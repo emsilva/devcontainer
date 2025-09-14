@@ -1,0 +1,167 @@
+# ---------- Global ----------
+palette = "catppuccin_macchiato"
+add_newline = true
+command_timeout = 1200
+
+# Left prompt (main info)
+format = """
+$os$hostname$directory$git_branch$git_status$git_state$package$nodejs$python$rust$golang$java$docker_context$kubernetes$cmd_duration$line_break$character
+"""
+
+# Right prompt (zsh/fish). Bash will ignore this.
+right_format = """$time$battery"""
+
+# ---------- Palette (Catppuccin Macchiato) ----------
+[palettes.catppuccin_macchiato]
+rosewater = "#f4dbd6"
+flamingo = "#f0c6c6"
+pink = "#f5bde6"
+mauve = "#c6a0f6"
+red = "#ed8796"
+maroon = "#ee99a0"
+peach = "#f5a97f"
+yellow = "#eed49f"
+green = "#a6da95"
+teal = "#8bd5ca"
+sky = "#91d7e3"
+sapphire = "#7dc4e4"
+blue = "#8aadf4"
+lavender = "#b7bdf8"
+text = "#cad3f5"
+subtext1 = "#b8c0e0"
+subtext0 = "#a5adcb"
+overlay2 = "#939ab7"
+overlay1 = "#8087a2"
+overlay0 = "#6e738d"
+surface2 = "#5b6078"
+surface1 = "#494d64"
+surface0 = "#363a4f"
+base = "#24273a"
+mantle = "#1e2030"
+crust = "#181926"
+
+# ---------- Modules ----------
+[os]
+disabled = false
+format = "[$symbol]($style)"
+style = "overlay1"
+[os.symbols]
+Ubuntu = " " # Ubuntu Nerd Font icon
+Fedora = " " # Nerd Font
+
+[hostname]
+ssh_only = true
+format = "[@$hostname]($style) "
+style = "overlay1"
+
+[directory]
+style = "blue bold"
+read_only = " "
+truncation_length = 3
+truncation_symbol = "…/"
+truncate_to_repo = false
+fish_style_pwd_dir_length = 2
+
+[git_branch]
+symbol = " "
+style = "mauve"
+format = "[$symbol$branch]($style) "
+
+[git_status]
+style = "peach bold"
+format = "[$all_status$ahead_behind]($style) "
+conflicted = "✖"
+ahead = "⇡${count}"
+behind = "⇣${count}"
+diverged = "⇕${ahead_count}/${behind_count}"
+stashed = "⧉"
+modified = "✚"
+staged = "●"
+renamed = "»"
+deleted = ""
+untracked = "…"
+
+[git_state]
+format = "[($state( $progress_current/$progress_total))]($style) "
+style = "yellow"
+
+[cmd_duration]
+min_time = 500
+style = "overlay2"
+format = "[⏱ $duration]($style) "
+
+[package]
+symbol = "📦 "
+style = "yellow"
+format = "[$symbol$version]($style) "
+
+[nodejs]
+symbol = " "
+format = "[$symbol$version]($style) "
+style = "green"
+
+[python]
+symbol = " "
+format = "[$symbol$version]($style) "
+style = "sky"
+pyenv_version_name = true
+
+[rust]
+symbol = " "
+format = "[$symbol$version]($style) "
+style = "peach"
+
+[golang]
+symbol = " "
+format = "[$symbol$version]($style) "
+style = "teal"
+
+[java]
+symbol = " "
+format = "[$symbol$version]($style) "
+style = "maroon"
+
+[docker_context]
+only_with_files = true
+symbol = "🐳 "
+format = "[$symbol$context]($style) "
+style = "sapphire"
+
+[kubernetes]
+disabled = false
+detect_files = ["k8s", "Chart.yaml", "values.yaml"]
+format = "[☸ $context(::$namespace)]($style) "
+style = "lavender"
+
+[container]
+format = "[⬢ $name]($style) "
+style = "sapphire"
+disabled = false
+
+[time]
+disabled = false
+time_format = "%H:%M"
+format = "[$time]($style) "
+style = "subtext1"
+
+[battery]
+disabled = false
+full_symbol = " "
+charging_symbol = " "
+discharging_symbol = " "
+unknown_symbol = " "
+format = "[$symbol$percentage]($style)"
+[[battery.display]]
+threshold = 20
+style = "red bold"
+[[battery.display]]
+threshold = 50
+style = "yellow"
+[[battery.display]]
+threshold = 101
+style = "green"
+
+[character]
+success_symbol = "[❯](green)"
+error_symbol = "[❯](red)"
+vimcmd_symbol = "[❮](peach)"

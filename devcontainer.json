@@ -1,0 +1,158 @@
+{
+  "name": "Mannu's Devcontainer (Ubuntu 24.04)",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": "true",
+      "installOhMyZsh": "true",
+      "username": "vscode",
+      "upgradePackages": "true"
+    },
+    "ghcr.io/devcontainers/features/aws-cli:1": {
+      "version": "latest"
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {
+      "version": "latest"
+    },
+    "ghcr.io/devcontainers/features/go:1": {
+      "version": "1.23"
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "22",
+      "installYarn": "true",
+      "pnpmVersion": "latest"
+    },
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.12",
+      "installTools": true
+    },
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "version": "latest",
+      "moby": true,
+      "dockerDashComposeVersion": "v2"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "anthropic.claude-code",
+        "eamodio.gitlens",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "tamasfe.even-better-toml",
+        "ms-vscode.makefile-tools",
+        "yzhang.markdown-all-in-one",
+        "bierner.markdown-mermaid",
+        "usernamehw.errorlens",
+        "streetsidesoftware.code-spell-checker"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh",
+        "terminal.integrated.persistentSessionReviveProcess": "never",
+        "terminal.integrated.enablePersistentSessions": false,
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+          "source.fixAll": true,
+          "source.organizeImports": true
+        },
+        "files.trimTrailingWhitespace": true,
+        "files.insertFinalNewline": true,
+        "go.toolsManagement.autoUpdate": true,
+        "python.defaultInterpreterPath": ".venv/bin/python",
+        "python.terminal.activateEnvInCurrentTerminal": true,
+        "python.terminal.activateEnvironment": true,
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff"
+        },
+        "git.autofetch": true,
+        "git.confirmSync": false,
+        "git.enableSmartCommit": true
+      }
+    }
+  },
+  "forwardPorts": [3000, 3001, 8000, 8080, 8888, 5000, 5173, 4000, 9000],
+  "portsAttributes": {
+    "3000": {
+      "label": "React Dev Server",
+      "onAutoForward": "openBrowser"
+    },
+    "3001": {
+      "label": "Alt React Dev Server",
+      "onAutoForward": "openBrowser"
+    },
+    "8000": {
+      "label": "HTTP Server",
+      "onAutoForward": "openBrowser"
+    },
+    "8080": {
+      "label": "Web Server",
+      "onAutoForward": "openBrowser"
+    },
+    "8888": {
+      "label": "Jupyter Server",
+      "onAutoForward": "openBrowser"
+    },
+    "5000": {
+      "label": "Flask/Express Server",
+      "onAutoForward": "openBrowser"
+    },
+    "5173": {
+      "label": "Vite Dev Server",
+      "onAutoForward": "openBrowser"
+    },
+    "4000": {
+      "label": "Jekyll/Hugo Server",
+      "onAutoForward": "openBrowser"
+    },
+    "9000": {
+      "label": "Custom Server",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "otherPortsAttributes": {
+    "onAutoForward": "openBrowserOnce"
+  },
+  "remoteUser": "vscode",
+  "containerEnv": {
+    "NPM_CONFIG_FUND": "false",
+    "NPM_CONFIG_AUDIT": "false",
+    "EDITOR": "code --wait",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONUNBUFFERED": "1",
+    "HOME": "/home/vscode",
+    "XDG_CONFIG_HOME": "/home/vscode/.config",
+    "GOMODCACHE": "/home/vscode/.cache/go-mod",
+    "TZ": "America/Sao_Paulo"
+  },
+  "remoteEnv": {
+    "HOME": "/home/vscode",
+    "XDG_CONFIG_HOME": "/home/vscode/.config",
+    "HISTFILE": "/commandhistory/.zsh_history",
+    "HISTSIZE": "10000",
+    "SAVEHIST": "10000",
+    "UV_CACHE_DIR": "/home/vscode/.cache/uv",
+    "DEVCONTAINER_SKIP_WELCOME": "${localEnv:DEVCONTAINER_SKIP_WELCOME}",
+    "CONTEXT7_API_KEY": "${localEnv:CONTEXT7_API_KEY}",
+    "EXA_API_KEY": "${localEnv:EXA_API_KEY}"
+  },
+  "mounts": [
+    "source=${localWorkspaceFolderBasename}-shell-history,target=/commandhistory,type=volume",
+    "source=${localWorkspaceFolderBasename}-npm-cache,target=/home/vscode/.npm,type=volume",
+    "source=${localWorkspaceFolderBasename}-uv-cache,target=/home/vscode/.cache/uv,type=volume",
+    "source=${localWorkspaceFolderBasename}-go-mod-cache,target=/home/vscode/.cache/go-mod,type=volume"
+  ],
+  "postCreateCommand": "chmod +x .devcontainer/post-create.sh && .devcontainer/post-create.sh",
+  "postStartCommand": "chmod +x .devcontainer/post-start.sh && .devcontainer/post-start.sh",
+  
+  "hostRequirements": {
+    "cpus": 16,
+    "memory": "64gb",
+    "storage": "128gb"
+  },
+  "updateContentCommand": "echo 'Container content updated'",
+  "waitFor": "postCreateCommand"
+}

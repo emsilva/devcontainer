@@ -1,0 +1,53 @@
+{
+  "installMethod": "native",
+  "autoUpdates": false,
+  "firstStartTime": "2025-09-14T03:29:17.665Z",
+  "userID": "b4f442854b723e3d73c66aa95d477f554b5bc4a8d0590975493482915bb6fc7b",
+  "projects": {
+    "/workspaces/ad-model-research": {
+      "allowedTools": [],
+      "history": [],
+      "mcpContextUris": [],
+      "mcpServers": {},
+      "enabledMcpjsonServers": [],
+      "disabledMcpjsonServers": [],
+      "hasTrustDialogAccepted": false,
+      "projectOnboardingSeenCount": 0,
+      "hasClaudeMdExternalIncludesApproved": false,
+      "hasClaudeMdExternalIncludesWarningShown": false
+    }
+  },
+  "autoUpdatesProtectedForNative": true,
+  "mcpServers": {
+    "context7": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp",
+        "--api-key",
+        "__CONTEXT7_API_KEY__"
+      ],
+      "env": {}
+    },
+    "exa": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "exa-mcp-server"
+      ],
+      "env": {
+        "EXA_API_KEY": "__EXA_API_KEY__"
+      }
+    },
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest"
+      ],
+      "env": {}
+    }
+  }
+}
