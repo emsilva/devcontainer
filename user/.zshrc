@@ -301,6 +301,15 @@ gg() {
     echo "Usage: gg <commit message>"
     return 1
   fi
+  # Guard: detect if there is anything to commit (tracked or untracked)
+  if git diff --quiet && git diff --cached --quiet; then
+    # Check untracked files
+    if [[ -z "$(git ls-files --others --exclude-standard | head -n1)" ]]; then
+      echo "No changes to commit"
+      return 0
+    fi
+  fi
+  git add -A
   git commit -m "$*"
 }
 alias ga='git add'
