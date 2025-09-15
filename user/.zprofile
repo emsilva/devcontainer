@@ -36,7 +36,21 @@ for p in "${path_pre[@]}" /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do
     new_path+=("$p")
   fi
 done
-export PATH="${new_path[*]}"
+if [[ -n "$ZSH_VERSION" ]]; then
+  # In zsh, arrays join with spaces; explicitly join with colons for PATH
+  local IFS=:
+  export PATH="${new_path[*]}"
+else
+  export PATH="${new_path[*]}"
+fi
+
+# Ensure /usr/local/go/bin present if go exists there but missing (defensive)
+if [[ -x /usr/local/go/bin/go ]] && ! command -v go >/dev/null 2>&1; then
+  case ":$PATH:" in
+    *":/usr/local/go/bin:"*) ;;
+    *) export PATH="/usr/local/go/bin:$PATH" ;;
+  esac
+fi
 
 # Go environment
 export GOPATH="${GOPATH:-$HOME/go}"
@@ -90,8 +104,8 @@ if [[ -f "$HOME/.cargo/env" ]]; then
 fi
 
 # GPG tty only meaningful for interactive terminals; skip if not a TTY
-if [[ -t 1 ]]; then
-  export GPG_TTY=$(tty)
+if [[ -t 1 ]] && command -v tty >/dev/null 2>&1; then
+  GPG_TTY=$(tty 2>/dev/null) && export GPG_TTY
 fi
 
 # History file definition is handled in interactive ~/.zshrc; do not override here.
