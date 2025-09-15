@@ -151,6 +151,28 @@ if [ -f "$CLAUDE_TEMPLATE" ]; then
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Generate Codex configuration (mirrors Claude pattern, stays in user dir)
+# ──────────────────────────────────────────────────────────────────────────────
+CODEX_TEMPLATE="${USER_DOTFILES_DIR}/.codex/config.toml.template"
+CODEX_GENERATED="${USER_DOTFILES_DIR}/.codex/config.toml"
+if [ -f "$CODEX_TEMPLATE" ]; then
+  echo "🧠 Generating Codex configuration from template..."
+  cp "$CODEX_TEMPLATE" "$CODEX_GENERATED"
+  if [ -n "${CONTEXT7_API_KEY:-}" ]; then
+    sed -i "s/__CONTEXT7_API_KEY__/${CONTEXT7_API_KEY}/g" "$CODEX_GENERATED"
+    echo "  ✓ Context7 API key configured (Codex)"
+  else
+    echo "  ⚠ CONTEXT7_API_KEY not found for Codex (placeholder left)"
+  fi
+  if [ -n "${EXA_API_KEY:-}" ]; then
+    sed -i "s/__EXA_API_KEY__/${EXA_API_KEY}/g" "$CODEX_GENERATED"
+    echo "  ✓ Exa API key configured (Codex)"
+  else
+    echo "  ⚠ EXA_API_KEY not found for Codex (placeholder left)"
+  fi
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Symlink user dotfiles from .devcontainer/user into $HOME
 #   - Mirrors the directory structure under $HOME
 #   - Only files are symlinked; parent directories are created as needed
@@ -392,48 +414,6 @@ mkdir -p \
   "${USER_HOME}/go/bin" \
   "${USER_HOME}/.cache/go-mod"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Codex configuration
-# ──────────────────────────────────────────────────────────────────────────────
-# Codex config template handling (similar to Claude)
-CODEX_TEMPLATE="${USER_DOTFILES_DIR}/.codex/config.toml.template"
-CODEX_DIR="${USER_HOME}/.codex"
-mkdir -p "$CODEX_DIR"
-CODEX_CFG="${CODEX_DIR}/config.toml"
-
-if [ -f "$CODEX_TEMPLATE" ]; then
-  if [ ! -f "$CODEX_CFG" ]; then
-    echo "🧠 Generating Codex config from template..."
-    cp "$CODEX_TEMPLATE" "$CODEX_CFG"
-
-    # Replace placeholders with environment variables if available
-    if [ -n "${CONTEXT7_API_KEY:-}" ]; then
-      sed -i "s/__CONTEXT7_API_KEY__/${CONTEXT7_API_KEY}/g" "$CODEX_CFG"
-      echo "  ✓ Context7 API key configured (Codex)"
-    else
-      echo "  ⚠ CONTEXT7_API_KEY not provided for Codex config"
-    fi
-
-    if [ -n "${EXA_API_KEY:-}" ]; then
-      sed -i "s/__EXA_API_KEY__/${EXA_API_KEY}/g" "$CODEX_CFG"
-      echo "  ✓ Exa API key configured (Codex)"
-    else
-      echo "  ⚠ EXA_API_KEY not provided for Codex config"
-    fi
-  else
-    echo "🧠 Existing Codex config present; skipping template generation"
-  fi
-else
-  # Fallback default if no template and no existing config
-  if [ ! -f "$CODEX_CFG" ]; then
-    echo "🧪 Writing fallback Codex config (no template found)"
-    cat > "$CODEX_CFG" <<'EOF'
-model = "gpt-5"
-model_reasoning_effort = "high"
-tools.web_search = true
-EOF
-  fi
-fi
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Final permission fixes

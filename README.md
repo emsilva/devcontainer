@@ -32,7 +32,7 @@ There is a `.claude.json.template` that gets copied and token placeholders repla
 
 ## Codex Configuration
 
-Codex now mirrors the Claude pattern: a template lives at `user/.codex/config.toml.template` with placeholder tokens (`__CONTEXT7_API_KEY__`, `__EXA_API_KEY__`). During `post-create` it is copied to `~/.codex/config.toml` and placeholders are replaced if the corresponding environment variables are set. The generated `config.toml` is git-ignored (`user/.codex/config.toml`). If no template exists, a minimal fallback config is written.
+Codex mirrors the Claude pattern. The template lives at `user/.codex/config.toml.template` with placeholder tokens (`__CONTEXT7_API_KEY__`, `__EXA_API_KEY__`). During `post-create` a generated file `user/.codex/config.toml` is created (placeholders replaced when env vars are present). That generated file is then symlinked into `~/.codex/config.toml` along with the rest of the user dotfiles. The generated file is ignored by git (`user/.codex/config.toml`). If you remove it and rebuild, it will be regenerated from the template.
 
 ## Expected Environment Variables (set as GitHub Codespace / repository secrets or local env when launching)
 
