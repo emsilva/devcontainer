@@ -15,41 +15,12 @@ export EDITOR="${EDITOR:-code --wait}"
 export PAGER="${PAGER:-less}"
 export SYSTEMD_EDITOR="$EDITOR"
 
-# Base PATH segments (prepend user-local first)
-path_pre=(
-  "$HOME/.local/bin"
-  "$HOME/bin"
-  "$HOME/.npm-global/bin"
-)
-
-# Language/tool specific additions (only if directories exist to avoid bloat)
-[[ -d "$HOME/.cargo/bin" ]] && path_pre+=("$HOME/.cargo/bin")
-[[ -d "$HOME/go/bin" ]] && path_pre+=("$HOME/go/bin")
-[[ -d "$HOME/.local/share/pnpm" ]] && path_pre+=("$HOME/.local/share/pnpm")
-[[ -d "/usr/local/go/bin" ]] && path_pre+=("/usr/local/go/bin")
-
-# Compose PATH uniquely (avoid duplicates)
-new_path=()
-for p in "${path_pre[@]}" /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do
-  [[ -d "$p" ]] || continue
-  if [[ ":$PATH:" != *":$p:"* ]]; then
-    new_path+=("$p")
-  fi
-done
-{
-  # Join with ':' regardless of shell; avoid 'local' at top scope for POSIX compliance
-  IFS=: path_join="${new_path[*]}"
-  unset IFS
-  export PATH="$path_join"
-}
-
-# Ensure /usr/local/go/bin present if go exists there but missing (defensive)
-if [[ -x /usr/local/go/bin/go ]] && ! command -v go >/dev/null 2>&1; then
-  case ":$PATH:" in
-    *":/usr/local/go/bin:"*) ;;
-    *) export PATH="/usr/local/go/bin:$PATH" ;;
-  esac
-fi
+# PATH: prepend user/local tool dirs while preserving existing PATH (or sensible defaults)
+export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.npm-global/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+[[ -d "$HOME/.cargo/bin" ]] && export PATH="$HOME/.cargo/bin:$PATH"
+[[ -d "$HOME/go/bin" ]] && export PATH="$HOME/go/bin:$PATH"
+[[ -d "$HOME/.local/share/pnpm" ]] && export PATH="$HOME/.local/share/pnpm:$PATH"
+[[ -d "/usr/local/go/bin" ]] && export PATH="/usr/local/go/bin:$PATH"
 
 # Go environment
 export GOPATH="${GOPATH:-$HOME/go}"

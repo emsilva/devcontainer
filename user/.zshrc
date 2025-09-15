@@ -40,7 +40,8 @@ _cache_cmd() {
 # ──────────────────────────────────────────────────────────────────────────────
 # 1) PATH & ENVIRONMENT
 # ──────────────────────────────────────────────────────────────────────────────
-export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.npm-global/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# PATH now primarily composed in ~/.zprofile for login/non-interactive shells.
+# Here we only append language/tool specific paths conditionally.
 
 # Ruby gems bin (cached)
 if _has_cmd ruby && _has_cmd gem; then
@@ -523,24 +524,26 @@ forward() {
 # --rebase       : Rebase local commits (mutually exclusive with --merge)
 # --init         : Ensure submodules are initialized
 gsubsync() {
-  local dry_run=0 mode="--ff-only" do_init=0
+  local dry_run=0 mode="ff" do_init=0 branch=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      -n|--dry-run) dry_run=1 ; shift ;;
-      --merge) mode="--merge" ; shift ;;
-      --rebase) mode="--rebase" ; shift ;;
-      --init) do_init=1 ; shift ;;
+      -n|--dry-run) dry_run=1; shift ;;
+      --merge) mode="merge"; shift ;;
+      --rebase) mode="rebase"; shift ;;
+      -b|--branch) branch="$2"; shift 2 ;;
+      --init) do_init=1; shift ;;
       -h|--help)
         cat <<'EOF'
 Usage: gsubsync [options]
-Update each git submodule to the tip of its remote tracking branch.
+Update each git submodule to the latest remote commit.
 
 Options:
-  -n, --dry-run   Show planned actions only.
-  --merge         Use merge strategy (default: fast-forward only).
-  --rebase        Rebase local commits onto upstream.
-  --init          Run 'git submodule update --init --recursive' first.
-  -h, --help      Show this help.
+  -n, --dry-run    Show planned actions only
+  --merge          Merge upstream changes (default: fast-forward/reset)
+  --rebase         Rebase local commits
+  -b, --branch B   Force branch B for all submodules
+  --init           Ensure submodules are initialized
+  -h, --help       Show this help
 EOF
         return 0 ;;
       *) echo "Unknown option: $1" >&2; return 2 ;;
@@ -548,57 +551,75 @@ EOF
   done
 
   [[ -f .gitmodules ]] || { echo "No .gitmodules file found" >&2; return 1; }
-  _has_cmd git || { echo "git not available" >&2; return 1; }
+  command -v git >/dev/null || { echo "git not available" >&2; return 1; }
 
-  if (( do_init )); then
-    echo "Initializing submodules..."
-    git submodule update --init --recursive || return 1
-  fi
+  (( do_init )) && git submodule update --init --recursive || true
 
-  # Extract submodule paths from .gitmodules
-  local submodules=()
-  while IFS= read -r _line; do
-    [[ -n "$_line" ]] && submodules+=("$_line")
-  done < <(grep -E '^\s*path\s*=\s*' .gitmodules | sed -E 's/.*path\s*=\s*//')
-  (( ${#submodules[@]} )) || { echo "No submodules defined"; return 0; }
+  local -a subpaths=()
+  while IFS= read -r p; do [[ -n "$p" ]] && subpaths+=("$p"); done \
+    < <(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | awk '{print $3}')
+  (( ${#subpaths[@]} )) || { echo "No submodules defined"; return 0; }
 
-  for path in "${submodules[@]}"; do
-    if [[ ! -d "$path/.git" && ! -f "$path/.git" ]]; then
-      echo "Skipping $path (not initialized)" >&2
+  local root; root="$(pwd)"
+
+  for path in "${subpaths[@]}"; do
+    if [[ ! -e "$path/.git" && ! -f "$path/.git" ]]; then
+      echo "Skipping $path (not initialized)"
       continue
     fi
-    echo "==> $path";
-    pushd "$path" > /dev/null || { echo "Failed to enter $path" >&2; continue; }
-    local current_branch
-    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || current_branch="(detached)"
-    local tracking
-    tracking=$(git for-each-ref --format='%(upstream:short)' "$(git symbolic-ref -q HEAD)" 2>/dev/null)
-    if [[ -z "$tracking" ]]; then
-      echo "  No upstream tracking branch set for $current_branch; skipping.";
-      popd > /dev/null; continue
-    fi
-    echo "  Branch: $current_branch -> $tracking"
-    if (( dry_run )); then
-      git fetch --dry-run 2>&1 | sed 's/^/  /'
-    else
-      git fetch --tags
-      case "$mode" in
-        --merge)  git merge --ff-only "$tracking" || git merge "$tracking" ;;
-        --rebase) git rebase "$tracking" || { echo "  Rebase failed" >&2; git rebase --abort 2>/dev/null; } ;;
-        --ff-only) git reset --hard "$tracking" ;;
-      esac
-    fi
-    popd > /dev/null
-  done
 
-  if (( ! dry_run )); then
-    echo "Updating superproject recorded commits..."
-    if (( ${#submodules[@]} )); then
-      git add .gitmodules "${submodules[@]}" 2>/dev/null || true
+    local target_branch=""
+    if [[ -n "$branch" ]]; then
+      target_branch="$branch"
     else
-      git add .gitmodules 2>/dev/null || true
+      local name b upstream symref
+      name="$(git config -f .gitmodules --get-regexp "^submodule\\..*\\.path$" | awk -v p="$path" '$3==p {print $1}' | sed -E 's/^submodule\\.|\\.path$//g')"
+      b="$(git config -f .gitmodules --get "submodule.$name.branch" 2>/dev/null || true)"
+      if [[ -n "$b" ]]; then
+        target_branch="$b"
+      else
+        upstream="$(git -C "$path" for-each-ref --format='%(upstream:short)' "$(git -C "$path" symbolic-ref -q HEAD)" 2>/dev/null || true)"
+        if [[ -n "$upstream" ]]; then
+          target_branch="${upstream#*/}"
+        else
+          symref="$(git -C "$path" remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p' | head -n1)"
+          target_branch="${symref:-main}"
+        fi
+      fi
     fi
-  fi
+
+    if (( dry_run )); then
+      echo "==> $path"
+      echo "  fetch origin"
+      echo "  update to origin/$target_branch ($mode)"
+      continue
+    fi
+
+    git -C "$path" fetch origin --tags || { echo "Fetch failed in $path" >&2; continue; }
+    local old new
+    old="$(git -C "$path" rev-parse --short=12 HEAD)"
+
+    case "$mode" in
+      merge)
+        git -C "$path" checkout -B "$target_branch" "origin/$target_branch" 2>/dev/null || git -C "$path" checkout "$target_branch"
+        git -C "$path" merge --ff-only "origin/$target_branch" || git -C "$path" merge "origin/$target_branch" || { echo "Merge failed in $path" >&2; continue; } ;;
+      rebase)
+        git -C "$path" checkout -B "$target_branch" "origin/$target_branch" 2>/dev/null || git -C "$path" checkout "$target_branch"
+        git -C "$path" rebase "origin/$target_branch" || { git -C "$path" rebase --abort || true; echo "Rebase failed in $path" >&2; continue; } ;;
+      ff|ff-only|*)
+        git -C "$path" reset --hard "origin/$target_branch" || { echo "Reset failed in $path" >&2; continue; } ;;
+    esac
+
+    new="$(git -C "$path" rev-parse --short=12 HEAD)"
+    if [[ "$old" == "$new" ]]; then
+      echo "==> $path is already up to date ($new)"
+      continue
+    fi
+
+    git -C "$root" add -- "$path" || { echo "Stage failed for $path" >&2; continue; }
+    git -C "$root" commit -m "bump to submodule $path: $old -> $new" || true
+    echo "==> $path: $old -> $new (committed)"
+  done
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
