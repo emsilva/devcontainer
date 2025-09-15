@@ -507,6 +507,85 @@ forward() {
   fi
 }
 
+# Update all git submodules to their remote tracking branches.
+# Usage: gsubsync [-n|--dry-run] [--merge|--rebase] [--init]
+# -n / --dry-run : Show what would be updated without performing fetch/reset
+# --merge        : Merge upstream changes instead of fast-forward (default fast-forward)
+# --rebase       : Rebase local commits (mutually exclusive with --merge)
+# --init         : Ensure submodules are initialized
+gsubsync() {
+  local dry_run=0 mode="--ff-only" do_init=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -n|--dry-run) dry_run=1 ; shift ;;
+      --merge) mode="--merge" ; shift ;;
+      --rebase) mode="--rebase" ; shift ;;
+      --init) do_init=1 ; shift ;;
+      -h|--help)
+        cat <<'EOF'
+Usage: gsubsync [options]
+Update each git submodule to the tip of its remote tracking branch.
+
+Options:
+  -n, --dry-run   Show planned actions only.
+  --merge         Use merge strategy (default: fast-forward only).
+  --rebase        Rebase local commits onto upstream.
+  --init          Run 'git submodule update --init --recursive' first.
+  -h, --help      Show this help.
+EOF
+        return 0 ;;
+      *) echo "Unknown option: $1" >&2; return 2 ;;
+    esac
+  done
+
+  [[ -f .gitmodules ]] || { echo "No .gitmodules file found" >&2; return 1; }
+  _has_cmd git || { echo "git not available" >&2; return 1; }
+
+  if (( do_init )); then
+    echo "Initializing submodules..."
+    git submodule update --init --recursive || return 1
+  fi
+
+  # Extract submodule paths from .gitmodules
+  local submodules
+  mapfile -t submodules < <(grep -E '^\s*path\s*=\s*' .gitmodules | sed -E 's/.*path\s*=\s*//')
+  (( ${#submodules[@]} )) || { echo "No submodules defined"; return 0; }
+
+  for path in "${submodules[@]}"; do
+    if [[ ! -d "$path/.git" && ! -f "$path/.git" ]]; then
+      echo "Skipping $path (not initialized)" >&2
+      continue
+    fi
+    echo "==> $path";
+    pushd "$path" > /dev/null || { echo "Failed to enter $path" >&2; continue; }
+    local current_branch
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || current_branch="(detached)"
+    local tracking
+    tracking=$(git for-each-ref --format='%(upstream:short)' "$(git symbolic-ref -q HEAD)" 2>/dev/null)
+    if [[ -z "$tracking" ]]; then
+      echo "  No upstream tracking branch set for $current_branch; skipping.";
+      popd > /dev/null; continue
+    fi
+    echo "  Branch: $current_branch -> $tracking"
+    if (( dry_run )); then
+      git fetch --dry-run 2>&1 | sed 's/^/  /'
+    else
+      git fetch --tags
+      case "$mode" in
+        --merge)  git merge --ff-only "$tracking" || git merge "$tracking" ;;
+        --rebase) git rebase "$tracking" || { echo "  Rebase failed" >&2; git rebase --abort 2>/dev/null; } ;;
+        --ff-only) git reset --hard "$tracking" ;;
+      esac
+    fi
+    popd > /dev/null
+  done
+
+  if (( ! dry_run )); then
+    echo "Updating superproject recorded commits..."
+    git add .gitmodules $(grep -E '^\s*path\s*=\s*' .gitmodules | sed -E 's/.*path\s*=\s*//') 2>/dev/null || true
+  fi
+}
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 10) COMPLETION & KEY BINDINGS
 # ──────────────────────────────────────────────────────────────────────────────
