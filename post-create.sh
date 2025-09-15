@@ -257,8 +257,20 @@ if command -v npm >/dev/null 2>&1; then
     npm config set prefix "${USER_HOME}/.npm-global" >/dev/null 2>&1 || true
   fi
 
-  # Enable corepack for pnpm/yarn (safe if already enabled)
-  corepack enable || true
+  # Enable corepack for pnpm/yarn.
+  # Devcontainer Node feature and/or nvm may already have created yarn/pnpm shims.
+  # A second "corepack enable" can throw a noisy EEXIST stack trace; treat as benign.
+  if command -v corepack >/dev/null 2>&1; then
+    if ! corepack enable 2>/tmp/corepack-enable.log 1>&2; then
+      if grep -q 'EEXIST: file already exists' /tmp/corepack-enable.log 2>/dev/null; then
+        echo "ℹ️ corepack already enabled (suppressing EEXIST)"
+      else
+        echo "⚠️ corepack enable encountered an unexpected issue (continuing)" >&2
+        sed 's/^/corepack: /' /tmp/corepack-enable.log 2>/dev/null || true
+      fi
+    fi
+    rm -f /tmp/corepack-enable.log 2>/dev/null || true
+  fi
 
   echo "📦 Installing global NPM packages..."
   npm install -g \
