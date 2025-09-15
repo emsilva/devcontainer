@@ -403,3 +403,18 @@ echo "🔒 Final permission fixes..."
 $SUDO chown -R vscode:vscode "${USER_HOME}" 2>/dev/null || true
 
 echo "✅ post-create complete!"
+
+# Ensure default shell is zsh (idempotent)
+if command -v zsh >/dev/null 2>&1; then
+  CURRENT_SHELL=$(getent passwd "vscode" | cut -d: -f7 || echo "")
+  if [ "$CURRENT_SHELL" != "$(command -v zsh)" ]; then
+    echo "💤 Updating default login shell for vscode user to zsh"
+    if command -v chsh >/dev/null 2>&1; then
+      $SUDO chsh -s "$(command -v zsh)" vscode 2>/dev/null || echo "⚠️ chsh failed (may be restricted)"
+    else
+      echo "⚠️ chsh not available; cannot change login shell automatically"
+    fi
+  else
+    echo "✅ vscode user's default shell already zsh"
+  fi
+fi

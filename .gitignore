@@ -1,0 +1,3 @@
+# Devcontainer repo ignores
+# Ignore Claude user config
+user/.claude.json
