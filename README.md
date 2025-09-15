@@ -24,6 +24,7 @@ A handy Ubuntu 24.04 development container setup meant for everyday polyglot wor
 - History persisted across rebuilds (`/commandhistory` volume)
 - Symlinked user dotfiles from `.devcontainer/user` into `$HOME`
 - Automatic detection + install of dependencies for Node / Python (uv) / Go
+- Port forwarding is now fully dynamic: no predeclared list; VS Code will just notify when a process starts listening (configured with `onAutoForward=notify`).
 
 ## Claude / MCP Integration
 
@@ -72,6 +73,17 @@ Add extra CLI tools in `post-create.sh` (keep things idempotent). Place new dotf
 | Missing Node global tools | Run `corepack enable` or reinstall via `npm -g` |
 | Slow first prompt | fzf + starship caching warms after first run |
 | Python deps missing | Run `uv sync` or fall back to `pip install -r requirements.txt` |
+| Port didn't open browser | Expected—only notifications now. Click the toast or use Ports view. |
+
+## Future Ideas / Nice-to-Haves
+
+- Add a lightweight `Taskfile.yml` with common flows (test, lint, build) if project work begins.
+- Provide a sample `.zshrc.local` placeholder (ignored) for truly local overrides.
+- Add a `LICENSE` if this is going public.
+- Consider neutralizing the devcontainer `name` if publishing (currently includes a personal identifier).
+- Add optional Redis/Postgres services via `docker-compose.yml` if databases become standard.
+- Introduce a minimal `SECURITY.md` clarifying no secrets should be committed and environment variables are injected at runtime.
+- Replace `curl | bash` installers with pinned checksums for stricter supply-chain hygiene if higher security posture is required.
 
 ---
 Lightweight, batteries included. Tweak to taste.
