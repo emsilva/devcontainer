@@ -162,7 +162,7 @@ if [ -d "${USER_DOTFILES_DIR}" ]; then
   while IFS= read -r -d '' dir; do
     # Skip the root folder itself
     if [ "${dir}" = "${USER_DOTFILES_DIR}" ]; then continue; fi
-    rel_dir="${dir#${USER_DOTFILES_DIR}/}"
+  rel_dir="${dir#"${USER_DOTFILES_DIR}"/}"
     dest_dir="${USER_HOME}/${rel_dir}"
     mkdir -p "${dest_dir}"
   done < <(find "${USER_DOTFILES_DIR}" -type d -print0)
@@ -172,7 +172,7 @@ if [ -d "${USER_DOTFILES_DIR}" ]; then
   while IFS= read -r -d '' src; do
     # Skip template files - they're for generation only
     if [[ "$src" == *.template ]]; then continue; fi
-    rel_path="${src#${USER_DOTFILES_DIR}/}"
+  rel_path="${src#"${USER_DOTFILES_DIR}"/}"
     dest="${USER_HOME}/${rel_path}"
     mkdir -p "$(dirname "${dest}")"
     if [ -e "${dest}" ] && [ ! -L "${dest}" ]; then
@@ -244,7 +244,7 @@ if command -v npm >/dev/null 2>&1; then
   # Heuristics:
   #  - NVM_DIR exists OR
   #  - 'node' binary path contains '/nvm/'
-  if [ -d "/usr/local/share/nvm" ] || echo "$(command -v node)" | grep -q "/nvm/"; then
+  if [ -d "/usr/local/share/nvm" ] || command -v node | grep -q "/nvm/"; then
     # Ensure no user-level prefix is set (prevents nvm warnings)
     npm config delete prefix >/dev/null 2>&1 || true
     if [ -f "${USER_HOME}/.npmrc" ]; then

@@ -34,7 +34,7 @@ export NPM_CONFIG_AUDIT=false
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$HOME/.cache/uv}"
 
 # Locale/editor (lightweight)
-export LANG=${LANG:-en_US.UTF-8}
+export LANG="${LANG:-en_US.UTF-8}"
 export EDITOR="${EDITOR:-code --wait}"
 export PAGER="${PAGER:-less}"
 
