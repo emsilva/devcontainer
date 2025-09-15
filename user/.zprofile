@@ -1,7 +1,6 @@
 # Minimal login shell environment for zsh
-# Loaded before interactive ~/.zshrc; keep lean for non-interactive contexts.
-# Purpose: ensure PATH + core language/toolchain variables available to
-# scripts, cron, GUI-launched terminals, remote commands, etc.
+# Delegates core PATH and base environment setup to shared POSIX script
+# at ~/.config/shell/env-base.sh so bash and other shells can reuse it.
 
 # Guard against multiple sourcing
 if [[ -n "${__ZPROFILE_LOADED:-}" ]]; then
@@ -15,63 +14,34 @@ export EDITOR="${EDITOR:-code --wait}"
 export PAGER="${PAGER:-less}"
 export SYSTEMD_EDITOR="$EDITOR"
 
-# PATH: prepend user/local tool dirs while preserving existing PATH (or sensible defaults)
-export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.npm-global/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
-[[ -d "$HOME/.cargo/bin" ]] && export PATH="$HOME/.cargo/bin:$PATH"
-[[ -d "$HOME/go/bin" ]] && export PATH="$HOME/go/bin:$PATH"
-[[ -d "$HOME/.local/share/pnpm" ]] && export PATH="$HOME/.local/share/pnpm:$PATH"
-[[ -d "/usr/local/go/bin" ]] && export PATH="/usr/local/go/bin:$PATH"
-
-# Go environment
-export GOPATH="${GOPATH:-$HOME/go}"
-export GOMODCACHE="${GOMODCACHE:-$HOME/.cache/go-mod}"
-
-# Python settings (match devcontainer expectations)
-export PYTHONDONTWRITEBYTECODE=1
-export PYTHONUNBUFFERED=1
-export VIRTUAL_ENV_DISABLE_PROMPT=1
-# UV cache dir if using uv
-export UV_CACHE_DIR="${UV_CACHE_DIR:-$HOME/.cache/uv}"
-
-# NPM noise reduction
-export NPM_CONFIG_FUND=false
-export NPM_CONFIG_AUDIT=false
-
-# Ripgrep config path (only set if file exists to avoid warnings)
-if command -v rg >/dev/null 2>&1 && [[ -f "$HOME/.config/ripgrep/ripgreprc" ]]; then
-  export RIPGREP_CONFIG_PATH="$HOME/.config/ripgrep/ripgreprc"
+# Source shared base environment (idempotent)
+if [ -f "$HOME/.config/shell/env-base.sh" ]; then
+  . "$HOME/.config/shell/env-base.sh"
 fi
 
-# Starship prompt may be initialized only in interactive shells; just define cache dir here
-export STARSHIP_CACHE="$HOME/.cache/starship"
-mkdir -p "$STARSHIP_CACHE" 2>/dev/null || true
+# (Most core environment now set in env-base.sh)
 
-# Node Version Manager lightweight path injection: if a current symlink exists, expose it
+# Create starship cache dir lazily (avoid failing if readonly)
+[ -d "$STARSHIP_CACHE" ] || mkdir -p "$STARSHIP_CACHE" 2>/dev/null || true
+
+# Lightweight NVM current symlink exposure (retained for login shells)
 for nvm_dir in "/usr/local/share/nvm" "$HOME/.nvm"; do
-  if [[ -d "$nvm_dir" ]]; then
+  if [ -d "$nvm_dir" ]; then
     export NVM_DIR="$nvm_dir"
-    if [[ -d "$NVM_DIR/current/bin" ]]; then
-      case ":$PATH:" in
-        *":$NVM_DIR/current/bin:"*) ;;
-        *) export PATH="$NVM_DIR/current/bin:$PATH" ;;
-      esac
-    elif [[ -L "$NVM_DIR/current" ]]; then
+    if [ -d "$NVM_DIR/current/bin" ]; then
+      case ":$PATH:" in *":$NVM_DIR/current/bin:"*) ;; *) PATH="$NVM_DIR/current/bin:$PATH"; export PATH;; esac
+    elif [ -L "$NVM_DIR/current" ]; then
       resolved=$(readlink "$NVM_DIR/current")
-      [[ -d "$resolved/bin" ]] && export PATH="$resolved/bin:$PATH"
+      [ -d "$resolved/bin" ] && PATH="$resolved/bin:$PATH" && export PATH
     fi
     break
   fi
 done
 
-# PNPM home
-[[ -d "$HOME/.local/share/pnpm" ]] && export PNPM_HOME="$HOME/.local/share/pnpm"
+# PNPM home (already in PATH via env-base if directory exists; only set var)
+[ -d "$HOME/.local/share/pnpm" ] && export PNPM_HOME="$HOME/.local/share/pnpm"
 
-# Cargo env (only export if file exists; avoid sourcing cost here)
-if [[ -f "$HOME/.cargo/env" ]]; then
-  # For non-interactive shells we prefer not to "source" heavy scripts.
-  # Instead just ensure ~/.cargo/bin is already in PATH (done above) and skip.
-  :
-fi
+# Skip sourcing heavy cargo env here (handled interactively in .zshrc)
 
 # GPG tty only meaningful for interactive terminals; skip if not a TTY
 if [[ -t 1 ]] && command -v tty >/dev/null 2>&1; then

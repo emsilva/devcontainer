@@ -40,8 +40,8 @@ _cache_cmd() {
 # ──────────────────────────────────────────────────────────────────────────────
 # 1) PATH & ENVIRONMENT
 # ──────────────────────────────────────────────────────────────────────────────
-# PATH now primarily composed in ~/.zprofile for login/non-interactive shells.
-# Here we only append language/tool specific paths conditionally.
+# Core PATH and base vars are centralized in user/.config/shell/env-base.sh (sourced
+# via ~/.zprofile and ~/.profile). This file only layers interactive/tool specifics.
 
 # Ruby gems bin (cached)
 if _has_cmd ruby && _has_cmd gem; then
