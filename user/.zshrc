@@ -293,7 +293,14 @@ alias du='du -h'
 alias free='free -h'
 
 # Git shortcuts
-alias gs='git status'
+alias g='git status'
+gg() {
+  if [[ $# -eq 0 ]]; then
+    echo "Usage: gg <commit message>"
+    return 1
+  fi
+  git commit -m "$*"
+}
 alias ga='git add'
 alias gc='git commit'
 alias gp='git push'
@@ -328,9 +335,9 @@ if _has_cmd docker; then
   alias dexec='docker exec -it'
   alias dlogs='docker logs -f'
   alias dprune='docker system prune -a'
-  alias dcup='docker-compose up -d'
-  alias dcdown='docker-compose down'
-  alias dclogs='docker-compose logs -f'
+  alias dcup='docker compose up -d'
+  alias dcdown='docker compose down'
+  alias dclogs='docker compose logs -f'
 fi
 
 # Python shortcuts
@@ -351,9 +358,6 @@ alias nd='npm run dev'
 # Devcontainer specific
 alias rebuild='devcontainer rebuild --no-cache'
 alias reopen='devcontainer reopen'
-
-# Custom project aliases
-alias pgsql='docker exec -it postgresql psql agentic_delivery_development -U admin'
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 9) FUNCTIONS
