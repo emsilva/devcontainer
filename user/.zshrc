@@ -294,6 +294,8 @@ alias free='free -h'
 
 # Git shortcuts
 alias g='git status'
+# Remove any gg alias from oh-my-zsh git plugin to avoid function definition errors
+unalias gg 2>/dev/null
 gg() {
   if [[ $# -eq 0 ]]; then
     echo "Usage: gg <commit message>"
