@@ -1,8 +1,0 @@
-model = "gpt-5-codex"
-model_reasoning_effort = "high"
-tools.web_search = true
-
-[shell_environment_policy]
-inherit = "all"
-ignore_default_excludes = true
-include_only = ["AWS_*", "GITHUB_*", "*API_KEY"]

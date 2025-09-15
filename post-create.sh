@@ -395,17 +395,44 @@ mkdir -p \
 # ──────────────────────────────────────────────────────────────────────────────
 # Codex configuration
 # ──────────────────────────────────────────────────────────────────────────────
-# Codex config is linked from .devcontainer/user/.codex/config.toml if present
+# Codex config template handling (similar to Claude)
+CODEX_TEMPLATE="${USER_DOTFILES_DIR}/.codex/config.toml.template"
 CODEX_DIR="${USER_HOME}/.codex"
 mkdir -p "$CODEX_DIR"
 CODEX_CFG="${CODEX_DIR}/config.toml"
-if [ ! -f "$CODEX_CFG" ] && [ ! -L "$CODEX_CFG" ]; then
-  echo "🧪 Writing default Codex config (none provided)"
-  cat > "$CODEX_CFG" <<'EOF'
+
+if [ -f "$CODEX_TEMPLATE" ]; then
+  if [ ! -f "$CODEX_CFG" ]; then
+    echo "🧠 Generating Codex config from template..."
+    cp "$CODEX_TEMPLATE" "$CODEX_CFG"
+
+    # Replace placeholders with environment variables if available
+    if [ -n "${CONTEXT7_API_KEY:-}" ]; then
+      sed -i "s/__CONTEXT7_API_KEY__/${CONTEXT7_API_KEY}/g" "$CODEX_CFG"
+      echo "  ✓ Context7 API key configured (Codex)"
+    else
+      echo "  ⚠ CONTEXT7_API_KEY not provided for Codex config"
+    fi
+
+    if [ -n "${EXA_API_KEY:-}" ]; then
+      sed -i "s/__EXA_API_KEY__/${EXA_API_KEY}/g" "$CODEX_CFG"
+      echo "  ✓ Exa API key configured (Codex)"
+    else
+      echo "  ⚠ EXA_API_KEY not provided for Codex config"
+    fi
+  else
+    echo "🧠 Existing Codex config present; skipping template generation"
+  fi
+else
+  # Fallback default if no template and no existing config
+  if [ ! -f "$CODEX_CFG" ]; then
+    echo "🧪 Writing fallback Codex config (no template found)"
+    cat > "$CODEX_CFG" <<'EOF'
 model = "gpt-5"
 model_reasoning_effort = "high"
 tools.web_search = true
 EOF
+  fi
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -30,6 +30,10 @@ A handy Ubuntu 24.04 development container setup meant for everyday polyglot wor
 
 There is a `.claude.json.template` that gets copied and token placeholders replaced at container create time if env vars are present. The actual generated `.claude.json` is ignored by git.
 
+## Codex Configuration
+
+Codex now mirrors the Claude pattern: a template lives at `user/.codex/config.toml.template` with placeholder tokens (`__CONTEXT7_API_KEY__`, `__EXA_API_KEY__`). During `post-create` it is copied to `~/.codex/config.toml` and placeholders are replaced if the corresponding environment variables are set. The generated `config.toml` is git-ignored (`user/.codex/config.toml`). If no template exists, a minimal fallback config is written.
+
 ## Expected Environment Variables (set as GitHub Codespace / repository secrets or local env when launching)
 
 | Variable | Purpose | Required? |
