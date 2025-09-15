@@ -55,6 +55,42 @@ If you edit features or the provisioning script:
 devcontainer rebuild
 ```
 
+## Environment Initialization (Baseline PATH Guarantee)
+
+The container ensures core tooling (Go, user local bins) is available in **all** shell modes (login, non-login, interactive, non-interactive) via a two-tier strategy:
+
+**Tier 1: System Profile Baseline**  
+`post-create.sh` installs `/etc/profile.d/00-core-path.sh` which:
+- Synthesizes `$HOME` if missing (fallback via `getent passwd`).
+- Prepend-only adds: `/usr/local/go/bin`, `$HOME/go/bin`, `$HOME/.local/bin` (if they exist).
+- Exports `GOPATH` (defaults to `$HOME/go`).
+- Is idempotent and safe to source multiple times.
+
+**Tier 2: Non-Login Shell Coverage**  
+`devcontainer.json` sets `BASH_ENV=/etc/profile.d/00-core-path.sh`, so even plain `bash -c '...'` shells inherit the baseline. (Note: bash ignores `BASH_ENV` for login shells, which is fine—login shells already source `/etc/profile`.)
+
+**User Layer**  
+Higher-level personalization and language/tool extras live in symlinked dotfiles under `.devcontainer/user`:
+- `~/.zprofile` / `env-base.sh`: lightweight user-level PATH additions (cargo, pnpm, npm-global) + language env vars.
+- `~/.zshrc`: interactive features (oh-my-zsh, starship, lazy nvm, caching helpers).
+
+**Why This Matters**  
+Previously `go` (and other tools) could be “missing” when automation launched a non-login shell with no `$HOME`. The new layering removes that fragility.
+
+**Verification Commands**
+```bash
+bash -lc 'echo LOGIN: $PATH | cut -d: -f1-5; command -v go'
+bash -c  'echo NONLOGIN: $PATH | cut -d: -f1-5; command -v go'
+zsh -lc  'echo ZSH_LOGIN: $(command -v go)'
+```
+All should report a valid path for `go`.
+
+**Extending Baseline**  
+To add another always-on tool path, append an `add_path` call in `/etc/profile.d/00-core-path.sh` (keeping it minimal and idempotent).
+
+**Avoid** duplicating those directories in user PATH logic—only append user-only dirs in `env-base.sh`.
+
+
 ## Extending
 
 Add extra CLI tools in `post-create.sh` (keep things idempotent). Place new dotfiles or config under `user/` and they’ll get symlinked in on create.

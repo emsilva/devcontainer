@@ -14,14 +14,12 @@ path_add() {
   case ":$PATH:" in *":$d:"*) ;; *) PATH="$d:$PATH" ;; esac
 }
 
-# Prepend user/tool directories
+# Prepend user-local/tool directories not guaranteed by system profile.d script
 path_add "$HOME/.local/bin"
 path_add "$HOME/bin"
 path_add "$HOME/.npm-global/bin"
 path_add "$HOME/.cargo/bin"
-path_add "$HOME/go/bin"
 path_add "$HOME/.local/share/pnpm"
-path_add "/usr/local/go/bin"
 
 export PATH
 
