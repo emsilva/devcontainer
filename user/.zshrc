@@ -593,7 +593,11 @@ EOF
 
   if (( ! dry_run )); then
     echo "Updating superproject recorded commits..."
-    git add .gitmodules $(grep -E '^\s*path\s*=\s*' .gitmodules | sed -E 's/.*path\s*=\s*//') 2>/dev/null || true
+    if (( ${#submodules[@]} )); then
+      git add .gitmodules "${submodules[@]}" 2>/dev/null || true
+    else
+      git add .gitmodules 2>/dev/null || true
+    fi
   fi
 }
 

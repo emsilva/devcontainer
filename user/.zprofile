@@ -36,13 +36,12 @@ for p in "${path_pre[@]}" /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do
     new_path+=("$p")
   fi
 done
-if [[ -n "$ZSH_VERSION" ]]; then
-  # In zsh, arrays join with spaces; explicitly join with colons for PATH
-  local IFS=:
-  export PATH="${new_path[*]}"
-else
-  export PATH="${new_path[*]}"
-fi
+{
+  # Join with ':' regardless of shell; avoid 'local' at top scope for POSIX compliance
+  IFS=: path_join="${new_path[*]}"
+  unset IFS
+  export PATH="$path_join"
+}
 
 # Ensure /usr/local/go/bin present if go exists there but missing (defensive)
 if [[ -x /usr/local/go/bin/go ]] && ! command -v go >/dev/null 2>&1; then
