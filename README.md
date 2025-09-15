@@ -44,12 +44,17 @@ Placeholder tokens (`__CONTEXT7_API_KEY__`, `__EXA_API_KEY__`) are replaced at c
 
 These are referenced in `devcontainer.json` under `remoteEnv` so they can be wired in from your local environment or repository-level secrets.
 
-## Adding Git Identity
+## Git Identity
 
-The setup intentionally does **not** hard-code `git config user.name` or `user.email`. Set them once inside the container if Git complains:
+In GitHub Codespaces your Git identity (user.name / user.email) is auto-configured by the platform. Locally (or if you want to override the defaults) you can set or adjust them explicitly:
 ```bash
 git config --global user.name "Your Name"
 git config --global user.email "you@example.com"
+```
+To view the current values:
+```bash
+git config --get user.name
+git config --get user.email
 ```
 
 ## Rebuild / Update
