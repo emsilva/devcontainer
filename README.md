@@ -26,13 +26,14 @@ A handy Ubuntu 24.04 development container setup meant for everyday polyglot wor
 - Automatic detection + install of dependencies for Node / Python (uv) / Go
 - Port forwarding is now fully dynamic: no predeclared list; VS Code will just notify when a process starts listening (configured with `onAutoForward=notify`).
 
-## Claude / MCP Integration
+## AI / MCP Configuration (Claude & Codex)
 
-There is a `.claude.json.template` that gets copied and token placeholders replaced at container create time if env vars are present. The actual generated `.claude.json` is ignored by git.
+Both Claude and Codex configs are generated from templates stored under `user/` and then symlinked into `$HOME` during provisioning:
 
-## Codex Configuration
+- Claude: `user/.claude.json.template` → generates `user/.claude.json` → symlinked to `~/.claude.json`.
+- Codex: `user/.codex/config.toml.template` → generates `user/.codex/config.toml` → symlinked to `~/.codex/config.toml`.
 
-Codex mirrors the Claude pattern. The template lives at `user/.codex/config.toml.template` with placeholder tokens (`__CONTEXT7_API_KEY__`, `__EXA_API_KEY__`). During `post-create` a generated file `user/.codex/config.toml` is created (placeholders replaced when env vars are present). That generated file is then symlinked into `~/.codex/config.toml` along with the rest of the user dotfiles. The generated file is ignored by git (`user/.codex/config.toml`). If you remove it and rebuild, it will be regenerated from the template.
+Placeholder tokens (`__CONTEXT7_API_KEY__`, `__EXA_API_KEY__`) are replaced at container create time when the corresponding environment variables are set. Generated files are ignored by git. Remove the generated file(s) and rebuild to force regeneration.
 
 ## Expected Environment Variables (set as GitHub Codespace / repository secrets or local env when launching)
 
@@ -40,7 +41,6 @@ Codex mirrors the Claude pattern. The template lives at `user/.codex/config.toml
 |----------|---------|-----------|
 | `CONTEXT7_API_KEY` | Enables Context7 MCP server integration | Optional |
 | `EXA_API_KEY` | Enables Exa search MCP server integration | Optional |
-| `DEVCONTAINER_SKIP_WELCOME` | Suppress first-shell banner (set to `1`) | Optional |
 
 These are referenced in `devcontainer.json` under `remoteEnv` so they can be wired in from your local environment or repository-level secrets.
 
