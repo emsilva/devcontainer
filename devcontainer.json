@@ -77,47 +77,8 @@
       }
     }
   },
-  "forwardPorts": [3000, 3001, 8000, 8080, 8888, 5000, 5173, 4000, 9000],
-  "portsAttributes": {
-    "3000": {
-      "label": "React Dev Server",
-      "onAutoForward": "openBrowser"
-    },
-    "3001": {
-      "label": "Alt React Dev Server",
-      "onAutoForward": "openBrowser"
-    },
-    "8000": {
-      "label": "HTTP Server",
-      "onAutoForward": "openBrowser"
-    },
-    "8080": {
-      "label": "Web Server",
-      "onAutoForward": "openBrowser"
-    },
-    "8888": {
-      "label": "Jupyter Server",
-      "onAutoForward": "openBrowser"
-    },
-    "5000": {
-      "label": "Flask/Express Server",
-      "onAutoForward": "openBrowser"
-    },
-    "5173": {
-      "label": "Vite Dev Server",
-      "onAutoForward": "openBrowser"
-    },
-    "4000": {
-      "label": "Jekyll/Hugo Server",
-      "onAutoForward": "openBrowser"
-    },
-    "9000": {
-      "label": "Custom Server",
-      "onAutoForward": "openBrowser"
-    }
-  },
   "otherPortsAttributes": {
-    "onAutoForward": "openBrowserOnce"
+    "onAutoForward": "notify"
   },
   "remoteUser": "vscode",
   "containerEnv": {
