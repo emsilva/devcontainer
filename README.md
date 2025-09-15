@@ -6,7 +6,7 @@ A handy Ubuntu 24.04 development container setup meant for everyday polyglot wor
 
 - Base image: `mcr.microsoft.com/devcontainers/base:ubuntu-24.04`
 - Languages & runtimes via features:
-  - Go 1.23
+  - Go 1.24
   - Node.js 22 (with Yarn, pnpm via Corepack)
   - Python 3.12 (plus `uv` for fast env + deps)
 - Tooling & CLI goodies:
