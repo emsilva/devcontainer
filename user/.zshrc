@@ -556,8 +556,10 @@ EOF
   fi
 
   # Extract submodule paths from .gitmodules
-  local submodules
-  mapfile -t submodules < <(grep -E '^\s*path\s*=\s*' .gitmodules | sed -E 's/.*path\s*=\s*//')
+  local submodules=()
+  while IFS= read -r _line; do
+    [[ -n "$_line" ]] && submodules+=("$_line")
+  done < <(grep -E '^\s*path\s*=\s*' .gitmodules | sed -E 's/.*path\s*=\s*//')
   (( ${#submodules[@]} )) || { echo "No submodules defined"; return 0; }
 
   for path in "${submodules[@]}"; do
