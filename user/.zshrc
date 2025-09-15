@@ -524,13 +524,14 @@ forward() {
 # --rebase       : Rebase local commits (mutually exclusive with --merge)
 # --init         : Ensure submodules are initialized
 gsubsync() {
-  local dry_run=0 mode="ff" do_init=0 branch=""
+  local dry_run=0 mode="ff" do_init=0 branch="" remote="origin"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -n|--dry-run) dry_run=1; shift ;;
       --merge) mode="merge"; shift ;;
       --rebase) mode="rebase"; shift ;;
-      -b|--branch) branch="$2"; shift 2 ;;
+  -b|--branch) branch="$2"; shift 2 ;;
+  -R|--remote) remote="$2"; shift 2 ;;
       --init) do_init=1; shift ;;
       -h|--help)
         cat <<'EOF'
@@ -568,21 +569,24 @@ EOF
       continue
     fi
 
-    local target_branch=""
+  local target_branch=""
     if [[ -n "$branch" ]]; then
       target_branch="$branch"
     else
       local name b upstream symref
       name="$(git config -f .gitmodules --get-regexp "^submodule\\..*\\.path$" | awk -v p="$path" '$3==p {print $1}' | sed -E 's/^submodule\\.|\\.path$//g')"
       b="$(git config -f .gitmodules --get "submodule.$name.branch" 2>/dev/null || true)"
-      if [[ -n "$b" ]]; then
+      if [[ "$b" == "." ]]; then
+        target_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+      elif [[ -n "$b" ]]; then
         target_branch="$b"
       else
         upstream="$(git -C "$path" for-each-ref --format='%(upstream:short)' "$(git -C "$path" symbolic-ref -q HEAD)" 2>/dev/null || true)"
         if [[ -n "$upstream" ]]; then
           target_branch="${upstream#*/}"
         else
-          symref="$(git -C "$path" remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p' | head -n1)"
+          git -C "$path" remote set-head -a "$remote" >/dev/null 2>&1 || true
+          symref="$(git -C "$path" symbolic-ref --short -q "refs/remotes/$remote/HEAD" 2>/dev/null | awk -F/ '{print $2}')"
           target_branch="${symref:-main}"
         fi
       fi
@@ -590,24 +594,24 @@ EOF
 
     if (( dry_run )); then
       echo "==> $path"
-      echo "  fetch origin"
-      echo "  update to origin/$target_branch ($mode)"
+      echo "  fetch $remote"
+      echo "  update to $remote/$target_branch ($mode)"
       continue
     fi
 
-    git -C "$path" fetch origin --tags || { echo "Fetch failed in $path" >&2; continue; }
+    git -C "$path" fetch "$remote" --tags || { echo "Fetch failed in $path" >&2; continue; }
     local old new
     old="$(git -C "$path" rev-parse --short=12 HEAD)"
 
     case "$mode" in
       merge)
-        git -C "$path" checkout -B "$target_branch" "origin/$target_branch" 2>/dev/null || git -C "$path" checkout "$target_branch"
-        git -C "$path" merge --ff-only "origin/$target_branch" || git -C "$path" merge "origin/$target_branch" || { echo "Merge failed in $path" >&2; continue; } ;;
+        git -C "$path" checkout -B "$target_branch" "$remote/$target_branch" 2>/dev/null || git -C "$path" checkout "$target_branch"
+        git -C "$path" merge --ff-only "$remote/$target_branch" || git -C "$path" merge "$remote/$target_branch" || { echo "Merge failed in $path" >&2; continue; } ;;
       rebase)
-        git -C "$path" checkout -B "$target_branch" "origin/$target_branch" 2>/dev/null || git -C "$path" checkout "$target_branch"
-        git -C "$path" rebase "origin/$target_branch" || { git -C "$path" rebase --abort || true; echo "Rebase failed in $path" >&2; continue; } ;;
+        git -C "$path" checkout -B "$target_branch" "$remote/$target_branch" 2>/dev/null || git -C "$path" checkout "$target_branch"
+        git -C "$path" rebase "$remote/$target_branch" || { git -C "$path" rebase --abort || true; echo "Rebase failed in $path" >&2; continue; } ;;
       ff|ff-only|*)
-        git -C "$path" reset --hard "origin/$target_branch" || { echo "Reset failed in $path" >&2; continue; } ;;
+        git -C "$path" reset --hard "$remote/$target_branch" || { echo "Reset failed in $path" >&2; continue; } ;;
     esac
 
     new="$(git -C "$path" rev-parse --short=12 HEAD)"

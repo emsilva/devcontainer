@@ -14,6 +14,10 @@ path_add() {
   case ":$PATH:" in *":$d:"*) ;; *) PATH="$d:$PATH" ;; esac
 }
 
+# Go toolchains (system + user) – ensure available to all shells early
+path_add "/usr/local/go/bin"
+path_add "$HOME/go/bin"
+
 # Prepend user-local/tool directories not guaranteed by system profile.d script
 path_add "$HOME/.local/bin"
 path_add "$HOME/bin"

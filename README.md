@@ -57,38 +57,53 @@ devcontainer rebuild
 
 ## Environment Initialization (Baseline PATH Guarantee)
 
-The container ensures core tooling (Go, user local bins) is available in **all** shell modes (login, non-login, interactive, non-interactive) via a two-tier strategy:
+Core tooling (Go, user-local bins) is available in every shell mode (login / non-login, interactive / non-interactive) through a layered, idempotent design:
 
-**Tier 1: System Profile Baseline**  
-`post-create.sh` installs `/etc/profile.d/00-core-path.sh` which:
-- Synthesizes `$HOME` if missing (fallback via `getent passwd`).
-- Prepend-only adds: `/usr/local/go/bin`, `$HOME/go/bin`, `$HOME/.local/bin` (if they exist).
-- Exports `GOPATH` (defaults to `$HOME/go`).
-- Is idempotent and safe to source multiple times.
+**Tier 1: System Baseline (/etc/profile.d)**  
+`post-create.sh` now ALWAYS writes `/etc/profile.d/00-core-path.sh` (even when the provisioning user is non-root, using sudo fallback). This script:
+- Synthesizes `$HOME` if missing (some automation strips it).
+- Prepend-adds (idempotently): `/usr/local/go/bin`, `$HOME/go/bin`, `$HOME/.local/bin` (when they exist).
+- Exports `GOPATH` defaulting to `$HOME/go`.
 
-**Tier 2: Non-Login Shell Coverage**  
-`devcontainer.json` sets `BASH_ENV=/etc/profile.d/00-core-path.sh`, so even plain `bash -c '...'` shells inherit the baseline. (Note: bash ignores `BASH_ENV` for login shells, which is fine—login shells already source `/etc/profile`.)
+**Tier 2: Non-Login Bash**  
+`BASH_ENV=/etc/profile.d/00-core-path.sh` in `devcontainer.json` ensures plain `bash -c '...'` inherits the same baseline (bash ignores `BASH_ENV` only for login shells, which source the profile chain).
 
-**User Layer**  
-Higher-level personalization and language/tool extras live in symlinked dotfiles under `.devcontainer/user`:
-- `~/.zprofile` / `env-base.sh`: lightweight user-level PATH additions (cargo, pnpm, npm-global) + language env vars.
-- `~/.zshrc`: interactive features (oh-my-zsh, starship, lazy nvm, caching helpers).
+**Tier 3: User Base (`env-base.sh`)**  
+`~/.config/shell/env-base.sh` is a POSIX script sourced by both login shells (`.profile` / `.zprofile`) and non-interactive shells (via `noninteractive-env.sh`). It now explicitly prepends `/usr/local/go/bin` and `$HOME/go/bin` early, then user-local directories (npm-global, cargo, pnpm). Language env variables (GOMODCACHE, Python, npm, uv) live here so they’re universal.
+
+**Tier 4: Interactive Layer (`.zshrc`)**  
+Adds only interactive conveniences: oh-my-zsh, starship, lazy nvm, completion caching, aliases, functions.
 
 **Why This Matters**  
-Previously `go` (and other tools) could be “missing” when automation launched a non-login shell with no `$HOME`. The new layering removes that fragility.
+Previously, non-login shells depending on a missing `/etc/profile.d/00-core-path.sh` plus an absent Go path in the base layer caused `go version` failures in automation contexts. Now every entry path converges on the same minimal baseline before interactive customization.
 
-**Verification Commands**
+**Extended Verification Matrix**
 ```bash
-bash -lc 'echo LOGIN: $PATH | cut -d: -f1-5; command -v go'
-bash -c  'echo NONLOGIN: $PATH | cut -d: -f1-5; command -v go'
-zsh -lc  'echo ZSH_LOGIN: $(command -v go)'
+# 1. Minimal login bash (ensures /etc/profile + user base)
+env -i HOME="$HOME" TERM=xterm-256color bash -lc 'echo login_bash: $(command -v go)';
+
+# 2. Non-login bash (BASH_ENV path inject)
+env -i HOME="$HOME" TERM=xterm-256color bash -c  'echo nonlogin_bash: $(command -v go)';
+
+# 3. Explicit non-login with stripped PATH to prove reconstruction
+env -i HOME="$HOME" PATH=/usr/bin:/bin TERM=xterm-256color bash -c 'command -v go';
+
+# 4. Zsh login
+zsh -lc 'echo zsh_login: $(command -v go)';
+
+# 5. Zsh interactive
+zsh -ic 'echo zsh_interactive: $(command -v go)';
+
+# 6. Direct script execution (simulating automation)
+/usr/bin/env bash -c 'command -v go';
 ```
-All should report a valid path for `go`.
+All lines should resolve to `/usr/local/go/bin/go` (or a valid path under `$HOME/go/bin` if you later install tools there).
 
 **Extending Baseline**  
-To add another always-on tool path, append an `add_path` call in `/etc/profile.d/00-core-path.sh` (keeping it minimal and idempotent).
+Add more universal tool directories only in `/etc/profile.d/00-core-path.sh` (keep it short). Per-user or language-specific additions belong in `env-base.sh`. Avoid duplicating the same path in multiple layers—shorter PATH = faster command lookup.
 
-**Avoid** duplicating those directories in user PATH logic—only append user-only dirs in `env-base.sh`.
+**Troubleshooting Quick Test**  
+If a tool seems missing in automation: `bash -lc 'echo $PATH'` then `bash -c 'echo $PATH'` – they should both contain `/usr/local/go/bin` and `$HOME/go/bin`. If not, rebuild the container (`devcontainer rebuild`).
 
 
 ## Extending
