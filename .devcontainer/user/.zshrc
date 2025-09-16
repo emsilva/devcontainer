@@ -1,3 +1,6 @@
+#!/usr/bin/env zsh
+# shellcheck shell=zsh disable=SC1090,SC1091,SC2034,SC2155,SC2032,SC2033,SC2038,SC2046,SC2164,SC2296
+
 # ──────────────────────────────────────────────────────────────────────────────
 # PERFORMANCE: Optional profiling (run with ZSH_PROFILE=1 zsh -i -c exit)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -6,6 +9,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # PERFORMANCE: Skip system compinit to avoid double initialization
 # ──────────────────────────────────────────────────────────────────────────────
+# shellcheck disable=SC2034
 skip_global_compinit=1
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -49,80 +53,29 @@ if _has_cmd ruby && _has_cmd gem; then
   [[ -n "$GEM_PATH" ]] && export PATH="$GEM_PATH/bin:$PATH"
 fi
 
-# Go path (always prepare GOPATH; /usr/local/go/bin already in PATH above)
-export GOPATH="${GOPATH:-$HOME/go}"
-export GOMODCACHE="${GOMODCACHE:-$HOME/.cache/go-mod}"
-mkdir -p "$GOPATH/bin" "$GOMODCACHE" 2>/dev/null || true
-export PATH="$GOPATH/bin:$PATH"
-
-# Rust/Cargo
+# Rust env helper for interactive sessions only
 [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
-[[ -d "$HOME/.cargo/bin" ]] && export PATH="$HOME/.cargo/bin:$PATH"
 
-# Node Version Manager (nvm) - Lazy loading to improve startup time
-for nvm_dir in "/usr/local/share/nvm" "$HOME/.nvm"; do
-  if [[ -d "$nvm_dir" ]]; then
-    export NVM_DIR="$nvm_dir"
-    # Lazy load NVM - only source when nvm command is used
-    nvm() {
-      unset -f nvm
-      [[ -s "$NVM_DIR/nvm.sh" ]] && source "$NVM_DIR/nvm.sh"
-      [[ -s "$NVM_DIR/bash_completion" ]] && source "$NVM_DIR/bash_completion"
-      nvm "$@"
-    }
-    break
-  fi
-done
-
-# Add current NVM node version to PATH (if exists)
-# This makes node/npm/npx available immediately without loading full NVM
-if [[ -d "$NVM_DIR/current/bin" ]]; then
-  export PATH="$NVM_DIR/current/bin:$PATH"
-elif [[ -L "$NVM_DIR/current" ]]; then
-  # Follow symlink to actual version
-  NVM_CURRENT=$(readlink "$NVM_DIR/current")
-  [[ -d "$NVM_CURRENT/bin" ]] && export PATH="$NVM_CURRENT/bin:$PATH"
-fi
-
-# PNPM
-export PNPM_HOME="$HOME/.local/share/pnpm"
-[[ -d "$PNPM_HOME" ]] && export PATH="$PNPM_HOME:$PATH"
-
-# UV (Python package manager) - installed by post-create
-[[ -f "$HOME/.local/bin/uv" ]] && export PATH="$HOME/.local/bin:$PATH"
-[[ -f "$HOME/.cargo/bin/uv" ]] && export PATH="$HOME/.cargo/bin:$PATH"
-
-# Claude Code CLI
-[[ -f "$HOME/.local/bin/claude" ]] && export PATH="$HOME/.local/bin:$PATH"
-
-# Core environment variables
-export ZSH="$HOME/.oh-my-zsh"
-export LANG=en_US.UTF-8
-export EDITOR="${EDITOR:-code --wait}"
-export PAGER="${PAGER:-less}"
-export SYSTEMD_EDITOR="${EDITOR}"
-
-# GPG TTY for git signing
-export GPG_TTY=$(tty)
-
-# Ripgrep configuration
-_has_cmd rg && export RIPGREP_CONFIG_PATH="$HOME/.config/ripgrep/ripgreprc"
-
-# Fix Starship permissions
-export STARSHIP_CACHE="$HOME/.cache/starship"
+# Ensure Starship cache dir exists (env-base defines STARSHIP_CACHE)
 [[ ! -d "$STARSHIP_CACHE" ]] && mkdir -p "$STARSHIP_CACHE"
 
-# Python settings (from devcontainer.json)
-export PYTHONDONTWRITEBYTECODE=1
-export PYTHONUNBUFFERED=1
-export VIRTUAL_ENV_DISABLE_PROMPT=1
+# GPG tty for signing from interactive shells
+if tty_output=$(tty 2>/dev/null); then
+  export GPG_TTY="$tty_output"
+fi
 
-# NPM settings (from devcontainer.json)
-export NPM_CONFIG_FUND=false
-export NPM_CONFIG_AUDIT=false
-
-# UV Cache (from devcontainer mounts)
-export UV_CACHE_DIR="$HOME/.cache/uv"
+# Lazy-load nvm on demand (env-base sets NVM_DIR + PATH)
+if [[ -n "${NVM_DIR:-}" ]]; then
+  nvm() {
+    unset -f nvm
+    [[ -s "$NVM_DIR/nvm.sh" ]] && source "$NVM_DIR/nvm.sh"
+    [[ -s "$NVM_DIR/bash_completion" ]] && source "$NVM_DIR/bash_completion"
+    nvm "$@"
+  }
+  if [[ -d "$NVM_DIR/current/bin" ]]; then
+    path=($NVM_DIR/current/bin ${path[@]/$NVM_DIR/current/bin})
+  fi
+fi
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 2) HISTORY - CRITICAL FOR DEVCONTAINER PERSISTENCE
@@ -190,7 +143,7 @@ _has_cmd zoxide && plugins+=(zoxide)
 [[ -d "$ZSH/custom/plugins/zsh-syntax-highlighting" ]] && plugins+=(zsh-syntax-highlighting)
 
 ZSH_THEME=""  # Using starship instead
-source $ZSH/oh-my-zsh.sh
+source "$ZSH"/oh-my-zsh.sh
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 5) EXTERNAL PLUGIN LOADING (for system-installed plugins)
@@ -376,7 +329,7 @@ alias reopen='devcontainer reopen'
 # ──────────────────────────────────────────────────────────────────────────────
 # Create directory and cd into it
 mkcd() {
-  mkdir -p "$1" && cd "$1"
+  mkdir -p "$1" && cd "$1" || return
 }
 
 # Extract various archive types
@@ -501,7 +454,13 @@ dc-rebuild() {
 }
 
 dc-logs() {
-  docker logs -f $(docker ps -q --filter "label=devcontainer.local_folder=$PWD")
+  local container_id
+  container_id=$(docker ps -q --filter "label=devcontainer.local_folder=$PWD")
+  if [[ -n "$container_id" ]]; then
+    docker logs -f "$container_id"
+  else
+    echo "No matching devcontainer found" >&2
+  fi
 }
 
 # Port forwarding helper
@@ -554,7 +513,9 @@ EOF
   [[ -f .gitmodules ]] || { echo "No .gitmodules file found" >&2; return 1; }
   command -v git >/dev/null || { echo "git not available" >&2; return 1; }
 
-  (( do_init )) && git submodule update --init --recursive || true
+  if (( do_init )); then
+    git submodule update --init --recursive || true
+  fi
 
   local -a subpaths=()
   while IFS= read -r p; do [[ -n "$p" ]] && subpaths+=("$p"); done \

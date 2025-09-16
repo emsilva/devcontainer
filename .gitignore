@@ -1,4 +1,4 @@
 # Devcontainer repo ignores
-# Ignore Claude user config
-user/.claude.json
-user/.codex/config.toml
+# Ignore generated configs
+.devcontainer/user/.claude.json
+.devcontainer/user/.codex/config.toml

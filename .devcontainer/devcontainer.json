@@ -8,26 +8,45 @@
       "username": "vscode",
       "upgradePackages": "true"
     },
+    "ghcr.io/rocker-org/devcontainer-features/apt-packages:1": {
+      "packages": "bat vim nano zoxide tmux tree tldr curl wget dnsutils net-tools iputils-ping httpie git git-lfs fd-find ripgrep jq yq postgresql-client default-mysql-client sqlite3 redis-tools htop ncdu zsh-autosuggestions zsh-syntax-highlighting"
+    },
     "ghcr.io/devcontainers/features/aws-cli:1": {
       "version": "latest"
     },
     "ghcr.io/devcontainers/features/github-cli:1": {
       "version": "latest"
     },
+    "ghcr.io/devcontainers/features/azure-cli:1": {
+      "version": "latest"
+    },
+    "ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
+      "minikube": "none"
+    },
+    "ghcr.io/schlich/devcontainer-features/starship:0": {},
     "ghcr.io/devcontainers/features/sshd:1": {
         "version": "latest"
     },
     "ghcr.io/devcontainers/features/go:1": {
-      "version": "1.24"
+      "version": "latest"
     },
     "ghcr.io/devcontainers/features/node:1": {
-      "version": "22",
+      "version": "latest",
       "installYarn": "true",
       "pnpmVersion": "latest"
     },
     "ghcr.io/devcontainers/features/python:1": {
-      "version": "3.12",
+      "version": "latest",
       "installTools": true
+    },
+    "ghcr.io/va-h/devcontainers-features/uv:1": {},
+    "ghcr.io/devcontainers-extra/features/go-task:1": {},
+    "ghcr.io/devcontainers-extra/features/fzf:1": {},
+    "ghcr.io/devcontainers-extra/features/pulumi:1": {
+      "version": "latest"
+    },
+    "ghcr.io/dhoeric/features/google-cloud-cli:1": {
+      "installGkeGcloudAuthPlugin": true
     },
     "ghcr.io/devcontainers/features/docker-in-docker:2": {
       "version": "latest",
@@ -77,9 +96,6 @@
       }
     }
   },
-  "otherPortsAttributes": {
-    "onAutoForward": "notify"
-  },
   "remoteUser": "vscode",
   "containerEnv": {
     "NPM_CONFIG_FUND": "false",
@@ -91,7 +107,7 @@
     "XDG_CONFIG_HOME": "/home/vscode/.config",
     "GOMODCACHE": "/home/vscode/.cache/go-mod",
     "TZ": "America/Sao_Paulo",
-    "BASH_ENV": "/etc/profile.d/00-core-path.sh"
+    "BASH_ENV": "/home/vscode/.config/shell/env-base.sh"
   },
   "remoteEnv": {
     "HOME": "/home/vscode",

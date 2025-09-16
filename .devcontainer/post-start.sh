@@ -27,7 +27,9 @@ fi
 # Check for updates to global tools (but don't block)
 (
   # Update tldr cache in background
-  command -v tldr >/dev/null 2>&1 && tldr --update 2>/dev/null || true
+  if command -v tldr >/dev/null 2>&1; then
+    tldr --update 2>/dev/null || true
+  fi
 ) &
 
 

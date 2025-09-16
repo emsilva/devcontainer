@@ -1,21 +1,26 @@
 # Devcontainer Workspace
 
-A handy Ubuntu 24.04 development container setup meant for everyday polyglot work (Go, Python, Node, shell tooling) without a bunch of manual bootstrap steps.
+A handy Ubuntu 24.04 development container setup for everyday polyglot work (Go, Python, Node) that prefers official Dev Container features over custom bootstrap scripts.
 
 ## What You Get
 
 - Base image: `mcr.microsoft.com/devcontainers/base:ubuntu-24.04`
 - Languages & runtimes via features:
-  - Go 1.24
-  - Node.js 22 (with Yarn, pnpm via Corepack)
-  - Python 3.12 (plus `uv` for fast env + deps)
-- Tooling & CLI goodies:
-  - zsh + Oh My Zsh + plugins (autosuggestions, syntax highlighting, zoxide)
-  - starship prompt (Catppuccin theme)
-  - fzf, fd, ripgrep, bat, tldr, tree, jq, yq, httpie, zoxide, vivid, fastfetch
-  - git + git-lfs configured with sensible defaults
-  - Task (`go-task`) for optional task automation
-- Container tuned for iterative dev: persistent shell history volume, trimmed noise, default branch = `main`.
+  - Go (latest from feature)
+  - Node.js (latest from feature, with Yarn & pnpm via Corepack)
+  - Python (latest from feature, with the `uv` feature for fast env + deps)
+- Tooling & CLI via features:
+  - Common utils + zsh/Oh My Zsh (`common-utils` feature)
+  - `fzf` via `ghcr.io/devcontainers-extra/features/fzf`
+  - Pulumi CLI via `ghcr.io/devcontainers-extra/features/pulumi`
+  - Azure CLI (`ghcr.io/devcontainers/features/azure-cli`)
+  - Google Cloud CLI (`ghcr.io/dhoeric/features/google-cloud-cli`)
+  - Shell tools via `apt-packages`: fd, ripgrep, bat, tldr, tree, jq, yq, httpie, zoxide, git, git-lfs, DB clients, etc.
+  - Starship prompt (`starship` feature) with Catppuccin config
+  - kubectl + Helm (`kubectl-helm` feature)
+  - AWS CLI and GitHub CLI features
+  - Task (`go-task`) CLI via `ghcr.io/devcontainers-extra/features/go-task`
+  - Container tuned for iterative dev: persistent shell history volume, trimmed noise, default branch = `main`.
 
 ## Devcontainer UX niceties
 
@@ -23,15 +28,15 @@ A handy Ubuntu 24.04 development container setup meant for everyday polyglot wor
 - Default terminal: `zsh`
 - History persisted across rebuilds (`/commandhistory` volume)
 - Symlinked user dotfiles from `.devcontainer/user` into `$HOME`
-- Automatic detection + install of dependencies for Node / Python (uv) / Go
+- Unified environment setup: a single `env-base.sh` shared by login/non-login shells keeps PATH consistent
 - Port forwarding is now fully dynamic: no predeclared list; VS Code will just notify when a process starts listening (configured with `onAutoForward=notify`).
 
 ## AI / MCP Configuration (Claude & Codex)
 
-Both Claude and Codex configs are generated from templates stored under `user/` and then symlinked into `$HOME` during provisioning:
+Both Claude and Codex configs are generated from templates stored under `.devcontainer/user/` and then symlinked into `$HOME` during provisioning:
 
-- Claude: `user/.claude.json.template` → generates `user/.claude.json` → symlinked to `~/.claude.json`.
-- Codex: `user/.codex/config.toml.template` → generates `user/.codex/config.toml` → symlinked to `~/.codex/config.toml`.
+- Claude: `.devcontainer/user/.claude.json.template` → generates `.devcontainer/user/.claude.json` → symlinked to `~/.claude.json`.
+- Codex: `.devcontainer/user/.codex/config.toml.template` → generates `.devcontainer/user/.codex/config.toml` → symlinked to `~/.codex/config.toml`.
 
 Placeholder tokens (`__CONTEXT7_API_KEY__`, `__EXA_API_KEY__`) are replaced at container create time when the corresponding environment variables are set. Generated files are ignored by git. Remove the generated file(s) and rebuild to force regeneration.
 
@@ -42,7 +47,7 @@ Placeholder tokens (`__CONTEXT7_API_KEY__`, `__EXA_API_KEY__`) are replaced at c
 | `CONTEXT7_API_KEY` | Enables Context7 MCP server integration | Optional |
 | `EXA_API_KEY` | Enables Exa search MCP server integration | Optional |
 
-These are referenced in `devcontainer.json` under `remoteEnv` so they can be wired in from your local environment or repository-level secrets.
+These are referenced in `.devcontainer/devcontainer.json` under `remoteEnv` so they can be wired in from your local environment or repository-level secrets.
 
 ## Git Identity
 
@@ -69,16 +74,13 @@ devcontainer rebuild
 Core tooling (Go, user-local bins) is available in every shell mode (login / non-login, interactive / non-interactive) through a layered, idempotent design:
 
 **Tier 1: System Baseline (/etc/profile.d)**  
-`post-create.sh` now ALWAYS writes `/etc/profile.d/00-core-path.sh` (even when the provisioning user is non-root, using sudo fallback). This script:
-- Synthesizes `$HOME` if missing (some automation strips it).
-- Prepend-adds (idempotently): `/usr/local/go/bin`, `$HOME/go/bin`, `$HOME/.local/bin` (when they exist).
-- Exports `GOPATH` defaulting to `$HOME/go`.
+`.devcontainer/post-create.sh` writes `/etc/profile.d/00-core-path.sh` (using sudo when available). The script synthesizes `$HOME` when needed and sources `~/.config/shell/env-base.sh` when present, falling back to a minimal PATH otherwise.
 
 **Tier 2: Non-Login Bash**  
-`BASH_ENV=/etc/profile.d/00-core-path.sh` in `devcontainer.json` ensures plain `bash -c '...'` inherits the same baseline (bash ignores `BASH_ENV` only for login shells, which source the profile chain).
+`BASH_ENV=/home/vscode/.config/shell/env-base.sh` in `.devcontainer/devcontainer.json` sends every `bash -c` through the same script.
 
 **Tier 3: User Base (`env-base.sh`)**  
-`~/.config/shell/env-base.sh` is a POSIX script sourced by both login shells (`.profile` / `.zprofile`) and non-interactive shells (via `noninteractive-env.sh`). It now explicitly prepends `/usr/local/go/bin` and `$HOME/go/bin` early, then user-local directories (npm-global, cargo, pnpm). Language env variables (GOMODCACHE, Python, npm, uv) live here so they’re universal.
+`~/.config/shell/env-base.sh` (single source of truth) prepends `/usr/local/go/bin`, `$HOME/go/bin`, `$HOME/.local/bin`, pnpm, cargo, npm-global, Pulumi, and resolves NVM’s current Node shim. It exports GOPATH, Python, npm, uv, pnpm, Pulumi, and editor locale settings.
 
 **Tier 4: Interactive Layer (`.zshrc`)**  
 Adds only interactive conveniences: oh-my-zsh, starship, lazy nvm, completion caching, aliases, functions.
@@ -109,7 +111,7 @@ zsh -ic 'echo zsh_interactive: $(command -v go)';
 All lines should resolve to `/usr/local/go/bin/go` (or a valid path under `$HOME/go/bin` if you later install tools there).
 
 **Extending Baseline**  
-Add more universal tool directories only in `/etc/profile.d/00-core-path.sh` (keep it short). Per-user or language-specific additions belong in `env-base.sh`. Avoid duplicating the same path in multiple layers—shorter PATH = faster command lookup.
+Add universal tool directories in `env-base.sh` so all entry points share them. Keep `/etc/profile.d/00-core-path.sh` minimal since it simply bootstraps into the same script.
 
 **Troubleshooting Quick Test**  
 If a tool seems missing in automation: `bash -lc 'echo $PATH'` then `bash -c 'echo $PATH'` – they should both contain `/usr/local/go/bin` and `$HOME/go/bin`. If not, rebuild the container (`devcontainer rebuild`).
@@ -117,7 +119,7 @@ If a tool seems missing in automation: `bash -lc 'echo $PATH'` then `bash -c 'ec
 
 ## Extending
 
-Add extra CLI tools in `post-create.sh` (keep things idempotent). Place new dotfiles or config under `user/` and they’ll get symlinked in on create.
+Prefer adding tools via features (e.g. the rocker-org `apt-packages` feature, language features). Keep `.devcontainer/post-create.sh` for dotfile linking and the minimal PATH baseline. If `gh` is available and `GH_TOKEN`/`GITHUB_TOKEN` is set, the script automatically runs `gh auth setup-git` so Git reuses the CLI’s credential helper.
 
 ## Safety / Secrets
 
@@ -129,6 +131,7 @@ Add extra CLI tools in `post-create.sh` (keep things idempotent). Place new dotf
 
 | Issue | Fix |
 |-------|-----|
+| Docker-in-Docker fails with `iptables: Table does not exist` | Some hosts (e.g. Fedora 41+) don't ship legacy `ip_tables` modules. Load them via `/lib/modules` + `modprobe iptable_nat`, or switch to the nft backend (install `iptables-nft`). Codespaces already exposes the modules, so the feature works there without changes. |
 | Zsh not default | Rebuild; post-create enforces `chsh` if possible |
 | Missing Node global tools | Run `corepack enable` or reinstall via `npm -g` |
 | Slow first prompt | fzf + starship caching warms after first run |
@@ -143,7 +146,7 @@ Add extra CLI tools in `post-create.sh` (keep things idempotent). Place new dotf
 - Consider neutralizing the devcontainer `name` if publishing (currently includes a personal identifier).
 - Add optional Redis/Postgres services via `docker-compose.yml` if databases become standard.
 - Introduce a minimal `SECURITY.md` clarifying no secrets should be committed and environment variables are injected at runtime.
-- Replace `curl | bash` installers with pinned checksums for stricter supply-chain hygiene if higher security posture is required.
+- Favor features over `curl | bash` installs. If adding anything custom, pin versions and checksums.
 
 ---
 Lightweight, batteries included. Tweak to taste.
