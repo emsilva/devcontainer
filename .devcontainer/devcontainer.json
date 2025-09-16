@@ -40,6 +40,7 @@
       "installTools": true
     },
     "ghcr.io/va-h/devcontainers-features/uv:1": {},
+    "ghcr.io/jsburckhardt/devcontainer-features/codex:1": {},
     "ghcr.io/devcontainers-extra/features/go-task:1": {},
     "ghcr.io/devcontainers-extra/features/fzf:1": {},
     "ghcr.io/devcontainers-extra/features/pulumi:1": {

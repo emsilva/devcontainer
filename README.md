@@ -12,6 +12,7 @@ A handy Ubuntu 24.04 development container setup for everyday polyglot work (Go,
 - Tooling & CLI via features:
   - Common utils + zsh/Oh My Zsh (`common-utils` feature)
   - `fzf` via `ghcr.io/devcontainers-extra/features/fzf`
+  - OpenAI Codex CLI via `ghcr.io/jsburckhardt/devcontainer-features/codex`
   - Pulumi CLI via `ghcr.io/devcontainers-extra/features/pulumi`
   - Azure CLI (`ghcr.io/devcontainers/features/azure-cli`)
   - Google Cloud CLI (`ghcr.io/dhoeric/features/google-cloud-cli`)
