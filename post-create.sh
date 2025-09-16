@@ -125,6 +125,37 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Pulumi CLI (manual install, no shell rc mutation)
+# ──────────────────────────────────────────────────────────────────────────────
+if ! command -v pulumi >/dev/null 2>&1; then
+  echo "🪄 Installing Pulumi CLI..."
+  P_VERSION="3.134.0" # Update as needed
+  ARCH="$(uname -m)"; OS="$(uname -s)";
+  case "$ARCH" in
+    x86_64|amd64) ARCH=amd64 ;;
+    aarch64|arm64) ARCH=arm64 ;;
+  esac
+  case "$OS" in
+    Linux) OS=linux ;;
+    Darwin) OS=darwin ;;
+  esac
+  URL="https://get.pulumi.com/releases/sdk/pulumi-v${P_VERSION}-${OS}-${ARCH}.tar.gz"
+  TMP_DIR="/tmp/pulumi-install"
+  mkdir -p "$TMP_DIR"
+  if curl -fsSL "$URL" -o "$TMP_DIR/pulumi.tgz"; then
+    tar -xzf "$TMP_DIR/pulumi.tgz" -C "$TMP_DIR"
+    mkdir -p "$USER_HOME/.pulumi/bin"
+    mv "$TMP_DIR/pulumi"/* "$USER_HOME/.pulumi/bin/" 2>/dev/null || true
+    rm -rf "$TMP_DIR"
+    echo "  ✓ Pulumi installed to $USER_HOME/.pulumi/bin"
+  else
+    echo "  ⚠ Pulumi download failed ($URL)" >&2
+  fi
+else
+  echo "🪄 Pulumi already installed ($(pulumi version 2>/dev/null || echo unknown))"
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Generate Claude configuration from template with secrets
 # ──────────────────────────────────────────────────────────────────────────────
 CLAUDE_TEMPLATE="${USER_DOTFILES_DIR}/.claude.json.template"

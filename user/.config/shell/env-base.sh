@@ -24,6 +24,7 @@ path_add "$HOME/bin"
 path_add "$HOME/.npm-global/bin"
 path_add "$HOME/.cargo/bin"
 path_add "$HOME/.local/share/pnpm"
+path_add "$HOME/.pulumi/bin"
 
 export PATH
 
@@ -36,6 +37,8 @@ export VIRTUAL_ENV_DISABLE_PROMPT=1
 export NPM_CONFIG_FUND=false
 export NPM_CONFIG_AUDIT=false
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$HOME/.cache/uv}"
+export PULUMI_SKIP_UPDATE_CHECK=1
+export PULUMI_HOME="$HOME/.pulumi"
 
 # Locale/editor (lightweight)
 export LANG="${LANG:-en_US.UTF-8}"

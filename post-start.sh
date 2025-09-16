@@ -30,4 +30,5 @@ fi
   command -v tldr >/dev/null 2>&1 && tldr --update 2>/dev/null || true
 ) &
 
+
 echo "✅ post-start complete"
