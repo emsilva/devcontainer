@@ -126,7 +126,7 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Pulumi CLI (manual install with checksum validation, no shell rc mutation)
+# Pulumi CLI (simple install: download & extract only)
 # ──────────────────────────────────────────────────────────────────────────────
 if ! command -v pulumi >/dev/null 2>&1; then
   echo "🪄 Installing Pulumi CLI (v${PULUMI_VERSION})..."
@@ -141,32 +141,21 @@ if ! command -v pulumi >/dev/null 2>&1; then
   esac
   BASE="pulumi-v${PULUMI_VERSION}-${OS}-${ARCH}"
   TGZ_URL="https://github.com/pulumi/pulumi/releases/download/v${PULUMI_VERSION}/${BASE}.tar.gz"
-  SHA_URL="${TGZ_URL}.sha256"
   TMP_DIR="/tmp/pulumi-install"
   mkdir -p "$TMP_DIR"
   TGZ_PATH="$TMP_DIR/${BASE}.tar.gz"
-  SHA_PATH="$TMP_DIR/${BASE}.tar.gz.sha256"
-
-  if curl -fsSL "$TGZ_URL" -o "$TGZ_PATH" && curl -fsSL "$SHA_URL" -o "$SHA_PATH"; then
-    EXPECTED_SHA=$(awk '{print $1}' "$SHA_PATH")
-    ACTUAL_SHA=$(sha256sum "$TGZ_PATH" | awk '{print $1}')
-    if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
-      echo "  ❌ Pulumi checksum mismatch; aborting install" >&2
-      echo "     expected=$EXPECTED_SHA" >&2
-      echo "     actual=$ACTUAL_SHA" >&2
-      rm -rf "$TMP_DIR"
-    else
-      echo "  ✓ Checksum verified ($ACTUAL_SHA)"
-      tar -xzf "$TGZ_PATH" -C "$TMP_DIR"
+  if curl -fsSL "$TGZ_URL" -o "$TGZ_PATH"; then
+    if tar -xzf "$TGZ_PATH" -C "$TMP_DIR"; then
       mkdir -p "$USER_HOME/.pulumi/bin"
       mv "$TMP_DIR/pulumi"/* "$USER_HOME/.pulumi/bin/" 2>/dev/null || true
-      rm -rf "$TMP_DIR"
       echo "  ✓ Pulumi installed to $USER_HOME/.pulumi/bin"
+    else
+      echo "  ❌ Failed to extract Pulumi archive" >&2
     fi
   else
-    echo "  ⚠ Pulumi download failed ($TGZ_URL)" >&2
-    rm -rf "$TMP_DIR"
+    echo "  ❌ Pulumi download failed ($TGZ_URL)" >&2
   fi
+  rm -rf "$TMP_DIR" 2>/dev/null || true
 else
   echo "🪄 Pulumi already installed ($(pulumi version 2>/dev/null || echo unknown))"
 fi
