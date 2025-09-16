@@ -9,6 +9,7 @@ ZSH_CUSTOM="${ZSH_CUSTOM:-${HOME}/.oh-my-zsh/custom}"
 USER_HOME="${HOME}"
 USER_DOTFILES_DIR=".devcontainer/user"
 SUDO=""
+PULUMI_VERSION="3.196.0" # Central Pulumi version pin (bump here)
 
 # Detect if we need sudo
 if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
@@ -125,11 +126,10 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Pulumi CLI (manual install, no shell rc mutation)
+# Pulumi CLI (manual install with checksum validation, no shell rc mutation)
 # ──────────────────────────────────────────────────────────────────────────────
 if ! command -v pulumi >/dev/null 2>&1; then
-  echo "🪄 Installing Pulumi CLI..."
-  P_VERSION="3.196.0" # Update as needed
+  echo "🪄 Installing Pulumi CLI (v${PULUMI_VERSION})..."
   ARCH="$(uname -m)"; OS="$(uname -s)";
   case "$ARCH" in
     x86_64|amd64) ARCH=amd64 ;;
@@ -139,17 +139,33 @@ if ! command -v pulumi >/dev/null 2>&1; then
     Linux) OS=linux ;;
     Darwin) OS=darwin ;;
   esac
-  URL="https://get.pulumi.com/releases/sdk/pulumi-v${P_VERSION}-${OS}-${ARCH}.tar.gz"
+  BASE="pulumi-v${PULUMI_VERSION}-${OS}-${ARCH}"
+  TGZ_URL="https://github.com/pulumi/pulumi/releases/download/v${PULUMI_VERSION}/${BASE}.tar.gz"
+  SHA_URL="${TGZ_URL}.sha256"
   TMP_DIR="/tmp/pulumi-install"
   mkdir -p "$TMP_DIR"
-  if curl -fsSL "$URL" -o "$TMP_DIR/pulumi.tgz"; then
-    tar -xzf "$TMP_DIR/pulumi.tgz" -C "$TMP_DIR"
-    mkdir -p "$USER_HOME/.pulumi/bin"
-    mv "$TMP_DIR/pulumi"/* "$USER_HOME/.pulumi/bin/" 2>/dev/null || true
-    rm -rf "$TMP_DIR"
-    echo "  ✓ Pulumi installed to $USER_HOME/.pulumi/bin"
+  TGZ_PATH="$TMP_DIR/${BASE}.tar.gz"
+  SHA_PATH="$TMP_DIR/${BASE}.tar.gz.sha256"
+
+  if curl -fsSL "$TGZ_URL" -o "$TGZ_PATH" && curl -fsSL "$SHA_URL" -o "$SHA_PATH"; then
+    EXPECTED_SHA=$(awk '{print $1}' "$SHA_PATH")
+    ACTUAL_SHA=$(sha256sum "$TGZ_PATH" | awk '{print $1}')
+    if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+      echo "  ❌ Pulumi checksum mismatch; aborting install" >&2
+      echo "     expected=$EXPECTED_SHA" >&2
+      echo "     actual=$ACTUAL_SHA" >&2
+      rm -rf "$TMP_DIR"
+    else
+      echo "  ✓ Checksum verified ($ACTUAL_SHA)"
+      tar -xzf "$TGZ_PATH" -C "$TMP_DIR"
+      mkdir -p "$USER_HOME/.pulumi/bin"
+      mv "$TMP_DIR/pulumi"/* "$USER_HOME/.pulumi/bin/" 2>/dev/null || true
+      rm -rf "$TMP_DIR"
+      echo "  ✓ Pulumi installed to $USER_HOME/.pulumi/bin"
+    fi
   else
-    echo "  ⚠ Pulumi download failed ($URL)" >&2
+    echo "  ⚠ Pulumi download failed ($TGZ_URL)" >&2
+    rm -rf "$TMP_DIR"
   fi
 else
   echo "🪄 Pulumi already installed ($(pulumi version 2>/dev/null || echo unknown))"
