@@ -18,7 +18,7 @@ echo
 
 # Run the validation script inside the container
 remote_user=${DEVCONTAINER_REMOTE_USER:-vscode}
-docker exec --user "$remote_user" "$container_id" bash -c "cd /workspaces/$(basename "$PWD") && REMOTE_USER=$remote_user VALIDATE_ENV_INTERNAL=1 TARGET=local bash scripts/validate-devcontainer.sh"
+docker exec --user "$remote_user" "$container_id" bash -c "cd /workspaces/$(basename "$PWD") && REMOTE_USER=$remote_user VALIDATE_ENV_INTERNAL=1 TARGET=local bash .devcontainer/scripts/validate-devcontainer.sh"
 
 echo
 echo "✅ Validation complete!"

@@ -273,6 +273,6 @@ if [ -z "$container_id" ]; then
   exit 1
 fi
 workspace_name=$(basename "$PWD")
-container_script="/workspaces/${workspace_name}/scripts/validate-devcontainer.sh"
+container_script="/workspaces/${workspace_name}/.devcontainer/scripts/validate-devcontainer.sh"
 remote_user_main=${DEVCONTAINER_REMOTE_USER:-vscode}
 docker exec --user "$remote_user_main" "$container_id" bash -lc "cd /workspaces/${workspace_name} && REMOTE_USER=$remote_user_main VALIDATE_ENV_INTERNAL=1 TARGET=local CONTAINER_ID=$container_id '$container_script'"
