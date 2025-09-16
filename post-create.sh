@@ -132,7 +132,7 @@ if ! command -v pulumi >/dev/null 2>&1; then
   echo "🪄 Installing Pulumi CLI (v${PULUMI_VERSION})..."
   ARCH="$(uname -m)"; OS="$(uname -s)";
   case "$ARCH" in
-    x86_64|amd64) ARCH=amd64 ;;
+    x86_64|amd64) ARCH=x64 ;;
     aarch64|arm64) ARCH=arm64 ;;
   esac
   case "$OS" in
