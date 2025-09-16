@@ -12,6 +12,9 @@
 # shellcheck disable=SC2034
 skip_global_compinit=1
 
+# Keep PATH unique while preserving order
+typeset -U path
+
 # ──────────────────────────────────────────────────────────────────────────────
 # PERFORMANCE: Command lookup cache
 # ──────────────────────────────────────────────────────────────────────────────

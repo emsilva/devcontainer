@@ -1,0 +1,11 @@
+version: '3'
+
+tasks:
+  rebuild:
+    desc: Rebuild the dev container with the Dev Containers CLI
+    preconditions:
+      - sh: command -v devcontainer >/dev/null 2>&1
+        msg: "Dev Containers CLI is not installed. Install with: npm i -g @devcontainers/cli"
+    cmds:
+      - devcontainer up --workspace-folder . --remove-existing-container --log-level trace
+    silent: false

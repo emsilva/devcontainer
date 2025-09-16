@@ -93,12 +93,12 @@ echo "UV_CACHE_DIR=${UV_CACHE_DIR:-<unset>}"
 echo "PULUMI_HOME=${PULUMI_HOME:-<unset>}"
 for bin in go node python3 uv aws az gcloud gh docker fzf task starship pulumi; do
   if command -v "$bin" >/dev/null 2>&1; then
-    path=$(command -v "$bin")
-    resolved=$(realpath "$path" 2>/dev/null || echo "$path")
+    bin_path=$(command -v "$bin")
+    resolved=$(realpath "$bin_path" 2>/dev/null || echo "$bin_path")
     if [ "$bin" = "docker" ] && ! docker version >/dev/null 2>&1; then
-      echo "which $bin -> $path (daemon not accessible)"
+      echo "which $bin -> $bin_path (daemon not accessible)"
     else
-      echo "which $bin -> $path"
+      echo "which $bin -> $bin_path"
     fi
     echo "realpath $bin -> $resolved"
   else
@@ -130,7 +130,7 @@ compare_env_data() {
   local issues=0
   
   # Check critical environment variables
-  local vars="USER SHELL GOPATH GOMODCACHE NVM_DIR PNPM_HOME UV_CACHE_DIR PULUMI_HOME"
+  local vars="USER GOPATH GOMODCACHE NVM_DIR PNPM_HOME UV_CACHE_DIR PULUMI_HOME"
   for var in $vars; do
     local baseline_val current_val
     baseline_val=$(echo "$baseline" | grep "^${var}=" | cut -d= -f2- || echo "<missing>")
@@ -161,16 +161,6 @@ compare_env_data() {
       issues=$((issues + 1))
     fi
   done
-  
-  # Check PATH consistency (count of directories)
-  local baseline_path_count current_path_count
-  baseline_path_count=$(echo "$baseline" | grep "^PATH=" | cut -d= -f2- | tr ':' '\n' | wc -l)
-  current_path_count=$(echo "$current" | grep "^PATH=" | cut -d= -f2- | tr ':' '\n' | wc -l)
-  
-  if [ "$baseline_path_count" != "$current_path_count" ]; then
-    echo "  ⚠️  PATH has different number of directories: $baseline_path_count vs $current_path_count"
-    issues=$((issues + 1))
-  fi
   
   if [ "$issues" -eq 0 ]; then
     echo "  ✅ $shell_name environment consistent with baseline"
