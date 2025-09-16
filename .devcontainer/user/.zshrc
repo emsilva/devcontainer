@@ -1,6 +1,9 @@
 #!/usr/bin/env zsh
 # shellcheck shell=zsh disable=SC1090,SC1091,SC2034,SC2155,SC2032,SC2033,SC2038,SC2046,SC2164,SC2296
 
+ZSH="${ZSH:-$HOME/.oh-my-zsh}"
+STARSHIP_CACHE="${STARSHIP_CACHE:-$HOME/.cache/starship}"
+
 # ──────────────────────────────────────────────────────────────────────────────
 # PERFORMANCE: Optional profiling (run with ZSH_PROFILE=1 zsh -i -c exit)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -60,7 +63,7 @@ fi
 [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
 
 # Ensure Starship cache dir exists (env-base defines STARSHIP_CACHE)
-[[ ! -d "$STARSHIP_CACHE" ]] && mkdir -p "$STARSHIP_CACHE"
+[[ -n "$STARSHIP_CACHE" ]] && [[ ! -d "$STARSHIP_CACHE" ]] && mkdir -p "$STARSHIP_CACHE"
 
 # GPG tty for signing from interactive shells
 if tty_output=$(tty 2>/dev/null); then
