@@ -114,6 +114,28 @@ if command -v corepack >/dev/null 2>&1; then
   corepack enable >/dev/null 2>&1 || true
 fi
 
+# Install crane (OCI utility) via Go if missing
+if ! command -v crane >/dev/null 2>&1; then
+  if command -v go >/dev/null 2>&1; then
+    echo "🪝 Installing crane (go-containerregistry)"
+    if GO111MODULE=on GOBIN="${USER_HOME}/.local/bin" go install github.com/google/go-containerregistry/cmd/crane@latest; then
+      if [ -x "${USER_HOME}/.local/bin/crane" ]; then
+        if [ -n "${SUDO}" ]; then
+          $SUDO ln -sfn "${USER_HOME}/.local/bin/crane" /usr/local/bin/crane
+        else
+          ln -sfn "${USER_HOME}/.local/bin/crane" /usr/local/bin/crane
+        fi
+      fi
+    else
+      echo "  ⚠ Failed to install crane" >&2
+    fi
+  else
+    echo "  ⚠ go not found; skipping crane install" >&2
+  fi
+else
+  echo "🪝 crane already available"
+fi
+
 # Install vivid via cargo when available
 if command -v cargo >/dev/null 2>&1; then
   if ! command -v vivid >/dev/null 2>&1; then
@@ -141,6 +163,12 @@ git config --global core.editor "${EDITOR:-code --wait}"
 if command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
   echo "🔐 Configuring GitHub CLI for git auth"
   gh auth setup-git >/dev/null 2>&1 || true
+fi
+
+# Update devcontainer features lock for reproducibility
+if [ -x .devcontainer/scripts/features-lock.sh ]; then
+  echo "📦 Refreshing devcontainer features lock"
+  .devcontainer/scripts/features-lock.sh generate || true
 fi
 
 echo "✅ post-create complete (features-first)"
