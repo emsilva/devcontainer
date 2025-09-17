@@ -114,6 +114,22 @@ if command -v corepack >/dev/null 2>&1; then
   corepack enable >/dev/null 2>&1 || true
 fi
 
+# Install vivid via cargo when available
+if command -v cargo >/dev/null 2>&1; then
+  if ! command -v vivid >/dev/null 2>&1; then
+    echo "🌈 Installing vivid (cargo)"
+    if cargo install vivid; then
+      echo "  ✅ vivid installed"
+    else
+      echo "  ⚠ Failed to install vivid" >&2
+    fi
+  else
+    echo "🌈 vivid already available"
+  fi
+else
+  echo "  ⚠ cargo not found; skipping vivid install" >&2
+fi
+
 # Basic Git defaults
 git config --global init.defaultBranch main
 git config --global pull.rebase false

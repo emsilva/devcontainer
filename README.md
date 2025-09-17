@@ -76,6 +76,11 @@ The installer:
 - Clones `https://github.com/emsilva/devcontainer.git` (override via `SETUP_DEVCONTAINER_REPO` or `SETUP_DEVCONTAINER_REF`).
 - Replaces the local `.devcontainer` directory and commits the change as `setting up devcontainer <source-sha>`.
 
+## Tooling Highlights
+
+- Rust toolchain (cargo, rustup) via the devcontainer Rust feature.
+- Post-create hook auto-installs [`vivid`](https://github.com/sharkdp/vivid) for richer `LS_COLORS` support when `cargo` is available.
+
 ## Rebuild / Update
 
 If you edit features or the provisioning script:
