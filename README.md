@@ -64,6 +64,18 @@ git config --get user.name
 git config --get user.email
 ```
 
+## Quick Bootstrap
+
+To pull the latest `.devcontainer` from `emsilva/devcontainer` into any clean Git repo:
+```bash
+curl -fsSL https://raw.githubusercontent.com/emsilva/devcontainer/main/install.sh | sh
+```
+
+The installer:
+- Requires `git` and a clean working tree (no staged/untracked changes, no active rebases).
+- Clones `https://github.com/emsilva/devcontainer.git` (override via `SETUP_DEVCONTAINER_REPO` or `SETUP_DEVCONTAINER_REF`).
+- Replaces the local `.devcontainer` directory and commits the change as `setting up devcontainer <source-sha>`.
+
 ## Rebuild / Update
 
 If you edit features or the provisioning script:
@@ -76,7 +88,7 @@ devcontainer rebuild
 Core tooling (Go, user-local bins) is available in every shell mode (login / non-login, interactive / non-interactive) through a layered, idempotent design:
 
 **Tier 1: System Baseline (/etc/profile.d)**  
-`.devcontainer/post-create.sh` writes `/etc/profile.d/00-core-path.sh` (using sudo when available). The script synthesizes `$HOME` when needed and sources `~/.config/shell/env-base.sh` when present, falling back to a minimal PATH otherwise.
+`.devcontainer/scripts/post-create.sh` writes `/etc/profile.d/00-core-path.sh` (using sudo when available). The script synthesizes `$HOME` when needed and sources `~/.config/shell/env-base.sh` when present, falling back to a minimal PATH otherwise.
 
 **Tier 2: Non-Login Bash**  
 `BASH_ENV=/home/vscode/.config/shell/env-base.sh` in `.devcontainer/devcontainer.json` sends every `bash -c` through the same script.
@@ -121,7 +133,7 @@ If a tool seems missing in automation: `bash -lc 'echo $PATH'` then `bash -c 'ec
 
 ## Extending
 
-Prefer adding tools via features (e.g. the rocker-org `apt-packages` feature, language features). Keep `.devcontainer/post-create.sh` for dotfile linking and the minimal PATH baseline. If `gh` is available and `GH_TOKEN`/`GITHUB_TOKEN` is set, the script automatically runs `gh auth setup-git` so Git reuses the CLI’s credential helper.
+Prefer adding tools via features (e.g. the rocker-org `apt-packages` feature, language features). Keep `.devcontainer/scripts/post-create.sh` for dotfile linking and the minimal PATH baseline. If `gh` is available and `GH_TOKEN`/`GITHUB_TOKEN` is set, the script automatically runs `gh auth setup-git` so Git reuses the CLI’s credential helper.
 
 ## Safety / Secrets
 

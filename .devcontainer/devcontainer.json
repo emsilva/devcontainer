@@ -80,8 +80,8 @@
         "terminal.integrated.enablePersistentSessions": false,
         "editor.formatOnSave": true,
         "editor.codeActionsOnSave": {
-          "source.fixAll": true,
-          "source.organizeImports": true
+          "source.fixAll": "always",
+          "source.organizeImports": "always"
         },
         "files.trimTrailingWhitespace": true,
         "files.insertFinalNewline": true,
@@ -128,8 +128,8 @@
     "source=${localWorkspaceFolderBasename}-uv-cache,target=/home/vscode/.cache/uv,type=volume",
     "source=${localWorkspaceFolderBasename}-go-mod-cache,target=/home/vscode/.cache/go-mod,type=volume"
   ],
-  "postCreateCommand": "chmod +x .devcontainer/post-create.sh && .devcontainer/post-create.sh",
-  "postStartCommand": "chmod +x .devcontainer/post-start.sh && .devcontainer/post-start.sh",
+  "postCreateCommand": "chmod +x .devcontainer/scripts/post-create.sh && .devcontainer/scripts/post-create.sh",
+  "postStartCommand": "chmod +x .devcontainer/scripts/post-start.sh && .devcontainer/scripts/post-start.sh",
   
   "hostRequirements": {
     "cpus": 16,
