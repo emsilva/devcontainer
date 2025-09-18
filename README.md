@@ -156,6 +156,7 @@ Prefer adding tools via features (e.g. the rocker-org `apt-packages` feature, la
 | Slow first prompt | fzf + starship caching warms after first run |
 | Python deps missing | Run `uv sync` or fall back to `pip install -r requirements.txt` |
 | Port didn't open browser | Expected—only notifications now. Click the toast or use Ports view. |
+| Features lock refresh hangs | Rebuild with `DEVCONTAINER_REFRESH_FEATURES_LOCK=0` or increase `DEVCONTAINER_FEATURES_LOCK_TIMEOUT` (default 180s) and rerun `.devcontainer/scripts/features-lock.sh generate` manually when convenient. |
 
 ## Future Ideas / Nice-to-Haves
 
