@@ -9,4 +9,10 @@ tasks:
     cmds:
       - devcontainer up --workspace-folder . --remove-existing-container --log-level trace
     silent: false
+  upgrade:self:
+    desc: Refresh the .devcontainer directory from the canonical repository
+    dir: ..
+    cmds:
+      - curl -fsSL https://raw.githubusercontent.com/emsilva/devcontainer/main/install.sh | sh
+    silent: false
 
