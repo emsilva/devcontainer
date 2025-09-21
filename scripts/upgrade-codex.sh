@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_OWNER="openai"
+REPO_NAME="codex"
+BINARY_NAME="codex"
+INSTALL_PREFIX="/usr/local/bin"
+
+if command -v tput >/dev/null 2>&1 && [ -n "${TERM:-}" ]; then
+  bold="$(tput bold)"
+  reset="$(tput sgr0)"
+else
+  bold=""
+  reset=""
+fi
+
+log() {
+  printf '%s%s%s\n' "$bold" "$*" "$reset"
+}
+
+run_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+require_tools() {
+  local missing=()
+  for tool in curl jq; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      missing+=("$tool")
+    fi
+  done
+
+  if [ ${#missing[@]} -gt 0 ]; then
+    printf 'Missing required tools: %s\n' "${missing[*]}" >&2
+    printf 'Install them and re-run this script.\n' >&2
+    exit 1
+  fi
+}
+
+fetch_latest_version() {
+  if [ -n "${CODEX_VERSION:-}" ]; then
+    printf '%s' "$CODEX_VERSION"
+    return
+  fi
+  local releases_url="https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases"
+  log "Fetching latest Codex release from $releases_url"
+  local version
+  version=$(curl -fsSL "$releases_url" | jq -r '.[0].tag_name // ""')
+  if [ -z "$version" ]; then
+    printf 'Unable to determine latest Codex release.\n' >&2
+    exit 1
+  fi
+  printf '%s' "$version"
+}
+
+select_asset() {
+  local version="$1"
+  local os arch target
+  os=$(uname | tr '[:upper:]' '[:lower:]')
+  arch=$(uname -m)
+
+  case "$arch" in
+    x86_64|amd64)
+      target="x86_64-unknown-linux-musl"
+      arch="x86_64"
+      ;;
+    i686|i386)
+      target="i686-unknown-linux-musl"
+      arch="i386"
+      ;;
+    armv7l)
+      target="armv7-unknown-linux-gnueabihf"
+      arch="armv7"
+      ;;
+    aarch64|arm64)
+      target="aarch64-unknown-linux-gnu"
+      arch="arm64"
+      ;;
+    *)
+      printf 'Unsupported architecture: %s\n' "$arch" >&2
+      exit 1
+      ;;
+  esac
+
+  local release_url="https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/tags/$version"
+  log "Inspecting release assets for $version"
+  local assets
+  assets=$(curl -fsSL "$release_url" | jq -r '.assets[].name' 2>/dev/null || true)
+
+  if [ -n "$assets" ]; then
+    local zst_asset tar_asset zip_asset
+    zst_asset=$(printf '%s\n' "$assets" | grep -E "^${BINARY_NAME}-.*${target}\.zst$" | head -n1 || true)
+    if [ -z "$zst_asset" ]; then
+      zst_asset=$(printf '%s\n' "$assets" | grep -i "${target}\.zst" | head -n1 || true)
+    fi
+    tar_asset=$(printf '%s\n' "$assets" | grep -i "${os}.*${arch}.*tar.gz" | head -n1 || true)
+    zip_asset=$(printf '%s\n' "$assets" | grep -i "${os}.*${arch}.*zip" | head -n1 || true)
+
+    if [ -n "$zst_asset" ]; then
+      printf '%s\n' "https://github.com/$REPO_OWNER/$REPO_NAME/releases/download/$version/$zst_asset zst"
+      return
+    fi
+    if [ -n "$tar_asset" ]; then
+      printf '%s\n' "https://github.com/$REPO_OWNER/$REPO_NAME/releases/download/$version/$tar_asset tar"
+      return
+    fi
+    if [ -n "$zip_asset" ]; then
+      printf '%s\n' "https://github.com/$REPO_OWNER/$REPO_NAME/releases/download/$version/$zip_asset zip"
+      return
+    fi
+  fi
+
+  local candidate="https://github.com/$REPO_OWNER/$REPO_NAME/releases/download/$version/${BINARY_NAME}-${target}.zst"
+  printf '%s\n' "$candidate zst"
+}
+
+extract_binary() {
+  local file="$1"
+  local format="$2"
+  local dest="$3"
+
+  case "$format" in
+    zst)
+      if ! command -v zstd >/dev/null 2>&1; then
+        printf 'The zstd utility is required to extract %s. Install zstd and retry.\n' "$file" >&2
+        exit 1
+      fi
+      zstd -d "$file" -o "$dest"
+      ;;
+    tar)
+      if ! command -v tar >/dev/null 2>&1; then
+        printf 'The tar utility is required to extract %s. Install tar and retry.\n' "$file" >&2
+        exit 1
+      fi
+      tar -xf "$file"
+      local found
+      found=$(find . -type f -name "$BINARY_NAME" -perm -u+x | head -n1 || true)
+      if [ -z "$found" ]; then
+        printf 'Codex binary not found in archive %s\n' "$file" >&2
+        exit 1
+      fi
+      mv "$found" "$dest"
+      ;;
+    zip)
+      if ! command -v unzip >/dev/null 2>&1; then
+        printf 'The unzip utility is required to extract %s. Install unzip and retry.\n' "$file" >&2
+        exit 1
+      fi
+      unzip -q "$file"
+      local found_zip
+      found_zip=$(find . -type f -name "$BINARY_NAME" -perm -u+x | head -n1 || true)
+      if [ -z "$found_zip" ]; then
+        printf 'Codex binary not found in archive %s\n' "$file" >&2
+        exit 1
+      fi
+      mv "$found_zip" "$dest"
+      ;;
+    *)
+      printf 'Unknown archive format: %s\n' "$format" >&2
+      exit 1
+      ;;
+  esac
+}
+
+install_binary() {
+  local source="$1"
+  local tmp_wrapper
+
+  run_root install -m 0755 "$source" "$INSTALL_PREFIX/$BINARY_NAME"
+
+  tmp_wrapper=$(mktemp)
+  cat >"$tmp_wrapper" <<'WRAP'
+#!/usr/bin/env bash
+export OPENAI_API_KEY="${OPENAI_API_KEY:-}"
+echo "Starting codex - remember to set your OPENAI_API_KEY environment variable"
+exec codex "$@"
+WRAP
+  run_root install -m 0755 "$tmp_wrapper" "$INSTALL_PREFIX/${BINARY_NAME}-wrapper"
+  rm -f "$tmp_wrapper"
+  run_root ln -sf "$INSTALL_PREFIX/${BINARY_NAME}-wrapper" "$INSTALL_PREFIX/${BINARY_NAME}-cli"
+}
+
+main() {
+  require_tools
+  local version
+  version=$(fetch_latest_version)
+  log "Latest Codex version: $version"
+  local asset_info download_url format
+  asset_info=$(select_asset "$version")
+  download_url="${asset_info%% *}"
+  format="${asset_info##* }"
+
+  log "Downloading Codex from $download_url"
+  local tmp_dir tmp_file
+  tmp_dir=$(mktemp -d)
+  trap 'rm -rf "$tmp_dir"' EXIT
+  cd "$tmp_dir"
+  tmp_file="codex-download"
+  curl -fL "$download_url" -o "$tmp_file"
+
+  local extracted="$tmp_dir/$BINARY_NAME"
+  extract_binary "$tmp_file" "$format" "$extracted"
+  chmod +x "$extracted"
+  install_binary "$extracted"
+
+  log "Codex upgrade complete"
+  "$INSTALL_PREFIX/$BINARY_NAME" --version || true
+}
+
+main "$@"
