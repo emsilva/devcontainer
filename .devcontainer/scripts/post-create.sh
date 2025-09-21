@@ -160,9 +160,19 @@ git config --global diff.colorMoved zebra
 git config --global core.editor "${EDITOR:-code --wait}"
 
 # Optional GitHub CLI auth setup (when gh is installed and token is available)
-if command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
-  echo "🔐 Configuring GitHub CLI for git auth"
-  gh auth setup-git >/dev/null 2>&1 || true
+if command -v gh >/dev/null 2>&1; then
+  token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+  if [ -n "$token" ]; then
+    echo "🔐 Configuring GitHub CLI authentication"
+    if printf '%s' "$token" | gh auth login --with-token --hostname github.com >/dev/null 2>&1; then
+      gh auth setup-git >/dev/null 2>&1 || true
+    else
+      echo "  ⚠ Failed to authenticate GitHub CLI with provided token" >&2
+    fi
+    unset GH_TOKEN GITHUB_TOKEN token
+  else
+    echo "  ⚠ GH_TOKEN not provided; skipping GitHub auth" >&2
+  fi
 fi
 
 # Update devcontainer features lock for reproducibility (with opt-out + timeout)
