@@ -210,6 +210,32 @@ if command -v gh >/dev/null 2>&1; then
   fi
 fi
 
+# Ensure requested Ruby version is installed with rbenv
+if command -v rbenv >/dev/null 2>&1; then
+  desired_ruby="3.4.5"
+  echo "💎 Ensuring Ruby ${desired_ruby} via rbenv"
+  export RBENV_ROOT="${RBENV_ROOT:-${HOME}/.rbenv}"
+  eval "$(rbenv init -)" >/dev/null 2>&1 || true
+  if ! rbenv versions --bare 2>/dev/null | grep -qx "${desired_ruby}"; then
+    echo "  ⏳ Installing Ruby ${desired_ruby}"
+    if rbenv install -s "${desired_ruby}" >/dev/null 2>&1; then
+      echo "  ✅ Ruby ${desired_ruby} installed"
+    else
+      echo "  ⚠ Failed to install Ruby ${desired_ruby} via rbenv" >&2
+    fi
+  else
+    echo "  ✅ Ruby ${desired_ruby} already installed"
+  fi
+  if rbenv global "${desired_ruby}" >/dev/null 2>&1; then
+    rbenv rehash >/dev/null 2>&1 || true
+    echo "  🌍 Set global Ruby to ${desired_ruby}"
+  else
+    echo "  ⚠ Failed to set global Ruby version via rbenv" >&2
+  fi
+else
+  echo "  ⚠ rbenv not available; skipping Ruby installation" >&2
+fi
+
 # Install Rails when Ruby is available
 if command -v gem >/dev/null 2>&1; then
   if ! command -v rails >/dev/null 2>&1; then
