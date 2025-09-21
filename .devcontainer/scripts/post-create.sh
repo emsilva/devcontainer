@@ -210,4 +210,20 @@ if command -v gh >/dev/null 2>&1; then
   fi
 fi
 
+# Install Rails when Ruby is available
+if command -v gem >/dev/null 2>&1; then
+  if ! command -v rails >/dev/null 2>&1; then
+    echo "🚂 Installing Rails (Ruby on Rails)"
+    if gem install rails --no-document; then
+      echo "  ✅ Rails installed"
+    else
+      echo "  ⚠ Failed to install Rails" >&2
+    fi
+  else
+    echo "🚂 Rails already available"
+  fi
+else
+  echo "  ⚠ RubyGems not available; skipping Rails install" >&2
+fi
+
 echo "✅ post-create complete"
