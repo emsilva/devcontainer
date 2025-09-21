@@ -9,6 +9,8 @@ A handy Ubuntu 24.04 development container setup for everyday polyglot work (Go,
   - Go (latest from feature)
   - Node.js (latest from feature, with Yarn & pnpm via Corepack)
   - Python (latest from feature, with the `uv` feature for fast env + deps)
+  - Ruby (latest from feature, with post-create installing Ruby 3.4.5 & Rails via rbenv)
+  - Rust (latest from feature)
 - Tooling & CLI via features:
   - Common utils + zsh/Oh My Zsh (`common-utils` feature)
   - `fzf` via `ghcr.io/devcontainers-extra/features/fzf`
@@ -22,6 +24,8 @@ A handy Ubuntu 24.04 development container setup for everyday polyglot work (Go,
   - kubectl + Helm (`kubectl-helm` feature)
   - AWS CLI and GitHub CLI features
   - Task (`go-task`) CLI via `ghcr.io/devcontainers-extra/features/go-task`
+  - SSHD server (`ghcr.io/devcontainers/features/sshd`) for remote debugging tunnels when needed
+  - Docker Engine + docker-compose v2 (`docker-in-docker` feature) for containerized workflows inside the devcontainer
   - Container tuned for iterative dev: persistent shell history volume, trimmed noise, default branch = `main`.
 
 ## Devcontainer UX niceties
@@ -30,6 +34,7 @@ A handy Ubuntu 24.04 development container setup for everyday polyglot work (Go,
 - Default terminal: `zsh`
 - History persisted across rebuilds (`/commandhistory` volume)
 - Symlinked user dotfiles from `.devcontainer/user` into `$HOME`
+- Every `.template` file under `.devcontainer` renders automatically on post-create, and the installer updates `.gitignore` so the generated outputs stay ignored even as new templates are added
 - Unified environment setup: a single `env-base.sh` shared by login/non-login shells keeps PATH consistent
 - Port forwarding is now fully dynamic: no predeclared list; VS Code will just notify when a process starts listening (configured with `onAutoForward=notify`).
 

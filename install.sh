@@ -97,6 +97,82 @@ with open(path, "w", encoding="utf-8") as fh:
 PY
 }
 
+ensure_template_gitignore() {
+  command -v python3 >/dev/null 2>&1 || {
+    info "python3 is required to manage template gitignore entries; skipping"
+    return
+  }
+
+  info "Ensuring generated template files are ignored"
+  REPO_ROOT="$REPO_ROOT" python3 <<'PY'
+import os
+import pathlib
+import sys
+
+root = pathlib.Path(os.environ["REPO_ROOT"])
+devcontainer_dir = root / ".devcontainer"
+if not devcontainer_dir.exists():
+    sys.exit(0)
+
+templates = sorted(
+    path for path in devcontainer_dir.rglob("*.template") if path.is_file()
+)
+
+if not templates:
+    sys.exit(0)
+
+gitignore_path = root / ".gitignore"
+original_text = ""
+if gitignore_path.exists():
+    original_text = gitignore_path.read_text(encoding="utf-8")
+    lines = original_text.splitlines()
+else:
+    lines = []
+
+line_set = set(lines)
+comment = "# Generated from .devcontainer templates"
+
+pending_entries = []
+for template in templates:
+    target = template.with_suffix("")
+    try:
+        rel_target = target.relative_to(root)
+    except ValueError:
+        # Should not happen, but skip if it does.
+        continue
+    entry = rel_target.as_posix()
+    if entry not in line_set:
+        pending_entries.append(entry)
+
+if not pending_entries:
+    sys.exit(0)
+
+if comment not in line_set:
+    if lines and lines[-1] != "":
+        lines.append("")
+    lines.append(comment)
+    line_set.add(comment)
+
+added = []
+for entry in pending_entries:
+    if entry in line_set:
+        continue
+    lines.append(entry)
+    line_set.add(entry)
+    added.append(entry)
+
+new_text = "\n".join(lines)
+if lines:
+    new_text += "\n"
+
+if new_text != original_text:
+    gitignore_path.write_text(new_text, encoding="utf-8")
+
+for entry in added:
+    print(f"  ↺ Added {entry}")
+PY
+}
+
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   die "run this from within a git repository"
 fi
@@ -135,10 +211,14 @@ info "Copying new .devcontainer into place"
 cp -a "$TMP_DIR/.devcontainer" .
 
 ensure_taskfile_shim
+ensure_template_gitignore
 
 git add .devcontainer
 if [ -f Taskfile.yml ]; then
   git add Taskfile.yml
+fi
+if [ -f .gitignore ]; then
+  git add .gitignore
 fi
 
 if git diff --cached --quiet; then

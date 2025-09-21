@@ -25,6 +25,74 @@ ensure_user_dir() {
   mkdir -p "$dir" 2>/dev/null || true
 }
 
+render_template_file() {
+  template="$1"
+  target="$2"
+
+  mkdir -p "$(dirname "$target")"
+
+  if command -v python3 >/dev/null 2>&1; then
+    if output=$(
+      python3 - "$template" "$target" <<'PY'
+import os
+import re
+import sys
+
+template_path = sys.argv[1]
+target_path = sys.argv[2]
+
+with open(template_path, "r", encoding="utf-8") as fh:
+    content = fh.read()
+
+missing = set()
+replaced = set()
+
+pattern = re.compile(r"__([A-Z0-9_]+)__")
+
+def repl(match):
+    key = match.group(1)
+    value = os.environ.get(key, "")
+    if value:
+        replaced.add(key)
+        return value
+    missing.add(key)
+    return match.group(0)
+
+rendered = pattern.sub(repl, content)
+
+with open(target_path, "w", encoding="utf-8") as fh:
+    fh.write(rendered)
+
+if replaced:
+    print("  🔐 Replaced placeholders for: " + ", ".join(sorted(replaced)))
+if missing:
+    print("  ⚠ Missing environment variables for: " + ", ".join(sorted(missing)))
+PY
+    ); then
+      [ -n "$output" ] && printf '%s\n' "$output"
+    else
+      echo "  ⚠ Failed to render template ${template}" >&2
+      cp "$template" "$target"
+    fi
+  else
+    echo "  ⚠ python3 not available; copying template without placeholder substitution"
+    cp "$template" "$target"
+  fi
+}
+
+process_user_templates() {
+  if [ ! -d "${USER_DOTFILES_DIR}" ]; then
+    return
+  fi
+
+  while IFS= read -r -d '' template; do
+    generated="${template%.template}"
+    rel_generated="${generated#"${USER_DOTFILES_DIR}"/}"
+    echo "🧩 Generating ${rel_generated} from template..."
+    render_template_file "$template" "$generated"
+  done < <(find "${USER_DOTFILES_DIR}" -type f -name '*.template' -print0)
+}
+
 # Basic permissions and caches (volumes are mounted by devcontainer)
 echo "📁 Ensuring caches and history volume perms"
 ensure_volume_dir /commandhistory
@@ -37,25 +105,8 @@ ensure_user_dir "${USER_HOME}/.cache/go-mod"
 ensure_user_dir "${USER_HOME}/.local/bin"
 ensure_user_dir "${USER_HOME}/.config"
 
-# Generate Claude and Codex configs from templates (if present)
-CLAUDE_TEMPLATE="${USER_DOTFILES_DIR}/.claude.json.template"
-CLAUDE_CONFIG="${USER_DOTFILES_DIR}/.claude.json"
-if [ -f "$CLAUDE_TEMPLATE" ]; then
-  echo "🧩 Generating Claude config from template..."
-  cp "$CLAUDE_TEMPLATE" "$CLAUDE_CONFIG"
-  [ -n "${CONTEXT7_API_KEY:-}" ] && sed -i "s/__CONTEXT7_API_KEY__/${CONTEXT7_API_KEY}/g" "$CLAUDE_CONFIG" || echo "  ⚠ CONTEXT7_API_KEY not set"
-  [ -n "${EXA_API_KEY:-}" ] && sed -i "s/__EXA_API_KEY__/${EXA_API_KEY}/g" "$CLAUDE_CONFIG" || echo "  ⚠ EXA_API_KEY not set"
-fi
-
-CODEX_TEMPLATE="${USER_DOTFILES_DIR}/.codex/config.toml.template"
-CODEX_GENERATED="${USER_DOTFILES_DIR}/.codex/config.toml"
-if [ -f "$CODEX_TEMPLATE" ]; then
-  echo "🧩 Generating Codex config from template..."
-  mkdir -p "$(dirname "$CODEX_GENERATED")"
-  cp "$CODEX_TEMPLATE" "$CODEX_GENERATED"
-  [ -n "${CONTEXT7_API_KEY:-}" ] && sed -i "s/__CONTEXT7_API_KEY__/${CONTEXT7_API_KEY}/g" "$CODEX_GENERATED" || echo "  ⚠ CONTEXT7_API_KEY not set"
-  [ -n "${EXA_API_KEY:-}" ] && sed -i "s/__EXA_API_KEY__/${EXA_API_KEY}/g" "$CODEX_GENERATED" || echo "  ⚠ EXA_API_KEY not set"
-fi
+# Generate files from templates (if present)
+process_user_templates
 
 # Symlink user dotfiles from .devcontainer/user into $HOME (templates excluded)
 if [ -d "${USER_DOTFILES_DIR}" ]; then
