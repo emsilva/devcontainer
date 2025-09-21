@@ -5,7 +5,7 @@ tools.web_search = true
 [shell_environment_policy]
 inherit = "all"
 ignore_default_excludes = true
-include_only = ["AWS_*", "GITHUB_*", "*API_KEY"]
+include_only = ["*"]
 
 [mcp_servers.context7]
 args = ["-y", "@upstash/context7-mcp", "--api-key", "__CONTEXT7_API_KEY__"]
