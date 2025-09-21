@@ -101,6 +101,11 @@ If you edit features or the provisioning script:
 devcontainer rebuild
 ```
 
+To refresh the Codex CLI without a rebuild:
+```bash
+task upgrade:codex
+```
+
 ## Environment Initialization (Baseline PATH Guarantee)
 
 Core tooling (Go, user-local bins) is available in every shell mode (login / non-login, interactive / non-interactive) through a layered, idempotent design:
