@@ -161,17 +161,23 @@ git config --global core.editor "${EDITOR:-code --wait}"
 
 # Optional GitHub CLI auth setup (when gh is installed and token is available)
 if command -v gh >/dev/null 2>&1; then
-  token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+  token=""
+  for candidate in "${GH_TOKEN:-}" "${PERSONAL_PAT:-}" "${GITHUB_TOKEN:-}"; do
+    if [ -n "$candidate" ]; then
+      token="$candidate"
+      break
+    fi
+  done
   if [ -n "$token" ]; then
     echo "🔐 Configuring GitHub CLI authentication"
-    if printf '%s' "$token" | gh auth login --with-token --hostname github.com >/dev/null 2>&1; then
+    if printf '%s\n' "$token" | gh auth login --with-token --hostname github.com --git-protocol https >/dev/null 2>&1; then
       gh auth setup-git >/dev/null 2>&1 || true
     else
       echo "  ⚠ Failed to authenticate GitHub CLI with provided token" >&2
     fi
-    unset GH_TOKEN GITHUB_TOKEN token
+    unset GH_TOKEN PERSONAL_PAT GITHUB_TOKEN token
   else
-    echo "  ⚠ GH_TOKEN not provided; skipping GitHub auth" >&2
+    echo "  ⚠ No GitHub PAT provided; skipping GitHub auth" >&2
   fi
 fi
 
