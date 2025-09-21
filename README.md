@@ -138,7 +138,7 @@ If a tool seems missing in automation: `bash -lc 'echo $PATH'` then `bash -c 'ec
 
 ## Extending
 
-Prefer adding tools via features (e.g. the rocker-org `apt-packages` feature, language features). Keep `.devcontainer/scripts/post-create.sh` for dotfile linking and the minimal PATH baseline. If `gh` is available and any of `GH_TOKEN`/`PERSONAL_PAT`/`GITHUB_TOKEN` is set, the script logs in non-interactively and wires `gh auth setup-git` so Git reuses the CLI’s credential helper.
+Prefer adding tools via features (e.g. the rocker-org `apt-packages` feature, language features). Keep `.devcontainer/scripts/post-create.sh` for dotfile linking and the minimal PATH baseline. If `gh` is available, the script pulls credentials from `PERSONAL_PAT` first, then `GH_TOKEN`/`GITHUB_TOKEN`, logs in non-interactively, and wires `gh auth setup-git` so Git reuses the CLI’s credential helper.
 
 ## Safety / Secrets
 

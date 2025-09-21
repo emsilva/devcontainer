@@ -162,7 +162,8 @@ git config --global core.editor "${EDITOR:-code --wait}"
 # Optional GitHub CLI auth setup (when gh is installed and token is available)
 if command -v gh >/dev/null 2>&1; then
   token=""
-  for candidate in "${GH_TOKEN:-}" "${PERSONAL_PAT:-}" "${GITHUB_TOKEN:-}"; do
+  # Prefer PERSONAL_PAT when present, fallback keeps legacy envs working
+  for candidate in "${PERSONAL_PAT:-}" "${GH_TOKEN:-}" "${GITHUB_TOKEN:-}"; do
     if [ -n "$candidate" ]; then
       token="$candidate"
       break
