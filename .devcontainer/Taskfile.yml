@@ -16,3 +16,9 @@ tasks:
       - curl -fsSL https://raw.githubusercontent.com/emsilva/devcontainer/main/install.sh | sh
     silent: false
 
+  upgrade:codex:
+    desc: Download and install the latest Codex CLI without rebuilding the container
+    cmds:
+      - ./scripts/upgrade-codex.sh
+    silent: false
+

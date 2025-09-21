@@ -9,8 +9,3 @@ tasks:
     cmds:
       - devcontainer up --workspace-folder . --remove-existing-container --log-level trace
     silent: false
-  upgrade:codex:
-    desc: Download and install the latest Codex CLI without rebuilding the container
-    cmds:
-      - ./scripts/upgrade-codex.sh
-    silent: false
