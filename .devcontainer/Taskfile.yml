@@ -10,8 +10,3 @@ tasks:
       - devcontainer up --workspace-folder . --remove-existing-container --log-level trace
     silent: false
 
-  devcontainer:updates:
-    desc: Check for devcontainer feature updates against features.lock
-    cmds:
-      - .devcontainer/scripts/features-lock.sh check
-    silent: false

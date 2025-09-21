@@ -138,7 +138,7 @@ If a tool seems missing in automation: `bash -lc 'echo $PATH'` then `bash -c 'ec
 
 ## Extending
 
-Prefer adding tools via features (e.g. the rocker-org `apt-packages` feature, language features). Keep `.devcontainer/scripts/post-create.sh` for dotfile linking and the minimal PATH baseline. If `gh` is available and `GH_TOKEN`/`GITHUB_TOKEN` is set, the script automatically runs `gh auth setup-git` so Git reuses the CLI’s credential helper.
+Prefer adding tools via features (e.g. the rocker-org `apt-packages` feature, language features). Keep `.devcontainer/scripts/post-create.sh` for dotfile linking and the minimal PATH baseline. If `gh` is available and any of `GH_TOKEN`/`PERSONAL_PAT`/`GITHUB_TOKEN` is set, the script logs in non-interactively and wires `gh auth setup-git` so Git reuses the CLI’s credential helper.
 
 ## Safety / Secrets
 
@@ -156,7 +156,6 @@ Prefer adding tools via features (e.g. the rocker-org `apt-packages` feature, la
 | Slow first prompt | fzf + starship caching warms after first run |
 | Python deps missing | Run `uv sync` or fall back to `pip install -r requirements.txt` |
 | Port didn't open browser | Expected—only notifications now. Click the toast or use Ports view. |
-| Features lock refresh hangs | Rebuild with `DEVCONTAINER_REFRESH_FEATURES_LOCK=0` or increase `DEVCONTAINER_FEATURES_LOCK_TIMEOUT` (default 180s) and rerun `.devcontainer/scripts/features-lock.sh generate` manually when convenient. |
 
 ## Future Ideas / Nice-to-Haves
 

@@ -181,29 +181,4 @@ if command -v gh >/dev/null 2>&1; then
   fi
 fi
 
-# Update devcontainer features lock for reproducibility (with opt-out + timeout)
-if [ -x .devcontainer/scripts/features-lock.sh ]; then
-  case "${DEVCONTAINER_REFRESH_FEATURES_LOCK:-1}" in
-    0|false|no)
-      echo "📦 Skipping devcontainer features lock refresh (DEVCONTAINER_REFRESH_FEATURES_LOCK=${DEVCONTAINER_REFRESH_FEATURES_LOCK})"
-      ;;
-    *)
-      echo "📦 Refreshing devcontainer features lock"
-      LOCK_TIMEOUT="${DEVCONTAINER_FEATURES_LOCK_TIMEOUT:-180}"
-      if command -v timeout >/dev/null 2>&1; then
-        if ! timeout "$LOCK_TIMEOUT" .devcontainer/scripts/features-lock.sh generate; then
-          status=$?
-          if [ "$status" -eq 124 ]; then
-            echo "  ⚠ features lock refresh timed out after ${LOCK_TIMEOUT}s; rerun manually when convenient" >&2
-          else
-            echo "  ⚠ features lock refresh failed with exit ${status}; rerun manually via .devcontainer/scripts/features-lock.sh generate" >&2
-          fi
-        fi
-      else
-        .devcontainer/scripts/features-lock.sh generate || true
-      fi
-      ;;
-  esac
-fi
-
-echo "✅ post-create complete (features-first)"
+echo "✅ post-create complete"
