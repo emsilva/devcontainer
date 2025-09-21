@@ -159,26 +159,54 @@ git config --global fetch.prune true
 git config --global diff.colorMoved zebra
 git config --global core.editor "${EDITOR:-code --wait}"
 
-# Optional GitHub CLI auth setup (when gh is installed and token is available)
+# Optional GitHub CLI auth setup (when gh is installed)
 if command -v gh >/dev/null 2>&1; then
-  token=""
-  # Prefer PERSONAL_PAT when present, fallback keeps legacy envs working
-  for candidate in "${PERSONAL_PAT:-}" "${GH_TOKEN:-}" "${GITHUB_TOKEN:-}"; do
-    if [ -n "$candidate" ]; then
-      token="$candidate"
-      break
+  personal_pat="${PERSONAL_PAT:-}"
+  if [ -n "$personal_pat" ]; then
+    echo "🔐 Configuring GitHub CLI authentication via PERSONAL_PAT"
+    cleared=""
+    for env_var in GH_TOKEN GITHUB_TOKEN GH_AUTH_TOKEN; do
+      if [ -n "${!env_var:-}" ]; then
+        if [ -n "$cleared" ]; then
+          cleared="$cleared, $env_var"
+        else
+          cleared="$env_var"
+        fi
+      fi
+      unset "$env_var" || true
+    done
+    if [ -n "$cleared" ]; then
+      echo "  ↺ Cleared preset GitHub token env vars: $cleared"
     fi
-  done
-  if [ -n "$token" ]; then
-    echo "🔐 Configuring GitHub CLI authentication"
-    if printf '%s\n' "$token" | gh auth login --with-token --hostname github.com --git-protocol https >/dev/null 2>&1; then
-      gh auth setup-git >/dev/null 2>&1 || true
+    if printf '%s\n' "$personal_pat" | gh auth login --with-token --hostname github.com --git-protocol https >/dev/null 2>&1; then
+      if gh auth setup-git >/dev/null 2>&1; then
+        echo "  🔁 Configured git credential helper via gh"
+      else
+        echo "  ⚠ Failed to configure git credential helper via gh" >&2
+      fi
+      if gh auth status >/dev/null 2>&1; then
+        echo "  ✅ GitHub CLI authenticated with PERSONAL_PAT"
+      else
+        echo "  ⚠ GitHub CLI authenticated but status check failed" >&2
+      fi
+      export GITHUB_TOKEN="$personal_pat"
+      echo "  🔄 Exported GITHUB_TOKEN for downstream tooling"
     else
-      echo "  ⚠ Failed to authenticate GitHub CLI with provided token" >&2
+      echo "  ⚠ Failed to authenticate GitHub CLI with PERSONAL_PAT" >&2
     fi
-    unset GH_TOKEN PERSONAL_PAT GITHUB_TOKEN token
+    unset personal_pat
   else
-    echo "  ⚠ No GitHub PAT provided; skipping GitHub auth" >&2
+    echo "🔐 GitHub CLI detected; PERSONAL_PAT not provided — reusing existing auth"
+    if gh auth setup-git >/dev/null 2>&1; then
+      echo "  🔁 Configured git credential helper via existing gh auth"
+    else
+      echo "  ⚠ Unable to configure git credential helper via gh" >&2
+    fi
+    if gh auth status >/dev/null 2>&1; then
+      echo "  ✅ Using existing GitHub CLI authentication"
+    else
+      echo "  ⚠ GitHub CLI not authenticated; run 'gh auth login' if needed" >&2
+    fi
   fi
 fi
 

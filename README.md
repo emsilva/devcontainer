@@ -64,6 +64,19 @@ git config --get user.name
 git config --get user.email
 ```
 
+### Troubleshooting GitHub CLI authentication
+
+If the GitHub CLI (`gh`) has been preconfigured with environment tokens (such as `GH_TOKEN`, `GITHUB_TOKEN`, or `GH_AUTH_TOKEN`), interactive authentication may fail or pick up the wrong credentials. Clearing those variables before logging in ensures `gh` prompts you correctly:
+
+```bash
+unset GH_TOKEN GITHUB_TOKEN GH_AUTH_TOKEN
+printf %s "$PERSONAL_PAT" | gh auth login --hostname github.com --with-token
+gh auth setup-git
+gh auth status
+```
+
+The final `gh auth status` should confirm the desired account, token scopes, and that Git operations are configured to use the CLI's credential helper.
+
 ## Quick Bootstrap
 
 To pull the latest `.devcontainer` from `emsilva/devcontainer` into any clean Git repo:
@@ -138,7 +151,7 @@ If a tool seems missing in automation: `bash -lc 'echo $PATH'` then `bash -c 'ec
 
 ## Extending
 
-Prefer adding tools via features (e.g. the rocker-org `apt-packages` feature, language features). Keep `.devcontainer/scripts/post-create.sh` for dotfile linking and the minimal PATH baseline. If `gh` is available, the script pulls credentials from `PERSONAL_PAT` first, then `GH_TOKEN`/`GITHUB_TOKEN`, logs in non-interactively, and wires `gh auth setup-git` so Git reuses the CLI’s credential helper.
+Prefer adding tools via features (e.g. the rocker-org `apt-packages` feature, language features). Keep `.devcontainer/scripts/post-create.sh` for dotfile linking and the minimal PATH baseline. When `gh` is available, the script only performs the non-interactive login/`gh auth setup-git` flow when `PERSONAL_PAT` is populated; otherwise it simply wires `gh auth setup-git` against whatever credentials are already configured.
 
 ## Safety / Secrets
 
