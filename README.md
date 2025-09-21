@@ -77,14 +77,19 @@ gh auth status
 
 The final `gh auth status` should confirm the desired account, token scopes, and that Git operations are configured to use the CLI's credential helper.
 
-## Quick Bootstrap
+## Quick Bootstrap & Updates
 
 To pull the latest `.devcontainer` from `emsilva/devcontainer` into any clean Git repo:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/emsilva/devcontainer/main/install.sh | sh
 ```
 
-The installer:
+Already using this devcontainer and want to refresh it with the same logic? Run:
+```bash
+task devcontainer:upgrade:self
+```
+
+Both flows execute the installer script, so they share the same behavior and safeguards:
 - Requires `git` and a clean working tree (no staged/untracked changes, no active rebases).
 - Clones `https://github.com/emsilva/devcontainer.git` (override via `SETUP_DEVCONTAINER_REPO` or `SETUP_DEVCONTAINER_REF`).
 - Replaces the local `.devcontainer` directory and commits the change as `setting up devcontainer <source-sha>`.
