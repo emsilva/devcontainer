@@ -9,3 +9,8 @@ tasks:
     cmds:
       - devcontainer up --workspace-folder . --remove-existing-container --log-level trace
     silent: false
+
+includes:
+  devcontainer:
+    taskfile: .devcontainer/Taskfile.yml
+    optional: true
