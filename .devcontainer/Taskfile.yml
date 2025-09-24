@@ -18,7 +18,7 @@ tasks:
 
   upgrade:codex:
     desc: Download and install the latest Codex CLI without rebuilding the container
+    dir: .devcontainer
     cmds:
       - ./scripts/upgrade-codex.sh
     silent: false
-

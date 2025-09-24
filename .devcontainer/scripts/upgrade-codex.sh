@@ -15,7 +15,7 @@ else
 fi
 
 log() {
-  printf '%s%s%s\n' "$bold" "$*" "$reset"
+  printf '%s%s%s\n' "$bold" "$*" "$reset" >&2
 }
 
 run_root() {
@@ -197,7 +197,7 @@ main() {
   log "Downloading Codex from $download_url"
   local tmp_dir tmp_file
   tmp_dir=$(mktemp -d)
-  trap 'rm -rf "$tmp_dir"' EXIT
+  trap 'if [ -n "${tmp_dir:-}" ]; then rm -rf "$tmp_dir"; fi' EXIT
   cd "$tmp_dir"
   tmp_file="codex-download"
   curl -fL "$download_url" -o "$tmp_file"
