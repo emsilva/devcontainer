@@ -114,7 +114,8 @@
     "HOME": "/home/vscode",
     "XDG_CONFIG_HOME": "/home/vscode/.config",
     "GOMODCACHE": "/home/vscode/.cache/go-mod",
-    "TZ": "America/Sao_Paulo",
+    "DEVCONTAINER_TZ": "${localEnv:DEVCONTAINER_TZ}",
+    "TZ": "${localEnv:DEVCONTAINER_TZ}",
     "BASH_ENV": "/home/vscode/.config/shell/env-base.sh"
   },
   "remoteEnv": {

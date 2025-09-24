@@ -37,6 +37,7 @@ A handy Ubuntu 24.04 development container setup for everyday polyglot work (Go,
 - Every `.template` file under `.devcontainer` renders automatically on post-create, and the installer updates `.gitignore` so the generated outputs stay ignored even as new templates are added
 - Unified environment setup: a single `env-base.sh` shared by login/non-login shells keeps PATH consistent
 - Port forwarding is now fully dynamic: no predeclared list; VS Code will just notify when a process starts listening (configured with `onAutoForward=notify`).
+- Timezone can be overridden via `DEVCONTAINER_TZ`; defaults to `America/Sao_Paulo` if not provided.
 
 ## AI / MCP Configuration (Claude & Codex)
 
@@ -53,8 +54,11 @@ Placeholder tokens (`__CONTEXT7_API_KEY__`, `__EXA_API_KEY__`) are replaced at c
 |----------|---------|-----------|
 | `CONTEXT7_API_KEY` | Enables Context7 MCP server integration | Optional |
 | `EXA_API_KEY` | Enables Exa search MCP server integration | Optional |
+| `DEVCONTAINER_TZ` | Overrides the container timezone (e.g. `America/Los_Angeles`); defaults to `America/Sao_Paulo` when unset | Optional |
 
 These are referenced in `.devcontainer/devcontainer.json` under `remoteEnv` so they can be wired in from your local environment or repository-level secrets.
+
+To set the timezone when launching locally, export `DEVCONTAINER_TZ` before `devcontainer up`, or add it as a repository secret in Codespaces.
 
 ## Git Identity
 
@@ -103,6 +107,10 @@ Both flows execute the installer script, so they share the same behavior and saf
 
 - Rust toolchain (cargo, rustup) via the devcontainer Rust feature.
 - Post-create hook auto-installs [`vivid`](https://github.com/sharkdp/vivid) for richer `LS_COLORS` support when `cargo` is available.
+
+## Shell Linting
+
+[`shellcheck`](https://www.shellcheck.net/) ships with the container (via the `apt-packages` feature). Run `shellcheck path/to/script.sh` locally or wire it into CI to catch common issues like unset variables or unsafe globbing. For consistent formatting pair it with [`shfmt`](https://github.com/mvdan/sh) if desired (install via `go install mvdan.cc/sh/v3/cmd/shfmt@latest` inside the container).
 
 ## Rebuild / Update
 

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-set -eu
+set -euo pipefail
 
 echo "🔧 post-create: provisioning (lean mode)"
 
 # Variables
 USER_HOME="${HOME}"
 USER_DOTFILES_DIR=".devcontainer/user"
-SUDO=""; command -v sudo >/dev/null 2>&1 && SUDO="sudo"
+SUDO=""
+command -v sudo >/dev/null 2>&1 && SUDO="sudo"
 
 ensure_volume_dir() {
   dir="$1"
@@ -23,6 +24,116 @@ ensure_volume_dir() {
 ensure_user_dir() {
   dir="$1"
   mkdir -p "$dir" 2>/dev/null || true
+}
+
+ensure_login_shell() {
+  desired_shell="/usr/bin/zsh"
+  command -v chsh >/dev/null 2>&1 || return
+  [ -x "$desired_shell" ] || {
+    echo "  ⚠ Desired shell $desired_shell not found; skipping chsh" >&2
+    return
+  }
+
+  current_shell="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f7)"
+  if [ "$current_shell" = "$desired_shell" ]; then
+    echo "🌀 Default shell already set to zsh"
+    return
+  fi
+
+  user_name="$(id -un)"
+  if [ -n "$SUDO" ]; then
+    if $SUDO chsh -s "$desired_shell" "$user_name" >/dev/null 2>&1; then
+      echo "🌀 Updated default shell to zsh"
+    else
+      echo "  ⚠ Failed to set default shell to zsh via sudo" >&2
+    fi
+  else
+    if chsh -s "$desired_shell" "$user_name" >/dev/null 2>&1; then
+      echo "🌀 Updated default shell to zsh"
+    else
+      echo "  ⚠ Failed to set default shell to zsh" >&2
+    fi
+  fi
+}
+
+configure_timezone() {
+  fallback_tz="America/Sao_Paulo"
+  desired_tz="${DEVCONTAINER_TZ:-${TZ:-}}"
+  [ -n "$desired_tz" ] || desired_tz="$fallback_tz"
+
+  if [ -z "$desired_tz" ]; then
+    echo "  ⚠ No timezone configured; keeping container default"
+    return
+  fi
+
+  zoneinfo_path="/usr/share/zoneinfo/${desired_tz}"
+  if [ ! -e "$zoneinfo_path" ]; then
+    echo "  ⚠ Timezone ${desired_tz} not found under /usr/share/zoneinfo; skipping" >&2
+    return
+  fi
+
+  current_link="$(readlink /etc/localtime 2>/dev/null || true)"
+  if [ "$current_link" = "$zoneinfo_path" ]; then
+    echo "🕒 Timezone already set to ${desired_tz}"
+  else
+    if [ -n "$SUDO" ]; then
+      if $SUDO ln -sf "$zoneinfo_path" /etc/localtime && printf '%s\n' "$desired_tz" | $SUDO tee /etc/timezone >/dev/null; then
+        echo "🕒 Set timezone to ${desired_tz}"
+      else
+        echo "  ⚠ Failed to update timezone to ${desired_tz}" >&2
+      fi
+    else
+      if ln -sf "$zoneinfo_path" /etc/localtime && printf '%s\n' "$desired_tz" >/etc/timezone; then
+        echo "🕒 Set timezone to ${desired_tz}"
+      else
+        echo "  ⚠ Failed to update timezone to ${desired_tz}" >&2
+      fi
+    fi
+  fi
+
+  export TZ="$desired_tz"
+}
+
+restore_man_pages_if_needed() {
+  local sentinel="${USER_HOME}/.config/.manpages-restored"
+  if ! command -v unminimize >/dev/null 2>&1 && [ ! -x /usr/local/sbin/unminimize ]; then
+    return
+  fi
+  if [ -f /usr/share/man/man1/ls.1.gz ] || [ -f "$sentinel" ]; then
+    return
+  fi
+  echo "📚 Restoring man pages (unminimize)"
+  if [ -n "$SUDO" ]; then
+    if ! $SUDO apt-get update; then
+      echo "  ⚠ Failed to refresh apt cache; skipping man page restore" >&2
+      return
+    fi
+    if ! DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y man-db manpages manpages-dev; then
+      echo "  ⚠ Failed to install man packages; skipping unminimize" >&2
+      return
+    fi
+    if ! yes | $SUDO unminimize; then
+      echo "  ⚠ unminimize failed; run manually if you need man pages" >&2
+      return
+    fi
+  else
+    if ! apt-get update; then
+      echo "  ⚠ Failed to refresh apt cache; skipping man page restore" >&2
+      return
+    fi
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y man-db manpages manpages-dev; then
+      echo "  ⚠ Failed to install man packages; skipping unminimize" >&2
+      return
+    fi
+    if ! yes | unminimize; then
+      echo "  ⚠ unminimize failed; run manually if you need man pages" >&2
+      return
+    fi
+  fi
+  ensure_user_dir "${USER_HOME}/.config"
+  if ! printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$sentinel"; then
+    echo "  ⚠ Failed to write sentinel file $sentinel" >&2
+  fi
 }
 
 render_template_file() {
@@ -105,8 +216,16 @@ ensure_user_dir "${USER_HOME}/.cache/go-mod"
 ensure_user_dir "${USER_HOME}/.local/bin"
 ensure_user_dir "${USER_HOME}/.config"
 
+restore_man_pages_if_needed
+
 # Generate files from templates (if present)
 process_user_templates
+
+# Ensure default shell is zsh for the vscode user (aligns with VS Code terminal profile)
+ensure_login_shell
+
+# Configure system timezone if requested
+configure_timezone
 
 # Symlink user dotfiles from .devcontainer/user into $HOME (templates excluded)
 if [ -d "${USER_DOTFILES_DIR}" ]; then
@@ -118,7 +237,7 @@ if [ -d "${USER_DOTFILES_DIR}" ]; then
   done < <(find "${USER_DOTFILES_DIR}" -type d -print0)
 
   while IFS= read -r -d '' src; do
-    case "$src" in *.template) continue;; esac
+    case "$src" in *.template) continue ;; esac
     rel_path="${src#"${USER_DOTFILES_DIR}"/}"
     dest="${USER_HOME}/${rel_path}"
     mkdir -p "$(dirname "$dest")"
@@ -141,7 +260,7 @@ fi
 # Minimal system-wide PATH baseline for login shells -> source shared env script when possible
 CORE_PROFILED="/etc/profile.d/00-core-path.sh"
 {
-  cat > "/tmp/00-core-path.sh" <<'EOF'
+  cat >"/tmp/00-core-path.sh" <<'EOF'
 #!/bin/sh
 if [ -z "${HOME:-}" ]; then
   h=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)
