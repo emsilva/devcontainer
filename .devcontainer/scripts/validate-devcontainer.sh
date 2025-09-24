@@ -23,7 +23,7 @@ run_in_target() {
   local shell_cmd=$1
   local snippet=$2
   if [ "$shell_cmd" = "__current" ]; then
-    ( eval "$snippet" )
+    (eval "$snippet")
     return
   fi
   local escaped
@@ -109,7 +109,7 @@ done
 EOS
 
   if [ "$shell_cmd" = "__current" ]; then
-    ( eval "$env_snippet" )
+    (eval "$env_snippet")
   else
     local escaped
     escaped=$(printf '%s' "$env_snippet" | escape_single_quotes)
@@ -128,20 +128,20 @@ compare_env_data() {
   local current="$2"
   local shell_name="$3"
   local issues=0
-  
+
   # Check critical environment variables
   local vars="USER GOPATH GOMODCACHE NVM_DIR PNPM_HOME UV_CACHE_DIR PULUMI_HOME"
   for var in $vars; do
     local baseline_val current_val
     baseline_val=$(echo "$baseline" | grep "^${var}=" | cut -d= -f2- || echo "<missing>")
     current_val=$(echo "$current" | grep "^${var}=" | cut -d= -f2- || echo "<missing>")
-    
+
     if [ "$baseline_val" != "$current_val" ]; then
       echo "  ❌ $var differs: '$baseline_val' vs '$current_val'"
       issues=$((issues + 1))
     fi
   done
-  
+
   # Check tool availability consistency
   local tools="go node python3 uv aws az gcloud gh claude docker fzf task starship pulumi"
   for tool in $tools; do
@@ -150,24 +150,24 @@ compare_env_data() {
     current_path=$(echo "$current" | grep "^which $tool ->" | sed "s/which $tool -> //" || echo "NOT FOUND")
     baseline_real=$(echo "$baseline" | grep "^realpath $tool ->" | sed "s/realpath $tool -> //" || echo "NOT FOUND")
     current_real=$(echo "$current" | grep "^realpath $tool ->" | sed "s/realpath $tool -> //" || echo "NOT FOUND")
-    
+
     baseline_path="${baseline_path/ (daemon not accessible)/}"
     current_path="${current_path/ (daemon not accessible)/}"
     baseline_real="${baseline_real/ (daemon not accessible)/}"
     current_real="${current_real/ (daemon not accessible)/}"
-    
+
     if [ "$baseline_path" != "$current_path" ] && [ "$baseline_real" != "$current_real" ]; then
       echo "  ❌ $tool path differs: '$baseline_path' vs '$current_path'"
       issues=$((issues + 1))
     fi
   done
-  
+
   if [ "$issues" -eq 0 ]; then
     echo "  ✅ $shell_name environment consistent with baseline"
   else
     echo "  📊 $shell_name has $issues differences from baseline"
   fi
-  
+
   return "$issues"
 }
 
@@ -180,25 +180,25 @@ run_env_checks() {
     "Zsh login|zsh -lc"
     "Zsh interactive|zsh -ic"
   )
-  
+
   echo "== Environment by shell (with consistency validation) =="
-  
+
   local entry label cmd baseline_data
   local total_issues=0
   local first_run=true
-  
+
   for entry in "${checks[@]}"; do
     IFS='|' read -r label cmd <<<"$entry"
     echo
     echo "=== $label ==="
-    
+
     # Collect environment data
     local env_data
     env_data=$(collect_env_data "$cmd" 2>&1 || echo "ERROR: Failed to collect data")
-    
+
     # Display the data
     echo "$env_data"
-    
+
     # Store baseline from first successful run
     if [ "$first_run" = true ] && [ "$env_data" != "ERROR: Failed to collect data" ]; then
       baseline_data="$env_data"
@@ -220,7 +220,7 @@ run_env_checks() {
       total_issues=$((total_issues + 1))
     fi
   done
-  
+
   echo
   echo "== Environment Consistency Summary =="
   if [ "$total_issues" -eq 0 ]; then

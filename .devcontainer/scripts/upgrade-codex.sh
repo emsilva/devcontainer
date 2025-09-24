@@ -64,11 +64,11 @@ select_asset() {
   arch=$(uname -m)
 
   case "$arch" in
-    x86_64|amd64)
+    x86_64 | amd64)
       target="x86_64-unknown-linux-musl"
       arch="x86_64"
       ;;
-    i686|i386)
+    i686 | i386)
       target="i686-unknown-linux-musl"
       arch="i386"
       ;;
@@ -76,7 +76,7 @@ select_asset() {
       target="armv7-unknown-linux-gnueabihf"
       arch="armv7"
       ;;
-    aarch64|arm64)
+    aarch64 | arm64)
       target="aarch64-unknown-linux-gnu"
       arch="arm64"
       ;;
