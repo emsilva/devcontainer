@@ -11,9 +11,9 @@ tasks:
     silent: false
   upgrade:self:
     desc: Refresh the .devcontainer directory from the canonical repository
-    dir: ..
+    dir: .devcontainer
     cmds:
-      - curl -fsSL https://raw.githubusercontent.com/emsilva/devcontainer/main/install.sh | sh
+      - bash -lc 'cd .. && curl -fsSL https://raw.githubusercontent.com/emsilva/devcontainer/main/install.sh | sh'
     silent: false
 
   upgrade:codex:
