@@ -124,6 +124,11 @@ To refresh the Codex CLI without a rebuild:
 task upgrade:codex
 ```
 
+By default the upgrade script installs the latest stable Codex release and skips prerelease tags (alphas, betas, release candidates). The behaviour can be adjusted with environment variables:
+
+- `CODEX_ALLOW_PRERELEASES=true task upgrade:codex` – include prerelease builds.
+- `CODEX_FORCE_VERSION=0.42.0 task upgrade:codex` – install a specific version (plain numbers are automatically converted to `rust-v0.42.0`; full tags are also accepted).
+
 ## Environment Initialization (Baseline PATH Guarantee)
 
 Core tooling (Go, user-local bins) is available in every shell mode (login / non-login, interactive / non-interactive) through a layered, idempotent design:

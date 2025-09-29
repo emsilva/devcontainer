@@ -41,18 +41,77 @@ require_tools() {
   fi
 }
 
+normalize_tag() {
+  local tag="$1"
+  if [[ "$tag" == rust-v* ]]; then
+    printf '%s' "$tag"
+  else
+    printf 'rust-v%s' "$tag"
+  fi
+}
+
+is_truthy() {
+  local value="${1:-}"
+  value="${value,,}"
+  case "$value" in
+    1|true|yes|y)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+fetch_release_by_tag() {
+  local raw_tag="$1"
+  local tag
+  tag=$(normalize_tag "$raw_tag")
+  local release_url="https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/tags/$tag"
+  log "Fetching Codex release metadata for $tag"
+  local response
+  if ! response=$(curl -fsSL "$release_url" 2>/dev/null); then
+    printf 'Codex release %s not found.\n' "$tag" >&2
+    return 1
+  fi
+  local actual_tag
+  actual_tag=$(printf '%s' "$response" | jq -r '.tag_name // ""')
+  if [ -z "$actual_tag" ]; then
+    printf 'Codex release %s is missing a tag_name field.\n' "$tag" >&2
+    return 1
+  fi
+  printf '%s' "$actual_tag"
+}
+
 fetch_latest_version() {
+  if [ -n "${CODEX_FORCE_VERSION:-}" ]; then
+    local forced_version
+    if ! forced_version=$(fetch_release_by_tag "$CODEX_FORCE_VERSION"); then
+      return 1
+    fi
+    printf '%s' "$forced_version"
+    return
+  fi
   if [ -n "${CODEX_VERSION:-}" ]; then
-    printf '%s' "$CODEX_VERSION"
+    printf '%s' "$(normalize_tag "$CODEX_VERSION")"
     return
   fi
   local releases_url="https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases"
   log "Fetching latest Codex release from $releases_url"
-  local version
-  version=$(curl -fsSL "$releases_url" | jq -r '.[0].tag_name // ""')
+  local releases_json
+  releases_json=$(curl -fsSL "$releases_url")
+  local version allow_prereleases
+  allow_prereleases=${CODEX_ALLOW_PRERELEASES:-}
+  if is_truthy "$allow_prereleases"; then
+    log "Including prerelease Codex builds (CODEX_ALLOW_PRERELEASES=true)"
+    version=$(printf '%s' "$releases_json" | jq -r '([.[] | select(.draft|not)] | first | .tag_name) // ""')
+  else
+    log "Selecting latest stable Codex release (set CODEX_ALLOW_PRERELEASES=true to include prereleases)"
+    version=$(printf '%s' "$releases_json" | jq -r '([.[] | select((.draft|not) and (.prerelease|not) and (.tag_name | test("alpha"; "i") | not))] | first | .tag_name) // ""')
+  fi
   if [ -z "$version" ]; then
     printf 'Unable to determine latest Codex release.\n' >&2
-    exit 1
+    return 1
   fi
   printf '%s' "$version"
 }
@@ -211,4 +270,6 @@ main() {
   "$INSTALL_PREFIX/$BINARY_NAME" --version || true
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
