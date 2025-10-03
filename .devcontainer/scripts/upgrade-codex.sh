@@ -152,12 +152,24 @@ select_asset() {
 
   if [ -n "$assets" ]; then
     local zst_asset tar_asset zip_asset
-    zst_asset=$(printf '%s\n' "$assets" | grep -E "^${BINARY_NAME}-.*${target}\.zst$" | head -n1 || true)
+
+    zst_asset=$(printf '%s\n' "$assets" | grep -E "^${BINARY_NAME}-${target}\.zst$" | head -n1 || true)
     if [ -z "$zst_asset" ]; then
-      zst_asset=$(printf '%s\n' "$assets" | grep -i "${target}\.zst" | head -n1 || true)
+      zst_asset=$(printf '%s\n' "$assets" | grep -E "^${BINARY_NAME}-(cli-)?[^[:space:]]*${target}\.zst$" | grep -v "responses-api-proxy" | head -n1 || true)
     fi
-    tar_asset=$(printf '%s\n' "$assets" | grep -i "${os}.*${arch}.*tar.gz" | head -n1 || true)
-    zip_asset=$(printf '%s\n' "$assets" | grep -i "${os}.*${arch}.*zip" | head -n1 || true)
+    if [ -z "$zst_asset" ]; then
+      zst_asset=$(printf '%s\n' "$assets" | grep -i "${target}\.zst" | grep -v "responses-api-proxy" | head -n1 || true)
+    fi
+
+    tar_asset=$(printf '%s\n' "$assets" | grep -E "^${BINARY_NAME}-${target}\.tar.gz$" | head -n1 || true)
+    if [ -z "$tar_asset" ]; then
+      tar_asset=$(printf '%s\n' "$assets" | grep -i "${target}\.tar.gz" | grep -v "responses-api-proxy" | head -n1 || true)
+    fi
+
+    zip_asset=$(printf '%s\n' "$assets" | grep -E "^${BINARY_NAME}-${target}\.zip$" | head -n1 || true)
+    if [ -z "$zip_asset" ]; then
+      zip_asset=$(printf '%s\n' "$assets" | grep -i "${target}\.zip" | grep -v "responses-api-proxy" | head -n1 || true)
+    fi
 
     if [ -n "$zst_asset" ]; then
       printf '%s\n' "https://github.com/$REPO_OWNER/$REPO_NAME/releases/download/$version/$zst_asset zst"
@@ -243,6 +255,17 @@ WRAP
   run_root ln -sf "$INSTALL_PREFIX/${BINARY_NAME}-wrapper" "$INSTALL_PREFIX/${BINARY_NAME}-cli"
 }
 
+print_version_summary() {
+  local binary_path="$1"
+  local release_tag="$2"
+
+  if "$binary_path" --help 2>&1 | grep -q -- '--version'; then
+    "$binary_path" --version
+  else
+    log "Installed Codex release $release_tag (CLI does not expose --version)"
+  fi
+}
+
 main() {
   require_tools
   local version
@@ -267,7 +290,7 @@ main() {
   install_binary "$extracted"
 
   log "Codex upgrade complete"
-  "$INSTALL_PREFIX/$BINARY_NAME" --version || true
+  print_version_summary "$INSTALL_PREFIX/$BINARY_NAME" "$version"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
