@@ -83,6 +83,10 @@ ensure_owned "${USER_HOME}/.local"
 ensure_user_dir "${USER_HOME}/.config"
 ensure_user_dir "${USER_HOME}/.local/bin"
 
+# The base image ships ~/.oh-my-zsh; this template uses antidote (via the user's
+# chezmoi dotfiles) instead, so drop the unused oh-my-zsh install.
+rm -rf "${USER_HOME}/.oh-my-zsh"
+
 restore_man_pages_if_needed
 
 # Enable corepack for pnpm/yarn if available
