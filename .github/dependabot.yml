@@ -1,12 +1,22 @@
 version: 2
 updates:
-  # Bump dev container feature versions (opens PRs; the controlled freshness off-ramp).
+  # Dev container features — grouped into one weekly PR. Skip major bumps; do those
+  # deliberately with `task devcontainer:upgrade:lock`.
   - package-ecosystem: "devcontainers"
     directory: "/"
     schedule:
       interval: "weekly"
-  # Keep the GitHub Actions used by CI current.
+    groups:
+      devcontainer-features:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+  # GitHub Actions used by CI — grouped into one weekly PR.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      github-actions:
+        patterns: ["*"]
