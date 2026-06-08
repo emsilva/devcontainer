@@ -145,6 +145,15 @@ apply_dotfiles_if_configured() {
   fi
 }
 
+# Load local-only secrets/config for non-Codespaces runs (gitignored). Absent in
+# Codespaces, where PERSONAL_PAT / DOTFILES_REPO arrive as Codespaces secrets.
+if [ -f .devcontainer/devcontainer.env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . .devcontainer/devcontainer.env
+  set +a
+fi
+
 # Basic permissions and caches (volumes are mounted by devcontainer)
 echo "📁 Ensuring caches and history volume perms"
 ensure_volume_dir /commandhistory
@@ -204,8 +213,6 @@ if command -v gh >/dev/null 2>&1; then
       else
         echo "  ⚠ GitHub CLI authenticated but status check failed" >&2
       fi
-      export GITHUB_TOKEN="$personal_pat"
-      echo "  🔄 Exported GITHUB_TOKEN for downstream tooling"
     else
       echo "  ⚠ Failed to authenticate GitHub CLI with PERSONAL_PAT" >&2
     fi

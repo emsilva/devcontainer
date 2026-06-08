@@ -1,2 +1,5 @@
 # Devcontainer repo ignores
 # Dotfiles are applied at runtime via chezmoi; nothing generated is tracked here.
+
+# Local-only secrets/config for non-Codespaces runs (see devcontainer.env.example).
+.devcontainer/devcontainer.env

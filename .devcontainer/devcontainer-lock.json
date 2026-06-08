@@ -15,11 +15,6 @@
       "resolved": "ghcr.io/devcontainers-extra/features/go-task@sha256:4d1db153919976cadd3209ca05d655a761a01707767716994dad677b4538dc1b",
       "integrity": "sha256:4d1db153919976cadd3209ca05d655a761a01707767716994dad677b4538dc1b"
     },
-    "ghcr.io/devcontainers-extra/features/pulumi:1": {
-      "version": "1.2.4",
-      "resolved": "ghcr.io/devcontainers-extra/features/pulumi@sha256:99ad8f91bd273eda83a0794565015314f463e7c07c76c3e4de8f28dd5c795d5e",
-      "integrity": "sha256:99ad8f91bd273eda83a0794565015314f463e7c07c76c3e4de8f28dd5c795d5e"
-    },
     "ghcr.io/devcontainers/features/aws-cli:1": {
       "version": "1.1.4",
       "resolved": "ghcr.io/devcontainers/features/aws-cli@sha256:1f93c8315b7a6d76982ebb2269f8b0d50413fc0f965c032edf4aee0caceb73ef",

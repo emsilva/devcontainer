@@ -1,12 +1,12 @@
 {
-  "name": "Mannu's Devcontainer (Ubuntu 24.04)",
+  "name": "Polyglot Devcontainer (Ubuntu 24.04)",
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
   "features": {
     "ghcr.io/devcontainers/features/common-utils:2": {
-      "installZsh": "true",
+      "installZsh": true,
       "installOhMyZsh": false,
       "username": "vscode",
-      "upgradePackages": "true"
+      "upgradePackages": true
     },
     "ghcr.io/rocker-org/devcontainer-features/apt-packages:1": {
       "packages": "bat vim nano zoxide tmux tree tldr curl wget dnsutils net-tools iputils-ping httpie git git-lfs fd-find ripgrep jq yq postgresql-client default-mysql-client sqlite3 redis-tools htop ncdu shellcheck zsh-autosuggestions zsh-syntax-highlighting"
@@ -32,7 +32,7 @@
     },
     "ghcr.io/devcontainers/features/node:1": {
       "version": "24",
-      "installYarn": "true",
+      "installYarn": true,
       "pnpmVersion": "latest"
     },
     "ghcr.io/devcontainers/features/python:1": {
@@ -50,9 +50,6 @@
     "ghcr.io/jsburckhardt/devcontainer-features/codex:1": {},
     "ghcr.io/devcontainers-extra/features/go-task:1": {},
     "ghcr.io/devcontainers-extra/features/fzf:1": {},
-    "ghcr.io/devcontainers-extra/features/pulumi:1": {
-      "version": "latest"
-    },
     "ghcr.io/dhoeric/features/google-cloud-cli:1": {
       "installGkeGcloudAuthPlugin": true
     },
@@ -111,9 +108,6 @@
     "EDITOR": "code --wait",
     "PYTHONDONTWRITEBYTECODE": "1",
     "PYTHONUNBUFFERED": "1",
-    "HOME": "/home/vscode",
-    "XDG_CONFIG_HOME": "/home/vscode/.config",
-    "GOMODCACHE": "/home/vscode/.cache/go-mod",
     "DEVCONTAINER_TZ": "${localEnv:DEVCONTAINER_TZ}",
     "TZ": "${localEnv:DEVCONTAINER_TZ}"
   },
@@ -124,9 +118,8 @@
     "HISTSIZE": "10000",
     "SAVEHIST": "10000",
     "UV_CACHE_DIR": "/home/vscode/.cache/uv",
-    "DEVCONTAINER_SKIP_WELCOME": "${localEnv:DEVCONTAINER_SKIP_WELCOME}",
-    "DOTFILES_REPO": "${localEnv:DOTFILES_REPO}",
-    "GH_TOKEN": "${localEnv:PERSONAL_PAT}"
+    "GOMODCACHE": "/home/vscode/.cache/go-mod",
+    "DEVCONTAINER_SKIP_WELCOME": "${localEnv:DEVCONTAINER_SKIP_WELCOME}"
   },
   "mounts": [
     "source=${localWorkspaceFolderBasename}-shell-history,target=/commandhistory,type=volume",
