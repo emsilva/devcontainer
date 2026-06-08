@@ -1,9 +1,11 @@
-name: CI
+name: ShellCheck
 
 on:
   push:
     branches: [main]
+    paths: ['**.sh']
   pull_request:
+    paths: ['**.sh']
 
 jobs:
   shellcheck:
@@ -12,21 +14,3 @@ jobs:
       - uses: actions/checkout@v6
       - name: ShellCheck scripts
         run: shellcheck .devcontainer/scripts/*.sh install.sh
-
-  devcontainer:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Build and verify devcontainer
-        uses: devcontainers/ci@v0.3
-        with:
-          push: never
-          runCmd: |
-            set -e
-            echo "Verifying toolchain..."
-            go version
-            node --version
-            python3 --version
-            ruby --version
-            chezmoi --version
-            nvim --version | head -1

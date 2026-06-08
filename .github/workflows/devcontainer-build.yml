@@ -1,0 +1,29 @@
+name: Devcontainer Build
+
+# Heavy build — only runs when the dev container itself changes, so docs/config-only
+# PRs don't pay the ~15-minute build.
+on:
+  push:
+    branches: [main]
+    paths: ['.devcontainer/**']
+  pull_request:
+    paths: ['.devcontainer/**']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build and verify devcontainer
+        uses: devcontainers/ci@v0.3
+        with:
+          push: never
+          runCmd: |
+            set -e
+            echo "Verifying toolchain..."
+            go version
+            node --version
+            python3 --version
+            ruby --version
+            chezmoi --version
+            nvim --version | head -1
