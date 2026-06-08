@@ -5,6 +5,7 @@
     "ghcr.io/devcontainers/features/common-utils:2": {
       "installZsh": true,
       "installOhMyZsh": false,
+      "installOhMyZshConfig": false,
       "username": "vscode",
       "upgradePackages": true
     },
