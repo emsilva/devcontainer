@@ -43,11 +43,12 @@ require_tools() {
 
 normalize_tag() {
   local tag="$1"
-  if [[ "$tag" == rust-v* ]]; then
-    printf '%s' "$tag"
-  else
-    printf 'rust-v%s' "$tag"
-  fi
+  case "$tag" in
+    rust-v*) printf '%s' "$tag" ;;       # already a full tag
+    v[0-9]*) printf 'rust-%s' "$tag" ;;  # v0.42.0 -> rust-v0.42.0
+    [0-9]*) printf 'rust-v%s' "$tag" ;;  # 0.42.0  -> rust-v0.42.0
+    *) printf '%s' "$tag" ;;             # pass anything else through unchanged
+  esac
 }
 
 is_truthy() {
@@ -104,10 +105,12 @@ fetch_latest_version() {
   allow_prereleases=${CODEX_ALLOW_PRERELEASES:-}
   if is_truthy "$allow_prereleases"; then
     log "Including prerelease Codex builds (CODEX_ALLOW_PRERELEASES=true)"
-    version=$(printf '%s' "$releases_json" | jq -r '([.[] | select(.draft|not)] | first | .tag_name) // ""')
+    # Newest rust-v* tag by release order (anchored to rust-v to skip unrelated lines like rusty-v8-*).
+    version=$(printf '%s' "$releases_json" | jq -r '[ .[] | select(.draft|not) | .tag_name | select(test("^rust-v[0-9]")) ] | first // ""')
   else
     log "Selecting latest stable Codex release (set CODEX_ALLOW_PRERELEASES=true to include prereleases)"
-    version=$(printf '%s' "$releases_json" | jq -r '([.[] | select((.draft|not) and (.prerelease|not) and (.tag_name | test("alpha"; "i") | not))] | first | .tag_name) // ""')
+    # Highest exact rust-vX.Y.Z stable tag, sorted by semver (not by API order).
+    version=$(printf '%s' "$releases_json" | jq -r '[ .[] | select(.draft|not) | .tag_name | select(test("^rust-v[0-9]+\\.[0-9]+\\.[0-9]+$")) ] | sort_by( sub("^rust-v";"") | split(".") | map(tonumber) ) | last // ""')
   fi
   if [ -z "$version" ]; then
     printf 'Unable to determine latest Codex release.\n' >&2
@@ -118,8 +121,7 @@ fetch_latest_version() {
 
 select_asset() {
   local version="$1"
-  local os arch target
-  os=$(uname | tr '[:upper:]' '[:lower:]')
+  local arch target
   arch=$(uname -m)
 
   case "$arch" in
@@ -185,6 +187,7 @@ select_asset() {
     fi
   fi
 
+  log "Warning: could not list/match release assets for $version; falling back to a guessed download URL"
   local candidate="https://github.com/$REPO_OWNER/$REPO_NAME/releases/download/$version/${BINARY_NAME}-${target}.zst"
   printf '%s\n' "$candidate zst"
 }

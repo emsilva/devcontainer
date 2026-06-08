@@ -39,12 +39,11 @@ run_in_target() {
 run_tool_checks() {
   read -r -d '' snippet <<'EOS' || true
 set -e
-for tool in go node python3 uv aws az gcloud gh claude docker fzf task starship pulumi; do
+for tool in go node python3 uv aws az gcloud gh claude docker fzf task starship; do
   if command -v "$tool" >/dev/null 2>&1; then
     printf '%-10s %s\n' "$tool" "$(command -v "$tool")"
     case "$tool" in
       go) go version ;;
-      pulumi) pulumi version ;;
       node) node --version ;;
       python3) python3 --version ;;
       uv) uv --version ;;
@@ -90,8 +89,7 @@ echo "GOMODCACHE=${GOMODCACHE:-<unset>}"
 echo "NVM_DIR=${NVM_DIR:-<unset>}"
 echo "PNPM_HOME=${PNPM_HOME:-<unset>}"
 echo "UV_CACHE_DIR=${UV_CACHE_DIR:-<unset>}"
-echo "PULUMI_HOME=${PULUMI_HOME:-<unset>}"
-for bin in go node python3 uv aws az gcloud gh claude docker fzf task starship pulumi; do
+for bin in go node python3 uv aws az gcloud gh claude docker fzf task starship; do
   if command -v "$bin" >/dev/null 2>&1; then
     bin_path=$(command -v "$bin")
     resolved=$(realpath "$bin_path" 2>/dev/null || echo "$bin_path")
@@ -130,7 +128,7 @@ compare_env_data() {
   local issues=0
 
   # Check critical environment variables
-  local vars="USER GOPATH GOMODCACHE NVM_DIR PNPM_HOME UV_CACHE_DIR PULUMI_HOME"
+  local vars="USER GOPATH GOMODCACHE NVM_DIR PNPM_HOME UV_CACHE_DIR"
   for var in $vars; do
     local baseline_val current_val
     baseline_val=$(echo "$baseline" | grep "^${var}=" | cut -d= -f2- || echo "<missing>")
@@ -143,7 +141,7 @@ compare_env_data() {
   done
 
   # Check tool availability consistency
-  local tools="go node python3 uv aws az gcloud gh claude docker fzf task starship pulumi"
+  local tools="go node python3 uv aws az gcloud gh claude docker fzf task starship"
   for tool in $tools; do
     local baseline_path current_path baseline_real current_real
     baseline_path=$(echo "$baseline" | grep "^which $tool ->" | sed "s/which $tool -> //" || echo "NOT FOUND")

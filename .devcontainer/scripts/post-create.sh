@@ -5,7 +5,6 @@ echo "🔧 post-create: provisioning (lean mode)"
 
 # Variables
 USER_HOME="${HOME}"
-USER_DOTFILES_DIR=".devcontainer/user"
 SUDO=""
 command -v sudo >/dev/null 2>&1 && SUDO="sudo"
 
@@ -133,115 +132,27 @@ configure_timezone() {
   export TZ="$desired_tz"
 }
 
-restore_man_pages_if_needed() {
-  local sentinel="${USER_HOME}/.config/.manpages-restored"
-  if ! command -v unminimize >/dev/null 2>&1 && [ ! -x /usr/local/sbin/unminimize ]; then
-    return
-  fi
-  if [ -f /usr/share/man/man1/ls.1.gz ] || [ -f "$sentinel" ]; then
-    return
-  fi
-  echo "📚 Restoring man pages (unminimize)"
-  if [ -n "$SUDO" ]; then
-    if ! $SUDO apt-get update; then
-      echo "  ⚠ Failed to refresh apt cache; skipping man page restore" >&2
-      return
-    fi
-    if ! DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y man-db manpages manpages-dev; then
-      echo "  ⚠ Failed to install man packages; skipping unminimize" >&2
-      return
-    fi
-    if ! yes | $SUDO unminimize; then
-      echo "  ⚠ unminimize failed; run manually if you need man pages" >&2
-      return
+apply_dotfiles_if_configured() {
+  # Personal dotfiles are applied per-user via chezmoi (see scripts/setup-dotfiles.sh).
+  # Runs after gh auth so private repos resolve via the credential helper.
+  if [ -n "${DOTFILES_REPO:-}" ]; then
+    if [ -f .devcontainer/scripts/setup-dotfiles.sh ]; then
+      bash .devcontainer/scripts/setup-dotfiles.sh "${DOTFILES_REPO}" \
+        || echo "  ⚠ dotfiles apply failed (retry: load-dotfiles ${DOTFILES_REPO})" >&2
     fi
   else
-    if ! apt-get update; then
-      echo "  ⚠ Failed to refresh apt cache; skipping man page restore" >&2
-      return
-    fi
-    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y man-db manpages manpages-dev; then
-      echo "  ⚠ Failed to install man packages; skipping unminimize" >&2
-      return
-    fi
-    if ! yes | unminimize; then
-      echo "  ⚠ unminimize failed; run manually if you need man pages" >&2
-      return
-    fi
-  fi
-  ensure_user_dir "${USER_HOME}/.config"
-  if ! printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$sentinel"; then
-    echo "  ⚠ Failed to write sentinel file $sentinel" >&2
+    echo "💡 No DOTFILES_REPO set — run 'task setup:dotfiles -- <repo>' or 'load-dotfiles <repo>' to load your dotfiles"
   fi
 }
 
-render_template_file() {
-  template="$1"
-  target="$2"
-
-  mkdir -p "$(dirname "$target")"
-
-  if command -v python3 >/dev/null 2>&1; then
-    if output=$(
-      python3 - "$template" "$target" <<'PY'
-import os
-import re
-import sys
-
-template_path = sys.argv[1]
-target_path = sys.argv[2]
-
-with open(template_path, "r", encoding="utf-8") as fh:
-    content = fh.read()
-
-missing = set()
-replaced = set()
-
-pattern = re.compile(r"__([A-Z0-9_]+)__")
-
-def repl(match):
-    key = match.group(1)
-    value = os.environ.get(key, "")
-    if value:
-        replaced.add(key)
-        return value
-    missing.add(key)
-    return match.group(0)
-
-rendered = pattern.sub(repl, content)
-
-with open(target_path, "w", encoding="utf-8") as fh:
-    fh.write(rendered)
-
-if replaced:
-    print("  🔐 Replaced placeholders for: " + ", ".join(sorted(replaced)))
-if missing:
-    print("  ⚠ Missing environment variables for: " + ", ".join(sorted(missing)))
-PY
-    ); then
-      [ -n "$output" ] && printf '%s\n' "$output"
-    else
-      echo "  ⚠ Failed to render template ${template}" >&2
-      cp "$template" "$target"
-    fi
-  else
-    echo "  ⚠ python3 not available; copying template without placeholder substitution"
-    cp "$template" "$target"
-  fi
-}
-
-process_user_templates() {
-  if [ ! -d "${USER_DOTFILES_DIR}" ]; then
-    return
-  fi
-
-  while IFS= read -r -d '' template; do
-    generated="${template%.template}"
-    rel_generated="${generated#"${USER_DOTFILES_DIR}"/}"
-    echo "🧩 Generating ${rel_generated} from template..."
-    render_template_file "$template" "$generated"
-  done < <(find "${USER_DOTFILES_DIR}" -type f -name '*.template' -print0)
-}
+# Load local-only secrets/config for non-Codespaces runs (gitignored). Absent in
+# Codespaces, where PERSONAL_PAT / DOTFILES_REPO arrive as Codespaces secrets.
+if [ -f .devcontainer/devcontainer.env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . .devcontainer/devcontainer.env
+  set +a
+fi
 
 # Basic permissions and caches (volumes are mounted by devcontainer)
 echo "📁 Ensuring caches and history volume perms"
@@ -255,115 +166,15 @@ ensure_user_dir "${USER_HOME}/.cache/go-mod"
 ensure_user_dir "${USER_HOME}/.local/bin"
 ensure_user_dir "${USER_HOME}/.config"
 
-restore_man_pages_if_needed
-
-# Generate files from templates (if present)
-process_user_templates
-
 # Ensure default shell is zsh for the vscode user (aligns with VS Code terminal profile)
 ensure_login_shell
 
 # Configure system timezone if requested
 configure_timezone
 
-# Symlink user dotfiles from .devcontainer/user into $HOME (templates excluded)
-if [ -d "${USER_DOTFILES_DIR}" ]; then
-  echo "🧷 Linking user dotfiles from ${USER_DOTFILES_DIR}"
-  while IFS= read -r -d '' dir; do
-    [ "${dir}" = "${USER_DOTFILES_DIR}" ] && continue
-    rel_dir="${dir#"${USER_DOTFILES_DIR}"/}"
-    mkdir -p "${USER_HOME}/${rel_dir}"
-  done < <(find "${USER_DOTFILES_DIR}" -type d -print0)
-
-  while IFS= read -r -d '' src; do
-    case "$src" in *.template) continue ;; esac
-    rel_path="${src#"${USER_DOTFILES_DIR}"/}"
-    dest="${USER_HOME}/${rel_path}"
-    mkdir -p "$(dirname "$dest")"
-    if [ -e "$dest" ] && [ ! -L "$dest" ]; then
-      mv "$dest" "${dest}.pre-devcontainer.$(date +%s)"
-    fi
-    ln -sfn "${PWD}/${src}" "$dest"
-  done < <(find "${USER_DOTFILES_DIR}" -type f -print0)
-fi
-
-# Harden oh-my-zsh permissions for completion safety
-if [ -d "${USER_HOME}/.oh-my-zsh" ]; then
-  if [ -n "${SUDO:-}" ]; then
-    $SUDO chmod go-w "${USER_HOME}/.oh-my-zsh" "${USER_HOME}/.oh-my-zsh/custom" 2>/dev/null || true
-  else
-    chmod go-w "${USER_HOME}/.oh-my-zsh" "${USER_HOME}/.oh-my-zsh/custom" 2>/dev/null || true
-  fi
-fi
-
-# Minimal system-wide PATH baseline for login shells -> source shared env script when possible
-CORE_PROFILED="/etc/profile.d/00-core-path.sh"
-{
-  cat >"/tmp/00-core-path.sh" <<'EOF'
-#!/bin/sh
-if [ -z "${HOME:-}" ]; then
-  h=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)
-  [ -n "$h" ] && HOME="$h" && export HOME
-fi
-
-if [ -n "${HOME:-}" ] && [ -f "$HOME/.config/shell/env-base.sh" ]; then
-  # shellcheck disable=SC1090
-  . "$HOME/.config/shell/env-base.sh"
-else
-  PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
-  export PATH
-fi
-EOF
-  if [ -n "${SUDO:-}" ]; then $SUDO cp /tmp/00-core-path.sh "$CORE_PROFILED" && $SUDO chmod 644 "$CORE_PROFILED" || true; else cp /tmp/00-core-path.sh "$CORE_PROFILED" && chmod 644 "$CORE_PROFILED" || true; fi
-  rm -f /tmp/00-core-path.sh 2>/dev/null || true
-} || true
-
-# Enable corepack for pnpm/yarn if available
-if command -v corepack >/dev/null 2>&1; then
-  corepack enable >/dev/null 2>&1 || true
-fi
-
 # Claude is installed through a feature at build time and may be owned by root.
 # Normalize ownership so `claude update` works after deployment.
 repair_claude_install_permissions
-
-# Install crane (OCI utility) via Go if missing
-if ! command -v crane >/dev/null 2>&1; then
-  if command -v go >/dev/null 2>&1; then
-    echo "🪝 Installing crane (go-containerregistry)"
-    if GO111MODULE=on GOBIN="${USER_HOME}/.local/bin" go install github.com/google/go-containerregistry/cmd/crane@latest; then
-      if [ -x "${USER_HOME}/.local/bin/crane" ]; then
-        if [ -n "${SUDO}" ]; then
-          $SUDO ln -sfn "${USER_HOME}/.local/bin/crane" /usr/local/bin/crane
-        else
-          ln -sfn "${USER_HOME}/.local/bin/crane" /usr/local/bin/crane
-        fi
-      fi
-    else
-      echo "  ⚠ Failed to install crane" >&2
-    fi
-  else
-    echo "  ⚠ go not found; skipping crane install" >&2
-  fi
-else
-  echo "🪝 crane already available"
-fi
-
-# Install vivid via cargo when available
-if command -v cargo >/dev/null 2>&1; then
-  if ! command -v vivid >/dev/null 2>&1; then
-    echo "🌈 Installing vivid (cargo)"
-    if cargo install vivid; then
-      echo "  ✅ vivid installed"
-    else
-      echo "  ⚠ Failed to install vivid" >&2
-    fi
-  else
-    echo "🌈 vivid already available"
-  fi
-else
-  echo "  ⚠ cargo not found; skipping vivid install" >&2
-fi
 
 # Basic Git defaults
 git config --global init.defaultBranch main
@@ -402,8 +213,6 @@ if command -v gh >/dev/null 2>&1; then
       else
         echo "  ⚠ GitHub CLI authenticated but status check failed" >&2
       fi
-      export GITHUB_TOKEN="$personal_pat"
-      echo "  🔄 Exported GITHUB_TOKEN for downstream tooling"
     else
       echo "  ⚠ Failed to authenticate GitHub CLI with PERSONAL_PAT" >&2
     fi
@@ -423,46 +232,7 @@ if command -v gh >/dev/null 2>&1; then
   fi
 fi
 
-# Ensure requested Ruby version is installed with rbenv
-if command -v rbenv >/dev/null 2>&1; then
-  desired_ruby="3.4.5"
-  echo "💎 Ensuring Ruby ${desired_ruby} via rbenv"
-  export RBENV_ROOT="${RBENV_ROOT:-${HOME}/.rbenv}"
-  eval "$(rbenv init -)" >/dev/null 2>&1 || true
-  if ! rbenv versions --bare 2>/dev/null | grep -qx "${desired_ruby}"; then
-    echo "  ⏳ Installing Ruby ${desired_ruby}"
-    if rbenv install -s "${desired_ruby}" >/dev/null 2>&1; then
-      echo "  ✅ Ruby ${desired_ruby} installed"
-    else
-      echo "  ⚠ Failed to install Ruby ${desired_ruby} via rbenv" >&2
-    fi
-  else
-    echo "  ✅ Ruby ${desired_ruby} already installed"
-  fi
-  if rbenv global "${desired_ruby}" >/dev/null 2>&1; then
-    rbenv rehash >/dev/null 2>&1 || true
-    echo "  🌍 Set global Ruby to ${desired_ruby}"
-  else
-    echo "  ⚠ Failed to set global Ruby version via rbenv" >&2
-  fi
-else
-  echo "  ⚠ rbenv not available; skipping Ruby installation" >&2
-fi
-
-# Install Rails when Ruby is available
-if command -v gem >/dev/null 2>&1; then
-  if ! command -v rails >/dev/null 2>&1; then
-    echo "🚂 Installing Rails (Ruby on Rails)"
-    if gem install rails --no-document; then
-      echo "  ✅ Rails installed"
-    else
-      echo "  ⚠ Failed to install Rails" >&2
-    fi
-  else
-    echo "🚂 Rails already available"
-  fi
-else
-  echo "  ⚠ RubyGems not available; skipping Rails install" >&2
-fi
+# Apply personal dotfiles (chezmoi) — only when DOTFILES_REPO is set
+apply_dotfiles_if_configured
 
 echo "✅ post-create complete"

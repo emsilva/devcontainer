@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Bump dev container feature versions (opens PRs; the controlled freshness off-ramp).
+  - package-ecosystem: "devcontainers"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  # Keep the GitHub Actions used by CI current.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
