@@ -22,3 +22,18 @@ tasks:
     cmds:
       - ./scripts/upgrade-codex.sh
     silent: false
+
+  upgrade:lock:
+    desc: Refresh devcontainer-lock.json to the newest feature versions allowed by devcontainer.json (deliberate dependency bump — review the diff before committing/rebuilding)
+    dir: .devcontainer
+    cmds:
+      - bash -lc 'cd .. && npx -y @devcontainers/cli@latest upgrade --workspace-folder .'
+    silent: false
+
+  setup:dotfiles:
+    desc: "Apply a chezmoi dotfiles repo into $HOME (usage: task setup:dotfiles -- <repo>; omit to use $DOTFILES_REPO or be prompted)"
+    dir: .devcontainer
+    interactive: true
+    cmds:
+      - ./scripts/setup-dotfiles.sh {{.CLI_ARGS}}
+    silent: false

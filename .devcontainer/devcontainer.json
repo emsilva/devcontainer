@@ -4,7 +4,7 @@
   "features": {
     "ghcr.io/devcontainers/features/common-utils:2": {
       "installZsh": "true",
-      "installOhMyZsh": "true",
+      "installOhMyZsh": false,
       "username": "vscode",
       "upgradePackages": "true"
     },
@@ -28,19 +28,19 @@
         "version": "latest"
     },
     "ghcr.io/devcontainers/features/go:1": {
-      "version": "latest"
+      "version": "1.26"
     },
     "ghcr.io/devcontainers/features/node:1": {
-      "version": "latest",
+      "version": "24",
       "installYarn": "true",
       "pnpmVersion": "latest"
     },
     "ghcr.io/devcontainers/features/python:1": {
-      "version": "latest",
+      "version": "3.13",
       "installTools": true
     },
     "ghcr.io/devcontainers/features/ruby:1": {
-      "version": "latest"
+      "version": "3.4"
     },
     "ghcr.io/devcontainers/features/rust:1": {
       "version": "latest"
@@ -115,8 +115,7 @@
     "XDG_CONFIG_HOME": "/home/vscode/.config",
     "GOMODCACHE": "/home/vscode/.cache/go-mod",
     "DEVCONTAINER_TZ": "${localEnv:DEVCONTAINER_TZ}",
-    "TZ": "${localEnv:DEVCONTAINER_TZ}",
-    "BASH_ENV": "/home/vscode/.config/shell/env-base.sh"
+    "TZ": "${localEnv:DEVCONTAINER_TZ}"
   },
   "remoteEnv": {
     "HOME": "/home/vscode",
@@ -126,8 +125,7 @@
     "SAVEHIST": "10000",
     "UV_CACHE_DIR": "/home/vscode/.cache/uv",
     "DEVCONTAINER_SKIP_WELCOME": "${localEnv:DEVCONTAINER_SKIP_WELCOME}",
-    "CONTEXT7_API_KEY": "${localEnv:CONTEXT7_API_KEY}",
-    "EXA_API_KEY": "${localEnv:EXA_API_KEY}",
+    "DOTFILES_REPO": "${localEnv:DOTFILES_REPO}",
     "GH_TOKEN": "${localEnv:PERSONAL_PAT}"
   },
   "mounts": [
@@ -136,6 +134,7 @@
     "source=${localWorkspaceFolderBasename}-uv-cache,target=/home/vscode/.cache/uv,type=volume",
     "source=${localWorkspaceFolderBasename}-go-mod-cache,target=/home/vscode/.cache/go-mod,type=volume"
   ],
+  "onCreateCommand": "chmod +x .devcontainer/scripts/on-create.sh && .devcontainer/scripts/on-create.sh",
   "postCreateCommand": "chmod +x .devcontainer/scripts/post-create.sh && .devcontainer/scripts/post-create.sh",
   "postStartCommand": "chmod +x .devcontainer/scripts/post-start.sh && .devcontainer/scripts/post-start.sh",
   
@@ -144,6 +143,5 @@
     "memory": "16gb",
     "storage": "32gb"
   },
-  "updateContentCommand": "echo 'Container content updated'",
   "waitFor": "postCreateCommand"
 }
