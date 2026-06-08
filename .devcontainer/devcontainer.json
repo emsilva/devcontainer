@@ -128,6 +128,13 @@
     "source=${localWorkspaceFolderBasename}-uv-cache,target=/home/vscode/.cache/uv,type=volume",
     "source=${localWorkspaceFolderBasename}-go-mod-cache,target=/home/vscode/.cache/go-mod,type=volume"
   ],
+  "forwardPorts": [2222],
+  "portsAttributes": {
+    "2222": {
+      "label": "ssh (in-container sshd)",
+      "onAutoForward": "silent"
+    }
+  },
   "onCreateCommand": "chmod +x .devcontainer/scripts/on-create.sh && .devcontainer/scripts/on-create.sh",
   "postCreateCommand": "chmod +x .devcontainer/scripts/post-create.sh && .devcontainer/scripts/post-create.sh",
   "postStartCommand": "chmod +x .devcontainer/scripts/post-start.sh && .devcontainer/scripts/post-start.sh",
