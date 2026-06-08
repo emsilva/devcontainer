@@ -56,6 +56,7 @@ they are injected automatically. For **local** runs, copy
 | `PERSONAL_PAT` | GitHub PAT for cross-repo git/gh auth (post-create runs `gh auth login`) |
 | `DOTFILES_REPO` | chezmoi dotfiles repo to auto-apply on create |
 | `DEVCONTAINER_TZ` | Container timezone (default `America/Sao_Paulo`) |
+| `SSH_AUTHORIZED_KEYS` | Public key(s) authorized for the in-container sshd on port 2222 — see [SSH access](#ssh-access) |
 
 > Secrets are intentionally **not** wired through `${localEnv:}` — in Codespaces that
 > resolves empty and would blank the injected secret.
@@ -104,6 +105,34 @@ git config --global user.email "you@example.com"
 ```
 
 If `gh` picks the wrong account: `unset GH_TOKEN GITHUB_TOKEN GH_AUTH_TOKEN`, then `gh auth login`.
+
+## SSH access
+
+Two ways to get a shell into the container:
+
+**`gh codespace ssh` (recommended for Codespaces)** — a GitHub-brokered tunnel; auth is your
+GitHub login, nothing to configure:
+
+```bash
+gh codespace ssh                      # pick a codespace
+gh codespace ssh -c <codespace-name>  # a specific one
+```
+
+**Raw SSH to the in-container sshd (port 2222)** — for tools/IDEs that need a real SSH
+endpoint (JetBrains Gateway, Remote-SSH, rsync, …). Provide your **public** key via
+`SSH_AUTHORIZED_KEYS` (a Codespaces secret, or `devcontainer.env` locally); `post-create`
+installs it to `~/.ssh/authorized_keys`. Then connect:
+
+```bash
+# Codespaces — forward 2222, then connect
+gh codespace ports forward 2222:2222 &
+ssh -p 2222 vscode@localhost
+
+# Local devcontainer in VS Code — 2222 is auto-forwarded
+ssh -p 2222 vscode@localhost
+```
+
+If you only ever use `gh codespace ssh`, the `sshd` feature is optional and can be removed.
 
 ## CI & validation
 

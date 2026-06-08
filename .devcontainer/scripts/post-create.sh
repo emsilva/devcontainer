@@ -145,6 +145,18 @@ apply_dotfiles_if_configured() {
   fi
 }
 
+authorize_ssh_keys() {
+  # Authorize key(s) for the in-container sshd (port 2222, via the sshd feature).
+  # SSH_AUTHORIZED_KEYS holds one or more public keys (newline-separated) — e.g. a
+  # Codespaces secret, or an entry in .devcontainer/devcontainer.env locally.
+  [ -n "${SSH_AUTHORIZED_KEYS:-}" ] || return 0
+  echo "🔑 Installing SSH authorized key(s) for the in-container sshd (port 2222)"
+  mkdir -p "${USER_HOME}/.ssh"
+  chmod 700 "${USER_HOME}/.ssh"
+  printf '%s\n' "${SSH_AUTHORIZED_KEYS}" >"${USER_HOME}/.ssh/authorized_keys"
+  chmod 600 "${USER_HOME}/.ssh/authorized_keys"
+}
+
 # Load local-only secrets/config for non-Codespaces runs (gitignored). Absent in
 # Codespaces, where PERSONAL_PAT / DOTFILES_REPO arrive as Codespaces secrets.
 if [ -f .devcontainer/devcontainer.env ]; then
@@ -231,6 +243,9 @@ if command -v gh >/dev/null 2>&1; then
     fi
   fi
 fi
+
+# Authorize SSH key(s) for the in-container sshd — only when SSH_AUTHORIZED_KEYS is set
+authorize_ssh_keys
 
 # Apply personal dotfiles (chezmoi) — only when DOTFILES_REPO is set
 apply_dotfiles_if_configured
