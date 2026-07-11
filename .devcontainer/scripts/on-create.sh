@@ -83,9 +83,28 @@ ensure_owned "${USER_HOME}/.local"
 ensure_user_dir "${USER_HOME}/.config"
 ensure_user_dir "${USER_HOME}/.local/bin"
 
-# The base image ships ~/.oh-my-zsh; this template uses antidote (via the user's
-# chezmoi dotfiles) instead, so drop the unused oh-my-zsh install.
+# The base image ships ~/.oh-my-zsh plus a stock ~/.zshrc that sources it; this
+# template uses antidote (via the user's chezmoi dotfiles) instead. Drop the
+# unused install, and swap the stock .zshrc — broken once oh-my-zsh is gone —
+# for a minimal default (chezmoi dotfiles overwrite it when applied).
 rm -rf "${USER_HOME}/.oh-my-zsh"
+if [ ! -f "${USER_HOME}/.zshrc" ] || grep -q "oh-my-zsh" "${USER_HOME}/.zshrc"; then
+  cat >"${USER_HOME}/.zshrc" <<'ZSHRC'
+# Minimal template default — replaced by your chezmoi dotfiles when applied
+# (set DOTFILES_REPO or run `load-dotfiles <repo>`).
+HISTSIZE=10000
+SAVEHIST=10000
+: "${HISTFILE:=$HOME/.zsh_history}"
+setopt inc_append_history hist_ignore_dups
+
+command -v starship >/dev/null 2>&1 && eval "$(starship init zsh)"
+
+[ -r /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh ] &&
+  source /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+[ -r /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ] &&
+  source /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+ZSHRC
+fi
 
 restore_man_pages_if_needed
 
