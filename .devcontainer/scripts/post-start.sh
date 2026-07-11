@@ -38,30 +38,10 @@ if command -v tldr >/dev/null 2>&1; then
   fi
 fi
 
-# cswap-switch service: keep Claude Code on the account with the most remaining
-# quota by looping `cswap switch --strategy best` every 5 minutes in the
-# background. A pidfile keeps restarts from stacking loops. Logs errors (and
-# no-ops) to ~/.local/state/cswap-switch.log until accounts exist (`cswap add`).
-if command -v cswap >/dev/null 2>&1 || [ -x "${HOME}/.local/bin/cswap" ]; then
-  cswap_state_dir="${HOME}/.local/state"
-  cswap_log="${cswap_state_dir}/cswap-switch.log"
-  cswap_pidfile="${cswap_state_dir}/cswap-switch.pid"
-  mkdir -p "$cswap_state_dir"
-  if [ -f "$cswap_pidfile" ] && kill -0 "$(cat "$cswap_pidfile")" 2>/dev/null; then
-    echo "🔁 cswap-switch service already running (pid $(cat "$cswap_pidfile"))"
-  else
-    echo "🔁 Starting cswap-switch service (strategy: best, every 300s → ${cswap_log})"
-    # Single quotes are deliberate: HOME/date/cswap must expand in the child shell.
-    # shellcheck disable=SC2016
-    nohup sh -c '
-      PATH="${HOME}/.local/bin:${PATH}"
-      while true; do
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $(cswap switch --strategy best 2>&1)"
-        sleep 300
-      done
-    ' >>"$cswap_log" 2>&1 &
-    echo $! >"$cswap_pidfile"
-  fi
-fi
+# Note: the cswap-switch service is deliberately NOT started here. The
+# Codespaces lifecycle runner kills every process a hook spawns on hook exit
+# (nohup, setsid, and double-fork all died — verified empirically), so the
+# service is installed by on-create and started from shell-login hooks
+# (/etc/profile.d + /etc/zsh/zprofile) instead.
 
 echo "✅ post-start complete"
