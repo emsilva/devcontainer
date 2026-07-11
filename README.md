@@ -20,7 +20,8 @@ Built for **GitHub Codespaces** first; also works locally via the Dev Containers
 - **Shell tools via `apt-packages`:** bat, ripgrep, fd, tldr, tree, jq, yq, httpie, zoxide,
   git, git-lfs, git-delta, DB clients (postgres/mysql/sqlite/redis), htop, ncdu, shellcheck, …
 - **Extra tooling (pinned, via on-create):** ast-grep (npm), herdr, claude-swap (`cswap`,
-  with a post-start service that keeps Claude Code on the account with the most quota).
+  with a login-activated service that keeps Claude Code on the account with the most quota;
+  it starts with your first shell — lifecycle-spawned daemons don't survive in Codespaces).
 - **Editor:** neovim (pinned static build) — for chezmoi dotfiles that use it (e.g. LazyVim).
 - **Dotfiles manager:** chezmoi (bring your own — see below).
 - Default branch `main`, persistent shell-history volume, dynamic port forwarding (notify).
@@ -66,12 +67,13 @@ they are injected automatically. For **local** runs, copy
 ## Lifecycle
 
 - **`onCreateCommand` → `scripts/on-create.sh`** (prebuild-cacheable, secret-free):
-  corepack, crane, vivid, Rails, chezmoi, neovim, ast-grep, herdr, claude-swap, a minimal
-  default `~/.zshrc` (replacing the base image's oh-my-zsh one), and (opt-in) man-page restore.
+  corepack, crane, vivid, Rails, chezmoi, neovim, ast-grep, herdr, claude-swap (+ its
+  login-activated cswap-switch service), a minimal default `~/.zshrc` (replacing the base
+  image's oh-my-zsh one), and (opt-in) man-page restore.
 - **`postCreateCommand` → `scripts/post-create.sh`** (per-user, has secrets): cache/volume
   perms, default shell, timezone, git config, gh auth, and the chezmoi dotfiles apply.
 - **`postStartCommand` → `scripts/post-start.sh`** (each start): history volume, a
-  once-weekly tldr refresh, and the `cswap switch --strategy best` background service.
+  once-weekly tldr refresh.
 
 Heavy installs live in `onCreate` so Codespaces **prebuilds** snapshot them; per-user work
 stays in `postCreate`. Restoring man pages (`apt` + `unminimize`, slow) is **opt-in** via

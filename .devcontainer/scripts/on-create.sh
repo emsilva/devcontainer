@@ -283,6 +283,57 @@ else
   echo "🔁 claude-swap already available"
 fi
 
+# Install the cswap-switch service: keeps Claude Code on the account with the
+# most remaining quota (`cswap switch --strategy best` every 300s). Started from
+# shell-login hooks, NOT from post-start: the Codespaces lifecycle runner kills
+# every process a lifecycle hook spawns (setsid and double-fork included), so a
+# daemon only survives when launched from a user session. The first login shell
+# starts it; any later shell revives it if dead (pidfile-guarded).
+install_cswap_switch_service() {
+  starter=/usr/local/bin/cswap-switch-service
+  hook_line='[ -x /usr/local/bin/cswap-switch-service ] && /usr/local/bin/cswap-switch-service >/dev/null 2>&1 || true'
+  tmp_svc="$(mktemp)"
+  cat >"$tmp_svc" <<'STARTER'
+#!/bin/sh
+# Keep Claude Code on the account with the most remaining quota.
+# Shell-login activated (see on-create.sh); idempotent via pidfile.
+set -eu
+state_dir="${HOME}/.local/state"
+log="${state_dir}/cswap-switch.log"
+pidfile="${state_dir}/cswap-switch.pid"
+command -v cswap >/dev/null 2>&1 || [ -x "${HOME}/.local/bin/cswap" ] || exit 0
+mkdir -p "$state_dir"
+if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+  exit 0
+fi
+# shellcheck disable=SC2016
+setsid sh -c '
+  echo "$$" >"$1"
+  PATH="${HOME}/.local/bin:${PATH}"
+  while true; do
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $(cswap switch --strategy best 2>&1)"
+    sleep 300
+  done
+' cswap-switch-loop "$pidfile" >>"$log" 2>&1 </dev/null &
+STARTER
+  if [ -n "${SUDO}" ]; then
+    $SUDO install -m 0755 "$tmp_svc" "$starter"
+    printf '%s\n' "$hook_line" | $SUDO tee /etc/profile.d/cswap-switch.sh >/dev/null
+    if ! grep -qs cswap-switch-service /etc/zsh/zprofile; then
+      printf '%s\n' "$hook_line" | $SUDO tee -a /etc/zsh/zprofile >/dev/null
+    fi
+  else
+    install -m 0755 "$tmp_svc" "$starter"
+    printf '%s\n' "$hook_line" >/etc/profile.d/cswap-switch.sh
+    if ! grep -qs cswap-switch-service /etc/zsh/zprofile; then
+      printf '%s\n' "$hook_line" >>/etc/zsh/zprofile
+    fi
+  fi
+  rm -f "$tmp_svc"
+  echo "🔁 cswap-switch service installed (starts on first login shell)"
+}
+install_cswap_switch_service
+
 # Install the `load-dotfiles` convenience command (same logic as `task setup:dotfiles`)
 if [ -f .devcontainer/scripts/setup-dotfiles.sh ]; then
   if [ -n "${SUDO}" ]; then
