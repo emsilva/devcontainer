@@ -238,6 +238,51 @@ else
   echo "📝 neovim already available"
 fi
 
+# Install ast-grep (structural code search; not packaged in noble) via npm, pinned
+if ! command -v ast-grep >/dev/null 2>&1; then
+  if command -v npm >/dev/null 2>&1; then
+    echo "🔍 Installing ast-grep (@ast-grep/cli)"
+    if npm install -g --no-fund --no-audit @ast-grep/cli@0.44.1; then
+      echo "  ✅ ast-grep installed"
+    else
+      echo "  ⚠ Failed to install ast-grep" >&2
+    fi
+  else
+    echo "  ⚠ npm not found; skipping ast-grep install" >&2
+  fi
+else
+  echo "🔍 ast-grep already available"
+fi
+
+# Install herdr (agent-herd orchestrator) via its installer (lands in ~/.local/bin)
+if ! command -v herdr >/dev/null 2>&1; then
+  echo "🐑 Installing herdr"
+  if curl -fsSL https://herdr.dev/install.sh | sh; then
+    echo "  ✅ herdr installed"
+  else
+    echo "  ⚠ Failed to install herdr" >&2
+  fi
+else
+  echo "🐑 herdr already available"
+fi
+
+# Install claude-swap (Claude Code multi-account rotation) as a uv tool, pinned.
+# The cswap-switch background service in post-start.sh depends on this.
+if ! command -v cswap >/dev/null 2>&1 && [ ! -x "${USER_HOME}/.local/bin/cswap" ]; then
+  if command -v uv >/dev/null 2>&1; then
+    echo "🔁 Installing claude-swap 0.19.0"
+    if uv tool install claude-swap==0.19.0; then
+      echo "  ✅ claude-swap installed"
+    else
+      echo "  ⚠ Failed to install claude-swap" >&2
+    fi
+  else
+    echo "  ⚠ uv not found; skipping claude-swap install" >&2
+  fi
+else
+  echo "🔁 claude-swap already available"
+fi
+
 # Install the `load-dotfiles` convenience command (same logic as `task setup:dotfiles`)
 if [ -f .devcontainer/scripts/setup-dotfiles.sh ]; then
   if [ -n "${SUDO}" ]; then
