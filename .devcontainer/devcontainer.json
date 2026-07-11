@@ -10,7 +10,7 @@
       "upgradePackages": true
     },
     "ghcr.io/rocker-org/devcontainer-features/apt-packages:1": {
-      "packages": "bat vim nano zoxide tmux tree tldr curl wget dnsutils net-tools iputils-ping httpie git git-lfs fd-find ripgrep jq yq postgresql-client default-mysql-client sqlite3 redis-tools htop ncdu shellcheck zsh-autosuggestions zsh-syntax-highlighting"
+      "packages": "bat vim nano zoxide tmux tree tldr curl wget dnsutils net-tools iputils-ping httpie git git-lfs git-delta fd-find ripgrep jq yq postgresql-client default-mysql-client sqlite3 redis-tools htop ncdu shellcheck zsh-autosuggestions zsh-syntax-highlighting"
     },
     "ghcr.io/devcontainers/features/aws-cli:1": {
       "version": "latest"
@@ -108,9 +108,7 @@
     "NPM_CONFIG_AUDIT": "false",
     "EDITOR": "code --wait",
     "PYTHONDONTWRITEBYTECODE": "1",
-    "PYTHONUNBUFFERED": "1",
-    "DEVCONTAINER_TZ": "${localEnv:DEVCONTAINER_TZ}",
-    "TZ": "${localEnv:DEVCONTAINER_TZ}"
+    "PYTHONUNBUFFERED": "1"
   },
   "remoteEnv": {
     "HOME": "/home/vscode",
