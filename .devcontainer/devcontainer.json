@@ -108,9 +108,7 @@
     "NPM_CONFIG_AUDIT": "false",
     "EDITOR": "code --wait",
     "PYTHONDONTWRITEBYTECODE": "1",
-    "PYTHONUNBUFFERED": "1",
-    "DEVCONTAINER_TZ": "${localEnv:DEVCONTAINER_TZ}",
-    "TZ": "${localEnv:DEVCONTAINER_TZ}"
+    "PYTHONUNBUFFERED": "1"
   },
   "remoteEnv": {
     "HOME": "/home/vscode",
