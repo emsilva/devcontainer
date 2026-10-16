@@ -24,12 +24,20 @@ class FakeGitHub:
         self.remote_branch = 'setup/devcontainer'
         self.api_dirty = False
         self.ssh_timeouts = []
+        self.fail_rebuild_once = False
+        self.container_generation = 100
+        self.identity_sequence = []
 
     def __call__(self, args, **kwargs):
         self.calls.append(args)
         output = ''
         if args[1:3] == ['codespace', 'create']:
             output = 'new-space\n'
+        elif args[1:3] == ['codespace', 'rebuild']:
+            if self.fail_rebuild_once:
+                self.fail_rebuild_once = False
+                return subprocess.CompletedProcess(args, 1, '', 'temporary rebuild API failure')
+            self.container_generation += 1
         elif args[1] == 'api':
             endpoint = args[2]
             if endpoint.endswith('/machines'):
@@ -51,6 +59,9 @@ class FakeGitHub:
                 output = self.remote_branch + '\n'
             elif args[-1].endswith('git status --porcelain --untracked-files=all'):
                 output = self.remote_dirty
+            elif '/proc/1/stat' in args[-1]:
+                generation = self.identity_sequence.pop(0) if self.identity_sequence else self.container_generation
+                output = f'11111111-1111-1111-1111-111111111111:{generation}'
             if 'git merge --ff-only' in args[-1]:
                 self.remote_sha = 'a' * 40
             if self.fail_personalization and args[-1].startswith('load-dotfiles '):
@@ -210,6 +221,35 @@ class CodespacesTests(unittest.TestCase):
                 return 'a' * 40
         self.assertEqual(self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
                          None, self.receipt, resume='new-space'), 'new-space')
+
+    def test_failed_rebuild_is_retried_even_after_git_already_advanced(self):
+        self.runner.remote_sha = 'b' * 40
+        self.runner.fail_rebuild_once = True
+        class Plan:
+            branch = 'setup/devcontainer'
+            def push(self):
+                return 'a' * 40
+        with self.assertRaisesRegex(ValueError, 'temporary rebuild API failure'):
+            self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+                            None, self.receipt, resume='new-space')
+        self.assertTrue(json.loads(self.receipt.read_text()).get('rebuild_pending'))
+        self.assertEqual(self.runner.remote_sha, 'a' * 40)
+        self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+                        None, self.receipt, resume='new-space')
+        self.assertEqual(sum(c[1:3] == ['codespace', 'rebuild'] for c in self.runner.calls), 2)
+        self.assertFalse(json.loads(self.receipt.read_text())['rebuild_pending'])
+
+    def test_rebuild_waits_for_new_container_when_api_still_says_available(self):
+        self.runner.remote_sha = 'b' * 40
+        self.runner.identity_sequence = [100, 100, 101]
+        class Plan:
+            branch = 'setup/devcontainer'
+            def push(self):
+                return 'a' * 40
+        with patch('devcontainer_setup.codespaces.time.sleep'):
+            self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+                            None, self.receipt, resume='new-space')
+        self.assertEqual(self.runner.identity_sequence, [])
 
     def test_resume_preserves_actual_remote_changes_even_when_api_says_clean(self):
         self.runner.remote_dirty = ' M source.py\n'

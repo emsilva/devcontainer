@@ -51,6 +51,24 @@ class Codespaces:
                 time.sleep(delay)
         raise AssertionError('SSH retry loop exhausted')
 
+    def _container_identity(self, name: str) -> str:
+        command = r'''printf '%s:%s\n' "$(cat /proc/sys/kernel/random/boot_id)" "$(awk '{sub(/^.*\) /, ""); print $20}' /proc/1/stat)"'''
+        result = self._read_ssh(name, command).splitlines()
+        identity = result[-1] if result else ''
+        if not re.fullmatch(r'[0-9a-f-]{36}:\d+', identity):
+            raise ValueError('Cannot identify the running codespace container; rebuild was not confirmed.')
+        return identity
+
+    def _wait_rebuilt(self, name: str, previous: str, timeout: float = 1200) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.wait(name, timeout=max(1, deadline - time.monotonic()))
+            if self._container_identity(name) != previous:
+                return
+            print(f'Waiting for the rebuilt container in {name}...', flush=True)
+            time.sleep(3)
+        raise ValueError('The old container is still running; resume to finish the pending rebuild.')
+
     def machines(self, repo: str, ref: str | None = None) -> list[dict]:
         self._repository(repo)
         args = ['api', f'repos/{repo}/codespaces/machines', '--method', 'GET']
@@ -147,8 +165,17 @@ class Codespaces:
             name = self.command(*args).splitlines()[-1]
             if not re.fullmatch(r'[A-Za-z0-9-]+', name):
                 raise ValueError('Creation did not return a codespace name. Check gh codespace list before retrying.')
-        self._save_receipt(receipt, {'codespace': name, 'repository': repo, 'branch': plan.branch,
-                                    'commit': sha, 'machine': machine, 'client': client})
+        record = {'codespace': name, 'repository': repo, 'branch': plan.branch,
+                  'commit': sha, 'machine': machine, 'client': client, 'rebuild_pending': False}
+        if resume and receipt.exists():
+            try:
+                previous = json.loads(receipt.read_text())
+            except (ValueError, OSError) as error:
+                raise ValueError(f'Cannot read launch receipt {receipt}; preserve it before retrying.') from error
+            if (previous.get('codespace') == name and previous.get('repository') == repo
+                    and previous.get('branch') == plan.branch):
+                record['rebuild_pending'] = bool(previous.get('rebuild_pending'))
+        self._save_receipt(receipt, record)
         try:
             if resume and data.get('state') in {'Shutdown', 'ShutDown'}:
                 self.command('api', f'user/codespaces/{name}/start', '--method', 'POST')
@@ -163,17 +190,27 @@ class Codespaces:
             revision_command = f'cd {shlex.quote(folder)} && git rev-parse HEAD'
             current = self._read_ssh(name, revision_command)
             if resume and current != sha:
+                # Arm before changing checkout HEAD so an interrupted rebuild
+                # cannot be mistaken for an already up-to-date environment.
+                record['rebuild_pending'] = True
+                self._save_receipt(receipt, record)
                 # A fast-forward is the only permitted update; divergence fails closed.
-                command = (f'cd {shlex.quote(folder)} && test -z "$(git status --porcelain)" && '
+                command = (f'cd {shlex.quote(folder)} && '
+                           f'test "$(git branch --show-current)" = {shlex.quote(plan.branch)} && '
+                           f'test -z "$(git status --porcelain)" && '
                            f'git fetch origin {shlex.quote(plan.branch)} && '
                            f'git merge-base --is-ancestor HEAD {shlex.quote(sha)} && git merge --ff-only {shlex.quote(sha)}')
                 self.command('codespace', 'ssh', '--codespace', name, '--', command)
+            if resume and record['rebuild_pending']:
+                previous_container = self._container_identity(name)
                 self.command('codespace', 'rebuild', '--codespace', name)
-                self.wait(name)
+                self._wait_rebuilt(name, previous_container)
                 current = self._read_ssh(name, revision_command)
             if current != sha:
                 raise ValueError('The codespace is not at the reviewed commit; inspect its Git state before resuming.')
             self._read_ssh(name, f'cd {shlex.quote(folder)} && bash .devcontainer/scripts/validate-selected.sh')
+            record['rebuild_pending'] = False
+            self._save_receipt(receipt, record)
             if dotfiles_repo:
                 self.personalize(name, dotfiles_repo)
             self.open(name, client)
