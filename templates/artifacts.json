@@ -14,11 +14,24 @@
     "version": "sha256-pinned-2026-10-16",
     "amd64": {
       "url": "https://tunnelsassetsprod.blob.core.windows.net/cli/linux-x64-devtunnel",
-      "sha256": "bdf8c7e80f1704fd11d06a845f9fe27bc470b5993ca9d4c99908b1855d893fbb"
+      "sha256": "723d6aebdc226064aef321258fb17c8a2770c9cc2bd05004c0fb83e72b302c3f"
     },
     "arm64": {
       "url": "https://tunnelsassetsprod.blob.core.windows.net/cli/linux-arm64-devtunnel",
-      "sha256": "1ed375a7c7c10ea7041c74994fdddaeb15dc068e2f75f3c88137457ddc688eee"
+      "sha256": "b537f270a55d57f23b7621cec0b09806aa9ada119713b33e9255284179b76bde"
+    }
+  },
+  "bun": {
+    "version": "1.4.3",
+    "amd64": {
+      "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-linux-x64.zip",
+      "sha256": "3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18",
+      "member": "bun-linux-x64/bun"
+    },
+    "arm64": {
+      "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-linux-aarch64.zip",
+      "sha256": "efa9813da5ed72423bf847f916e8d2c47c0d776add972354026a75e10da9aa21",
+      "member": "bun-linux-aarch64/bun"
     }
   }
 }

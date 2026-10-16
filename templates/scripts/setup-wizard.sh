@@ -15,5 +15,7 @@ if [ ! -f "$runner" ]; then
   if [ ! -d "$cache_root/$revision" ]; then
     mv "$staging/release" "$cache_root/$revision"
   fi
+  rm -rf "$staging"
+  trap - EXIT
 fi
 exec bash "$runner" --project "$PWD" "$@"

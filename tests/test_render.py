@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import tarfile
 import shutil
 from pathlib import Path
 import tempfile
@@ -175,6 +178,56 @@ class RenderTests(unittest.TestCase):
         config['features'][PYTHON]['version'] = '3.9'
         (self.project / '.devcontainer/devcontainer.json').write_text(json.dumps(config))
         self.assertTrue(any('features' in error for error in validate(self.project)))
+
+    def test_removing_managed_command_stops_update(self):
+        files = self.render()
+        self.install(files)
+        config = self.config(files)
+        config['postCreateCommand'] = {'project': 'echo mine'}
+        (self.project / '.devcontainer/devcontainer.json').write_text(json.dumps(config))
+        with self.assertRaisesRegex(ValueError, 'command'):
+            self.render()
+
+    def test_directory_at_generated_file_path_is_actionable(self):
+        (self.project / '.devcontainer/scripts/validate-selected.sh').mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, 'file|directory'):
+            self.render()
+
+    def test_cached_launcher_runs_pinned_runner_and_cleans_staging(self):
+        self.install(self.render())
+        upstream = self.project / 'upstream/scripts'
+        upstream.mkdir(parents=True)
+        (upstream / 'setup.sh').write_text('printf "%s\\n" "$@"\n')
+        archive = self.project / 'upstream.tar.gz'
+        with tarfile.open(archive, 'w:gz') as bundle:
+            bundle.add(upstream.parent, arcname='release')
+        fake_bin = self.project / 'bin'
+        fake_bin.mkdir()
+        curl = fake_bin / 'curl'
+        curl.write_text('#!/usr/bin/env bash\nwhile [ "$1" != "-o" ]; do shift; done\ncp "$TEST_ARCHIVE" "$2"\n')
+        curl.chmod(0o755)
+        cache = self.project / 'cache'
+        result = subprocess.run(['bash', '.devcontainer/scripts/setup-wizard.sh', '--check'],
+                                cwd=self.project, text=True, capture_output=True,
+                                env=dict(os.environ, XDG_CACHE_HOME=str(cache), TEST_ARCHIVE=str(archive),
+                                         PATH=str(fake_bin)+os.pathsep+os.environ['PATH']))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['--project', str(self.project.resolve()), '--check'])
+        self.assertTrue((cache / 'devcontainer-setup/releases' / REF / 'scripts/setup.sh').is_file())
+        self.assertFalse(list((cache / 'devcontainer-setup/releases').glob('.download.*')))
+
+    def test_detected_optional_managers_build_before_features(self):
+        for family, manager in [('python', 'poetry'), ('python', 'pipenv'), ('node', 'bun')]:
+            with self.subTest(manager=manager):
+                files = self.render(package_managers={family: manager})
+                dockerfile = files['.devcontainer/Dockerfile'].decode()
+                if family == 'python':
+                    self.assertIn('apt-get install -y --no-install-recommends python3 python3-venv', dockerfile)
+                    self.assertIn(manager + '==', dockerfile)
+                else:
+                    self.assertIn('sha256sum -c', dockerfile)
+                    self.assertIn('bun-linux-', dockerfile)
+                self.assertIn(manager, files['.devcontainer/scripts/validate-selected.sh'].decode())
 
     def test_source_ref_must_be_immutable(self):
         from devcontainer_setup.render import render

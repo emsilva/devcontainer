@@ -62,6 +62,8 @@ def _safe_path(project, relative):
         target = target / part
         if target.is_symlink():
             raise ValueError(f'Unsafe symlink at {relative}')
+    if target.exists() and not target.is_file():
+        raise ValueError(f'Expected managed file but found directory: {relative}')
     return target
 
 
@@ -85,7 +87,7 @@ def _selections(values):
     for family, manager in selected['package_managers'].items():
         if family not in RUNTIMES or not isinstance(manager, str):
             raise ValueError('Package managers must map runtime families to names')
-        supported = {'node': {'npm', 'pnpm', 'yarn'}, 'python': {'uv', 'pip', 'poetry'},
+        supported = {'node': {'npm', 'pnpm', 'yarn', 'bun'}, 'python': {'uv', 'pip', 'poetry', 'pipenv'},
                      'ruby': {'bundler'}, 'go': {'go'}, 'rust': {'cargo'}}
         if manager not in supported[family]:
             raise ValueError(f'Unsupported package manager: {family}/{manager}')
@@ -111,7 +113,7 @@ def _merge_config(current, previous, desired, path=()):
             result = {NAMESPACE: result}
         if isinstance(current, dict):
             # Only the reserved generator command remains protected.
-            if NAMESPACE in current and current.get(NAMESPACE) != previous.get(NAMESPACE):
+            if current.get(NAMESPACE) != previous.get(NAMESPACE):
                 raise ValueError(f'Modified managed command: {path[0]}.{NAMESPACE}')
             result.update({key: value for key, value in current.items() if key != NAMESPACE})
         else:
@@ -142,10 +144,12 @@ def _merge_config(current, previous, desired, path=()):
 
 
 def _install_artifact(name, artifact):
-    cases = ' '.join(f'{arch}) url="{artifact[arch]["url"]}"; checksum="{artifact[arch]["sha256"]}" ;;'
+    cases = ' '.join(f'{arch}) url="{artifact[arch]["url"]}"; checksum="{artifact[arch]["sha256"]}"; member="{artifact[arch].get("member", "")}" ;;'
                      for arch in ('amd64', 'arm64'))
     extraction = (f'tar -xzf /tmp/{name}.download -C /usr/local/bin {name}' if name == 'chezmoi'
                   else f'install -m 0755 /tmp/{name}.download /usr/local/bin/{name}')
+    if name == 'bun':
+        extraction = 'unzip -p /tmp/bun.download "$member" > /usr/local/bin/bun; chmod 0755 /usr/local/bin/bun; ln -s /usr/local/bin/bun /usr/local/bin/bunx'
     return (f'RUN set -eu; case "$(dpkg --print-architecture)" in {cases} '
             f'*) echo "Unsupported architecture for {name}" >&2; exit 1 ;; esac; \\\n'
             f'    curl --fail --location --silent --show-error "$url" -o /tmp/{name}.download; \\\n'
@@ -240,9 +244,7 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
         commands.extend(tool_commands[tool])
     if selected['agents'] or selected['polyglot']:
         commands.extend(['claude', 'codex'])
-    manager = selected['package_managers'].get('node')
-    if manager:
-        commands.append(manager)
+    commands.extend(selected['package_managers'].values())
     if selected['dotfiles']:
         commands.extend(['chezmoi', 'load-dotfiles'])
     replacements = {'__SOURCE_REF__': source_ref, '__TOOLS__': ' '.join(dict.fromkeys(commands)),
@@ -263,10 +265,19 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
         installs.append('COPY scripts/apply-dotfiles.sh /usr/local/bin/load-dotfiles\nRUN chmod 0755 /usr/local/bin/load-dotfiles')
     if 'devtunnel' in selected['tools']:
         installs.append(_install_artifact('devtunnel', artifacts['devtunnel']))
+    python_tools = {}
     if 'precommit' in selected['tools']:
-        installs.append('RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \\\n    && python3 -m venv /opt/pre-commit \\\n    && /opt/pre-commit/bin/pip install --no-cache-dir pre-commit==4.7.0 \\\n    && ln -s /opt/pre-commit/bin/pre-commit /usr/local/bin/pre-commit \\\n    && rm -rf /var/lib/apt/lists/*')
-    if selected['package_managers'].get('python') == 'poetry':
-        raise ValueError('Poetry installation is not supported yet; choose uv or pip')
+        python_tools['pre-commit'] = '4.7.0'
+    manager = selected['package_managers'].get('python')
+    if manager in ('poetry', 'pipenv'):
+        python_tools[manager] = {'poetry': '2.5.1', 'pipenv': '2026.9.1'}[manager]
+    if python_tools:
+        installs.append('RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv && rm -rf /var/lib/apt/lists/*')
+        for package, version in python_tools.items():
+            installs.append(f'RUN python3 -m venv /opt/{package} && /opt/{package}/bin/pip install --no-cache-dir {package}=={version} && ln -s /opt/{package}/bin/{package} /usr/local/bin/{package}')
+    if selected['package_managers'].get('node') == 'bun':
+        installs.append('RUN apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/*')
+        installs.append(_install_artifact('bun', artifacts['bun']))
     if installs:
         dockerfile = (templates / 'Dockerfile').read_text().replace('__BASE_IMAGE__', canonical['image']).replace('__INSTALLS__', '\n'.join(installs))
         files['.devcontainer/Dockerfile'] = dockerfile.encode()
@@ -369,7 +380,8 @@ def validate(project: Path) -> list[str]:
                 errors.append(f'Missing managed script registration: {required_file}')
         if selected['dotfiles'] and not (project / '.devcontainer/scripts/apply-dotfiles.sh').is_file():
             errors.append('Missing dotfiles helper')
-        if selected['dotfiles'] or set(selected['tools']) & {'devtunnel', 'precommit'}:
+        if (selected['dotfiles'] or set(selected['tools']) & {'devtunnel', 'precommit'}
+                or set(selected['package_managers'].values()) & {'poetry', 'pipenv', 'bun'}):
             if not (project / '.devcontainer/Dockerfile').is_file() or config.get('build', {}).get('dockerfile') != 'Dockerfile':
                 errors.append('Missing selected build-time installation Dockerfile')
         actual = copy.deepcopy(config)
