@@ -6,12 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-try:
-    from devcontainer_setup.preferences import config_path, load_preferences, save_preferences
-except ImportError:
-    config_path = lambda env=None: None
-    load_preferences = lambda env=None: {}
-    save_preferences = lambda values, env=None: None
+from devcontainer_setup.preferences import config_path, load_preferences, save_preferences
 
 
 class PreferencesTests(unittest.TestCase):
@@ -72,6 +67,13 @@ class PreferencesTests(unittest.TestCase):
     def test_environ_is_used_when_not_explicitly_supplied(self):
         with patch.dict(os.environ, self.env, clear=True):
             self.assertEqual(config_path(), config_path(self.env))
+
+    def test_invalid_utf8_receives_config_location(self):
+        path = config_path(self.env)
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b'\xff')
+        with self.assertRaisesRegex(ValueError, 'config.json'):
+            load_preferences(self.env)
 
 
 if __name__ == '__main__':

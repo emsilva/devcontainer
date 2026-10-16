@@ -9,7 +9,7 @@ import tomllib
 
 RUNTIMES = ('python', 'node', 'ruby', 'go', 'rust')
 TOOLS = ('azure', 'aws', 'gcp', 'docker', 'devtunnel', 'precommit', 'kubernetes')
-DISCOUNTED = {'vendor', 'vendors', 'generated', 'examples', 'example', 'fixtures', 'fixture', 'testdata', 'node_modules', '.venv', 'venv', '.bundle', 'target', 'dist', 'build', '__pycache__', '.devcontainer', '.git'}
+DISCOUNTED = {'vendor', 'vendors', 'generated', 'examples', 'example', 'fixtures', 'fixture', 'testdata', 'docs', 'node_modules', '.venv', 'venv', '.bundle', 'target', 'dist', 'build', '__pycache__', '.devcontainer', '.git'}
 MAX_FILE_BYTES = 512 * 1024
 
 
@@ -22,6 +22,8 @@ def _compatible(version: str, declaration: str) -> bool:
     """Compare common numeric pins and constraints; unknown syntax needs review."""
     candidate = _version(version)
     for alternative in declaration.split('||'):
+        if re.sub(r'(>=|<=|==|!=|~=|\^|~|>|<|=)?\s*v?\d+(?:\.(?:\d+|[xX*]))*|[,\s]', '', alternative):
+            continue
         terms = re.findall(r'(>=|<=|==|!=|~=|\^|~|>|<|=)?\s*v?(\d+(?:\.(?:\d+|[xX*]))*)', alternative)
         if not terms:
             continue
@@ -77,6 +79,7 @@ def scan(project: Path) -> dict:
     sources = {name: [] for name in RUNTIMES}
     managers: dict[str, dict[str, list[str]]] = {}
     ports = set()
+    command_managers: dict[str, list[str]] = {}
 
     def runtime(name, path, reason, version=None, priority=2):
         row = found['runtimes'][name]
@@ -103,10 +106,11 @@ def scan(project: Path) -> dict:
         if any(part.is_symlink() for part in (full, *full.parents)):
             continue
         base = path.name
+        container_file = base.startswith('Dockerfile') or bool(re.fullmatch(r'(?:docker-compose|compose)(?:[.-][\w-]+)?\.ya?ml', base))
         suffix_runtime = {'.py': 'python', '.rb': 'ruby', '.go': 'go', '.js': 'node', '.jsx': 'node', '.ts': 'node', '.tsx': 'node', '.rs': 'rust'}.get(path.suffix)
         if suffix_runtime:
             sources[suffix_runtime].append(relative)
-        relevant = (base in {'package.json', 'pyproject.toml', 'Pipfile', 'Gemfile', 'Gemfile.lock', 'go.mod', 'go.work', 'go.sum', 'Cargo.toml', 'Cargo.lock', '.python-version', '.ruby-version', '.node-version', '.nvmrc', '.tool-versions', '.gitignore', '.pre-commit-config.yaml', '.pre-commit-config.yml', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb', 'uv.lock', 'poetry.lock', 'Pipfile.lock'} or base.startswith(('requirements', 'Dockerfile', 'Taskfile', 'docker-compose', 'compose.')) or base.endswith('.gemspec') or path.suffix in {'.sh', '.bash'} or relative.startswith('.github/workflows/'))
+        relevant = (base in {'package.json', 'pyproject.toml', 'Pipfile', 'Gemfile', 'Gemfile.lock', 'go.mod', 'go.work', 'go.sum', 'Cargo.toml', 'Cargo.lock', '.python-version', '.ruby-version', '.node-version', '.nvmrc', '.tool-versions', '.gitignore', '.pre-commit-config.yaml', '.pre-commit-config.yml', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb', 'uv.lock', 'poetry.lock', 'Pipfile.lock'} or base.startswith(('requirements', 'Dockerfile', 'Taskfile')) or container_file or base.endswith('.gemspec') or path.suffix in {'.sh', '.bash'} or relative.startswith('.github/workflows/'))
         if not relevant:
             continue
         try:
@@ -149,7 +153,7 @@ def scan(project: Path) -> dict:
             elif base in {'go.mod', 'go.work', 'go.sum'}:
                 match = re.search(r'^go\s+([\d.]+)', text, re.M)
                 runtime('go', relative, 'Go module/workspace', match[1] if match else None)
-            elif base in {'Gemfile', 'Gemfile.lock'} or base.endswith('.gemspec'):
+            elif base in {'Gemfile', 'Gemfile.lock'} or container_file or base.endswith('.gemspec'):
                 match = re.search(r'\bruby\s+[\'"]([^\'"]+)', text)
                 runtime('ruby', relative, 'Ruby manifest/lock', match[1] if match else None)
                 manager('ruby', 'bundler', relative)
@@ -172,10 +176,16 @@ def scan(project: Path) -> dict:
             found['warnings'].append(f'{relative}: malformed manifest ({error})')
             continue
 
-        workflow = base.startswith(('Taskfile', 'Dockerfile', 'docker-compose', 'compose.')) or path.suffix in {'.sh', '.bash'} or relative.startswith('.github/workflows/') or base == 'package.json'
+        workflow = base.startswith('Taskfile') or container_file or path.suffix in {'.sh', '.bash'} or relative.startswith('.github/workflows/') or base == 'package.json'
         if not workflow:
             continue
         active = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith(('#', 'desc:', 'description:')))
+        commands = {'python': r'python(?:3(?:\.\d+)?)?\s+(?:-m|[\w./-]+\.py)', 'node': r'(?:node\s+[\w./-]+|(?:npm|pnpm|yarn|bun)\s+(?:run|install|ci|build|test|dev|start))', 'ruby': r'(?:ruby\s+[\w./-]+\.rb|bundle\s+(?:exec|install)|rails\s+\w+)', 'go': r'go\s+(?:build|test|run|mod|generate)\b', 'rust': r'cargo\s+(?:build|test|run|check|clippy)\b'}
+        for name, pattern in commands.items():
+            if re.search(r'(?:^|[\s;&|(\"\'])' + pattern, active, re.M):
+                runtime(name, relative, f'{name} build/run command')
+        for match in re.finditer(r'(?:^|[\s;&|(\"\'])(npm|pnpm|yarn|bun)\s+(?:run|install|ci|build|test|dev|start)\b', active, re.M):
+            command_managers.setdefault(match[1], []).append(f'{relative}: {match[1]} workflow command')
         # CI setup actions and Docker image tags are declarative runtime evidence.
         for name, key in [('node', 'node'), ('python', 'python'), ('ruby', 'ruby'), ('go', 'go'), ('rust', 'rust')]:
             for match in re.finditer(rf'\b{key}-version:\s*[\'"]?([^\s\'"#]+)', active):
@@ -191,7 +201,7 @@ def scan(project: Path) -> dict:
         patterns = {'azure': r'(?:^|[\s;&|("\'])az\s+[a-z]|uses:\s*azure/', 'aws': r'(?:^|[\s;&|("\'])aws\s+[a-z]|uses:\s*aws-actions/', 'gcp': r'(?:^|[\s;&|("\'])gcloud\s+[a-z]|uses:\s*google-github-actions/', 'docker': r'(?:^|[\s;&|("\'])docker(?:-compose)?\s+[a-z]|uses:\s*docker/', 'devtunnel': r'(?:^|[\s;&|("\'])devtunnel\s+[a-z]', 'precommit': r'(?:^|[\s;&|("\'])pre-commit\s+[a-z]', 'kubernetes': r'(?:^|[\s;&|("\'])kubectl\s+[a-z]'}
         for name, pattern in patterns.items():
             if re.search(pattern, active, re.M): tool(name, relative, 'declared workflow command/action')
-        if base.startswith(('Dockerfile', 'docker-compose', 'compose.')): tool('docker', relative, 'container workflow')
+        if container_file: tool('docker', relative, 'container workflow')
         for pattern in (r'^\s*EXPOSE\s+(\d+)', r'\blsof\b[^\n]*?\btcp:(\d+)', r'(?<![\w-])(?:[A-Z_]*PORT)\s*[:=]\s*[\'"]?(\d+)', r'--port(?:=|\s+)(\d+)'):
             for value in re.findall(pattern, active, re.M):
                 port = int(value)
@@ -203,6 +213,8 @@ def scan(project: Path) -> dict:
         version, conflicts = _choose(declarations[name], '3.13' if name == 'python' else None)
         found['runtimes'][name]['version'] = version
         found['runtimes'][name]['conflicts'] = conflicts
+    if 'node' not in managers and command_managers:
+        managers['node'] = command_managers
     for family, choices in managers.items():
         found['package_managers'][family] = {'selected': next(iter(choices)) if len(choices) == 1 else None, 'evidence': [item for values in choices.values() for item in values], 'conflicts': [f'{family}: conflicting package managers: {", ".join(sorted(choices))}'] if len(choices) > 1 else []}
     found['ports'] = sorted(ports)

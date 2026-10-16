@@ -4,10 +4,7 @@ import subprocess
 import tempfile
 import unittest
 
-try:
-    from devcontainer_setup.discovery import scan
-except ImportError:
-    scan = lambda project: {}
+from devcontainer_setup.discovery import scan
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -105,6 +102,31 @@ class DiscoveryTests(unittest.TestCase):
         found = scan(self.root)
         self.assertTrue(found['warnings'])
         self.assertFalse(any(value['selected'] for value in found['tools'].values()))
+
+    def test_compose_source_files_and_docs_do_not_recommend_tools(self):
+        self.put('server/compose.ts', 'export const compose = () => 1')
+        self.put('docs/example.sh', 'az login\n')
+        found = scan(self.root)
+        self.assertFalse(found['tools']['docker']['selected'])
+        self.assertFalse(found['tools']['azure']['selected'])
+
+    def test_workflow_commands_and_ci_setup_without_version(self):
+        self.put('Taskfile.yml', 'cmds:\n - go test ./...\n - ruby app.rb\n - cargo build\n - python3 -m pytest\n - npm run build\n')
+        found = scan(self.root)
+        for name in ('go', 'ruby', 'rust', 'node'):
+            self.assertTrue(found['runtimes'][name]['selected'], name)
+        self.assertEqual(found['package_managers']['node']['selected'], 'npm')
+        self.assertEqual(found['runtimes']['python']['version'], '3.13')
+
+    def test_unsupported_version_expression_requires_review(self):
+        self.put('package.json', '{"engines":{"node":">=20 bananas"}}')
+        found = scan(self.root)
+        self.assertIsNone(found['runtimes']['node']['version'])
+        self.assertTrue(found['runtimes']['node']['conflicts'])
+
+    def test_missing_pyproject_constraint_keeps_python_baseline(self):
+        self.put('pyproject.toml', '[project]\nname="hello"\nversion="99.0"\n')
+        self.assertEqual(scan(self.root)['runtimes']['python']['version'], '3.13')
 
 
 if __name__ == '__main__':

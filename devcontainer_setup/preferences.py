@@ -45,6 +45,8 @@ def load_preferences(env: Mapping | None = None) -> dict:
         content = path.read_text(encoding='utf-8')
     except FileNotFoundError:
         return DEFAULTS.copy()
+    except UnicodeError as error:
+        raise ValueError(f'Invalid preferences at {path}: {error}. Repair this file before saving preferences.') from error
     try:
         values = json.loads(content)
     except (ValueError, UnicodeError) as error:
