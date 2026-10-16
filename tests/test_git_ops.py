@@ -40,6 +40,42 @@ class GitPlanTests(unittest.TestCase):
             GitPlan(self.root, self.files)
         self.assertFalse((self.root / '.devcontainer').exists())
 
+    def test_unrelated_changes_staged_after_apply_are_preserved_and_refused(self):
+        head = git(self.root, 'rev-parse', 'HEAD')
+        plan = GitPlan(self.root, self.files)
+        plan.apply()
+        (self.root / 'app.txt').write_text('owner staged edit\n')
+        git(self.root, 'add', 'app.txt')
+        (self.root / 'app.txt').write_text('owner unstaged edit\n')
+        index = git(self.root, 'write-tree')
+
+        with self.assertRaises(ReviewChanged):
+            plan.commit()
+
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(git(self.root, 'write-tree'), index)
+        self.assertEqual(git(self.root, 'show', ':app.txt'), 'owner staged edit')
+        self.assertEqual((self.root / 'app.txt').read_text(), 'owner unstaged edit\n')
+
+    def test_generated_path_index_must_match_reviewed_worktree(self):
+        head = git(self.root, 'rev-parse', 'HEAD')
+        plan = GitPlan(self.root, self.files)
+        plan.apply()
+        name = '.devcontainer/devcontainer.json'
+        target = self.root / name
+        target.write_bytes(b'{"name":"Unreviewed"}\n')
+        git(self.root, 'add', name)
+        target.write_bytes(self.files[name])
+        index = git(self.root, 'write-tree')
+
+        with self.assertRaises(ReviewChanged):
+            plan.commit()
+
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(git(self.root, 'write-tree'), index)
+        self.assertEqual(git(self.root, 'show', f':{name}'), '{"name":"Unreviewed"}')
+        self.assertEqual(target.read_bytes(), self.files[name])
+
     def test_reviewed_path_changed_during_review_is_not_overwritten(self):
         plan = GitPlan(self.root, self.files)
         target = self.root / '.devcontainer/devcontainer.json'

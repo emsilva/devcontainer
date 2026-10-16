@@ -83,6 +83,7 @@ class GitPlan:
             self.original[name] = path.read_bytes() if path.exists() else None
         self.changed = [name for name, data in self.files.items() if self.original[name] != data]
         self.applied = False
+        self.reviewed_tree: str | None = None
 
     def _safe_path(self, name: str) -> None:
         path = PurePosixPath(name)
@@ -134,8 +135,32 @@ class GitPlan:
             finally:
                 if os.path.exists(staged):
                     os.unlink(staged)
+        self.reviewed_tree = self._build_reviewed_tree()
         git(self.project, 'add', '--', *self.changed)
         self.applied = True
+
+    def _build_reviewed_tree(self) -> str:
+        # The shared index is mutable user state, never the source of approval.
+        with tempfile.TemporaryDirectory(prefix='devcontainer-index-') as temporary:
+            env = dict(os.environ, GIT_INDEX_FILE=str(Path(temporary) / 'index'))
+
+            def index_git(*args: str, data: bytes | None = None) -> str:
+                result = subprocess.run(['git', '-C', str(self.project), *args],
+                                        input=data, env=env, capture_output=True)
+                if result.returncode:
+                    raise ValueError(result.stderr.decode().strip() or 'Git command failed')
+                return result.stdout.decode().strip()
+
+            index_git('read-tree', self.head or '--empty')
+            filemode = git(self.project, 'config', '--bool', 'core.filemode', check=False) != 'false'
+            for name in self.changed:
+                original = index_git('ls-files', '--stage', '--', name)
+                mode = '100755' if (self.project / name).stat().st_mode & 0o100 else '100644'
+                if original and not filemode:
+                    mode = original.split()[0]
+                blob = index_git('hash-object', '-w', '--path', name, '--stdin', data=self.files[name])
+                index_git('update-index', '--add', '--cacheinfo', mode, blob, name)
+            return index_git('write-tree')
 
     def _review_changed(self, tree: str) -> bool:
         if git(self.project, 'write-tree') != tree:
@@ -156,6 +181,7 @@ class GitPlan:
         for name in self.changed:
             self._safe_path(name)
             self.files[name] = (self.project / name).read_bytes()
+        self.reviewed_tree = self._build_reviewed_tree()
         git(self.project, 'add', '--', *self.changed)
 
     def commit(self) -> str:
@@ -163,7 +189,9 @@ class GitPlan:
             return self.head
         if not self.applied:
             raise ValueError('Apply the confirmed candidate before committing.')
-        tree = git(self.project, 'write-tree')
+        tree = self.reviewed_tree
+        if tree is None:
+            raise ValueError('Apply the confirmed candidate before committing.')
         if self._review_changed(tree):
             raise ReviewChanged('Reviewed files changed before commit; review them again.')
         hooks = Path(git(self.project, 'rev-parse', '--path-format=absolute', '--git-path', 'hooks'))
