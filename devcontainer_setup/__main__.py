@@ -301,7 +301,9 @@ def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume
         return None
     repo = _repository(project)
     try:
-        machines = api.machines(repo, git(project, 'branch', '--show-current'))
+        # Before approval the local branch/configuration may not exist on GitHub.
+        # Offer repository machines now; launch rechecks the committed, pushed SHA.
+        machines = api.machines(repo)
         if not machines:
             raise ValueError('No available Codespaces machines for this repository/account.')
     except ValueError as error:

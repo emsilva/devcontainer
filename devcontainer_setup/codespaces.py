@@ -30,14 +30,11 @@ class Codespaces:
                 raise ValueError('GitHub returned an invalid response.') from error
         return result.stdout.strip()
 
-    def machines(self, repo: str, ref: str | None = None,
-                 config: str | None = None) -> list[dict]:
+    def machines(self, repo: str, ref: str | None = None) -> list[dict]:
         self._repository(repo)
         args = ['api', f'repos/{repo}/codespaces/machines', '--method', 'GET']
         if ref:
             args += ['-f', f'ref={ref}']
-        if config:
-            args += ['-f', f'devcontainer_path={config}']
         data = self.command(*args, json_output=True)
         return data.get('machines', [])
 
@@ -116,7 +113,7 @@ class Codespaces:
             if data.get('git_status', {}).get('has_uncommitted_changes') or data.get('git_status', {}).get('has_unpushed_changes'):
                 raise ValueError('The existing codespace has user changes. Preserve them before reuse.')
         else:
-            available = self.machines(repo, plan.branch, '.devcontainer/devcontainer.json')
+            available = self.machines(repo, sha)
             if machine not in {entry['name'] for entry in available}:
                 raise ValueError(f'Selected machine {machine} is unavailable for the pushed configuration; '
                                  'setup is committed and pushed. Rerun to choose an available machine.')

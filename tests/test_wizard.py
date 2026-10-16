@@ -32,6 +32,46 @@ class WizardCliTests(unittest.TestCase):
         return subprocess.run([sys.executable, '-m', 'devcontainer_setup', '--project', str(self.root), *args],
                               cwd=SOURCE, env=self.env, capture_output=True, text=True)
 
+    def test_launch_choices_work_before_local_branch_is_published(self):
+        from devcontainer_setup.__main__ import _launch_options
+        from devcontainer_setup.codespaces import Codespaces
+        self.git('switch', '-c', 'docs/local-only')
+        self.git('remote', 'add', 'origin', 'https://github.com/owner/project.git')
+        before = self.git('rev-parse', 'HEAD')
+        calls = []
+
+        def github(args, **kwargs):
+            calls.append(args)
+            if args[1] != 'api':
+                self.fail(f'Machine selection must not push or allocate: {args}')
+            if args[2].endswith('/machines'):
+                if any(arg.startswith('ref=') for arg in args):
+                    return subprocess.CompletedProcess(args, 1, '', "The 'ref' provided was invalid (HTTP 400)")
+                payload = {'machines': [{'name': 'standardLinux32gb', 'cpus': 4,
+                            'memory_in_bytes': 16 * 1024**3, 'storage_in_bytes': 32 * 1024**3}]}
+            else:
+                self.assertEqual(args[2], 'user/codespaces?per_page=100')
+                payload = [{'codespaces': []}]
+            return subprocess.CompletedProcess(args, 0, json.dumps(payload), '')
+
+        case = self
+        class UI:
+            def choose(self, title, options, selected=None):
+                return 'Commit, push and open in browser' if title == 'After setup' else selected or options[0]
+
+            def confirm(self, title, default=True):
+                case.assertNotEqual(title, 'Continue with commit only?',
+                                    'Unpublished branches must still offer Codespaces launch')
+                return default
+
+        options = _launch_options(UI(), Codespaces(run=github), self.root, 'docs/local-only', None)
+        self.assertEqual(options['machine'], 'standardLinux32gb')
+        self.assertEqual(options['client'], 'browser')
+        self.assertEqual(options['idle_timeout'], '30m')
+        self.assertFalse(any(arg.startswith('ref=') for call in calls for arg in call))
+        self.assertEqual(self.git('rev-parse', 'HEAD'), before)
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
     def test_existing_taskfile_variants_keep_real_task_operations(self):
         import shutil
         from devcontainer_setup.__main__ import integrate_taskfile
