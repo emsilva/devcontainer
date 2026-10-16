@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import tomllib
 
@@ -39,8 +40,16 @@ def _compatible(version: str, declaration: str) -> bool:
             elif op == '>': okay = a > b
             elif op == '<': okay = a < b
             elif op == '!=': okay = candidate[:len(expected)] != expected
-            elif op == '^': okay = a >= b and candidate[:1] == expected[:1]
-            else: okay = a >= b and candidate[:max(1, len(expected) - 1)] == expected[:max(1, len(expected) - 1)]
+            else:
+                if op == '^':
+                    index = next((i for i, part in enumerate(expected) if part), len(expected) - 1)
+                elif op == '~':
+                    index = min(1, len(expected) - 1)
+                else:  # Python ~= keeps every specified component except the last.
+                    index = max(0, len(expected) - 2)
+                upper = expected[:index] + (expected[index] + 1,)
+                padded_upper = upper + (0,) * max(0, len(candidate) - len(upper))
+                okay = a >= b and a < padded_upper
             valid = valid and okay
         if valid:
             return True
@@ -56,12 +65,48 @@ def _choose(declarations: list[tuple[int, str, str]], baseline: str | None) -> t
         for match in re.finditer(r'(?<![\d.])v?(\d+(?:\.\d+)*)', declaration):
             if match.group(1) not in candidates:
                 candidates.append(match.group(1))
+    # Strict lower bounds and excluded numeric pins need interior candidates.
+    # Try numeric successors after literal candidates, preserving explicit pins.
+    for literal in candidates.copy():
+        parts = _version(literal)
+        for index in range(len(parts) - 1, -1, -1):
+            successor = '.'.join(map(str, parts[:index] + (parts[index] + 1,)))
+            if successor not in candidates:
+                candidates.append(successor)
     if baseline and baseline not in candidates:
         candidates.append(baseline)
     for candidate in candidates:
         if all(_compatible(candidate, value) for _, value, _ in declarations):
             return candidate, []
     return None, [f'{path}: {value}' for _, value, path in ordered]
+
+
+def _without_printed_help(text: str) -> str:
+    """Exclude echo/printf payloads while retaining following shell commands."""
+    lines = []
+    for line in text.splitlines():
+        if line.lstrip().startswith(('#', 'desc:', 'description:')):
+            continue
+        try:
+            lexer = shlex.shlex(line, posix=False, punctuation_chars=';&|')
+            lexer.whitespace_split = True
+            tokens = list(lexer)
+        except ValueError:
+            # A shell/YAML multiline quote cannot be parsed on this line alone.
+            # Discard a printing tail rather than interpreting its prose.
+            lines.append(re.split(r'\b(?:echo|printf)\s+', line, maxsplit=1)[0])
+            continue
+        kept = []
+        printing = False
+        for token in tokens:
+            if token in {';', '&&', '||', '|', '&'}:
+                printing = False
+            if token in {'echo', 'printf'}:
+                printing = True
+            if not printing:
+                kept.append(token)
+        lines.append(' '.join(kept))
+    return '\n'.join(lines)
 
 
 def scan(project: Path) -> dict:
@@ -110,6 +155,17 @@ def scan(project: Path) -> dict:
         suffix_runtime = {'.py': 'python', '.rb': 'ruby', '.go': 'go', '.js': 'node', '.jsx': 'node', '.ts': 'node', '.tsx': 'node', '.rs': 'rust'}.get(path.suffix)
         if suffix_runtime:
             sources[suffix_runtime].append(relative)
+        lockfiles = {
+            'package-lock.json': ('node', 'npm'), 'pnpm-lock.yaml': ('node', 'pnpm'),
+            'yarn.lock': ('node', 'yarn'), 'bun.lock': ('node', 'bun'), 'bun.lockb': ('node', 'bun'),
+            'uv.lock': ('python', 'uv'), 'poetry.lock': ('python', 'poetry'), 'Pipfile.lock': ('python', 'pipenv'),
+            'Gemfile.lock': ('ruby', 'bundler'), 'Cargo.lock': ('rust', 'cargo'),
+        }
+        if base in lockfiles:
+            family, package_manager = lockfiles[base]
+            runtime(family, relative, f'{family} lockfile')
+            manager(family, package_manager, relative)
+            continue
         relevant = (base in {'package.json', 'pyproject.toml', 'Pipfile', 'Gemfile', 'Gemfile.lock', 'go.mod', 'go.work', 'go.sum', 'Cargo.toml', 'Cargo.lock', '.python-version', '.ruby-version', '.node-version', '.nvmrc', '.tool-versions', '.gitignore', '.pre-commit-config.yaml', '.pre-commit-config.yml', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb', 'uv.lock', 'poetry.lock', 'Pipfile.lock'} or base.startswith(('requirements', 'Dockerfile', 'Taskfile')) or container_file or base.endswith('.gemspec') or path.suffix in {'.sh', '.bash'} or relative.startswith('.github/workflows/'))
         if not relevant:
             continue
@@ -152,12 +208,20 @@ def scan(project: Path) -> dict:
                     runtime({'nodejs': 'node', 'golang': 'go'}.get(name, name), relative, f'explicit pin {version}', version, 3)
             elif base in {'go.mod', 'go.work', 'go.sum'}:
                 match = re.search(r'^go\s+([\d.]+)', text, re.M)
-                runtime('go', relative, 'Go module/workspace', match[1] if match else None)
+                runtime('go', relative, 'Go module/workspace minimum', '>=' + match[1] if match else None)
             elif base in {'Gemfile', 'Gemfile.lock'} or base.endswith('.gemspec'):
                 match = re.search(r'\bruby\s+[\'"]([^\'"]+)', text)
                 runtime('ruby', relative, 'Ruby manifest/lock', match[1] if match else None)
                 manager('ruby', 'bundler', relative)
-            elif base.startswith('requirements') or base in {'Pipfile', 'uv.lock', 'poetry.lock', 'Pipfile.lock'}:
+            elif base == 'Pipfile':
+                data = tomllib.loads(text)
+                requires = data.get('requires', {})
+                runtime('python', relative, 'Pipfile Python dependencies')
+                for key in ('python_version', 'python_full_version'):
+                    if key in requires:
+                        runtime('python', relative, f'Pipfile {key}={requires[key]}', requires[key], 3)
+                manager('python', 'pipenv', relative)
+            elif base.startswith('requirements') or base in {'uv.lock', 'poetry.lock', 'Pipfile.lock'}:
                 runtime('python', relative, 'Python dependencies')
                 manager('python', {'uv.lock': 'uv', 'poetry.lock': 'poetry', 'Pipfile': 'pipenv', 'Pipfile.lock': 'pipenv'}.get(base, 'pip'), relative)
             elif base in {'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb'}:
@@ -179,7 +243,7 @@ def scan(project: Path) -> dict:
         workflow = base.startswith('Taskfile') or container_file or path.suffix in {'.sh', '.bash'} or relative.startswith('.github/workflows/') or base == 'package.json'
         if not workflow:
             continue
-        active = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith(('#', 'desc:', 'description:')))
+        active = _without_printed_help(text)
         commands = {'python': r'python(?:3(?:\.\d+)?)?\s+(?:-m|[\w./-]+\.py)', 'node': r'(?:node\s+[\w./-]+|(?:npm|pnpm|yarn|bun)\s+(?:run|install|ci|build|test|dev|start))', 'ruby': r'(?:ruby\s+[\w./-]+\.rb|bundle\s+(?:exec|install)|rails\s+\w+)', 'go': r'go\s+(?:build|test|run|mod|generate)\b', 'rust': r'cargo\s+(?:build|test|run|check|clippy)\b'}
         for name, pattern in commands.items():
             if re.search(r'(?:^|[\s;&|(\"\'])' + pattern, active, re.M):

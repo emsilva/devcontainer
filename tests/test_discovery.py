@@ -129,6 +129,75 @@ class DiscoveryTests(unittest.TestCase):
         self.put('pyproject.toml', '[project]\nname="hello"\nversion="99.0"\n')
         self.assertEqual(scan(self.root)['runtimes']['python']['version'], '3.13')
 
+    def test_two_component_tilde_does_not_accept_next_minor(self):
+        self.put('package.json', '{"engines":{"node":"~20.1"}}')
+        self.put('.node-version', '20.9')
+        found = scan(self.root)['runtimes']['node']
+        self.assertIsNone(found['version'])
+        self.assertTrue(found['conflicts'])
+
+    def test_caret_zero_major_and_tilde_boundaries(self):
+        for declaration, pin, compatible in [('^0.2', '0.3.0', False), ('^0.2', '0.2.9', True), ('^0.0.2', '0.0.3', False), ('~20.1', '20.1.5', True), ('~20', '20.9', True)]:
+            with self.subTest(declaration=declaration, pin=pin):
+                self.put('package.json', json.dumps({'engines': {'node': declaration}}))
+                self.put('.node-version', pin)
+                found = scan(self.root)['runtimes']['node']
+                self.assertEqual(bool(found['conflicts']), not compatible)
+
+    def test_large_npm_lock_retains_conflict_with_other_lock(self):
+        self.put('package-lock.json', 'x' * (512 * 1024 + 1))
+        self.put('pnpm-lock.yaml', 'lockfileVersion: 9')
+        found = scan(self.root)['package_managers']['node']
+        self.assertIsNone(found['selected'])
+        self.assertTrue(found['conflicts'])
+
+    def test_pipfile_full_version_conflicts_with_incompatible_pin(self):
+        self.put('Pipfile', '[requires]\npython_full_version = "3.12.1"\n')
+        self.put('.python-version', '3.12.9')
+        self.assertTrue(scan(self.root)['runtimes']['python']['conflicts'])
+
+    def test_go_mod_rejects_older_ci_toolchain(self):
+        self.put('go.mod', 'module example.com/demo\ngo 1.24\n')
+        self.put('.github/workflows/test.yml', 'steps:\n - uses: actions/setup-go@v5\n   with:\n     go-version: 1.22\n')
+        self.assertTrue(scan(self.root)['runtimes']['go']['conflicts'])
+
+    def test_binary_and_large_lockfiles_still_supply_filename_evidence(self):
+        self.put('web/bun.lockb', '').write_bytes(b'\xff\x00bun')
+        self.put('api/uv.lock', 'x' * (512 * 1024 + 1))
+        found = scan(self.root)
+        self.assertTrue(found['runtimes']['node']['selected'])
+        self.assertEqual(found['package_managers']['node']['selected'], 'bun')
+        self.assertEqual(found['package_managers']['python']['selected'], 'uv')
+
+    def test_pipfile_requires_controls_python_version(self):
+        self.put('Pipfile', '[requires]\npython_version = "3.12"\n')
+        found = scan(self.root)
+        self.assertEqual(found['runtimes']['python']['version'], '3.12')
+        self.assertEqual(found['package_managers']['python']['selected'], 'pipenv')
+
+    def test_echoed_tool_and_runtime_examples_are_not_workflows(self):
+        self.put('Taskfile.yml', "cmds:\n - echo 'az login; aws configure; gcloud auth login; docker run demo; devtunnel host x; kubectl get pods; pre-commit run; npm run dev --port 3000; cargo build'\n")
+        found = scan(self.root)
+        self.assertFalse(any(row['selected'] for row in found['tools'].values()))
+        self.assertFalse(found['runtimes']['node']['selected'])
+        self.assertFalse(found['runtimes']['rust']['selected'])
+        self.assertEqual(found['ports'], [])
+
+    def test_valid_open_range_finds_interior_version(self):
+        self.put('package.json', '{"engines":{"node":">20 <24"}}')
+        found = scan(self.root)['runtimes']['node']
+        self.assertIsNotNone(found['version'])
+        self.assertEqual(found['conflicts'], [])
+        self.assertGreater(int(found['version'].split('.')[0]), 20)
+        self.assertLess(int(found['version'].split('.')[0]), 24)
+
+    def test_go_mod_minimum_accepts_newer_ci_toolchain(self):
+        self.put('go.mod', 'module example.com/demo\ngo 1.22\n')
+        self.put('.github/workflows/test.yml', 'steps:\n - uses: actions/setup-go@v5\n   with:\n     go-version: 1.24\n')
+        found = scan(self.root)['runtimes']['go']
+        self.assertEqual(found['version'], '1.24')
+        self.assertEqual(found['conflicts'], [])
+
 
 if __name__ == '__main__':
     unittest.main()
