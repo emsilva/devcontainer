@@ -153,7 +153,7 @@ def scan(project: Path) -> dict:
             elif base in {'go.mod', 'go.work', 'go.sum'}:
                 match = re.search(r'^go\s+([\d.]+)', text, re.M)
                 runtime('go', relative, 'Go module/workspace', match[1] if match else None)
-            elif base in {'Gemfile', 'Gemfile.lock'} or container_file or base.endswith('.gemspec'):
+            elif base in {'Gemfile', 'Gemfile.lock'} or base.endswith('.gemspec'):
                 match = re.search(r'\bruby\s+[\'"]([^\'"]+)', text)
                 runtime('ruby', relative, 'Ruby manifest/lock', match[1] if match else None)
                 manager('ruby', 'bundler', relative)

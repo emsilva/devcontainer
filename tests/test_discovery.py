@@ -37,6 +37,7 @@ class DiscoveryTests(unittest.TestCase):
         self.put('.pre-commit-config.yaml', 'repos: []')
         found = scan(self.root)
         self.assertEqual(found['runtimes']['node']['version'], '24')
+        self.assertFalse(found['runtimes']['ruby']['selected'])
         self.assertEqual(found['runtimes']['node']['conflicts'], [])
         self.assertTrue(any('web/package.json' in x for x in found['runtimes']['node']['evidence']))
         self.assertTrue(any('build' in x for x in found['runtimes']['node']['evidence']))
