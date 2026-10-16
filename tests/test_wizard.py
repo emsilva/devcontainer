@@ -301,5 +301,66 @@ class WizardCliTests(unittest.TestCase):
                 self.assertIn('runtimes', json.loads(result.stdout))
 
 
+    def test_launch_discovery_failures_offer_commit_only_fallback(self):
+        import contextlib
+        import io
+        from devcontainer_setup.__main__ import _launch_options
+        from devcontainer_setup.codespaces import Codespaces
+        from devcontainer_setup.ui import Cancelled
+        self.git('remote', 'add', 'origin', 'https://github.com/owner/project.git')
+        for failure in ('missing-gh', 'forbidden-existing', 'forbidden-resume',
+                        'missing-machine-metadata', 'forbidden-machines'):
+            for accept_fallback in (True, False):
+                with self.subTest(failure=failure, accept_fallback=accept_fallback):
+                    prompts = []
+                    def github(args, **kwargs):
+                        if failure == 'missing-gh':
+                            raise FileNotFoundError('gh')
+                        if failure == 'missing-machine-metadata':
+                            return subprocess.CompletedProcess(args, 0, '{}', '')
+                        if failure == 'forbidden-machines' and '?' in args[2]:
+                            return subprocess.CompletedProcess(args, 0, '[{"codespaces": []}]', '')
+                        return subprocess.CompletedProcess(args, 1, '', 'No Codespaces permission (HTTP 403)')
+                    class UI:
+                        def choose(self, title, options, selected=None):
+                            if title == 'After setup': return 'Commit, push and open in browser'
+                            raise AssertionError(f'Unexpected launch prompt: {title}')
+                        def confirm(self, title, default=True):
+                            prompts.append(title)
+                            return accept_fallback
+                    resume = ('existing-space' if failure in ('forbidden-resume',
+                              'missing-machine-metadata') else None)
+                    error_output = io.StringIO()
+                    with contextlib.redirect_stderr(error_output):
+                        if accept_fallback:
+                            self.assertIsNone(_launch_options(UI(), Codespaces(run=github), self.root,
+                                                              'main', resume))
+                        else:
+                            with self.assertRaises(Cancelled):
+                                _launch_options(UI(), Codespaces(run=github), self.root, 'main', resume)
+                    self.assertEqual(prompts, ['Continue with commit only?'])
+                    self.assertIn('Launch unavailable:', error_output.getvalue())
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_launch_reuse_cancellation_does_not_offer_error_fallback(self):
+        from devcontainer_setup.__main__ import _launch_options
+        from devcontainer_setup.codespaces import Codespaces
+        from devcontainer_setup.ui import Cancelled
+        self.git('remote', 'add', 'origin', 'https://github.com/owner/project.git')
+        prompts = []
+        class UI:
+            def choose(self, title, options, selected=None):
+                return 'Commit, push and open in browser'
+            def confirm(self, title, default=True):
+                prompts.append(title)
+                return False
+        def github(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0,
+                '{"machine":{"name":"actual-machine"},"idle_timeout_minutes":30}', '')
+        with self.assertRaises(Cancelled):
+            _launch_options(UI(), Codespaces(run=github), self.root, 'main', 'existing-space')
+        self.assertEqual(prompts, ['Reuse this codespace with these existing resource settings?'])
+
+
 if __name__ == '__main__':
     unittest.main()

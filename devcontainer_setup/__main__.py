@@ -283,26 +283,26 @@ def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume
     if action == 'Commit only':
         return None
     repo = _repository(project)
-    if not resume:
-        spaces = api.existing(repo, branch)
-        if spaces:
-            choices = ['Create a new codespace', *[f'Reuse {space["name"]}' for space in spaces]]
-            choice = ui.choose('Existing codespaces for this branch', choices)
-            if choice.startswith('Reuse '):
-                resume = choice.removeprefix('Reuse ')
-    if resume:
-        settings = api.resource_settings(api.get(resume))
-        print(f'Existing codespace {resume}: {json.dumps(settings, sort_keys=True)}', flush=True)
-        if not ui.confirm('Reuse this codespace with these existing resource settings?'):
-            raise Cancelled()
-        return {'repo': repo, 'machine': settings['machine'],
-                'idle_timeout': (f"{settings['idle_timeout_minutes']}m"
-                                 if settings['idle_timeout_minutes'] is not None else None),
-                'location': settings['location'],
-                'retention': (f"{settings['retention_period_minutes']}m"
-                              if settings['retention_period_minutes'] is not None else None),
-                'client': 'browser' if action.endswith('browser') else 'vscode', 'resume': resume}
     try:
+        if not resume:
+            spaces = api.existing(repo, branch)
+            if spaces:
+                choices = ['Create a new codespace', *[f'Reuse {space["name"]}' for space in spaces]]
+                choice = ui.choose('Existing codespaces for this branch', choices)
+                if choice.startswith('Reuse '):
+                    resume = choice.removeprefix('Reuse ')
+        if resume:
+            settings = api.resource_settings(api.get(resume))
+            print(f'Existing codespace {resume}: {json.dumps(settings, sort_keys=True)}', flush=True)
+            if not ui.confirm('Reuse this codespace with these existing resource settings?'):
+                raise Cancelled()
+            return {'repo': repo, 'machine': settings['machine'],
+                    'idle_timeout': (f"{settings['idle_timeout_minutes']}m"
+                                     if settings['idle_timeout_minutes'] is not None else None),
+                    'location': settings['location'],
+                    'retention': (f"{settings['retention_period_minutes']}m"
+                                  if settings['retention_period_minutes'] is not None else None),
+                    'client': 'browser' if action.endswith('browser') else 'vscode', 'resume': resume}
         # Before approval the local branch/configuration may not exist on GitHub.
         # Offer repository machines now; launch rechecks the committed, pushed SHA.
         machines = api.machines(repo)

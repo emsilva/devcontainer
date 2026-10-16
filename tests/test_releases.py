@@ -285,5 +285,42 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(cached_main.read_bytes(), authentic)
 
 
+    def test_bootstraps_support_prior_release_api_and_preserve_modified_archives(self):
+        implementation = Path(__file__).resolve().parents[1]
+        self.execution_source()
+        # Expose the historical fetch_release/_validate public API without
+        # depending on old Git objects being available in a shallow CI clone.
+        old_api = (implementation / 'devcontainer_setup/releases.py').read_bytes().replace(
+            b'publish_release', b'_private_cache_publication')
+        self.assertNotIn(b'def publish_release', old_api)
+        (self.source / 'devcontainer_setup/releases.py').write_bytes(old_api)
+        sha = self.commit()
+        for entry, shell, argument in (('install.sh', 'sh', '--scan'),
+                ('templates/scripts/setup-wizard.sh', 'bash', '--check')):
+            for modified in (False, True):
+                with self.subTest(entry=entry, modified=modified):
+                    cache_base = self.root / f'{shell}-{modified}'
+                    self.cache = cache_base / 'devcontainer-setup/releases'
+                    release, _ = self.archive_cache()
+                    helper = release / 'devcontainer_setup/helper.py'
+                    if modified:
+                        helper.write_text('VALUE = 99\n')
+                    original = helper.read_bytes()
+                    script = (implementation / entry).read_text().replace('__SOURCE_REF__', sha)
+                    result = subprocess.run([shell, '-s', '--', argument], input=script, text=True,
+                        capture_output=True, cwd=self.source,
+                        env=dict(os.environ, XDG_CACHE_HOME=str(cache_base),
+                                 SETUP_DEVCONTAINER_REPO=str(self.source), SETUP_DEVCONTAINER_REF=sha))
+                    if modified:
+                        self.assertNotEqual(result.returncode, 0, result.stdout)
+                        self.assertIn('modified tracked source', result.stderr)
+                        self.assertNotIn('trusted-runner', result.stdout)
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(result.stdout, 'trusted-runner\n')
+                    self.assertEqual(helper.read_bytes(), original)
+                    self.assertFalse((release / '.git').exists())
+
+
 if __name__ == '__main__':
     unittest.main()

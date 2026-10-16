@@ -17,7 +17,7 @@ git -C "$staging/source" -c core.hooksPath=/dev/null -c core.autocrlf=false chec
 # Authenticate every tracked cached byte/mode/link using the fresh source authority.
 (
   cd "$staging/source"
-  python3 -I -B -X pycache_prefix=/dev/null -c 'from pathlib import Path; import sys; sys.path.insert(0, str(Path.cwd())); from devcontainer_setup.releases import publish_release; publish_release(Path.cwd(), sys.argv[1], Path(sys.argv[2]))' "$revision" "$cache_root"
+  python3 -I -B -X pycache_prefix=/dev/null -c 'from pathlib import Path; import sys; sys.path.insert(0, str(Path.cwd())); from devcontainer_setup.releases import fetch_release; fetch_release(str(Path.cwd()), sys.argv[1], Path(sys.argv[2]))' "$revision" "$cache_root"
 )
 rm -rf "$staging"
 trap - EXIT
