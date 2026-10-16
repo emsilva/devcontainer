@@ -205,6 +205,9 @@ class CodespacesTests(unittest.TestCase):
         self.assertFalse(any(c[1:3] == ['codespace', 'create'] for c in self.runner.calls))
 
     def test_retry_of_current_codespace_skips_rebuild(self):
+        self.api._save_receipt(self.receipt, {'codespace': 'new-space', 'repository': 'owner/project',
+            'branch': 'setup/devcontainer', 'commit': 'a' * 40,
+            'validated_commit': 'a' * 40, 'rebuild_pending': False})
         class Plan:
             branch = 'setup/devcontainer'
             def push(self):
@@ -212,6 +215,42 @@ class CodespacesTests(unittest.TestCase):
         self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
                         None, self.receipt, resume='new-space')
         self.assertFalse(any(c[1:3] == ['codespace', 'rebuild'] for c in self.runner.calls))
+
+    def test_matching_checkout_without_validated_image_requires_rebuild(self):
+        class Plan:
+            branch = 'setup/devcontainer'
+            def push(self):
+                return 'a' * 40
+        self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+                        None, self.receipt, resume='new-space')
+        self.assertEqual(sum(c[1:3] == ['codespace', 'rebuild'] for c in self.runner.calls), 1)
+        self.assertEqual(json.loads(self.receipt.read_text())['validated_commit'], 'a' * 40)
+
+    def test_previous_image_receipt_cannot_certify_a_new_checked_out_commit(self):
+        self.api._save_receipt(self.receipt, {'codespace': 'new-space', 'repository': 'owner/project',
+            'branch': 'setup/devcontainer', 'commit': 'b' * 40,
+            'validated_commit': 'b' * 40, 'rebuild_pending': False})
+        class Plan:
+            branch = 'setup/devcontainer'
+            def push(self):
+                return 'a' * 40
+        self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+                        None, self.receipt, resume='new-space')
+        self.assertEqual(sum(c[1:3] == ['codespace', 'rebuild'] for c in self.runner.calls), 1)
+
+    def test_failed_initial_validation_never_attests_to_a_built_image(self):
+        self.runner.fail_validation = True
+        with self.assertRaisesRegex(ValueError, 'Missing selected tool'):
+            self.launch()
+        self.assertIsNone(json.loads(self.receipt.read_text()).get('validated_commit'))
+        self.runner.fail_validation = False
+        class Plan:
+            branch = 'setup/devcontainer'
+            def push(self):
+                return 'a' * 40
+        self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+                        None, self.receipt, resume='new-space')
+        self.assertEqual(sum(c[1:3] == ['codespace', 'rebuild'] for c in self.runner.calls), 1)
 
     def test_resume_checks_live_git_instead_of_stale_api_dirty_flags(self):
         self.runner.api_dirty = True

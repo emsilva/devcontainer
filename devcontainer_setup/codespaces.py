@@ -166,15 +166,21 @@ class Codespaces:
             if not re.fullmatch(r'[A-Za-z0-9-]+', name):
                 raise ValueError('Creation did not return a codespace name. Check gh codespace list before retrying.')
         record = {'codespace': name, 'repository': repo, 'branch': plan.branch,
-                  'commit': sha, 'machine': machine, 'client': client, 'rebuild_pending': False}
+                  'commit': sha, 'machine': machine, 'client': client,
+                  'validated_commit': None, 'rebuild_pending': bool(resume)}
         if resume and receipt.exists():
             try:
                 previous = json.loads(receipt.read_text())
             except (ValueError, OSError) as error:
                 raise ValueError(f'Cannot read launch receipt {receipt}; preserve it before retrying.') from error
+            if not isinstance(previous, dict):
+                raise ValueError(f'Invalid launch receipt {receipt}; preserve it before retrying.')
             if (previous.get('codespace') == name and previous.get('repository') == repo
                     and previous.get('branch') == plan.branch):
-                record['rebuild_pending'] = bool(previous.get('rebuild_pending'))
+                record['validated_commit'] = previous.get('validated_commit')
+                record['rebuild_pending'] = not (
+                    previous.get('validated_commit') == sha
+                    and previous.get('rebuild_pending') is False)
         self._save_receipt(receipt, record)
         try:
             if resume and data.get('state') in {'Shutdown', 'ShutDown'}:
@@ -209,6 +215,7 @@ class Codespaces:
             if current != sha:
                 raise ValueError('The codespace is not at the reviewed commit; inspect its Git state before resuming.')
             self._read_ssh(name, f'cd {shlex.quote(folder)} && bash .devcontainer/scripts/validate-selected.sh')
+            record['validated_commit'] = sha
             record['rebuild_pending'] = False
             self._save_receipt(receipt, record)
             if dotfiles_repo:
