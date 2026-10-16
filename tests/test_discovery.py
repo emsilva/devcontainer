@@ -20,6 +20,28 @@ class DiscoveryTests(unittest.TestCase):
         path.write_text(text)
         return path
 
+    def test_explicit_manager_pin_and_engines_version_are_retained(self):
+        self.put('package.json', json.dumps({'packageManager': 'pnpm@9.15.4',
+                  'engines': {'node': '24', 'pnpm': '9.15.4'}}))
+        manager = scan(self.root)['package_managers']['node']
+        self.assertEqual(manager['selected'], 'pnpm')
+        self.assertEqual(manager['version'], '9.15.4')
+        self.assertEqual(manager['versions']['pnpm']['conflicts'], [])
+        self.assertTrue(any('9.15.4' in item for item in manager['evidence']))
+
+    def test_nested_incompatible_manager_versions_require_visible_resolution(self):
+        self.put('web/package.json', '{"packageManager":"pnpm@9.15.4"}')
+        self.put('other/package.json', '{"packageManager":"pnpm@10.2.1"}')
+        manager = scan(self.root)['package_managers']['node']
+        self.assertIsNone(manager['version'])
+        self.assertEqual(len(manager['versions']['pnpm']['conflicts']), 2)
+
+    def test_engine_only_manager_declarations_are_not_discarded(self):
+        self.put('package.json', '{"engines":{"pnpm":"9.15.4"}}')
+        manager = scan(self.root)['package_managers']['node']
+        self.assertEqual(manager['selected'], 'pnpm')
+        self.assertEqual(manager['version'], '9.15.4')
+
     def test_empty_project_has_python_baseline_and_all_runtime_entries(self):
         found = scan(self.root)
         self.assertEqual(set(found.get('runtimes', {})), {'python', 'node', 'ruby', 'go', 'rust'})

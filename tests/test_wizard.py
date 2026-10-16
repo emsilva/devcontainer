@@ -32,6 +32,90 @@ class WizardCliTests(unittest.TestCase):
         return subprocess.run([sys.executable, '-m', 'devcontainer_setup', '--project', str(self.root), *args],
                               cwd=SOURCE, env=self.env, capture_output=True, text=True)
 
+    def test_existing_taskfile_variants_keep_real_task_operations(self):
+        import shutil
+        from devcontainer_setup.__main__ import integrate_taskfile
+        self.assertIsNotNone(shutil.which('task'), 'real go-task required')
+        for name in ('Taskfile.yml', 'Taskfile.yaml', 'taskfile.yml', 'taskfile.yaml',
+                     'Taskfile.dist.yml', 'Taskfile.dist.yaml', 'taskfile.dist.yml', 'taskfile.dist.yaml'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / name).write_text("version: '3'\ntasks:\n  up:\n    cmds: ['echo existing']\n  test:\n    cmds: ['echo tests']\n")
+                files = {}
+                integrate_taskfile(root, files)
+                self.assertIn(name, files)
+                for relative, data in files.items():
+                    (root / relative).write_bytes(data)
+                result = subprocess.run(['task', '--list-all'], cwd=root, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('up:', result.stdout)
+                self.assertIn('test:', result.stdout)
+                self.assertEqual([path.name for path in root.glob('*') if 'taskfile' in path.name.lower()], [name])
+
+    def test_package_manager_pin_survives_defaults_and_renders(self):
+        from devcontainer_setup.__main__ import defaults
+        from devcontainer_setup.discovery import scan
+        from devcontainer_setup.render import render
+        (self.root / 'package.json').write_text('{"packageManager":"pnpm@9.15.4","engines":{"node":"24","pnpm":"9.15.4"}}')
+        chosen = defaults(scan(self.root), {'agentic_tools': False, 'apply_dotfiles': False}, {})
+        self.assertEqual(chosen['package_manager_versions'], {'node': '9.15.4'})
+        config = json.loads(render(self.root, SOURCE, chosen, 'a' * 40)['.devcontainer/devcontainer.json'])
+        self.assertEqual(config['features']['ghcr.io/devcontainers/features/node:1']['pnpmVersion'], '9.15.4')
+
+    def test_manager_version_conflict_prompts_with_both_declarations(self):
+        import contextlib
+        import io
+        from devcontainer_setup.__main__ import defaults, _select
+        from devcontainer_setup.discovery import scan
+        (self.root / 'package.json').write_text('{"packageManager":"pnpm@9.15.4"}')
+        (self.root / 'nested').mkdir()
+        (self.root / 'nested/package.json').write_text('{"packageManager":"pnpm@10.2.1"}')
+        found = scan(self.root)
+        preferences = {'agentic_tools': False, 'apply_dotfiles': False, 'dotfiles_repo': ''}
+        class UI:
+            prompts = []
+            def multi(self, title, options, selected): return selected
+            def confirm(self, title, default=True): return False
+            def input(self, title, value=''):
+                self.prompts.append(title)
+                return '9.15.4'
+        ui, output = UI(), io.StringIO()
+        with contextlib.redirect_stdout(output):
+            chosen = _select(ui, found, defaults(found, preferences, {}), preferences)
+        self.assertTrue(any('pnpm' in prompt and 'version' in prompt for prompt in ui.prompts))
+        self.assertIn('9.15.4', output.getvalue())
+        self.assertIn('10.2.1', output.getvalue())
+        self.assertEqual(chosen['package_manager_versions'], {'node': '9.15.4'})
+
+    def test_fresh_taskfile_has_working_lifecycle_aliases(self):
+        from devcontainer_setup.__main__ import integrate_taskfile
+        files = {}
+        integrate_taskfile(self.root, files)
+        (self.root / 'Taskfile.yml').write_bytes(files['Taskfile.yml'])
+        (self.root / '.devcontainer').mkdir()
+        (self.root / '.devcontainer/Taskfile.yml').write_bytes((SOURCE / 'templates/Taskfile.yml').read_bytes())
+        for operation in ('up', 'down', 'status', 'build'):
+            result = subprocess.run(['task', '--dry', operation], cwd=self.root, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unresolved_manager_versions_cannot_silently_dry_run_default(self):
+        (self.root / 'package.json').write_text('{"packageManager":"pnpm@9.15.4"}')
+        (self.root / 'nested').mkdir()
+        (self.root / 'nested/package.json').write_text('{"packageManager":"pnpm@10.2.1"}')
+        result = self.cli('--dry-run')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('version', result.stderr)
+        self.assertNotIn('12.11.2', result.stdout)
+
+    def test_ambiguous_taskfiles_fail_without_changing_either(self):
+        from devcontainer_setup.__main__ import integrate_taskfile
+        for name in ('Taskfile.yml', 'Taskfile.yaml'):
+            (self.root / name).write_text("version: '3'\n")
+        files = {}
+        with self.assertRaisesRegex(ValueError, 'Multiple supported Taskfiles'):
+            integrate_taskfile(self.root, files)
+        self.assertEqual(files, {})
+
     def test_scan_reports_node_and_python_without_writing(self):
         result = self.cli('--scan')
         self.assertEqual(result.returncode, 0, result.stderr)

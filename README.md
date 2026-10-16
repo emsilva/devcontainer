@@ -60,6 +60,13 @@ Re-running setup uses the recorded selections. Upgrades are deliberate and keep
 custom project ports, hooks, and editor settings. Existing unmanaged configurations
 require explicit adoption; local edits to managed helpers stop an overwrite.
 
+The wizard honors exact pnpm versions from `packageManager` and `engines.pnpm`
+(for example, `pnpm@9.15.4`) and checks that version inside the container.
+Incompatible nested declarations require an explicit version choice. Explicit
+npm, Yarn, or Bun version overrides currently stop setup with a conflict: the
+locked installation does not support those overrides. Review the project
+requirement or add a separately verified installer before continuing.
+
 Commit-only mode performs no push or Codespaces allocation. Launch mode explicitly
 confirms the branch, push, machine, and opening action; commits and pushes survive
 a later launch failure, and the retry reuses the recorded codespace. Personal

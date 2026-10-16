@@ -9,4 +9,17 @@ for tool in __TOOLS__; do
     missing=1
   fi
 done
+# The renderer adds calls with the selected exact versions below.
+# shellcheck disable=SC2329
+check_manager_version() {
+  local tool="$1" expected="$2" actual
+  if ! actual=$("$tool" --version); then
+    printf 'Cannot verify selected %s version (expected %s)\n' "$tool" "$expected" >&2
+    missing=1
+  elif [ "$actual" != "$expected" ]; then
+    printf 'Selected %s version mismatch: expected %s, got %s\n' "$tool" "$expected" "$actual" >&2
+    missing=1
+  fi
+}
+__MANAGER_VERSIONS__
 exit "$missing"

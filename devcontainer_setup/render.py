@@ -76,6 +76,7 @@ def _selections(values):
                 'ssh': bool(values.get('ssh', False)),
                 'ports': sorted(set(values.get('ports', []))),
                 'package_managers': dict(values.get('package_managers', {})),
+                'package_manager_versions': dict(values.get('package_manager_versions', {})),
                 'polyglot': bool(values.get('polyglot', False))}
     for runtime, version in selected['runtimes'].items():
         if runtime not in RUNTIMES or not isinstance(version, str) or not re.fullmatch(r'[A-Za-z0-9_.+-]+', version):
@@ -92,6 +93,13 @@ def _selections(values):
                      'ruby': {'bundler'}, 'go': {'go'}, 'rust': {'cargo'}}
         if manager not in supported[family]:
             raise ValueError(f'Unsupported package manager: {family}/{manager}')
+    for family, version in selected['package_manager_versions'].items():
+        manager = selected['package_managers'].get(family)
+        if not manager or not isinstance(version, str) or not re.fullmatch(r'\d+\.\d+\.\d+', version):
+            raise ValueError(f'Choose an exact supported package-manager version (x.y.z): {family}={version}')
+        if manager != 'pnpm':
+            raise ValueError(f'{manager} version override {version} is not supported by the locked installation; '
+                             'review the project declaration or add a separately verified installer before setup')
     return selected
 
 
@@ -202,6 +210,19 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
             managed = _safe_path(project, relative)
             if not managed.is_file() or _digest(managed.read_bytes()) != digest:
                 raise ValueError(f'Modified or missing managed file: {relative}')
+    legacy_files = {}
+    if current and not marker and selected['polyglot']:
+        legacy = _read(source / 'templates/legacy-files.json')
+        original = legacy['files']
+        if _digest(target.read_bytes()) == original[CONFIG]:
+            for relative, digest in original.items():
+                legacy_path = _safe_path(project, relative)
+                if not legacy_path.is_file() or _digest(legacy_path.read_bytes()) != digest:
+                    raise ValueError(f'Modified or missing legacy producer file: {relative}; preserve your changes and review migration manually')
+            # Exact producer defaults are replaceable, including obsolete lifecycle wiring.
+            # Retained legacy files remain on disk and become protected managed content.
+            legacy_files = {name: digest for name, digest in original.items() if name != CONFIG}
+            current = {}
     canonical = _read(source / CONFIG)
     catalog = canonical['features']
     catalog_lock = _read(source / LOCK)['features']
@@ -245,7 +266,7 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
     if FEATURE + 'node:1' in features:
         manager = selected['package_managers'].get('node', 'npm')
         features[FEATURE + 'node:1'].pop('installYarn', None)
-        features[FEATURE + 'node:1']['pnpmVersion'] = '12.11.2' if manager == 'pnpm' else 'none'
+        features[FEATURE + 'node:1']['pnpmVersion'] = selected['package_manager_versions'].get('node', '12.11.2') if manager == 'pnpm' else 'none'
     desired = {'name': 'Project development environment', 'image': canonical['image'],
                'features': features, 'remoteUser': 'vscode',
                'containerEnv': {'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONUNBUFFERED': '1'},
@@ -275,7 +296,10 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
     if selected['dotfiles']:
         commands.extend(['chezmoi', 'load-dotfiles'])
     replacements = {'__SOURCE_REF__': source_ref, '__TOOLS__': ' '.join(dict.fromkeys(commands)),
-                    '__DOTFILES__': (templates / 'dotfiles-hook.sh').read_text() if selected['dotfiles'] else ''}
+                    '__DOTFILES__': (templates / 'dotfiles-hook.sh').read_text() if selected['dotfiles'] else '',
+                    '__MANAGER_VERSIONS__': '\n'.join(
+                        f'check_manager_version {selected["package_managers"][family]} {version}'
+                        for family, version in sorted(selected['package_manager_versions'].items()))}
     helper_names = ['setup-wizard.sh', 'validate-selected.sh', 'post-create-selected.sh']
     if selected['dotfiles']:
         helper_names.append('apply-dotfiles.sh')
@@ -368,12 +392,12 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
     for relative, data in files.items():
         destination = _safe_path(project, relative)
         if destination.exists() and not (marker and relative in marker.get('managedFiles', {})):
-            if relative == LOCK:
+            if relative == LOCK or relative in legacy_files:
                 continue
             if destination.read_bytes() != data:
                 raise ValueError(f'Existing unmanaged file requires reviewed migration: {relative}')
     # Obsolete files stay untouched and remain protected; cleanup is a separate explicit review.
-    managed_files = dict(marker.get('managedFiles', {})) if marker else {}
+    managed_files = dict(marker.get('managedFiles', {})) if marker else dict(legacy_files)
     managed_files.update({relative: _digest(data) for relative, data in files.items()})
     snapshot = copy.deepcopy(desired)
     dependencies = {'node': 'Coding-agent tools use Node'} if selected['agents'] else {}
@@ -410,6 +434,10 @@ def validate(project: Path) -> list[str]:
             errors.append('Generator sourceRef must be an immutable commit')
         selected = _selections(marker.get('selections', {}))
         features = config.get('features', {})
+        if selected['package_managers'].get('node') == 'pnpm':
+            expected = selected['package_manager_versions'].get('node', '12.11.2')
+            if features.get(FEATURE + 'node:1', {}).get('pnpmVersion') != expected:
+                errors.append(f'Selected pnpm version conflicts with Node Feature: expected {expected}')
         required = set(BASE_FEATURES)
         required.update(FEATURE + runtime + ':1' for runtime in selected['runtimes'])
         required.update(TOOLS[tool] for tool in selected['tools'] if tool in TOOLS)

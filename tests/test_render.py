@@ -34,6 +34,82 @@ class RenderTests(unittest.TestCase):
     def config(self, files):
         return json.loads(files['.devcontainer/devcontainer.json'])
 
+    def legacy_fixture(self):
+        with tarfile.open(ROOT / 'tests/fixtures/legacy-base.tar.gz') as bundle:
+            bundle.extractall(self.project, filter='data')
+
+    def test_known_legacy_base_adoption_validates_and_repeats(self):
+        from devcontainer_setup.__main__ import check_candidate
+        from devcontainer_setup.render import validate
+        self.legacy_fixture()
+        old_helper = self.project / '.devcontainer/scripts/post-create.sh'
+        before = old_helper.read_bytes()
+        custom = self.project / '.devcontainer/custom-project.txt'
+        custom.write_text('project-owned')
+        files = self.render(polyglot=True, agents=True, dotfiles=True,
+                            runtimes={'python': '3.13'})
+        check_candidate(files, self.project)
+        config = self.config(files)
+        self.assertNotIn('onCreateCommand', config)
+        self.assertNotIn('postStartCommand', config)
+        self.assertNotIn('post-create.sh', json.dumps(config['postCreateCommand']))
+        self.install(files)
+        self.assertEqual(old_helper.read_bytes(), before)
+        self.assertEqual(custom.read_text(), 'project-owned')
+        self.assertNotIn('.devcontainer/custom-project.txt', files)
+        self.assertEqual(validate(self.project), [])
+        self.assertEqual(files, self.render(polyglot=True, agents=True, dotfiles=True,
+                                           runtimes={'python': '3.13'}))
+
+    def test_modified_legacy_files_are_protected(self):
+        self.legacy_fixture()
+        for relative in ('.devcontainer/Taskfile.yml', '.devcontainer/scripts/post-create.sh',
+                         '.devcontainer/devcontainer.json'):
+            with self.subTest(relative=relative):
+                path = self.project / relative
+                before = path.read_bytes()
+                path.write_bytes(before + b'\n# custom change\n' if not relative.endswith('.json')
+                                 else before.replace(b'Polyglot', b'Custom'))
+                changed = path.read_bytes()
+                with self.assertRaisesRegex(ValueError, 'legacy|unmanaged'):
+                    self.render(polyglot=True)
+                self.assertEqual(path.read_bytes(), changed)
+                path.write_bytes(before)
+
+    def test_pnpm_explicit_version_is_installed_and_runtime_checked(self):
+        from devcontainer_setup.render import validate
+        files = self.render(package_managers={'node': 'pnpm'},
+                            package_manager_versions={'node': '9.15.4'})
+        self.assertEqual(self.config(files)['features'][NODE]['pnpmVersion'], '9.15.4')
+        self.install(files)
+        self.assertEqual(validate(self.project), [])
+        self.assertEqual(files, self.render(package_managers={'node': 'pnpm'},
+                                           package_manager_versions={'node': '9.15.4'}))
+        helper = self.project / '.devcontainer/scripts/validate-selected.sh'
+        content = helper.read_text()
+        commands = content.split('for tool in ', 1)[1].split(';', 1)[0].split()
+        bins = self.project / 'bin'
+        bins.mkdir()
+        for command in commands:
+            path = bins / command
+            path.write_text('#!/bin/sh\nexit 0\n')
+            path.chmod(0o755)
+        manager = bins / 'pnpm'
+        for version, expected in [('9.15.4', 0), ('12.11.2', 1)]:
+            manager.write_text('#!/bin/sh\necho ' + version + '\n')
+            result = subprocess.run(['/bin/bash', str(helper)], capture_output=True, text=True,
+                                    env=dict(os.environ, PATH=str(bins)))
+            self.assertEqual(result.returncode, expected, result.stderr)
+            if expected:
+                self.assertIn('9.15.4', result.stderr)
+                self.assertIn('12.11.2', result.stderr)
+
+    def test_unsupported_manager_version_overrides_stop_with_actionable_conflict(self):
+        for manager in ('yarn', 'npm', 'bun'):
+            with self.subTest(manager=manager), self.assertRaisesRegex(ValueError, 'version.*(support|locked)|locked.*version'):
+                self.render(package_managers={'node': manager},
+                            package_manager_versions={'node': '9.15.4'})
+
     def test_minimal_is_selective_and_does_not_write(self):
         files = self.render()
         config = self.config(files)

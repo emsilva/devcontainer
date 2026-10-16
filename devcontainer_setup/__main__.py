@@ -58,12 +58,26 @@ def defaults(found: dict, preferences: dict, metadata: dict) -> dict:
                          for name, entry in found['runtimes'].items() if entry['selected']},
             'tools': [name for name, entry in found['tools'].items() if entry['selected']],
             'agents': preferences['agentic_tools'], 'dotfiles': preferences['apply_dotfiles'],
-            'ssh': False, 'ports': found['ports'], 'package_managers': managers, 'polyglot': False}
+            'ssh': False, 'ports': found['ports'], 'package_managers': managers,
+            'package_manager_versions': {family: entry.get('version') or '' for family, entry in found['package_managers'].items()
+                                         if entry.get('selected') and (entry.get('version') or
+                                             entry.get('versions', {}).get(entry['selected'], {}).get('conflicts'))}, 'polyglot': False}
 
 
 def integrate_taskfile(project: Path, files: dict[str, bytes]) -> None:
-    path = project / 'Taskfile.yml'
-    text = path.read_text() if path.exists() else "version: '3'\n"
+    names = ('Taskfile.yml', 'Taskfile.yaml', 'taskfile.yml', 'taskfile.yaml',
+             'Taskfile.dist.yml', 'Taskfile.dist.yaml', 'taskfile.dist.yml', 'taskfile.dist.yaml')
+    present = {path.name for path in project.iterdir()}
+    existing = [name for name in names if name in present]
+    if len(existing) > 1:
+        raise ValueError('Multiple supported Taskfiles found; choose one active entrypoint before setup: ' + ', '.join(existing))
+    name = existing[0] if existing else 'Taskfile.yml'
+    path = project / name
+    if path.is_symlink():
+        raise ValueError(f'Existing Taskfile is a symlink: {name}; review integration manually')
+    text = path.read_text() if existing else "version: '3'\ntasks:\n" + ''.join(
+        f"  {operation}:\n    cmds: [{{task: 'devcontainer:{operation}'}}]\n"
+        for operation in ('up', 'down', 'status', 'build'))
     target = '.devcontainer/Taskfile.yml'
     if target not in text:
         entry = '  devcontainer:\n    taskfile: .devcontainer/Taskfile.yml\n    optional: true\n'
@@ -76,7 +90,7 @@ def integrate_taskfile(project: Path, files: dict[str, bytes]) -> None:
             raise ValueError('Expand the inline Taskfile includes mapping before setup; existing tasks were preserved.')
         else:
             text = text.rstrip() + '\n\nincludes:\n' + entry
-        files['Taskfile.yml'] = text.encode()
+        files[name] = text.encode()
     ignore = project / '.gitignore'
     ignored = ignore.read_text() if ignore.exists() else ''
     line = '/.devcontainer/devcontainer.env'
@@ -231,6 +245,8 @@ def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
                       [TOOL_LABELS[name] for name in chosen['tools'] if name in TOOL_LABELS])]
     chosen['package_managers'] = {family: manager for family, manager in chosen.get('package_managers', {}).items()
                                   if family in runtimes}
+    chosen['package_manager_versions'] = {family: version for family, version in chosen.get('package_manager_versions', {}).items()
+                                           if family in chosen['package_managers']}
     for family, entry in found['package_managers'].items():
         if family not in runtimes:
             continue
@@ -239,6 +255,17 @@ def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
             options = {'node': ['npm', 'pnpm', 'yarn', 'bun'], 'python': ['uv', 'pip', 'poetry', 'pipenv']}.get(family)
             if options:
                 chosen['package_managers'][family] = ui.choose(f'{family} package manager', options)
+        manager = chosen['package_managers'].get(family)
+        version_entry = entry.get('versions', {}).get(manager, {})
+        if version_entry.get('conflicts'):
+            print('\n'.join(version_entry['conflicts']), flush=True)
+            chosen['package_manager_versions'][family] = ui.input(
+                f'{manager} version (resolve declarations above; exact x.y.z)',
+                chosen['package_manager_versions'].get(family, ''))
+        elif version_entry.get('version'):
+            chosen['package_manager_versions'][family] = version_entry['version']
+        elif entry['conflicts']:
+            chosen['package_manager_versions'].pop(family, None)
     chosen['dotfiles'] = ui.confirm('Apply dotfiles inside the container?', preferences['apply_dotfiles'])
     if chosen['dotfiles']:
         while True:

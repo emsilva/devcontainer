@@ -136,6 +136,7 @@ def scan(project: Path) -> dict:
     declarations = {name: [] for name in RUNTIMES}
     sources = {name: [] for name in RUNTIMES}
     managers: dict[str, dict[str, list[str]]] = {}
+    manager_declarations = {}
     ports = set()
     command_managers: dict[str, list[str]] = {}
 
@@ -152,8 +153,11 @@ def scan(project: Path) -> dict:
         if evidence not in found['tools'][name]['evidence']:
             found['tools'][name]['evidence'].append(evidence)
 
-    def manager(family, name, path):
-        managers.setdefault(family, {}).setdefault(name, []).append(f'{path}: {name}')
+    def manager(family, name, path, version=None):
+        evidence = f'{path}: {name}' + (f'@{version}' if version else '')
+        managers.setdefault(family, {}).setdefault(name, []).append(evidence)
+        if version:
+            manager_declarations.setdefault((family, name), []).append((3, str(version), path))
 
     names = sorted(set(proc.stdout.decode('utf-8', errors='surrogateescape').split('\0')) - {''})
     for relative in names:
@@ -200,7 +204,11 @@ def scan(project: Path) -> dict:
                 runtime('node', relative, 'Node manifest' + (f' engines.node={engines["node"]}' if 'node' in engines else ''), engines.get('node'))
                 pm = data.get('packageManager')
                 if isinstance(pm, str) and pm.split('@')[0] in {'npm', 'pnpm', 'yarn', 'bun'}:
-                    manager('node', pm.split('@')[0], relative)
+                    name, _, version = pm.partition('@')
+                    manager('node', name, relative + ' packageManager', version.split('+sha', 1)[0])
+                for name in ('npm', 'pnpm', 'yarn', 'bun'):
+                    if engines.get(name):
+                        manager('node', name, relative + ' engines.' + name, str(engines[name]))
                 text = '\n'.join(str(x) for x in data.get('scripts', {}).values())
             elif base == 'pyproject.toml':
                 data = tomllib.loads(text)
@@ -293,6 +301,18 @@ def scan(project: Path) -> dict:
     if 'node' not in managers and command_managers:
         managers['node'] = command_managers
     for family, choices in managers.items():
-        found['package_managers'][family] = {'selected': next(iter(choices)) if len(choices) == 1 else None, 'evidence': [item for values in choices.values() for item in values], 'conflicts': [f'{family}: conflicting package managers: {", ".join(sorted(choices))}'] if len(choices) > 1 else []}
+        versions = {}
+        for name in choices:
+            declarations_for_manager = manager_declarations.get((family, name), [])
+            version, conflicts = _choose(declarations_for_manager, None)
+            if declarations_for_manager and (not version or not re.fullmatch(r'\d+\.\d+\.\d+', version)):
+                version = None
+                conflicts = [f'{path}: {value}' for _, value, path in declarations_for_manager]
+            versions[name] = {'version': version, 'conflicts': conflicts}
+        selected = next(iter(choices)) if len(choices) == 1 else None
+        found['package_managers'][family] = {
+            'selected': selected, 'version': versions[selected]['version'] if selected else None,
+            'versions': versions, 'evidence': [item for values in choices.values() for item in values],
+            'conflicts': [f'{family}: conflicting package managers: {", ".join(sorted(choices))}'] if len(choices) > 1 else []}
     found['ports'] = sorted(ports)
     return found
