@@ -5,9 +5,10 @@ if [ -z "${CODESPACES+x}" ] && [ -z "${DOTFILES_REPO:-}" ] && [ -f .devcontainer
 from pathlib import Path
 lines = Path('.devcontainer/devcontainer.env').read_text().splitlines()
 prefix = 'DOTFILES_REPO='
-if len(lines) != 1 or not lines[0].startswith(prefix) or not lines[0][len(prefix):]:
+repositories = [line[len(prefix):] for line in lines if line.startswith(prefix)]
+if len(repositories) != 1 or not repositories[0]:
     raise SystemExit('Expected one nonempty DOTFILES_REPO= value in .devcontainer/devcontainer.env')
-print(lines[0][len(prefix):], end='')
+print(repositories[0], end='')
 PY
   )
   export DOTFILES_REPO

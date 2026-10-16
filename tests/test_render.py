@@ -225,7 +225,7 @@ class RenderTests(unittest.TestCase):
         apply = self.project / '.devcontainer/scripts/apply-dotfiles.sh'
         apply.write_text('printf "%s\\n" "$1" >> "$TEST_LOG"\n')
         literal = 'https://example.invalid/$(touch owned).git'
-        (self.project / '.devcontainer/devcontainer.env').write_text('DOTFILES_REPO=' + literal + '\n')
+        (self.project / '.devcontainer/devcontainer.env').write_text('# Local runtime settings\nPERSONAL_PAT=private-fixture\nDOTFILES_REPO=' + literal + '\nSSH_AUTH_SOCK=/tmp/example\n')
         base_env = dict(os.environ, TEST_LOG=str(self.project / 'apply.log'))
         base_env.pop('DOTFILES_REPO', None)
         base_env.pop('CODESPACES', None)
@@ -246,6 +246,20 @@ class RenderTests(unittest.TestCase):
                     self.assertTrue(log.exists())
                     self.assertEqual(log.read_text().splitlines(), [expected])
                 self.assertFalse((self.project / 'owned').exists())
+
+    def test_duplicate_local_dotfiles_assignments_are_rejected(self):
+        self.install(self.render(dotfiles=True))
+        (self.project / '.devcontainer/scripts/validate-selected.sh').write_text('exit 0\n')
+        (self.project / '.devcontainer/scripts/apply-dotfiles.sh').write_text('touch should-not-apply\n')
+        (self.project / '.devcontainer/devcontainer.env').write_text('DOTFILES_REPO=one/repo\nOTHER=kept\nDOTFILES_REPO=two/repo\n')
+        env = dict(os.environ)
+        env.pop('CODESPACES', None)
+        env.pop('DOTFILES_REPO', None)
+        result = subprocess.run(['bash', '.devcontainer/scripts/post-create-selected.sh'],
+                                cwd=self.project, env=env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('DOTFILES_REPO', result.stderr)
+        self.assertFalse((self.project / 'should-not-apply').exists())
 
     def test_detected_optional_managers_build_before_features(self):
         for family, manager in [('python', 'poetry'), ('python', 'pipenv'), ('node', 'bun')]:
