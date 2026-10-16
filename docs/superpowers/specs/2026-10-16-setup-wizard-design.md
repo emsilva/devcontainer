@@ -2,7 +2,7 @@
 
 Date: 2026-10-16
 
-Status: conversation design agreed; written specification awaiting owner review.
+Status: approved by owner on 2026-10-16; implementation in progress.
 
 ## Goal
 

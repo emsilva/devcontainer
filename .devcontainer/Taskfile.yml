@@ -1,6 +1,29 @@
 version: '3'
 
 tasks:
+  setup:
+    desc: Run the project-aware setup wizard
+    interactive: true
+    cmds:
+      - bash scripts/setup.sh {{.CLI_ARGS}}
+  check:
+    desc: Validate the installed selected configuration
+    cmds:
+      - bash scripts/setup.sh --check
+  up:
+    desc: Start this workspace's development container
+    cmds:
+      - devcontainer up --workspace-folder .
+  down:
+    desc: Stop this workspace's running development container
+    cmds:
+      - |
+        containers=$(docker ps -q --filter "label=devcontainer.local_folder=$PWD")
+        if [ -n "$containers" ]; then docker stop $containers; fi
+  status:
+    desc: Show this workspace's running container and published ports
+    cmds:
+      - docker ps --filter "label=devcontainer.local_folder=$PWD" --format 'table {{"{{"}}.Names{{"}}"}}\t{{"{{"}}.Status{{"}}"}}\t{{"{{"}}.Ports{{"}}"}}'
   rebuild:
     desc: Rebuild the dev container with the Dev Containers CLI
     preconditions:
@@ -10,10 +33,10 @@ tasks:
       - devcontainer up --workspace-folder . --remove-existing-container --log-level trace
     silent: false
   upgrade:self:
-    desc: Refresh the .devcontainer directory from the canonical repository
-    dir: .devcontainer
+    desc: Review a deliberate generator upgrade
+    interactive: true
     cmds:
-      - bash -lc 'cd .. && curl -fsSL https://raw.githubusercontent.com/emsilva/devcontainer/main/install.sh | sh'
+      - bash scripts/setup.sh --upgrade {{.CLI_ARGS}}
     silent: false
 
   upgrade:codex:

@@ -3,9 +3,9 @@ name: ShellCheck
 on:
   push:
     branches: [main]
-    paths: ['**.sh']
+    paths: ['**.sh', '**.py', 'templates/**', 'Taskfile.yml', '.github/workflows/ci.yml']
   pull_request:
-    paths: ['**.sh']
+    paths: ['**.sh', '**.py', 'templates/**', 'Taskfile.yml', '.github/workflows/ci.yml']
 
 jobs:
   shellcheck:
@@ -13,4 +13,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: ShellCheck scripts
-        run: shellcheck .devcontainer/scripts/*.sh install.sh
+        run: shellcheck .devcontainer/scripts/*.sh scripts/*.sh templates/scripts/*.sh install.sh
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Wizard tests
+        run: python3 -m unittest discover -s tests -v
