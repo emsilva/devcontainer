@@ -12,7 +12,7 @@ for tool in __TOOLS__; do
   fi
 done
 # The renderer adds calls with the selected exact versions below.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 check_manager_version() {
   local tool="$1" expected="$2" actual
   if ! actual=$("$tool" --version); then
