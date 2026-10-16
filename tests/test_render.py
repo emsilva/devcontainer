@@ -197,7 +197,7 @@ class RenderTests(unittest.TestCase):
         self.install(self.render())
         upstream = self.project / 'upstream/scripts'
         upstream.mkdir(parents=True)
-        (upstream / 'setup.sh').write_text('printf "%s\\n" "$@"\n')
+        (upstream / 'setup.sh').write_text('printf "%s\\n" "$@" "${DEVCONTAINER_SETUP_REF:-MISSING}"\n')
         archive = self.project / 'upstream.tar.gz'
         with tarfile.open(archive, 'w:gz') as bundle:
             bundle.add(upstream.parent, arcname='release')
@@ -212,9 +212,40 @@ class RenderTests(unittest.TestCase):
                                 env=dict(os.environ, XDG_CACHE_HOME=str(cache), TEST_ARCHIVE=str(archive),
                                          PATH=str(fake_bin)+os.pathsep+os.environ['PATH']))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ['--project', str(self.project.resolve()), '--check'])
+        self.assertEqual(result.stdout.splitlines(), ['--project', str(self.project.resolve()), '--check', REF])
         self.assertTrue((cache / 'devcontainer-setup/releases' / REF / 'scripts/setup.sh').is_file())
         self.assertFalse(list((cache / 'devcontainer-setup/releases').glob('.download.*')))
+
+    def test_local_dotfiles_file_is_data_and_codespaces_environment_wins(self):
+        files = self.render(dotfiles=True)
+        self.assertFalse((self.project / '.devcontainer').exists())
+        self.install(files)
+        validator = self.project / '.devcontainer/scripts/validate-selected.sh'
+        validator.write_text('exit 0\n')
+        apply = self.project / '.devcontainer/scripts/apply-dotfiles.sh'
+        apply.write_text('printf "%s\\n" "$1" >> "$TEST_LOG"\n')
+        literal = 'https://example.invalid/$(touch owned).git'
+        (self.project / '.devcontainer/devcontainer.env').write_text('DOTFILES_REPO=' + literal + '\n')
+        base_env = dict(os.environ, TEST_LOG=str(self.project / 'apply.log'))
+        base_env.pop('DOTFILES_REPO', None)
+        base_env.pop('CODESPACES', None)
+        cases = [({}, literal), ({'DOTFILES_REPO': 'existing/local'}, 'existing/local'),
+                 ({'CODESPACES': 'true', 'DOTFILES_REPO': 'remote/repo'}, 'remote/repo'),
+                 ({'CODESPACES': 'true'}, None), ({'CODESPACES': ''}, None)]
+        for additions, expected in cases:
+            with self.subTest(environment=additions):
+                log = self.project / 'apply.log'
+                log.unlink(missing_ok=True)
+                result = subprocess.run(['bash', '.devcontainer/scripts/post-create-selected.sh'],
+                                        cwd=self.project, env=dict(base_env, **additions),
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                if expected is None:
+                    self.assertFalse(log.exists())
+                else:
+                    self.assertTrue(log.exists())
+                    self.assertEqual(log.read_text().splitlines(), [expected])
+                self.assertFalse((self.project / 'owned').exists())
 
     def test_detected_optional_managers_build_before_features(self):
         for family, manager in [('python', 'poetry'), ('python', 'pipenv'), ('node', 'bun')]:

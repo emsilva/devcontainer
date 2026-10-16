@@ -18,4 +18,5 @@ if [ ! -f "$runner" ]; then
   rm -rf "$staging"
   trap - EXIT
 fi
+export DEVCONTAINER_SETUP_REF="$revision"
 exec bash "$runner" --project "$PWD" "$@"

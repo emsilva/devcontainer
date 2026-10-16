@@ -248,7 +248,7 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
     if selected['dotfiles']:
         commands.extend(['chezmoi', 'load-dotfiles'])
     replacements = {'__SOURCE_REF__': source_ref, '__TOOLS__': ' '.join(dict.fromkeys(commands)),
-                    '__DOTFILES__': 'if [ -n "${DOTFILES_REPO:-}" ]; then\n  bash .devcontainer/scripts/apply-dotfiles.sh "$DOTFILES_REPO"\nfi' if selected['dotfiles'] else ''}
+                    '__DOTFILES__': (templates / 'dotfiles-hook.sh').read_text() if selected['dotfiles'] else ''}
     helper_names = ['setup-wizard.sh', 'validate-selected.sh', 'post-create-selected.sh']
     if selected['dotfiles']:
         helper_names.append('apply-dotfiles.sh')
