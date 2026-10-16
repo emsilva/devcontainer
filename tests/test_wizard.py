@@ -102,10 +102,10 @@ class WizardCliTests(unittest.TestCase):
                 self.assertIn(name, files)
                 for relative, data in files.items():
                     (root / relative).write_bytes(data)
-                result = subprocess.run(['task', '--list-all'], cwd=root, text=True, capture_output=True)
+                result = subprocess.run(['task', '--list-all', '--json'], cwd=root, text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn('up:', result.stdout)
-                self.assertIn('test:', result.stdout)
+                names = {task['name'] for task in json.loads(result.stdout)['tasks']}
+                self.assertTrue({'up', 'test'} <= names, names)
                 self.assertEqual([path.name for path in root.glob('*') if 'taskfile' in path.name.lower()], [name])
 
     def test_package_manager_pin_survives_defaults_and_renders(self):
