@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import tempfile
 
+from .ui import cache_home
+
 
 def _git(root: Path, *args: str) -> str:
     # A caller may itself run inside a Git hook or an alternate worktree.
@@ -30,7 +32,7 @@ def _git(root: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _validate(root: Path, sha: str) -> None:
+def _validate(root: Path, source: Path) -> None:
     if root.is_symlink() or not root.is_dir():
         raise ValueError(f'Invalid release cache at {root}; existing content was preserved.')
     for name in ('scripts/setup.sh', 'devcontainer_setup/__main__.py'):
@@ -38,12 +40,29 @@ def _validate(root: Path, sha: str) -> None:
         if path.parent.is_symlink() or path.is_symlink() or not path.is_file():
             raise ValueError(f'Release cache {root} has no supported wizard ({name}). '
                              'Existing content was preserved.')
-    if _git(root, 'rev-parse', '--verify', 'HEAD^{commit}') != sha:
-        raise ValueError(f'Release cache {root} has a different revision; '
-                         'existing content was preserved.')
-    if _git(root, 'status', '--porcelain', '--untracked-files=no'):
-        raise ValueError(f'Release cache {root} has modified tracked files; '
-                         'existing content was preserved.')
+    # Installed runners also come from git archive/codeload and need not have
+    # Git metadata. The freshly fetched checkout is the revision authority.
+    for entry in _git(source, 'ls-files', '--stage', '-z').split('\0'):
+        if not entry:
+            continue
+        metadata, name = entry.split('\t', 1)
+        mode = metadata.split()[0]
+        path = root / name
+        expected = source / name
+        ancestors = Path(name).parents
+        safe_parents = not any((root / parent).is_symlink() for parent in ancestors)
+        if mode == '120000':
+            matches = (safe_parents and path.is_symlink()
+                       and os.readlink(path) == os.readlink(expected))
+        elif mode in {'100644', '100755'}:
+            matches = (safe_parents and not path.is_symlink() and path.is_file()
+                       and bool(path.stat().st_mode & 0o100) == (mode == '100755')
+                       and path.read_bytes() == expected.read_bytes())
+        else:
+            raise ValueError(f'Unsupported release source mode {mode} for {name}.')
+        if not matches:
+            raise ValueError(f'Release cache {root} has modified tracked source ({name}); '
+                             'existing content was preserved.')
 
 
 def fetch_release(
@@ -62,8 +81,7 @@ def fetch_release(
     if local.is_dir():
         repository = str(local.resolve())
     if cache is None:
-        base = os.environ.get('XDG_CACHE_HOME')
-        cache = (Path(base) if base else Path.home() / '.cache') / 'devcontainer-setup/releases'
+        cache = cache_home() / 'devcontainer-setup/releases'
     cache = Path(cache).expanduser().absolute()
     try:
         cache.mkdir(parents=True, exist_ok=True)
@@ -76,19 +94,19 @@ def fetch_release(
             sha = _git(tree, 'rev-parse', '--verify', 'FETCH_HEAD^{commit}')
             if not re.fullmatch(r'[0-9a-f]{40}', sha):
                 raise ValueError('Fetched wizard revision is not a full SHA-1 commit.')
+            _git(tree, 'checkout', '--quiet', '--detach', sha)
+            _validate(tree, tree)
             release = cache / sha
             if os.path.lexists(release):
-                _validate(release, sha)
+                _validate(release, tree)
                 return release, sha
-            _git(tree, 'checkout', '--quiet', '--detach', sha)
-            _validate(tree, sha)
             # copytree creates its destination exclusively, so even a concurrent
             # empty directory cannot be replaced. A failed publication is kept
             # for inspection; cleanup is confined to our temporary fetch tree.
             try:
                 shutil.copytree(tree, release, symlinks=True)
             except FileExistsError:
-                _validate(release, sha)
+                _validate(release, tree)
             return release, sha
     except OSError as error:
         raise ValueError(f'Cannot fetch wizard release into cache {cache}: {error}') from error

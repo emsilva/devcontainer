@@ -1,7 +1,9 @@
 from pathlib import Path
 from contextlib import chdir
+import io
 import os
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -35,6 +37,16 @@ class ReleaseTests(unittest.TestCase):
         git(self.source, 'add', '.')
         git(self.source, 'commit', '-m', 'Release')
         return git(self.source, 'rev-parse', 'HEAD')
+
+    def archive_cache(self):
+        sha = git(self.source, 'rev-parse', 'HEAD')
+        release = self.cache / sha
+        release.mkdir(parents=True)
+        archive = subprocess.check_output(['git', '-C', str(self.source), 'archive', sha])
+        with tarfile.open(fileobj=io.BytesIO(archive)) as stream:
+            # This archive contains only the local, test-authored fixture.
+            stream.extractall(release)
+        return release, sha
 
     def test_branch_resolves_to_immutable_revision_and_advances_separately(self):
         original = git(self.source, 'rev-parse', 'HEAD')
@@ -122,6 +134,53 @@ class ReleaseTests(unittest.TestCase):
             release, sha = fetch_release('source', cache=self.cache)
         self.assertEqual(sha, git(self.source, 'rev-parse', 'HEAD'))
         self.assertTrue((release / 'scripts/setup.sh').is_file())
+
+    def test_archive_cache_reused_without_git_metadata_and_preserves_owner_notes(self):
+        release, sha = self.archive_cache()
+        self.assertFalse((release / '.git').exists())
+        marker = release / 'owner-note'
+        marker.write_text('keep me')
+        original_mtime = (release / 'scripts/setup.sh').stat().st_mtime_ns
+        self.assertEqual(fetch_release(str(self.source), cache=self.cache), (release, sha))
+        self.assertEqual(marker.read_text(), 'keep me')
+        self.assertEqual((release / 'scripts/setup.sh').stat().st_mtime_ns, original_mtime)
+        self.assertFalse((release / '.git').exists())
+
+    def test_archive_cache_rejects_modified_nonentrypoint_source_and_mode(self):
+        helper = self.source / 'devcontainer_setup/helper.py'
+        helper.write_text('VALUE = 1\n')
+        self.commit()
+        release, _ = self.archive_cache()
+        cached = release / 'devcontainer_setup/helper.py'
+        cached.write_text('VALUE = 2\n')
+        with self.assertRaisesRegex(ValueError, 'modified'):
+            fetch_release(str(self.source), cache=self.cache)
+        self.assertEqual(cached.read_text(), 'VALUE = 2\n')
+        cached.write_bytes(helper.read_bytes())
+        cached.chmod(0o755)
+        with self.assertRaisesRegex(ValueError, 'modified'):
+            fetch_release(str(self.source), cache=self.cache)
+        self.assertEqual(cached.stat().st_mode & 0o111, 0o111)
+
+    def test_relative_xdg_cache_home_falls_back_to_home_cache(self):
+        home = self.root / 'home'
+        with chdir(self.root), patch.dict(os.environ, {'XDG_CACHE_HOME': 'relative-cache'}), \
+                patch('pathlib.Path.home', return_value=home):
+            release, sha = fetch_release(str(self.source))
+        self.assertEqual(release, home / '.cache/devcontainer-setup/releases' / sha)
+
+    def test_archive_cache_checks_tracked_symlink_target(self):
+        (self.source / 'target.txt').write_text('source bytes')
+        (self.source / 'link.txt').symlink_to('target.txt')
+        self.commit()
+        release, sha = self.archive_cache()
+        self.assertEqual(fetch_release(str(self.source), cache=self.cache), (release, sha))
+        cached_link = release / 'link.txt'
+        cached_link.unlink()
+        cached_link.symlink_to('owner-note')
+        with self.assertRaisesRegex(ValueError, 'modified'):
+            fetch_release(str(self.source), cache=self.cache)
+        self.assertEqual(os.readlink(cached_link), 'owner-note')
 
 
 if __name__ == '__main__':
