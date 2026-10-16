@@ -260,6 +260,77 @@ class RenderTests(unittest.TestCase):
                     self.assertIn('bun-linux-', dockerfile)
                 self.assertIn(manager, files['.devcontainer/scripts/validate-selected.sh'].decode())
 
+    def test_adoption_rerun_preserves_all_user_owned_configuration(self):
+        dc = self.project / '.devcontainer'
+        dc.mkdir()
+        original = {'image': 'custom:image', 'features': {NODE: {'version': '22'}},
+                    'forwardPorts': [3000], 'onCreateCommand': 'echo preparation',
+                    'postCreateCommand': 'echo mine',
+                    'mounts': ['source=mine,target=/custom,type=volume'],
+                    'customizations': {'vscode': {'settings': {'editor.tabSize': 7}}}}
+        (dc / 'devcontainer.json').write_text(json.dumps(original))
+        first = self.render(polyglot=True)
+        self.install(first)
+        second = self.render(polyglot=True)
+        self.assertEqual(first, second)
+        config = self.config(second)
+        for key in ('image', 'forwardPorts', 'onCreateCommand', 'mounts'):
+            self.assertEqual(config[key], original[key])
+        self.assertEqual(config['features'][NODE]['version'], '22')
+        self.assertEqual(config['postCreateCommand']['project'], 'echo mine')
+        config['image'] = 'custom:new'
+        config['features'][NODE]['version'] = '22.1'
+        (dc / 'devcontainer.json').write_text(json.dumps(config))
+        updated = self.config(self.render(polyglot=True))
+        self.assertEqual(updated['image'], 'custom:new')
+        self.assertEqual(updated['features'][NODE]['version'], '22.1')
+
+    def test_adoption_build_extras_use_only_build_shape(self):
+        from devcontainer_setup.render import validate
+        dc = self.project / '.devcontainer'
+        dc.mkdir()
+        canonical = json.loads((ROOT / '.devcontainer/devcontainer.json').read_text())
+        (dc / 'devcontainer.json').write_text(json.dumps({'image': canonical['image']}))
+        files = self.render(polyglot=True, dotfiles=True)
+        config = self.config(files)
+        self.assertIn('build', config)
+        self.assertNotIn('image', config)
+        self.install(files)
+        self.assertEqual(validate(self.project), [])
+        self.assertEqual(files, self.render(polyglot=True, dotfiles=True))
+        config['image'] = canonical['image']
+        (dc / 'devcontainer.json').write_text(json.dumps(config))
+        self.assertTrue(any('image' in error and 'build' in error for error in validate(self.project)))
+
+    def test_adoption_existing_build_does_not_add_image(self):
+        dc = self.project / '.devcontainer'
+        dc.mkdir()
+        (dc / 'devcontainer.json').write_text(json.dumps({'build': {'dockerfile': 'Customfile'}}))
+        files = self.render(polyglot=True)
+        self.assertNotIn('image', self.config(files))
+        self.assertEqual(self.config(files)['build'], {'dockerfile': 'Customfile'})
+        self.install(files)
+        self.assertEqual(files, self.render(polyglot=True))
+
+    def test_node_uses_supported_options_and_declares_yarn_dependency(self):
+        files = self.render(runtimes={'node': '24'})
+        config = self.config(files)
+        self.assertNotIn('installYarn', config['features'][NODE])
+        self.assertEqual(config['features'][NODE]['nvmVersion'], '0.40.8')
+        metadata = config['customizations']['devcontainerSetup']
+        self.assertIn('yarn', metadata['dependencies'])
+        self.assertIn('Feature', metadata['dependencies']['yarn'])
+        self.assertIn('yarn', files['.devcontainer/scripts/validate-selected.sh'].decode())
+
+    def test_supported_docker_secondary_pin_and_compose_limitation(self):
+        config = self.config(self.render(tools=['docker']))
+        docker = config['features']['ghcr.io/devcontainers/features/docker-in-docker:2']
+        self.assertEqual(docker['mobyBuildxVersion'], '0.38.0')
+        self.assertIn(docker['dockerDashComposeVersion'], ['none', 'v1', 'v2'])
+        limitations = config['customizations']['devcontainerSetup']['pinningLimitations']
+        self.assertIn('compose', limitations)
+        self.assertIn('none/v1/v2', limitations['compose'])
+
     def test_source_ref_must_be_immutable(self):
         from devcontainer_setup.render import render
         with self.assertRaisesRegex(ValueError, 'revision|source|40'):

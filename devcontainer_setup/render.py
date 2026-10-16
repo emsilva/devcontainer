@@ -27,7 +27,8 @@ PINNED_OPTIONS = {
     FEATURE + 'azure-cli:1': {'version': '2.91.0'},
     FEATURE + 'github-cli:1': {'version': '2.102.0'},
     FEATURE + 'rust:1': {'version': '1.99.1'},
-    FEATURE + 'docker-in-docker:2': {'version': '29.9.1'},
+    FEATURE + 'docker-in-docker:2': {'version': '29.9.1', 'mobyBuildxVersion': '0.38.0'},
+    FEATURE + 'node:1': {'nvmVersion': '0.40.8'},
     FEATURE + 'kubectl-helm-minikube:1': {'version': '1.37.1', 'helm': '4.3.1'},
     'ghcr.io/dhoeric/features/google-cloud-cli:1': {'version': '589.0.0'},
     'ghcr.io/va-h/devcontainers-features/uv:1': {'version': '0.13.1'},
@@ -94,8 +95,10 @@ def _selections(values):
     return selected
 
 
-def _merge_config(current, previous, desired, path=()):
+def _merge_config(current, previous, desired, path=(), adopted_paths=frozenset()):
     """Three-way merge; ports, editor configuration, and project hooks are user-owned."""
+    if path in adopted_paths:
+        return copy.deepcopy(current)
     if path == ('forwardPorts',):
         additions = [port for port in current if port not in previous]
         return list(dict.fromkeys(desired + additions))
@@ -122,6 +125,11 @@ def _merge_config(current, previous, desired, path=()):
     if isinstance(previous, dict) and isinstance(current, dict) and isinstance(desired, dict):
         result = {}
         for key in previous.keys() | current.keys() | desired.keys():
+            child = path + (key,)
+            if child in adopted_paths:
+                if key in current:
+                    result[key] = copy.deepcopy(current[key])
+                continue
             if key not in previous:
                 if key in current:
                     if key in desired and current[key] != desired[key]:
@@ -133,14 +141,33 @@ def _merge_config(current, previous, desired, path=()):
                 if key in desired:
                     raise ValueError(f'Deleted managed configuration: {".".join(path + (key,))}')
             elif key not in desired:
+                if any(owned[:len(child)] == child for owned in adopted_paths):
+                    result[key] = copy.deepcopy(current[key])
+                    continue
                 if current[key] != previous[key]:
                     raise ValueError(f'Modified managed configuration: {".".join(path + (key,))}')
             else:
-                result[key] = _merge_config(current[key], previous[key], desired[key], path + (key,))
+                result[key] = _merge_config(current[key], previous[key], desired[key], child, adopted_paths)
         return result
     if current != previous and current != desired:
         raise ValueError(f'Modified managed configuration: {".".join(path)}')
     return copy.deepcopy(desired)
+
+
+def _leaf_paths(value, path=()):
+    if isinstance(value, dict) and value:
+        return [leaf for key, child in value.items() for leaf in _leaf_paths(child, path + (key,))]
+    return [path]
+
+
+def _overlay(base, overrides):
+    result = copy.deepcopy(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _overlay(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
 
 
 def _install_artifact(name, artifact):
@@ -217,8 +244,8 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
         features[FEATURE + runtime + ':1']['version'] = version
     if FEATURE + 'node:1' in features:
         manager = selected['package_managers'].get('node', 'npm')
-        features[FEATURE + 'node:1'].update(installYarn=manager == 'yarn',
-                                         pnpmVersion='12.11.2' if manager == 'pnpm' else 'none')
+        features[FEATURE + 'node:1'].pop('installYarn', None)
+        features[FEATURE + 'node:1']['pnpmVersion'] = '12.11.2' if manager == 'pnpm' else 'none'
     desired = {'name': 'Project development environment', 'image': canonical['image'],
                'features': features, 'remoteUser': 'vscode',
                'containerEnv': {'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONUNBUFFERED': '1'},
@@ -229,7 +256,7 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
     templates = source / 'templates'
     files = {}
     commands = ['python3', 'uv', 'uvx', 'git', 'task', 'curl', 'jq', 'rg', 'gh']
-    runtime_commands = {'node': ['node', 'npm'], 'ruby': ['ruby', 'bundle'], 'go': ['go'], 'rust': ['rustc', 'cargo']}
+    runtime_commands = {'node': ['node', 'npm', 'yarn'], 'ruby': ['ruby', 'bundle'], 'go': ['go'], 'rust': ['rustc', 'cargo']}
     for runtime, bins in runtime_commands.items():
         if FEATURE + runtime + ':1' in names:
             commands.extend(bins)
@@ -285,22 +312,40 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
         desired['build'] = {'dockerfile': 'Dockerfile'}
     current_without_marker = copy.deepcopy(current)
     current_without_marker.get('customizations', {}).pop(NAMESPACE, None)
+    if 'image' in current and 'build' in current:
+        raise ValueError('Choose exactly one devcontainer image or build configuration')
     if marker:
-        config = _merge_config(current_without_marker, marker['managedConfig'], desired)
-    elif current:
-        config = copy.deepcopy(desired)
-        # Explicit polyglot adoption preserves the existing environment and hooks.
-        config.update(copy.deepcopy(current_without_marker))
-        config['features'] = dict(features, **current.get('features', {}))
-        for key in ('postCreateCommand',):
-            old_command = current.get(key)
-            if old_command:
-                user_commands = old_command if isinstance(old_command, dict) else {'project': old_command}
-                config[key] = dict(user_commands, **desired[key])
-        if installs and ('build' in current or current.get('image') != canonical['image']):
+        adopted_paths = {tuple(path) for path in marker.get('adoptedPaths', [])}
+    else:
+        adopted_paths = {path for path in _leaf_paths(current_without_marker)
+                         if path and path[0] != 'forwardPorts' and not path[0].endswith('Command')}
+    if installs and current and not marker:
+        if 'build' in current or current.get('image') != canonical['image']:
             raise ValueError('Build-time extras require reviewed migration of the existing custom image/build')
+        adopted_paths.discard(('image',))
+    if not installs and any(path[0] == 'build' for path in adopted_paths):
+        desired.pop('image', None)
+    if marker:
+        config = _merge_config(current_without_marker, marker['managedConfig'], desired,
+                               adopted_paths=adopted_paths)
+    elif current:
+        # Preserve adopted user fields; keep only generated defaults in the managed baseline.
+        config = _overlay(desired, current_without_marker)
+        if installs:
+            config.pop('image', None)
+        elif 'build' in current:
+            config.pop('image', None)
+        config['forwardPorts'] = list(dict.fromkeys(desired['forwardPorts'] + current.get('forwardPorts', [])))
+        old_command = current.get('postCreateCommand')
+        if old_command:
+            user_commands = old_command if isinstance(old_command, dict) else {'project': old_command}
+            if NAMESPACE in user_commands and user_commands[NAMESPACE] != desired['postCreateCommand'][NAMESPACE]:
+                raise ValueError('Existing unmanaged command uses reserved devcontainerSetup name')
+            config['postCreateCommand'] = dict(user_commands, **desired['postCreateCommand'])
     else:
         config = desired
+    if ('image' in config) == ('build' in config):
+        raise ValueError('Choose exactly one devcontainer image or build configuration')
     # Reuse existing resolved feature records for ordinary reruns, including custom polyglot features.
     existing_lock = _read(_safe_path(project, LOCK)).get('features', {}) if (project / LOCK).exists() else {}
     locked = {}
@@ -326,11 +371,19 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
     managed_files = dict(marker.get('managedFiles', {})) if marker else {}
     managed_files.update({relative: _digest(data) for relative, data in files.items()})
     snapshot = copy.deepcopy(desired)
-    if current and not marker:
-        snapshot = copy.deepcopy(config)
+    dependencies = {'node': 'Coding-agent tools use Node'} if selected['agents'] else {}
+    limitations = {}
+    if FEATURE + 'node:1' in config['features']:
+        dependencies['yarn'] = 'The locked Node Feature installs Yarn with Node; it cannot be deselected'
+        limitations['yarn'] = 'The locked Node Feature exposes no Yarn version option'
+    if FEATURE + 'docker-in-docker:2' in config['features']:
+        limitations['compose'] = 'The locked Docker Feature only supports none/v1/v2; its apt Compose package has no exact version option'
+    if any(name in config['features'] for name in AGENTS):
+        limitations['agents'] = 'The locked agent Features expose no CLI version options'
     config.setdefault('customizations', {})[NAMESPACE] = {
         'version': 1, 'sourceRef': source_ref, 'selections': selected,
-        'dependencies': {'node': 'Coding-agent tools use Node' } if selected['agents'] else {},
+        'dependencies': dependencies, 'pinningLimitations': limitations,
+        'adoptedPaths': sorted([list(path) for path in adopted_paths]),
         'managedConfig': snapshot, 'managedFiles': dict(sorted(managed_files.items()))}
     files[CONFIG] = _json(config)
     return files
@@ -342,6 +395,8 @@ def validate(project: Path) -> list[str]:
     errors = []
     try:
         config = _read(_safe_path(project, CONFIG))
+        if ('image' in config) == ('build' in config):
+            errors.append('Choose exactly one devcontainer image or build configuration')
         lock = _read(_safe_path(project, LOCK)).get('features', {})
         marker = config.get('customizations', {}).get(NAMESPACE)
         if not isinstance(marker, dict) or marker.get('version') != 1:
@@ -386,7 +441,8 @@ def validate(project: Path) -> list[str]:
                 errors.append('Missing selected build-time installation Dockerfile')
         actual = copy.deepcopy(config)
         actual.get('customizations', {}).pop(NAMESPACE, None)
-        _merge_config(actual, marker['managedConfig'], marker['managedConfig'])
+        _merge_config(actual, marker['managedConfig'], marker['managedConfig'],
+                      adopted_paths={tuple(path) for path in marker.get('adoptedPaths', [])})
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         errors.append(str(exc))
     return errors
