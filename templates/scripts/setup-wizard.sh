@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 revision='__SOURCE_REF__'
-cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/devcontainer-setup/releases"
+case "${XDG_CACHE_HOME:-}" in
+  /*) cache_base=$XDG_CACHE_HOME ;;
+  *) cache_base=$HOME/.cache ;;
+esac
+cache_root="$cache_base/devcontainer-setup/releases"
 runner="$cache_root/$revision/scripts/setup.sh"
-if [ ! -f "$runner" ]; then
-  mkdir -p "$cache_root"
-  staging=$(mktemp -d "$cache_root/.download.XXXXXX")
-  trap 'rm -rf "$staging"' EXIT
-  curl --fail --location --silent --show-error \
-    "https://codeload.github.com/emsilva/devcontainer/tar.gz/$revision" -o "$staging/source.tar.gz"
-  mkdir "$staging/release"
-  tar -xzf "$staging/source.tar.gz" --strip-components=1 -C "$staging/release"
-  test -f "$staging/release/scripts/setup.sh"
-  if [ ! -d "$cache_root/$revision" ]; then
-    mv "$staging/release" "$cache_root/$revision"
-  fi
-  rm -rf "$staging"
-  trap - EXIT
-fi
+mkdir -p "$cache_root"
+staging=$(mktemp -d "$cache_root/.download.XXXXXX")
+trap 'rm -rf "$staging"' EXIT
+git init --quiet "$staging/source"
+git -C "$staging/source" -c core.hooksPath=/dev/null -c core.autocrlf=false fetch --quiet --depth=1 --no-tags -- \
+  "${SETUP_DEVCONTAINER_REPO:-https://github.com/emsilva/devcontainer.git}" "$revision"
+git -C "$staging/source" -c core.hooksPath=/dev/null -c core.autocrlf=false checkout --quiet --detach FETCH_HEAD
+# Authenticate every tracked cached byte/mode/link using the fresh source authority.
+(
+  cd "$staging/source"
+  python3 -I -B -X pycache_prefix=/dev/null -c 'from pathlib import Path; import sys; sys.path.insert(0, str(Path.cwd())); from devcontainer_setup.releases import publish_release; publish_release(Path.cwd(), sys.argv[1], Path(sys.argv[2]))' "$revision" "$cache_root"
+)
+rm -rf "$staging"
+trap - EXIT
 export DEVCONTAINER_SETUP_REF="$revision"
 exec bash "$runner" --project "$PWD" "$@"

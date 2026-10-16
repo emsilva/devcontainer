@@ -370,26 +370,30 @@ class RenderTests(unittest.TestCase):
             self.render()
 
     def test_cached_launcher_runs_pinned_runner_and_cleans_staging(self):
-        self.install(self.render())
-        upstream = self.project / 'upstream/scripts'
-        upstream.mkdir(parents=True)
-        (upstream / 'setup.sh').write_text('printf "%s\\n" "$@" "${DEVCONTAINER_SETUP_REF:-MISSING}"\n')
-        archive = self.project / 'upstream.tar.gz'
-        with tarfile.open(archive, 'w:gz') as bundle:
-            bundle.add(upstream.parent, arcname='release')
-        fake_bin = self.project / 'bin'
-        fake_bin.mkdir()
-        curl = fake_bin / 'curl'
-        curl.write_text('#!/usr/bin/env bash\nwhile [ "$1" != "-o" ]; do shift; done\ncp "$TEST_ARCHIVE" "$2"\n')
-        curl.chmod(0o755)
+        from devcontainer_setup.render import render
+        upstream = self.project / 'upstream'
+        (upstream / 'scripts').mkdir(parents=True)
+        (upstream / 'scripts/setup.sh').write_text('printf "%s\\n" "$@" "${DEVCONTAINER_SETUP_REF:-MISSING}"\n')
+        (upstream / 'devcontainer_setup').mkdir()
+        for name in ('__init__.py', 'releases.py', 'ui.py', '__main__.py'):
+            shutil.copyfile(ROOT / 'devcontainer_setup' / name, upstream / 'devcontainer_setup' / name)
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(upstream), *args], text=True).strip()
+        git('init', '-b', 'main')
+        git('config', 'user.name', 'Render Test')
+        git('config', 'user.email', 'render@example.com')
+        git('add', '.')
+        git('commit', '-m', 'Fixture')
+        sha = git('rev-parse', 'HEAD')
+        self.install(render(self.project, ROOT, self.selection, sha))
         cache = self.project / 'cache'
         result = subprocess.run(['bash', '.devcontainer/scripts/setup-wizard.sh', '--check'],
                                 cwd=self.project, text=True, capture_output=True,
-                                env=dict(os.environ, XDG_CACHE_HOME=str(cache), TEST_ARCHIVE=str(archive),
-                                         PATH=str(fake_bin)+os.pathsep+os.environ['PATH']))
+                                env=dict(os.environ, XDG_CACHE_HOME=str(cache),
+                                         SETUP_DEVCONTAINER_REPO=str(upstream)))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ['--project', str(self.project.resolve()), '--check', REF])
-        self.assertTrue((cache / 'devcontainer-setup/releases' / REF / 'scripts/setup.sh').is_file())
+        self.assertEqual(result.stdout.splitlines(), ['--project', str(self.project.resolve()), '--check', sha])
+        self.assertTrue((cache / 'devcontainer-setup/releases' / sha / 'scripts/setup.sh').is_file())
         self.assertFalse(list((cache / 'devcontainer-setup/releases').glob('.download.*')))
 
     def test_local_dotfiles_file_is_data_and_codespaces_environment_wins(self):

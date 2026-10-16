@@ -2,6 +2,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
+
+import devcontainer_setup.git_ops as operations
 
 from devcontainer_setup.git_ops import GitPlan, ReviewChanged, proposed_branch
 
@@ -152,6 +155,131 @@ class GitPlanTests(unittest.TestCase):
         git(self.root, 'push', 'origin', f'{other}:refs/heads/main')
         with self.assertRaisesRegex(ValueError, 'diverg'):
             plan.push()
+
+
+    def snapshot(self):
+        return (git(self.root, 'branch', '--show-current'), git(self.root, 'rev-parse', 'HEAD'),
+                git(self.root, 'write-tree'), git(self.root, 'status', '--porcelain'),
+                (self.root / '.devcontainer/devcontainer.json').read_bytes())
+
+    def test_commit_refuses_changed_identity_after_apply(self):
+        for change in ('branch', 'head'):
+            with self.subTest(change=change):
+                plan = GitPlan(self.root, self.files, branch='setup/devcontainer')
+                plan.apply()
+                if change == 'branch':
+                    git(self.root, 'switch', '-c', 'owner-work')
+                else:
+                    parent = git(self.root, 'rev-parse', 'HEAD')
+                    sha = subprocess.check_output(['git', '-C', str(self.root), 'commit-tree',
+                        f'{parent}^{{tree}}', '-p', parent], input='Owner history\n', text=True).strip()
+                    git(self.root, 'update-ref', 'HEAD', sha)
+                before = self.snapshot()
+                with self.assertRaisesRegex(ValueError, 'HEAD|branch'):
+                    plan.commit()
+                self.assertEqual(self.snapshot(), before)
+                # Restore only test-owned fixture state for the second case.
+                git(self.root, 'reset', '--hard', plan.head)
+                git(self.root, 'switch', 'main')
+                git(self.root, 'branch', '-D', 'setup/devcontainer')
+                if change == 'branch':
+                    git(self.root, 'branch', '-D', 'owner-work')
+
+    def test_commit_hook_branch_switch_is_refused_and_recovery_preserves_it(self):
+        hook = self.root / '.git/hooks/pre-commit'
+        hook.write_text('#!/bin/sh\ngit switch -c owner-work\n')
+        hook.chmod(0o755)
+        plan = GitPlan(self.root, self.files, branch='setup/devcontainer')
+        plan.apply()
+        head = plan.head
+        tree = git(self.root, 'write-tree')
+        with self.assertRaisesRegex(ValueError, 'branch|review|Review'):
+            plan.commit()
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(git(self.root, 'write-tree'), tree)
+        before = self.snapshot()
+        with self.assertRaisesRegex(ValueError, 'branch'):
+            plan.accept_hook_changes()
+        self.assertEqual(self.snapshot(), before)
+
+    def remote(self):
+        remote = Path(self.tmp.name) / 'remote.git'
+        git(self.root, 'init', '--bare', str(remote))
+        git(self.root, 'remote', 'add', 'origin', str(remote))
+        return remote
+
+    def test_push_refuses_branch_switch(self):
+        remote = self.remote()
+        plan = GitPlan(self.root, self.files, branch='setup/devcontainer')
+        plan.apply()
+        plan.commit()
+        git(self.root, 'switch', '-c', 'owner-work')
+        before = self.snapshot()
+        with self.assertRaisesRegex(ValueError, 'branch'):
+            plan.push()
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(git(remote, 'for-each-ref'), '')
+
+    def test_push_publishes_exact_reviewed_sha_during_concurrent_head_advance(self):
+        remote = self.remote()
+        plan = GitPlan(self.root, self.files, branch='setup/devcontainer')
+        plan.apply()
+        reviewed = plan.commit()
+        real_git = operations.git
+        advanced = []
+        def boundary(root, *args, **kwargs):
+            result = real_git(root, *args, **kwargs)
+            if args[:1] == ('ls-remote',) and not advanced:
+                (self.root / 'owner.txt').write_text('Unreviewed owner work\n')
+                git(self.root, 'add', 'owner.txt')
+                git(self.root, 'commit', '-m', 'Owner concurrent work')
+                advanced.append(git(self.root, 'rev-parse', 'HEAD'))
+            return result
+        with patch.object(operations, 'git', side_effect=boundary):
+            plan.push()
+        self.assertEqual(git(remote, 'rev-parse', 'refs/heads/setup/devcontainer'), reviewed)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), advanced[0])
+        self.assertEqual(git(self.root, 'rev-parse', '--abbrev-ref', '@{upstream}'), 'origin/setup/devcontainer')
+
+    def test_normal_push_sets_upstream_to_reviewed_commit(self):
+        remote = self.remote()
+        plan = GitPlan(self.root, self.files, branch='setup/devcontainer')
+        plan.apply()
+        sha = plan.commit()
+        self.assertEqual(plan.push(), sha)
+        self.assertEqual(git(remote, 'rev-parse', 'refs/heads/setup/devcontainer'), sha)
+        self.assertEqual(git(self.root, 'rev-parse', '--abbrev-ref', '@{upstream}'), 'origin/setup/devcontainer')
+
+
+    def test_unborn_commit_and_unchanged_plan_keep_the_reviewed_identity(self):
+        unborn = self.root / 'unborn'
+        unborn.mkdir()
+        git(unborn, 'init', '-b', 'main')
+        git(unborn, 'config', 'user.name', 'Test User')
+        git(unborn, 'config', 'user.email', 'test@example.com')
+        plan = GitPlan(unborn, self.files, branch='setup/devcontainer')
+        plan.apply()
+        sha = plan.commit()
+        self.assertEqual(git(unborn, 'show', '-s', '--format=%P', sha), '')
+        unchanged = GitPlan(unborn, self.files, branch='unused-proposed-branch')
+        unchanged.branch = unchanged.start_branch  # interactive() no-change handoff
+        unchanged.apply()
+        self.assertEqual(unchanged.commit(), sha)
+        self.assertEqual(git(unborn, 'branch', '--show-current'), 'setup/devcontainer')
+
+
+    def test_push_with_single_branch_fetch_preserves_refspec_and_sets_upstream(self):
+        remote = self.remote()
+        narrow = '+refs/heads/main:refs/remotes/origin/main'
+        git(self.root, 'config', 'remote.origin.fetch', narrow)
+        plan = GitPlan(self.root, self.files, branch='setup/devcontainer')
+        plan.apply()
+        sha = plan.commit()
+        self.assertEqual(plan.push(), sha)
+        self.assertEqual(git(remote, 'rev-parse', 'refs/heads/setup/devcontainer'), sha)
+        self.assertEqual(git(self.root, 'config', '--get-all', 'remote.origin.fetch'), narrow)
+        self.assertEqual(git(self.root, 'config', 'branch.setup/devcontainer.remote'), 'origin')
+        self.assertEqual(git(self.root, 'config', 'branch.setup/devcontainer.merge'), 'refs/heads/setup/devcontainer')
 
 
 if __name__ == '__main__':

@@ -2,6 +2,8 @@ from pathlib import Path
 from contextlib import chdir
 import io
 import os
+import py_compile
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -181,6 +183,106 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'modified'):
             fetch_release(str(self.source), cache=self.cache)
         self.assertEqual(os.readlink(cached_link), 'owner-note')
+
+
+    def execution_source(self):
+        implementation = Path(__file__).resolve().parents[1]
+        for name in ('__init__.py', 'releases.py', 'ui.py'):
+            shutil.copyfile(implementation / 'devcontainer_setup' / name,
+                            self.source / 'devcontainer_setup' / name)
+        (self.source / 'scripts/setup.sh').write_text('printf "trusted-runner\\n"\n')
+        (self.source / 'devcontainer_setup/helper.py').write_text('VALUE = 1\n')
+        return self.commit()
+
+    def test_execution_entrypoints_refuse_modified_cached_source(self):
+        from devcontainer_setup.__main__ import _ensure_runner
+        implementation = Path(__file__).resolve().parents[1]
+        sha = self.execution_source()
+        for entry in ('installer', 'runner', 'ensure'):
+            for name in ('scripts/setup.sh', 'devcontainer_setup/helper.py'):
+                with self.subTest(entry=entry, name=name):
+                    cache_base = self.root / f'{entry}-{Path(name).name}'
+                    self.cache = cache_base / 'devcontainer-setup/releases'
+                    release, _ = self.archive_cache()
+                    target = release / name
+                    content = 'printf "modified-cache-runner\\n"\n' if name.endswith('.sh') else 'VALUE = 99\n'
+                    target.write_text(content)
+                    env = dict(os.environ, XDG_CACHE_HOME=str(cache_base),
+                               SETUP_DEVCONTAINER_REPO=str(self.source), SETUP_DEVCONTAINER_REF=sha)
+                    if entry == 'ensure':
+                        with patch.dict(os.environ, env), patch('devcontainer_setup.__main__.SOURCE', self.source):
+                            with self.assertRaisesRegex(ValueError, 'modified'):
+                                _ensure_runner(sha)
+                    else:
+                        if entry == 'installer':
+                            command = ['sh', '-s', '--', '--scan']
+                            script = (implementation / 'install.sh').read_text()
+                        else:
+                            command = ['bash', '-s', '--', '--check']
+                            script = (implementation / 'templates/scripts/setup-wizard.sh').read_text().replace('__SOURCE_REF__', sha)
+                        result = subprocess.run(command, input=script, text=True, capture_output=True,
+                                                cwd=self.source, env=env)
+                        self.assertNotEqual(result.returncode, 0, result.stdout)
+                        self.assertIn('modified', result.stderr)
+                        self.assertNotIn('modified-cache-runner', result.stdout)
+                    self.assertEqual(target.read_text(), content)
+
+    def test_execution_entrypoints_accept_valid_archive_cache(self):
+        from devcontainer_setup.__main__ import _ensure_runner
+        implementation = Path(__file__).resolve().parents[1]
+        sha = self.execution_source()
+        cache_base = self.root / 'valid'
+        self.cache = cache_base / 'devcontainer-setup/releases'
+        release, _ = self.archive_cache()
+        (release / 'owner-note').write_text('keep')
+        env = dict(os.environ, XDG_CACHE_HOME=str(cache_base), SETUP_DEVCONTAINER_REPO=str(self.source),
+                   SETUP_DEVCONTAINER_REF=sha)
+        for script_path, shell, argument in (('install.sh', 'sh', '--scan'),
+                ('templates/scripts/setup-wizard.sh', 'bash', '--check')):
+            script = (implementation / script_path).read_text().replace('__SOURCE_REF__', sha)
+            result = subprocess.run([shell, '-s', '--', argument], input=script, text=True,
+                                    capture_output=True, cwd=self.source, env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, 'trusted-runner\n')
+        with patch.dict(os.environ, env), patch('devcontainer_setup.__main__.SOURCE', self.source):
+            _ensure_runner(sha)
+        self.assertFalse((release / '.git').exists())
+        self.assertEqual((release / 'owner-note').read_text(), 'keep')
+
+
+    def test_execution_entrypoints_ignore_forged_cached_bytecode(self):
+        implementation = Path(__file__).resolve().parents[1]
+        self.execution_source()
+        shutil.copyfile(implementation / 'scripts/setup.sh', self.source / 'scripts/setup.sh')
+        main = self.source / 'devcontainer_setup/__main__.py'
+        authentic = b'print("TRUSTED_SOURCE")\n'
+        forged = b'print("UNVERIFIED_PYC")\n'
+        self.assertEqual(len(authentic), len(forged))
+        main.write_bytes(authentic)
+        sha = self.commit()
+        for entry, shell, argument in (('install.sh', 'sh', '--scan'),
+                ('templates/scripts/setup-wizard.sh', 'bash', '--check')):
+            with self.subTest(entry=entry):
+                cache_base = self.root / shell
+                self.cache = cache_base / 'devcontainer-setup/releases'
+                release, _ = self.archive_cache()
+                cached_main = release / 'devcontainer_setup/__main__.py'
+                original = cached_main.stat()
+                cached_main.write_bytes(forged)
+                os.utime(cached_main, ns=(original.st_atime_ns, original.st_mtime_ns))
+                bytecode = Path(py_compile.compile(str(cached_main), doraise=True))
+                forged_bytes = bytecode.read_bytes()
+                cached_main.write_bytes(authentic)
+                os.utime(cached_main, ns=(original.st_atime_ns, original.st_mtime_ns))
+                script = (implementation / entry).read_text().replace('__SOURCE_REF__', sha)
+                result = subprocess.run([shell, '-s', '--', argument], input=script, text=True,
+                    capture_output=True, cwd=self.source,
+                    env=dict(os.environ, XDG_CACHE_HOME=str(cache_base),
+                             SETUP_DEVCONTAINER_REPO=str(self.source), SETUP_DEVCONTAINER_REF=sha))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, 'TRUSTED_SOURCE\n')
+                self.assertEqual(bytecode.read_bytes(), forged_bytes)
+                self.assertEqual(cached_main.read_bytes(), authentic)
 
 
 if __name__ == '__main__':

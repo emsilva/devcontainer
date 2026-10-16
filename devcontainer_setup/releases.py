@@ -65,6 +65,25 @@ def _validate(root: Path, source: Path) -> None:
                              'existing content was preserved.')
 
 
+def publish_release(source: Path, sha: str, cache: Path) -> Path:
+    """Publish or authenticate a cache using a freshly fetched source authority."""
+    if not re.fullmatch(r'[0-9a-f]{40}', sha):
+        raise ValueError('Release revision must be a full SHA-1 commit.')
+    if _git(source, 'rev-parse', 'HEAD') != sha:
+        raise ValueError('Fetched source does not match the requested release revision.')
+    _validate(source, source)
+    release = cache / sha
+    if os.path.lexists(release):
+        _validate(release, source)
+        return release
+    # Exclusive publication preserves even a concurrent empty owner directory.
+    try:
+        shutil.copytree(source, release, symlinks=True)
+    except FileExistsError:
+        _validate(release, source)
+    return release
+
+
 def fetch_release(
     repository: str = 'https://github.com/emsilva/devcontainer.git',
     ref: str = 'main',
@@ -95,18 +114,6 @@ def fetch_release(
             if not re.fullmatch(r'[0-9a-f]{40}', sha):
                 raise ValueError('Fetched wizard revision is not a full SHA-1 commit.')
             _git(tree, 'checkout', '--quiet', '--detach', sha)
-            _validate(tree, tree)
-            release = cache / sha
-            if os.path.lexists(release):
-                _validate(release, tree)
-                return release, sha
-            # copytree creates its destination exclusively, so even a concurrent
-            # empty directory cannot be replaced. A failed publication is kept
-            # for inspection; cleanup is confined to our temporary fetch tree.
-            try:
-                shutil.copytree(tree, release, symlinks=True)
-            except FileExistsError:
-                _validate(release, tree)
-            return release, sha
+            return publish_release(tree, sha, cache), sha
     except OSError as error:
         raise ValueError(f'Cannot fetch wizard release into cache {cache}: {error}') from error

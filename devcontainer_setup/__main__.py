@@ -145,27 +145,10 @@ def repository_access(repo: str) -> bool:
 
 
 def _ensure_runner(ref: str) -> None:
-    destination = cache_home() / 'devcontainer-setup/releases' / ref
-    if (destination / 'scripts/setup.sh').is_file():
-        return
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='.release-', dir=destination.parent) as directory:
-        staged = Path(directory) / 'source'
-        if (SOURCE / '.git').exists():
-            staged.mkdir()
-            archive = Path(directory) / 'source.tar'
-            with archive.open('wb') as output:
-                result = subprocess.run(['git', '-C', str(SOURCE), 'archive', ref], stdout=output,
-                                        stderr=subprocess.PIPE, text=True)
-            if result.returncode:
-                raise ValueError(result.stderr.strip())
-            subprocess.run(['tar', '-xf', str(archive), '-C', str(staged)], check=True)
-        else:
-            shutil.copytree(SOURCE, staged, ignore=shutil.ignore_patterns('__pycache__', '.git'))
-        if not (staged / 'scripts/setup.sh').is_file():
-            raise ValueError('The selected source revision does not include the wizard. Commit its implementation first.')
-        if not destination.exists():
-            os.rename(staged, destination)
+    # Even an existing SHA-named directory needs an independent source authority.
+    repository = (str(SOURCE) if (SOURCE / '.git').exists() else
+                  os.environ.get('SETUP_DEVCONTAINER_REPO', 'https://github.com/emsilva/devcontainer.git'))
+    fetch_release(repository, ref, cache_home() / 'devcontainer-setup/releases')
 
 
 def _repository(project: Path) -> str:
@@ -300,6 +283,25 @@ def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume
     if action == 'Commit only':
         return None
     repo = _repository(project)
+    if not resume:
+        spaces = api.existing(repo, branch)
+        if spaces:
+            choices = ['Create a new codespace', *[f'Reuse {space["name"]}' for space in spaces]]
+            choice = ui.choose('Existing codespaces for this branch', choices)
+            if choice.startswith('Reuse '):
+                resume = choice.removeprefix('Reuse ')
+    if resume:
+        settings = api.resource_settings(api.get(resume))
+        print(f'Existing codespace {resume}: {json.dumps(settings, sort_keys=True)}', flush=True)
+        if not ui.confirm('Reuse this codespace with these existing resource settings?'):
+            raise Cancelled()
+        return {'repo': repo, 'machine': settings['machine'],
+                'idle_timeout': (f"{settings['idle_timeout_minutes']}m"
+                                 if settings['idle_timeout_minutes'] is not None else None),
+                'location': settings['location'],
+                'retention': (f"{settings['retention_period_minutes']}m"
+                              if settings['retention_period_minutes'] is not None else None),
+                'client': 'browser' if action.endswith('browser') else 'vscode', 'resume': resume}
     try:
         # Before approval the local branch/configuration may not exist on GitHub.
         # Offer repository machines now; launch rechecks the committed, pushed SHA.
@@ -318,13 +320,6 @@ def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume
     timeout = ui.choose('Stop when idle for', ['15m', '30m', '1h', '2h'], '30m')
     options = {'repo': repo, 'machine': machine['name'], 'idle_timeout': timeout,
                'client': 'browser' if action.endswith('browser') else 'vscode', 'resume': resume}
-    if not resume:
-        spaces = api.existing(repo, branch)
-        if spaces:
-            choices = ['Create a new codespace', *[f'Reuse {space["name"]}' for space in spaces]]
-            choice = ui.choose('Existing codespaces for this branch', choices)
-            if choice.startswith('Reuse '):
-                options['resume'] = choice.removeprefix('Reuse ')
     if ui.confirm('Show advanced launch options?', False):
         region = ui.choose('Region', ['Automatic', 'EastUs', 'WestUs2', 'WestEurope', 'SouthEastAsia'])
         if region != 'Automatic':

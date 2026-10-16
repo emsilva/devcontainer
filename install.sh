@@ -34,9 +34,11 @@ if [ ! -f "$staging/source/scripts/setup.sh" ]; then
   echo 'The requested devcontainer revision does not include the setup wizard.' >&2
   exit 1
 fi
-if [ ! -d "$cache_root/$revision" ]; then
-  mv "$staging/source" "$cache_root/$revision"
-fi
+# Run the shared validator from freshly fetched source, never from the cache.
+(
+  cd "$staging/source"
+  python3 -I -B -X pycache_prefix=/dev/null -c 'from pathlib import Path; import sys; sys.path.insert(0, str(Path.cwd())); from devcontainer_setup.releases import publish_release; publish_release(Path.cwd(), sys.argv[1], Path(sys.argv[2]))' "$revision" "$cache_root"
+)
 rm -rf "$staging"
 trap - EXIT HUP INT TERM
 export DEVCONTAINER_SETUP_REF="$revision"

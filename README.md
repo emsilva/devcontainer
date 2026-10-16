@@ -47,6 +47,8 @@ task devcontainer:upgrade:self
 task devcontainer:setup -- --resume <codespace-name>
 ```
 
+Installed project runners need network access to fetch the pinned source and validate the existing cache; modified cached source is preserved and refused.
+
 Read-only commands work without a terminal and do not change the project or save
 preferences:
 

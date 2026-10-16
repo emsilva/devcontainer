@@ -51,7 +51,11 @@ if original.is_file() and os.access(original, os.X_OK):
     if result.returncode:
         sys.exit(result.returncode)
 tree = subprocess.check_output(['git', 'write-tree'], text=True).strip()
-changed = tree != os.environ['DEVCONTAINER_REVIEWED_TREE']
+head = subprocess.run(['git', 'rev-parse', '--verify', 'HEAD'], capture_output=True, text=True).stdout.strip()
+branch = subprocess.check_output(['git', 'branch', '--show-current'], text=True).strip()
+changed = (tree != os.environ['DEVCONTAINER_REVIEWED_TREE']
+           or head != os.environ['DEVCONTAINER_REVIEWED_HEAD']
+           or branch != os.environ['DEVCONTAINER_REVIEWED_BRANCH'])
 for name, expected in json.loads(pathlib.Path(os.environ['DEVCONTAINER_REVIEW_MANIFEST']).read_text()).items():
     path = pathlib.Path(name)
     if not path.is_file() or path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
@@ -172,9 +176,14 @@ class GitPlan:
                 return True
         return False
 
-    def accept_hook_changes(self) -> None:
+    def _check_identity(self) -> None:
         if git(self.project, 'rev-parse', '--verify', 'HEAD', check=False) != self.head:
-            raise ValueError('HEAD changed during hooks; inspect the repository before retrying.')
+            raise ValueError('HEAD changed since review; inspect the repository before retrying.')
+        if git(self.project, 'branch', '--show-current') != self.branch:
+            raise ValueError('Working branch changed since review; inspect the repository before retrying.')
+
+    def accept_hook_changes(self) -> None:
+        self._check_identity()
         staged = set(git(self.project, 'diff', '--cached', '--name-only').splitlines())
         if staged - set(self.changed):
             raise ValueError('Hooks staged unrelated files; preserve and unstage them before retrying.')
@@ -185,6 +194,7 @@ class GitPlan:
         git(self.project, 'add', '--', *self.changed)
 
     def commit(self) -> str:
+        self._check_identity()
         if not self.changed:
             return self.head
         if not self.applied:
@@ -209,23 +219,29 @@ class GitPlan:
             manifest = root / 'review.json'
             manifest.write_text(json.dumps({name: _digest(self.files[name]) for name in self.changed}))
             env = dict(os.environ, DEVCONTAINER_ORIGINAL_HOOKS=str(hooks), DEVCONTAINER_REVIEWED_TREE=tree,
-                       DEVCONTAINER_REVIEW_MANIFEST=str(manifest))
+                       DEVCONTAINER_REVIEW_MANIFEST=str(manifest),
+                       DEVCONTAINER_REVIEWED_HEAD=self.head, DEVCONTAINER_REVIEWED_BRANCH=self.branch)
             result = subprocess.run(['git', '-c', f'core.hooksPath={root}', 'commit', '-m',
                                      'Configure project devcontainer'], cwd=self.project,
                                     env=env, capture_output=True, text=True)
         if result.returncode:
+            self._check_identity()
             if self._review_changed(tree):
                 raise ReviewChanged(result.stderr.strip() or 'Hooks changed the reviewed candidate.')
             raise ValueError(result.stderr.strip() or result.stdout.strip() or 'Commit failed.')
         if self._review_changed(tree) or git(self.project, 'rev-parse', 'HEAD^{tree}') != tree:
             raise ValueError('Repository changed after commit; inspect it before pushing.')
-        self.head = git(self.project, 'rev-parse', 'HEAD')
+        committed = git(self.project, 'rev-parse', 'HEAD')
+        parents = git(self.project, 'show', '-s', '--format=%P', committed)
+        if (git(self.project, 'branch', '--show-current') != self.branch
+                or parents != self.head):
+            raise ValueError('HEAD or branch changed during commit; inspect it before pushing.')
+        self.head = committed
         return self.head
 
     def push(self) -> str:
-        head = git(self.project, 'rev-parse', 'HEAD')
-        if head != self.head:
-            raise ValueError('HEAD changed before push; rerun the review.')
+        self._check_identity()
+        head = self.head
         refs = git(self.project, 'ls-remote', '--heads', 'origin', f'refs/heads/{self.branch}')
         if refs:
             remote_sha = refs.split()[0]
@@ -235,8 +251,12 @@ class GitPlan:
             if result.returncode:
                 raise ValueError(f'Local and origin/{self.branch} diverge or remote is ahead. '
                                  'No push performed; review a merge plan first.')
-        git(self.project, 'push', '--set-upstream', 'origin', f'HEAD:refs/heads/{self.branch}')
+        git(self.project, 'push', 'origin', f'{head}:refs/heads/{self.branch}')
         remote = git(self.project, 'ls-remote', '--heads', 'origin', f'refs/heads/{self.branch}')
         if not remote or remote.split()[0] != head:
             raise ValueError('Remote branch does not match the reviewed setup commit.')
+        # Like push -u, record the upstream even for a single-branch fetch mapping
+        # that intentionally has no origin/<setup-branch> tracking ref.
+        git(self.project, 'config', f'branch.{self.branch}.remote', 'origin')
+        git(self.project, 'config', f'branch.{self.branch}.merge', f'refs/heads/{self.branch}')
         return head

@@ -16,6 +16,8 @@ MACHINE = {'name': 'standardLinux32gb', 'display_name': '4 cores, 16 GB RAM',
 class FakeGitHub:
     def __init__(self):
         self.calls = []
+        self.resource = {"machine": dict(MACHINE), "idle_timeout_minutes": 30,
+                         "retention_period_minutes": 10080, "location": "EastUs"}
         self.fail_personalization = False
         self.remote_sha = 'a' * 40
         self.ssh_failures = []
@@ -44,7 +46,7 @@ class FakeGitHub:
                 output = json.dumps({'machines': [MACHINE], 'total_count': 1})
             elif endpoint.startswith('user/codespaces/new-space'):
                 output = json.dumps({'name': 'new-space', 'state': 'Available',
-                    'repository': {'full_name': 'owner/project'}, 'git_status': {'ref': 'setup/devcontainer',
+                    **self.resource, 'repository': {'full_name': 'owner/project'}, 'git_status': {'ref': 'setup/devcontainer',
                     'has_uncommitted_changes': self.api_dirty, 'has_unpushed_changes': self.api_dirty}})
         if args[1:3] == ['codespace', 'ssh']:
             self.ssh_timeouts.append(kwargs.get('timeout'))
@@ -324,6 +326,75 @@ class CodespacesTests(unittest.TestCase):
                             None, self.receipt)
         self.assertFalse(any(c[1:3] == ['codespace', 'code'] for c in self.runner.calls))
         self.assertTrue(self.receipt.exists())
+
+
+    def resume(self, **options):
+        class Plan:
+            branch = 'setup/devcontainer'
+            def push(self):
+                return 'a' * 40
+        values = dict(machine=MACHINE['name'], idle_timeout='30m', client='browser',
+                      dotfiles_repo=None, receipt=self.receipt, resume='new-space')
+        values.update(options)
+        return self.api.launch(Plan(), 'owner/project', **values)
+
+    def test_invalid_receipt_path_refused_before_allocation(self):
+        for path in (Path(self.tmp.name), Path(self.tmp.name) / 'file/launch.json'):
+            with self.subTest(path=path):
+                (Path(self.tmp.name) / 'file').write_text('owner data')
+                self.receipt = path
+                with self.assertRaisesRegex(ValueError, 'receipt|state'):
+                    self.launch()
+                self.assertFalse(any(c[1:3] == ['codespace', 'create'] for c in self.runner.calls))
+                self.assertEqual((Path(self.tmp.name) / 'file').read_text(), 'owner data')
+
+    def test_receipt_failure_after_allocation_always_reports_resume(self):
+        for resume in (False, True):
+            for save_number in (1, 2):
+                with self.subTest(resume=resume, save_number=save_number):
+                    self.runner.calls.clear()
+                    self.receipt.unlink(missing_ok=True)
+                    save = self.api._save_receipt
+                    count = 0
+                    def failing_save(path, values):
+                        nonlocal count
+                        count += 1
+                        if count == save_number:
+                            raise OSError('simulated receipt disk failure')
+                        save(path, values)
+                    with patch.object(self.api, '_save_receipt', side_effect=failing_save):
+                        with self.assertRaisesRegex(ValueError,
+                                'task devcontainer:setup -- --resume new-space'):
+                            self.resume() if resume else self.launch()
+                    self.assertEqual(sum(c[1:3] == ['codespace', 'create'] for c in self.runner.calls),
+                                     0 if resume else 1)
+                    if self.receipt.exists():
+                        self.assertIsNone(json.loads(self.receipt.read_text())['validated_commit'])
+                    self.assertFalse(any(c[1:3] == ['codespace', 'code'] for c in self.runner.calls))
+
+    def test_resume_rejects_conflicting_resource_settings_without_mutation(self):
+        for options in ({'machine': 'cheaper-machine'}, {'idle_timeout': '15m'},
+                        {'retention': '24h'}, {'location': 'WestEurope'}):
+            with self.subTest(options=options):
+                self.runner.calls.clear()
+                with self.assertRaisesRegex(ValueError, 'existing|Existing|resource'):
+                    self.resume(**options)
+                self.assertFalse(self.receipt.exists())
+                self.assertTrue(all(c[1] == 'api' and len(c) == 3 for c in self.runner.calls))
+
+    def test_resume_requires_actual_machine_metadata(self):
+        self.runner.resource.pop('machine')
+        with self.assertRaisesRegex(ValueError, 'machine.*metadata|metadata.*machine'):
+            self.resume()
+        self.assertFalse(self.receipt.exists())
+
+    def test_resume_receipt_records_actual_resource_settings(self):
+        self.resume(location='EastUs', retention='168h')
+        record = json.loads(self.receipt.read_text())
+        self.assertEqual(record['machine'], MACHINE['name'])
+        self.assertEqual(record['idle_timeout_minutes'], 30)
+        self.assertEqual(record['retention_period_minutes'], 10080)
+        self.assertEqual(record['location'], 'EastUs')
 
 
 if __name__ == '__main__':

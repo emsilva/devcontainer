@@ -250,5 +250,56 @@ class WizardCliTests(unittest.TestCase):
             dotfiles_repository('https://personal-token@github.com/owner/dotfiles.git')
 
 
+    def test_reuse_reviews_actual_settings_without_creation_prompts(self):
+        from devcontainer_setup.__main__ import _launch_options
+        from devcontainer_setup.codespaces import Codespaces
+        import contextlib
+        import io
+        self.git('remote', 'add', 'origin', 'https://github.com/owner/project.git')
+        resource = {'name': 'existing-space', 'repository': {'full_name': 'owner/project'},
+                    'git_status': {'ref': 'main'}, 'machine': {'name': 'expensive-8-core'},
+                    'idle_timeout_minutes': 60, 'retention_period_minutes': 4320, 'location': 'WestEurope'}
+        for resume in ('existing-space', None):
+            with self.subTest(resume=resume):
+                calls = []
+                def github(args, **kwargs):
+                    calls.append(args)
+                    self.assertNotIn('/machines', args[2])
+                    payload = ([{'codespaces': [resource]}] if '?' in args[2] else resource)
+                    return subprocess.CompletedProcess(args, 0, json.dumps(payload), '')
+                class UI:
+                    def choose(self, title, options, selected=None):
+                        if title == 'After setup': return 'Commit, push and open in browser'
+                        if title == 'Existing codespaces for this branch': return 'Reuse existing-space'
+                        raise AssertionError(f'Unexpected creation prompt: {title}')
+                    def confirm(self, title, default=True): return True
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    options = _launch_options(UI(), Codespaces(run=github), self.root, 'main', resume)
+                self.assertEqual(options['machine'], 'expensive-8-core')
+                self.assertEqual(options['idle_timeout'], '60m')
+                self.assertEqual(options['location'], 'WestEurope')
+                self.assertEqual(options['retention'], '4320m')
+                self.assertIn('expensive-8-core', output.getvalue())
+                self.assertIn('WestEurope', output.getvalue())
+
+
+    def test_host_launcher_isolates_project_and_ambient_python_imports(self):
+        (self.root / 'devcontainer_setup.py').write_text('print("PROJECT_MODULE_EXECUTED")\n')
+        poison = Path(self.tmp.name) / 'poison'
+        poison.mkdir()
+        (poison / 'json.py').write_text('raise RuntimeError("AMBIENT_MODULE_EXECUTED")\n')
+        for ambient in ('', str(poison)):
+            if ambient:
+                (self.root / 'devcontainer_setup.py').unlink()
+            with self.subTest(ambient=ambient):
+                result = subprocess.run(['bash', str(SOURCE / 'scripts/setup.sh'), '--scan'],
+                    cwd=self.root, env=dict(self.env, PYTHONPATH=ambient), capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn('PROJECT_MODULE_EXECUTED', result.stdout)
+                self.assertNotIn('AMBIENT_MODULE_EXECUTED', result.stderr)
+                self.assertIn('runtimes', json.loads(result.stdout))
+
+
 if __name__ == '__main__':
     unittest.main()
