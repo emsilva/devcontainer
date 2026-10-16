@@ -4,6 +4,7 @@ import shlex
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from devcontainer_setup.codespaces import Codespaces
 
@@ -17,6 +18,12 @@ class FakeGitHub:
         self.calls = []
         self.fail_personalization = False
         self.remote_sha = 'a' * 40
+        self.ssh_failures = []
+        self.fail_validation = False
+        self.remote_dirty = ''
+        self.remote_branch = 'setup/devcontainer'
+        self.api_dirty = False
+        self.ssh_timeouts = []
 
     def __call__(self, args, **kwargs):
         self.calls.append(args)
@@ -29,14 +36,27 @@ class FakeGitHub:
                 output = json.dumps({'machines': [MACHINE], 'total_count': 1})
             elif endpoint.startswith('user/codespaces/new-space'):
                 output = json.dumps({'name': 'new-space', 'state': 'Available',
-                    'repository': {'full_name': 'owner/project'}, 'git_status': {'ref': 'setup/devcontainer'}})
+                    'repository': {'full_name': 'owner/project'}, 'git_status': {'ref': 'setup/devcontainer',
+                    'has_uncommitted_changes': self.api_dirty, 'has_unpushed_changes': self.api_dirty}})
         if args[1:3] == ['codespace', 'ssh']:
+            self.ssh_timeouts.append(kwargs.get('timeout'))
+            if self.ssh_failures:
+                failure = self.ssh_failures.pop(0)
+                if isinstance(failure, Exception):
+                    raise failure
+                return subprocess.CompletedProcess(args, 255, '', failure)
             if args[-1].endswith('git rev-parse HEAD'):
                 output = self.remote_sha + '\n'
+            elif args[-1].endswith('git branch --show-current'):
+                output = self.remote_branch + '\n'
+            elif args[-1].endswith('git status --porcelain --untracked-files=all'):
+                output = self.remote_dirty
             if 'git merge --ff-only' in args[-1]:
                 self.remote_sha = 'a' * 40
-            if self.fail_personalization:
+            if self.fail_personalization and args[-1].startswith('load-dotfiles '):
                 return subprocess.CompletedProcess(args, 1, '', 'private dotfiles access denied')
+            if self.fail_validation and 'scripts/validate-selected.sh' in args[-1]:
+                return subprocess.CompletedProcess(args, 1, '', 'Missing selected tool: uv')
         return subprocess.CompletedProcess(args, 0, output, '')
 
 
@@ -54,6 +74,53 @@ class CodespacesTests(unittest.TestCase):
         self.assertIn('repos/owner/project/codespaces/machines', args)
         self.assertIn('ref=feature/test', args)
         self.assertIn('GET', args)
+
+    def launch(self):
+        class Plan:
+            branch = 'setup/devcontainer'
+            def push(self):
+                return 'a' * 40
+        return self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+                               None, self.receipt)
+
+    def test_available_codespace_retries_transient_ssh_tunnel_failure(self):
+        self.runner.ssh_failures = ['kex_exchange_identification: read: Connection reset by peer\n'
+                                    'tunnel closed: error forwarding port: unexpected EOF']
+        with patch('devcontainer_setup.codespaces.time.sleep'):
+            self.assertEqual(self.launch(), 'new-space')
+        self.assertEqual(sum(call[1:3] == ['codespace', 'create'] for call in self.runner.calls), 1)
+        self.assertEqual(self.runner.calls[-1][1:3], ['codespace', 'code'])
+
+    def test_stalled_ssh_probe_has_timeout_and_retries(self):
+        self.runner.ssh_failures = [subprocess.TimeoutExpired(['gh', 'codespace', 'ssh'], 20)]
+        with patch('devcontainer_setup.codespaces.time.sleep'):
+            self.assertEqual(self.launch(), 'new-space')
+        self.assertTrue(all(timeout and 0 < timeout <= 30 for timeout in self.runner.ssh_timeouts))
+
+    def test_persistent_ssh_failure_stops_and_keeps_same_codespace_receipt(self):
+        self.runner.ssh_failures = ['tunnel closed: error forwarding port: unexpected EOF'] * 10
+        with patch('devcontainer_setup.codespaces.time.sleep'):
+            with self.assertRaisesRegex(ValueError, '--resume new-space'):
+                self.launch()
+        ssh_calls = [call for call in self.runner.calls if call[1:3] == ['codespace', 'ssh']]
+        self.assertEqual(len(ssh_calls), 4)
+        self.assertEqual(json.loads(self.receipt.read_text())['codespace'], 'new-space')
+        self.assertEqual(sum(call[1:3] == ['codespace', 'create'] for call in self.runner.calls), 1)
+        self.assertFalse(any(call[1:3] == ['codespace', 'code'] for call in self.runner.calls))
+
+    def test_tool_validation_failure_is_not_retried_as_transport_failure(self):
+        self.runner.fail_validation = True
+        with patch('devcontainer_setup.codespaces.time.sleep') as sleep:
+            with self.assertRaisesRegex(ValueError, 'Missing selected tool: uv'):
+                self.launch()
+        sleep.assert_not_called()
+
+    def test_ssh_permission_failure_is_not_retried(self):
+        self.runner.ssh_failures = ['vscode@localhost: Permission denied (publickey).']
+        with patch('devcontainer_setup.codespaces.time.sleep') as sleep:
+            with self.assertRaisesRegex(ValueError, 'Permission denied'):
+                self.launch()
+        sleep.assert_not_called()
 
     def test_launch_pushes_before_allocation_and_opens_selected_client(self):
         calls = self.runner.calls
@@ -134,6 +201,38 @@ class CodespacesTests(unittest.TestCase):
         self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
                         None, self.receipt, resume='new-space')
         self.assertFalse(any(c[1:3] == ['codespace', 'rebuild'] for c in self.runner.calls))
+
+    def test_resume_checks_live_git_instead_of_stale_api_dirty_flags(self):
+        self.runner.api_dirty = True
+        class Plan:
+            branch = 'setup/devcontainer'
+            def push(self):
+                return 'a' * 40
+        self.assertEqual(self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+                         None, self.receipt, resume='new-space'), 'new-space')
+
+    def test_resume_preserves_actual_remote_changes_even_when_api_says_clean(self):
+        self.runner.remote_dirty = ' M source.py\n'
+        class Plan:
+            branch = 'setup/devcontainer'
+            def push(self):
+                return 'a' * 40
+        with self.assertRaisesRegex(ValueError, 'source.py'):
+            self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+                            None, self.receipt, resume='new-space')
+        self.assertFalse(any('git fetch' in call[-1] for call in self.runner.calls))
+        self.assertFalse(any(call[1:3] == ['codespace', 'rebuild'] for call in self.runner.calls))
+
+    def test_resume_preserves_remote_branch_when_api_ref_is_stale(self):
+        self.runner.remote_branch = 'user-work'
+        class Plan:
+            branch = 'setup/devcontainer'
+            def push(self):
+                return 'a' * 40
+        with self.assertRaisesRegex(ValueError, 'branch'):
+            self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+                            None, self.receipt, resume='new-space')
+        self.assertFalse(any('git fetch' in call[-1] for call in self.runner.calls))
 
     def test_remote_revision_must_equal_reviewed_commit_before_opening(self):
         self.runner.remote_sha = 'b' * 40

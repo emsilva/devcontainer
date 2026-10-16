@@ -16,9 +16,9 @@ class Codespaces:
     def __init__(self, run=subprocess.run):
         self.run = run
 
-    def command(self, *args: str, json_output: bool = False):
+    def command(self, *args: str, json_output: bool = False, timeout: float | None = None):
         try:
-            result = self.run(['gh', *args], capture_output=True, text=True)
+            result = self.run(['gh', *args], capture_output=True, text=True, timeout=timeout)
         except FileNotFoundError as error:
             raise ValueError('GitHub CLI is required: install gh and run gh auth login.') from error
         if result.returncode:
@@ -29,6 +29,27 @@ class Codespaces:
             except json.JSONDecodeError as error:
                 raise ValueError('GitHub returned an invalid response.') from error
         return result.stdout.strip()
+
+    def _read_ssh(self, name: str, command: str) -> str:
+        """Wait for SSH transport on read-only probes; never repeat mutations."""
+        for attempt in range(4):
+            try:
+                return self.command('codespace', 'ssh', '--codespace', name, '--', command, timeout=20)
+            except (ValueError, subprocess.TimeoutExpired) as error:
+                transport = isinstance(error, subprocess.TimeoutExpired) or any(
+                    marker in str(error).lower() for marker in (
+                        'kex_exchange_identification:', 'ssh_exchange_identification:',
+                        'tunnel closed:', 'ssh: connect to host ',
+                    ))
+                if not transport:
+                    raise
+                if attempt == 3:
+                    raise ValueError(f'SSH connection to {name} failed after 4 attempts: {error}') from error
+                delay = 2 ** (attempt + 1)
+                print(f'SSH tunnel for {name} is not ready; retrying in {delay}s '
+                      f'({attempt + 2}/4).', flush=True)
+                time.sleep(delay)
+        raise AssertionError('SSH retry loop exhausted')
 
     def machines(self, repo: str, ref: str | None = None) -> list[dict]:
         self._repository(repo)
@@ -110,8 +131,6 @@ class Codespaces:
             if (data.get('repository', {}).get('full_name', '').lower() != repo.lower()
                     or data.get('git_status', {}).get('ref') != plan.branch):
                 raise ValueError('The selected codespace belongs to a different repository or branch.')
-            if data.get('git_status', {}).get('has_uncommitted_changes') or data.get('git_status', {}).get('has_unpushed_changes'):
-                raise ValueError('The existing codespace has user changes. Preserve them before reuse.')
         else:
             available = self.machines(repo, sha)
             if machine not in {entry['name'] for entry in available}:
@@ -134,20 +153,27 @@ class Codespaces:
             if resume and data.get('state') in {'Shutdown', 'ShutDown'}:
                 self.command('api', f'user/codespaces/{name}/start', '--method', 'POST')
             self.wait(name)
+            if resume:
+                actual_branch = self._read_ssh(name, f'cd {shlex.quote(folder)} && git branch --show-current')
+                if actual_branch != plan.branch:
+                    raise ValueError('The existing codespace is on a different branch. Preserve it before reuse.')
+                dirty = self._read_ssh(name, f'cd {shlex.quote(folder)} && git status --porcelain --untracked-files=all')
+                if dirty:
+                    raise ValueError(f'The existing codespace has user changes. Preserve them before reuse:\n{dirty}')
             revision_command = f'cd {shlex.quote(folder)} && git rev-parse HEAD'
-            current = self.command('codespace', 'ssh', '--codespace', name, '--', revision_command)
+            current = self._read_ssh(name, revision_command)
             if resume and current != sha:
                 # A fast-forward is the only permitted update; divergence fails closed.
                 command = (f'cd {shlex.quote(folder)} && test -z "$(git status --porcelain)" && '
-                           f'git fetch origin {shlex.quote(plan.branch)} && git merge --ff-only {shlex.quote(sha)}')
+                           f'git fetch origin {shlex.quote(plan.branch)} && '
+                           f'git merge-base --is-ancestor HEAD {shlex.quote(sha)} && git merge --ff-only {shlex.quote(sha)}')
                 self.command('codespace', 'ssh', '--codespace', name, '--', command)
                 self.command('codespace', 'rebuild', '--codespace', name)
                 self.wait(name)
-                current = self.command('codespace', 'ssh', '--codespace', name, '--', revision_command)
+                current = self._read_ssh(name, revision_command)
             if current != sha:
                 raise ValueError('The codespace is not at the reviewed commit; inspect its Git state before resuming.')
-            self.command('codespace', 'ssh', '--codespace', name, '--',
-                         f'cd {shlex.quote(folder)} && bash .devcontainer/scripts/validate-selected.sh')
+            self._read_ssh(name, f'cd {shlex.quote(folder)} && bash .devcontainer/scripts/validate-selected.sh')
             if dotfiles_repo:
                 self.personalize(name, dotfiles_repo)
             self.open(name, client)
