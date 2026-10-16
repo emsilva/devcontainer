@@ -3,7 +3,7 @@
 ## Project Structure & Module Organization
 - `install.sh` bootstraps this devcontainer into another repo; treat the root as the canonical template.
 - `.devcontainer/devcontainer.json` defines features (Go, Node, Python, Ruby, Rust, CLIs) and lifecycle hooks.
-- `.devcontainer/scripts/` holds bash helpers (`on-create.sh`, `post-create.sh`, `post-start.sh`, `setup-dotfiles.sh`, `upgrade-codex.sh`, `validate-*.sh`); keep additions idempotent and container-safe.
+- `.devcontainer/scripts/` holds bash helpers (`on-create.sh`, `post-create.sh`, `post-start.sh`, `setup-dotfiles.sh`, `install-agents.sh`, `validate-*.sh`); keep additions idempotent and container-safe.
 - Personal dotfiles are not stored here — they are applied at create time via chezmoi from `$DOTFILES_REPO` (see `setup-dotfiles.sh`).
 - `Taskfile.yml` (root and `.devcontainer/Taskfile.yml`) track devcontainer rebuild/upgrade flows; add new tasks rather than ad-hoc scripts when feasible.
 
@@ -11,7 +11,7 @@
 - `task devcontainer:rebuild` — recreate the container locally with the Dev Containers CLI (requires `@devcontainers/cli`).
 - `task devcontainer:upgrade:self` — pull the latest canonical `.devcontainer` assets.
 - `task devcontainer:upgrade:lock` — bump feature versions in `devcontainer-lock.json` (review the diff, then commit).
-- `task devcontainer:upgrade:codex` — refresh the Codex CLI in-place.
+- `task devcontainer:upgrade:agents` — refresh the native Codex, Claude Code, and OpenCode installations in-place.
 - `task devcontainer:setup:dotfiles -- <repo>` (or `load-dotfiles <repo>`) — apply chezmoi dotfiles.
 - `bash .devcontainer/scripts/validate-devcontainer.sh` — verify required tools, PATH wiring, and Docker connectivity (run inside the container; outside requires Docker access).
 

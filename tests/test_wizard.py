@@ -32,6 +32,22 @@ class WizardCliTests(unittest.TestCase):
         return subprocess.run([sys.executable, '-m', 'devcontainer_setup', '--project', str(self.root), *args],
                               cwd=SOURCE, env=self.env, capture_output=True, text=True)
 
+    def test_legacy_agent_opt_out_is_ignored_without_an_agent_prompt(self):
+        from devcontainer_setup.__main__ import defaults, _select
+        from devcontainer_setup.discovery import scan
+        preferences = {'agentic_tools': False, 'apply_dotfiles': False, 'dotfiles_repo': ''}
+        chosen = defaults(scan(self.root), preferences, {})
+        self.assertIs(chosen['agents'], True)
+        self.assertIs(defaults(scan(self.root), preferences, {'selections': dict(chosen, agents=False)})['agents'], True)
+        class UI:
+            def multi(self, title, options, selected): return selected
+            def confirm(self, title, default=True):
+                if 'Claude' in title or 'Codex' in title or 'OpenCode' in title:
+                    raise AssertionError('Agents must not have an opt-out prompt')
+                return False
+        chosen = _select(UI(), scan(self.root), chosen, preferences)
+        self.assertIs(chosen['agents'], True)
+
     def test_launch_choices_work_before_local_branch_is_published(self):
         from devcontainer_setup.__main__ import _launch_options
         from devcontainer_setup.codespaces import Codespaces

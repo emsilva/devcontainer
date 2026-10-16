@@ -17,8 +17,6 @@ TOOLS = {'azure': FEATURE + 'azure-cli:1', 'aws': FEATURE + 'aws-cli:1',
          'docker': FEATURE + 'docker-in-docker:2',
          'kubernetes': FEATURE + 'kubectl-helm-minikube:1'}
 RUNTIMES = {'python', 'node', 'ruby', 'go', 'rust'}
-AGENTS = ['ghcr.io/anthropics/devcontainer-features/claude-code:1.0',
-          'ghcr.io/jsburckhardt/devcontainer-features/codex:1']
 CONFIG = '.devcontainer/devcontainer.json'
 LOCK = '.devcontainer/devcontainer-lock.json'
 NAMESPACE = 'devcontainerSetup'
@@ -99,7 +97,7 @@ def _safe_path(project, relative):
 def _selections(values):
     selected = {'runtimes': dict(values.get('runtimes', {})),
                 'tools': sorted(set(values.get('tools', []))),
-                'agents': bool(values.get('agents', True)),
+                'agents': True,
                 'dotfiles': bool(values.get('dotfiles', True)),
                 'ssh': bool(values.get('ssh', False)),
                 'ports': sorted(set(values.get('ports', []))),
@@ -220,6 +218,24 @@ def _install_artifact(name, artifact):
             f'    {extraction}; rm /tmp/{name}.download')
 
 
+def _validate_agent_environment(config):
+    """Reject adopted settings incompatible with the supported native user paths."""
+    def incompatible(detail):
+        raise ValueError(f'Native agents {detail}; a reviewed migration is required before setup')
+    if config.get('remoteUser', 'vscode') != 'vscode':
+        incompatible('require remoteUser=vscode')
+    for field in ('containerEnv', 'remoteEnv'):
+        environment = config.get(field, {})
+        if not isinstance(environment, dict):
+            incompatible(f'require an object for {field}')
+        if environment.get('HOME', '/home/vscode') != '/home/vscode':
+            incompatible(f'require {field}.HOME=/home/vscode when HOME is overridden')
+    prefix = '/home/vscode/.local/bin:/home/vscode/.opencode/bin:'
+    path = config.get('remoteEnv', {}).get('PATH', '')
+    if not isinstance(path, str) or not path.startswith(prefix):
+        incompatible(f'require remoteEnv.PATH to begin with {prefix}')
+
+
 def render(project: Path, source: Path, selections: dict, source_ref: str) -> dict[str, bytes]:
     """Return the exact candidate files; never write to the consumer checkout."""
     project, source = Path(project), Path(source)
@@ -256,15 +272,8 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
     catalog_lock = _read(source / LOCK)['features']
     names = set(catalog if selected['polyglot'] else BASE_FEATURES)
     runtimes = dict(selected['runtimes'])
-    if selected['agents']:
-        names.update(AGENTS)
-        runtimes.setdefault('node', catalog[FEATURE + 'node:1']['version'])
     for runtime in selected['package_managers']:
         runtimes.setdefault(runtime, catalog[FEATURE + runtime + ':1']['version'])
-    if selected['agents']:
-        node_major = re.match(r'^(\d+)', runtimes['node'])
-        if not node_major or int(node_major.group(1)) < 18:
-            raise ValueError('Agent tools require Node 18 or newer; choose a compatible Node version')
     names.update(FEATURE + runtime + ':1' for runtime in runtimes)
     names.update(TOOLS[tool] for tool in selected['tools'] if tool in TOOLS)
     if selected['ssh']:
@@ -298,6 +307,7 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
     desired = {'name': 'Project development environment', 'image': canonical['image'],
                'features': features, 'remoteUser': 'vscode',
                'containerEnv': {'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONUNBUFFERED': '1'},
+               'remoteEnv': {'PATH': '/home/vscode/.local/bin:/home/vscode/.opencode/bin:${containerEnv:PATH}'},
                'customizations': {'vscode': {'settings': {'editor.formatOnSave': True}}},
                'forwardPorts': sorted(set(selected['ports'] + ([2222] if selected['ssh'] else []))),
                'postCreateCommand': {NAMESPACE: ['bash', '.devcontainer/scripts/post-create-selected.sh']},
@@ -318,8 +328,7 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
         effective_tools.add('db-clients')
     for tool in sorted(effective_tools):
         commands.extend(tool_commands[tool])
-    if selected['agents'] or selected['polyglot']:
-        commands.extend(['claude', 'codex'])
+    commands.extend(['claude', 'codex', 'opencode'])
     commands.extend(selected['package_managers'].values())
     if selected['dotfiles']:
         commands.extend(['chezmoi', 'load-dotfiles'])
@@ -336,6 +345,7 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
         for old, new in replacements.items():
             content = content.replace(old, new)
         files['.devcontainer/scripts/' + name] = content.encode()
+    files['.devcontainer/scripts/install-agents.sh'] = (source / '.devcontainer/scripts/install-agents.sh').read_bytes()
     files['.devcontainer/Taskfile.yml'] = (templates / 'Taskfile.yml').read_bytes()
     artifacts = _read(templates / 'artifacts.json')
     installs = []
@@ -396,6 +406,7 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
             config['postCreateCommand'] = dict(user_commands, **desired['postCreateCommand'])
     else:
         config = desired
+    _validate_agent_environment(config)
     if ('image' in config) == ('build' in config):
         raise ValueError('Choose exactly one devcontainer image or build configuration')
     # Ordinary reruns retain exact locks; an explicit generator revision change
@@ -428,15 +439,13 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
     managed_files = dict(marker.get('managedFiles', {})) if marker else dict(legacy_files)
     managed_files.update({relative: _digest(data) for relative, data in files.items()})
     snapshot = copy.deepcopy(desired)
-    dependencies = {'node': 'Coding-agent tools use Node'} if selected['agents'] else {}
+    dependencies = {}
     limitations = {}
     if FEATURE + 'node:1' in config['features']:
         dependencies['yarn'] = 'The locked Node Feature installs Yarn with Node; it cannot be deselected'
         limitations['yarn'] = 'The locked Node Feature exposes no Yarn version option'
     if FEATURE + 'docker-in-docker:2' in config['features']:
         limitations['compose'] = 'The locked Docker Feature only supports none/v1/v2; its apt Compose package has no exact version option'
-    if any(name in config['features'] for name in AGENTS):
-        limitations['agents'] = 'The locked agent Features expose no CLI version options'
     config.setdefault('customizations', {})[NAMESPACE] = {
         'version': 1, 'sourceRef': source_ref, 'selections': selected,
         'dependencies': dependencies, 'pinningLimitations': limitations,
@@ -452,6 +461,7 @@ def validate(project: Path) -> list[str]:
     errors = []
     try:
         config = _read(_safe_path(project, CONFIG))
+        _validate_agent_environment(config)
         if ('image' in config) == ('build' in config):
             errors.append('Choose exactly one devcontainer image or build configuration')
         lock = _read(_safe_path(project, LOCK)).get('features', {})
@@ -469,8 +479,6 @@ def validate(project: Path) -> list[str]:
         required = set(BASE_FEATURES)
         required.update(FEATURE + runtime + ':1' for runtime in selected['runtimes'])
         required.update(TOOLS[tool] for tool in selected['tools'] if tool in TOOLS)
-        if selected['agents']:
-            required.update(AGENTS + [FEATURE + 'node:1'])
         if selected['ssh']:
             required.add(FEATURE + 'sshd:1')
         for name in sorted(required - set(features)):
@@ -491,7 +499,7 @@ def validate(project: Path) -> list[str]:
                 errors.append(f'Missing managed helper/file: {relative}')
             elif not _managed_matches(relative, target.read_bytes(), digest):
                 errors.append(f'Modified managed helper/file: {relative}')
-        for required_file in ['.devcontainer/scripts/validate-selected.sh', '.devcontainer/scripts/post-create-selected.sh', '.devcontainer/scripts/setup-wizard.sh']:
+        for required_file in ['.devcontainer/scripts/install-agents.sh', '.devcontainer/scripts/validate-selected.sh', '.devcontainer/scripts/post-create-selected.sh', '.devcontainer/scripts/setup-wizard.sh']:
             if required_file not in marker.get('managedFiles', {}):
                 errors.append(f'Missing managed script registration: {required_file}')
         if selected['dotfiles'] and not (project / '.devcontainer/scripts/apply-dotfiles.sh').is_file():

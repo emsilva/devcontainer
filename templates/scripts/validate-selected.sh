@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
+bash .devcontainer/scripts/install-agents.sh --check
 missing=0
 # The renderer replaces this token with the selected command list.
 # shellcheck disable=SC2043

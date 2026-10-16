@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
 
 inside_container() {
   [ -f /.dockerenv ] || [ -n "${CODESPACES:-}" ]
@@ -39,7 +40,10 @@ run_in_target() {
 run_tool_checks() {
   read -r -d '' snippet <<'EOS' || true
 set -e
-for tool in go node python3 uv aws az gcloud gh claude docker fzf task starship; do
+export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
+bash .devcontainer/scripts/install-agents.sh --check
+
+for tool in go node python3 uv aws az gcloud gh claude codex opencode docker fzf task starship; do
   if command -v "$tool" >/dev/null 2>&1; then
     printf '%-10s %s\n' "$tool" "$(command -v "$tool")"
     case "$tool" in
@@ -89,7 +93,7 @@ echo "GOMODCACHE=${GOMODCACHE:-<unset>}"
 echo "NVM_DIR=${NVM_DIR:-<unset>}"
 echo "PNPM_HOME=${PNPM_HOME:-<unset>}"
 echo "UV_CACHE_DIR=${UV_CACHE_DIR:-<unset>}"
-for bin in go node python3 uv aws az gcloud gh claude docker fzf task starship; do
+for bin in go node python3 uv aws az gcloud gh claude codex opencode docker fzf task starship; do
   if command -v "$bin" >/dev/null 2>&1; then
     bin_path=$(command -v "$bin")
     resolved=$(realpath "$bin_path" 2>/dev/null || echo "$bin_path")
@@ -141,7 +145,7 @@ compare_env_data() {
   done
 
   # Check tool availability consistency
-  local tools="go node python3 uv aws az gcloud gh claude docker fzf task starship"
+  local tools="go node python3 uv aws az gcloud gh claude codex opencode docker fzf task starship"
   for tool in $tools; do
     local baseline_path current_path baseline_real current_real
     baseline_path=$(echo "$baseline" | grep "^which $tool ->" | sed "s/which $tool -> //" || echo "NOT FOUND")

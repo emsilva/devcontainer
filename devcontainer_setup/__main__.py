@@ -51,13 +51,13 @@ def _metadata(project: Path) -> dict:
 def defaults(found: dict, preferences: dict, metadata: dict) -> dict:
     previous = metadata.get('selections')
     if previous:
-        return json.loads(json.dumps(previous))
+        return dict(json.loads(json.dumps(previous)), agents=True)
     managers = {family: entry['selected'] for family, entry in found['package_managers'].items()
                 if entry.get('selected')}
     return {'runtimes': {name: entry['version'] or RUNTIME_DEFAULTS[name]
                          for name, entry in found['runtimes'].items() if entry['selected']},
             'tools': [name for name, entry in found['tools'].items() if entry['selected']],
-            'agents': preferences['agentic_tools'], 'dotfiles': preferences['apply_dotfiles'],
+            'agents': True, 'dotfiles': preferences['apply_dotfiles'],
             'ssh': False, 'ports': found['ports'], 'package_managers': managers,
             'package_manager_versions': {family: entry.get('version') or '' for family, entry in found['package_managers'].items()
                                          if entry.get('selected') and (entry.get('version') or
@@ -279,7 +279,7 @@ def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
                 break
             except ValueError as error:
                 print(error, file=sys.stderr)
-    chosen['agents'] = ui.confirm('Include Claude Code and Codex?', preferences['agentic_tools'])
+    chosen['agents'] = True
     preferences['apply_dotfiles'], preferences['agentic_tools'] = chosen['dotfiles'], chosen['agents']
     if ui.confirm('Advanced environment options?', False):
         for name, version in chosen['runtimes'].items():
@@ -350,7 +350,7 @@ def interactive(project: Path, found: dict, metadata: dict, ref: str, resume: st
             plan.branch = plan.start_branch
         print(f'\nProject: {project}\nBranch: {plan.branch}\nRuntimes: {chosen["runtimes"]}'
               f'\nTools: {", ".join(chosen["tools"]) or "baseline only"}'
-              f'\nAgents: {chosen["agents"]}; dotfiles: {preferences["dotfiles_repo"] if chosen["dotfiles"] else "disabled"}'
+              f'\nAgents: Codex, Claude Code, OpenCode (baseline); dotfiles: {preferences["dotfiles_repo"] if chosen["dotfiles"] else "disabled"}'
               f'\nFiles: {", ".join(plan.changed) or "already configured"}', flush=True)
         generated_config = json.loads(files['.devcontainer/devcontainer.json'])
         marker = generated_config['customizations']['devcontainerSetup']

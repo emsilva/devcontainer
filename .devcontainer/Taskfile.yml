@@ -39,13 +39,10 @@ tasks:
       - bash scripts/setup.sh --upgrade {{.CLI_ARGS}}
     silent: false
 
-  upgrade:codex:
-    desc: Download and install the latest Codex CLI without rebuilding the container
-    dir: .devcontainer
+  upgrade:agents:
+    desc: Update native Codex, Claude Code and OpenCode with official user installers
     cmds:
-      - ./scripts/upgrade-codex.sh
-    silent: false
-
+      - bash .devcontainer/scripts/install-agents.sh --update
   upgrade:lock:
     desc: Refresh devcontainer-lock.json to the newest feature versions allowed by devcontainer.json (deliberate dependency bump — review the diff before committing/rebuilding)
     dir: .devcontainer

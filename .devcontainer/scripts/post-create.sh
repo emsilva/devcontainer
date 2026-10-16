@@ -25,45 +25,6 @@ ensure_user_dir() {
   mkdir -p "$dir" 2>/dev/null || true
 }
 
-repair_claude_install_permissions() {
-  if ! command -v claude >/dev/null 2>&1; then
-    return
-  fi
-
-  user_name="$(id -un)"
-  group_name="$(id -gn)"
-  claude_bin="$(command -v claude)"
-
-  echo "🤖 Repairing Claude CLI ownership for self-upgrades"
-
-  fix_owner() {
-    path="$1"
-    [ -e "$path" ] || return
-    if [ -n "$SUDO" ]; then
-      $SUDO chown -R "${user_name}:${group_name}" "$path" 2>/dev/null || true
-    else
-      chown -R "${user_name}:${group_name}" "$path" 2>/dev/null || true
-    fi
-  }
-
-  # Binary path can be a symlink into NVM/global npm directories.
-  fix_owner "$claude_bin"
-  if command -v readlink >/dev/null 2>&1; then
-    resolved_bin="$(readlink -f "$claude_bin" 2>/dev/null || true)"
-    [ -n "${resolved_bin:-}" ] && fix_owner "$resolved_bin"
-  fi
-
-  if command -v npm >/dev/null 2>&1; then
-    npm_prefix="$(npm config get prefix 2>/dev/null || true)"
-    npm_root_global="$(npm root -g 2>/dev/null || true)"
-    [ -n "${npm_prefix:-}" ] && fix_owner "$npm_prefix"
-    if [ -n "${npm_root_global:-}" ]; then
-      fix_owner "$npm_root_global"
-      fix_owner "${npm_root_global}/@anthropic-ai"
-    fi
-  fi
-}
-
 ensure_login_shell() {
   desired_shell="/usr/bin/zsh"
   command -v chsh >/dev/null 2>&1 || return
@@ -184,9 +145,9 @@ ensure_login_shell
 # Configure system timezone if requested
 configure_timezone
 
-# Claude is installed through a feature at build time and may be owned by root.
-# Normalize ownership so `claude update` works after deployment.
-repair_claude_install_permissions
+# Install complete user-owned native coding tools.
+export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
+bash .devcontainer/scripts/install-agents.sh
 
 # Basic Git defaults
 git config --global init.defaultBranch main

@@ -15,6 +15,10 @@ tasks:
     interactive: true
     cmds:
       - bash .devcontainer/scripts/setup-wizard.sh --upgrade {{.CLI_ARGS}}
+  upgrade:agents:
+    desc: Update native Codex, Claude Code and OpenCode with official user installers
+    cmds:
+      - bash .devcontainer/scripts/install-agents.sh --update
   build:
     desc: Build the selected devcontainer
     cmds:

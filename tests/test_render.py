@@ -39,6 +39,104 @@ class RenderTests(unittest.TestCase):
         with tarfile.open(ROOT / 'tests/fixtures/legacy-base.tar.gz') as bundle:
             bundle.extractall(self.project, filter='data')
 
+    def test_native_agents_are_mandatory_without_node_dependency(self):
+        files = self.render(agents=False)
+        config = self.config(files)
+        metadata = config['customizations']['devcontainerSetup']
+        self.assertIs(metadata['selections']['agents'], True)
+        self.assertNotIn(NODE, config['features'])
+        self.assertNotIn('node', metadata['dependencies'])
+        self.assertNotIn('agents', metadata['pinningLimitations'])
+        self.assertFalse(any('codex:' in name or 'claude-code:' in name for name in config['features']))
+        self.assertEqual(files['.devcontainer/scripts/install-agents.sh'],
+                         (ROOT / '.devcontainer/scripts/install-agents.sh').read_bytes())
+        post = files['.devcontainer/scripts/post-create-selected.sh'].decode()
+        self.assertLess(post.index('install-agents.sh'), post.index('validate-selected.sh'))
+        self.assertIn('install-agents.sh --check', files['.devcontainer/scripts/validate-selected.sh'].decode())
+        self.assertIn('upgrade:agents:', files['.devcontainer/Taskfile.yml'].decode())
+        self.assertIn('install-agents.sh --update', files['.devcontainer/Taskfile.yml'].decode())
+        self.assertNotIn('PATH', config['containerEnv'])
+        self.assertTrue(config['remoteEnv']['PATH'].startswith('/home/vscode/.local/bin:/home/vscode/.opencode/bin:'))
+        self.assertIn('export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"', post)
+
+    def test_old_managed_agents_migrate_while_custom_features_survive(self):
+        from devcontainer_setup.render import validate
+        files = self.render()
+        config = self.config(files)
+        metadata = config['customizations']['devcontainerSetup']
+        lock = json.loads(files['.devcontainer/devcontainer-lock.json'])
+        legacy = ['ghcr.io/anthropics/devcontainer-features/claude-code:1.0',
+                  'ghcr.io/jsburckhardt/devcontainer-features/codex:1']
+        extra = 'ghcr.io/example/features/custom:1'
+        for name in legacy + [extra]:
+            config['features'][name] = {}
+            lock['features'][name] = {'version': '1.0.0', 'resolved': name.split(':')[0] + '@sha256:' + 'e' * 64,
+                                      'integrity': 'sha256:' + 'e' * 64}
+        for name in legacy:
+            metadata['managedConfig']['features'][name] = {}
+        metadata['selections']['agents'] = False
+        helper = '.devcontainer/scripts/install-agents.sh'
+        del files[helper]
+        del metadata['managedFiles'][helper]
+        files['.devcontainer/devcontainer-lock.json'] = json.dumps(lock).encode()
+        metadata['managedFiles']['.devcontainer/devcontainer-lock.json'] = hashlib.sha256(files['.devcontainer/devcontainer-lock.json']).hexdigest()
+        files['.devcontainer/devcontainer.json'] = json.dumps(config).encode()
+        self.install(files)
+        updated = self.render(agents=False)
+        config = self.config(updated)
+        lock = json.loads(updated['.devcontainer/devcontainer-lock.json'])
+        for name in legacy:
+            self.assertNotIn(name, config['features'])
+            self.assertNotIn(name, lock['features'])
+        self.assertIn(extra, config['features'])
+        self.assertIn(extra, lock['features'])
+        self.install(updated)
+        self.assertEqual(validate(self.project), [])
+        self.assertEqual(updated, self.render(agents=False))
+
+    def test_adoption_rejects_incompatible_agent_user_home_or_path_without_writes(self):
+        dc = self.project / '.devcontainer'
+        dc.mkdir()
+        for fields in ({'remoteUser': 'alice'}, {'remoteEnv': {'HOME': '/home/alice'}},
+                       {'containerEnv': {'HOME': '/root'}},
+                       {'remoteEnv': {'PATH': '/custom/bin:${containerEnv:PATH}'}}):
+            with self.subTest(fields=fields):
+                config = {'image': 'custom:image', **fields}
+                path = dc / 'devcontainer.json'
+                before = json.dumps(config).encode()
+                path.write_bytes(before)
+                with self.assertRaisesRegex(ValueError, 'Native agents.*reviewed migration'):
+                    self.render(polyglot=True)
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(list(dc.iterdir()), [path])
+
+    def test_adopted_agent_environment_cannot_drift_past_validation(self):
+        from devcontainer_setup.render import validate
+        dc = self.project / '.devcontainer'
+        dc.mkdir()
+        baseline = {'image': 'custom:image', 'remoteUser': 'vscode',
+                    'remoteEnv': {'HOME': '/home/vscode', 'PATH': '/home/vscode/.local/bin:/home/vscode/.opencode/bin:/custom/bin:${containerEnv:PATH}'},
+                    'containerEnv': {'HOME': '/home/vscode'}}
+        (dc / 'devcontainer.json').write_text(json.dumps(baseline))
+        files = self.render(polyglot=True)
+        self.install(files)
+        self.assertEqual(validate(self.project), [])
+        self.assertEqual(files, self.render(polyglot=True))
+        for fields in ({'remoteUser': 'alice'}, {'remoteEnv': {'HOME': '/home/alice'}},
+                       {'containerEnv': {'HOME': '/root'}},
+                       {'remoteEnv': {'PATH': '/custom/bin:${containerEnv:PATH}'}}):
+            with self.subTest(fields=fields):
+                config = self.config(files)
+                for name, value in fields.items():
+                    if isinstance(value, dict):
+                        config[name].update(value)
+                    else:
+                        config[name] = value
+                (dc / 'devcontainer.json').write_text(json.dumps(config))
+                self.assertTrue(any('Native agents' in error for error in validate(self.project)))
+                with self.assertRaisesRegex(ValueError, 'Native agents.*reviewed migration'):
+                    self.render(polyglot=True)
+
     def test_known_legacy_base_adoption_validates_and_repeats(self):
         from devcontainer_setup.__main__ import check_candidate
         from devcontainer_setup.render import validate
@@ -87,6 +185,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(files, self.render(package_managers={'node': 'pnpm'},
                                            package_manager_versions={'node': '9.15.4'}))
         helper = self.project / '.devcontainer/scripts/validate-selected.sh'
+        (self.project / '.devcontainer/scripts/install-agents.sh').write_text('exit 0\n')
         content = helper.read_text()
         commands = content.split('for tool in ', 1)[1].split(';', 1)[0].split()
         bins = self.project / 'bin'
@@ -98,8 +197,8 @@ class RenderTests(unittest.TestCase):
         manager = bins / 'pnpm'
         for version, expected in [('9.15.4', 0), ('12.11.2', 1)]:
             manager.write_text('#!/bin/sh\necho ' + version + '\n')
-            result = subprocess.run(['/bin/bash', str(helper)], capture_output=True, text=True,
-                                    env=dict(os.environ, PATH=str(bins)))
+            result = subprocess.run(['/bin/bash', str(helper)], cwd=self.project, capture_output=True, text=True,
+                                    env=dict(os.environ, HOME=str(self.project), PATH=str(bins) + os.pathsep + os.environ['PATH']))
             self.assertEqual(result.returncode, expected, result.stderr)
             if expected:
                 self.assertIn('9.15.4', result.stderr)
@@ -127,16 +226,16 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn('.devcontainer/Dockerfile', files)
         self.assertNotIn('Taskfile.yml', files)
 
-    def test_feature_lock_and_agent_node_dependency(self):
+    def test_feature_lock_and_independent_node_selection(self):
         files = self.render(runtimes={'node': '24'}, agents=True, tools=['azure', 'docker'])
         config = self.config(files)
         lock = json.loads(files['.devcontainer/devcontainer-lock.json'])
         self.assertEqual(config['features'][NODE]['version'], '24')
-        self.assertIn('ghcr.io/anthropics/devcontainer-features/claude-code:1.0', config['features'])
+        self.assertNotIn('ghcr.io/anthropics/devcontainer-features/claude-code:1.0', config['features'])
         self.assertEqual(set(config['features']), set(lock['features']))
         self.assertTrue(all('@sha256:' not in key for key in config['features']))
         self.assertTrue(all('@sha256:' in value['resolved'] for value in lock['features'].values()))
-        self.assertIn(NODE, self.config(self.render(agents=True))['features'])
+        self.assertNotIn(NODE, self.config(self.render(agents=True))['features'])
 
     def test_repeat_is_identical_and_valid(self):
         from devcontainer_setup.render import validate
@@ -190,7 +289,7 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn('image', config)
         self.assertEqual(config['build']['dockerfile'], 'Dockerfile')
         for name, data in files.items():
-            if name.endswith('.sh'):
+            if name.endswith('.sh') and name != '.devcontainer/scripts/install-agents.sh':
                 self.assertLess(len(data.splitlines()), 100)
 
     def test_unmanaged_environment_requires_explicit_polyglot(self):
@@ -220,6 +319,7 @@ class RenderTests(unittest.TestCase):
         for name in ('devcontainer.json', 'devcontainer-lock.json'):
             shutil.copyfile(ROOT / '.devcontainer' / name, source / '.devcontainer' / name)
         shutil.copytree(ROOT / 'templates', source / 'templates')
+        shutil.copytree(ROOT / '.devcontainer/scripts', source / '.devcontainer/scripts')
         lock_path = source / '.devcontainer/devcontainer-lock.json'
         lock = json.loads(lock_path.read_text())
         dependency = 'ghcr.io/schlich/devcontainer-features/starship:0'
@@ -238,9 +338,8 @@ class RenderTests(unittest.TestCase):
         for name in ('aws', 'az', 'gcloud', 'docker', 'kubectl', 'helm'):
             self.assertIn(name, commands.split('for tool in ', 1)[1].split(';', 1)[0].split())
 
-    def test_rejects_conflicting_project_and_agent_node_versions(self):
-        with self.assertRaisesRegex(ValueError, 'Node|node'):
-            self.render(agents=True, runtimes={'node': '16'})
+    def test_native_agents_do_not_restrict_project_node_version(self):
+        self.assertEqual(self.config(self.render(agents=True, runtimes={'node': '16'}))['features'][NODE]['version'], '16')
 
     def test_package_manager_requires_its_runtime(self):
         result = self.render(package_managers={'node': 'pnpm'})
@@ -299,6 +398,7 @@ class RenderTests(unittest.TestCase):
         self.install(files)
         validator = self.project / '.devcontainer/scripts/validate-selected.sh'
         validator.write_text('exit 0\n')
+        (self.project / '.devcontainer/scripts/install-agents.sh').write_text('exit 0\n')
         apply = self.project / '.devcontainer/scripts/apply-dotfiles.sh'
         apply.write_text('printf "%s\\n" "$1" >> "$TEST_LOG"\n')
         literal = 'https://example.invalid/$(touch owned).git'
@@ -513,6 +613,7 @@ class RenderTests(unittest.TestCase):
         for name in ('devcontainer.json', 'devcontainer-lock.json'):
             shutil.copyfile(ROOT / '.devcontainer' / name, source / '.devcontainer' / name)
         shutil.copytree(ROOT / 'templates', source / 'templates')
+        shutil.copytree(ROOT / '.devcontainer/scripts', source / '.devcontainer/scripts')
         lock_path = source / '.devcontainer/devcontainer-lock.json'
         lock = json.loads(lock_path.read_text())
         updated = dict(lock['features'][PYTHON], version='1.8.99',

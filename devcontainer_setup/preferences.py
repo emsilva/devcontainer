@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import tempfile
 
+# agentic_tools remains readable for older preference files; agents are now mandatory.
 DEFAULTS = {'version': 1, 'apply_dotfiles': True, 'dotfiles_repo': '', 'agentic_tools': True}
 
 
