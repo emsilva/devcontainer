@@ -73,6 +73,12 @@ def _choose(declarations: list[tuple[int, str, str]], baseline: str | None) -> t
             successor = '.'.join(map(str, parts[:index] + (parts[index] + 1,)))
             if successor not in candidates:
                 candidates.append(successor)
+        if len(parts) < 3:
+            patch_release = parts + (0,) * (3 - len(parts))
+            patch_release = patch_release[:-1] + (patch_release[-1] + 1,)
+            successor = '.'.join(map(str, patch_release))
+            if successor not in candidates:
+                candidates.append(successor)
     if baseline and baseline not in candidates:
         candidates.append(baseline)
     for candidate in candidates:
@@ -87,6 +93,13 @@ def _without_printed_help(text: str) -> str:
     for line in text.splitlines():
         if line.lstrip().startswith(('#', 'desc:', 'description:')):
             continue
+        scalar = re.fullmatch(r'''\s*(?:-\s+|(?:run|cmd):\s*)(['"])(.*)\1\s*''', line)
+        if scalar:
+            # YAML scalar quotes surround shell syntax; remove that outer layer
+            # before looking for echo/printf command tokens.
+            line = scalar[2]
+            if scalar[1] == "'":
+                line = line.replace("''", "'")
         try:
             lexer = shlex.shlex(line, posix=False, punctuation_chars=';&|')
             lexer.whitespace_split = True

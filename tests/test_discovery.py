@@ -198,6 +198,22 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(found['version'], '1.24')
         self.assertEqual(found['conflicts'], [])
 
+    def test_yaml_quoted_echo_scalar_does_not_select_cloud_tool(self):
+        for scalar in ["'echo \"Use az login for deployment\"'", '"echo \'Use az login for deployment\'"', "'echo \"Use az login\" && docker run demo'"]:
+            with self.subTest(scalar=scalar):
+                self.put('Taskfile.yml', 'tasks:\n  help:\n    cmds:\n      - ' + scalar + '\n')
+                tools = scan(self.root)['tools']
+                self.assertFalse(tools['azure']['selected'])
+                self.assertEqual(tools['docker']['selected'], '&& docker' in scalar)
+
+    def test_python_strict_minor_bounds_choose_compatible_patch(self):
+        for constraint in ('>3.12,<3.13', '>3.12.0,<3.12.2'):
+            with self.subTest(constraint=constraint):
+                self.put('pyproject.toml', '[project]\nrequires-python = "' + constraint + '"\n')
+                found = scan(self.root)['runtimes']['python']
+                self.assertEqual(found['conflicts'], [])
+                self.assertEqual(found['version'], '3.12.1')
+
 
 if __name__ == '__main__':
     unittest.main()
