@@ -3,3 +3,9 @@
 
 # Local-only secrets/config for non-Codespaces runs (see devcontainer.env.example).
 .devcontainer/devcontainer.env
+
+# Local execution evidence and Python caches
+/.superpowers/
+/tmp/
+__pycache__/
+*.pyc

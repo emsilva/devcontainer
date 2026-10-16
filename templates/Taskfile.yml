@@ -1,0 +1,41 @@
+version: '3'
+
+tasks:
+  setup:
+    desc: Review the selected devcontainer setup
+    interactive: true
+    cmds:
+      - bash .devcontainer/scripts/setup-wizard.sh {{.CLI_ARGS}}
+  check:
+    desc: Validate the selected devcontainer configuration
+    cmds:
+      - bash .devcontainer/scripts/setup-wizard.sh --check
+  upgrade:self:
+    desc: Review a deliberate devcontainer generator upgrade
+    interactive: true
+    cmds:
+      - bash .devcontainer/scripts/setup-wizard.sh --upgrade {{.CLI_ARGS}}
+  upgrade:agents:
+    desc: Update native Codex, Claude Code and OpenCode with official user installers
+    cmds:
+      - bash .devcontainer/scripts/install-agents.sh --update
+  build:
+    desc: Build the selected devcontainer
+    cmds:
+      - devcontainer build --workspace-folder .
+  up:
+    desc: Start the devcontainer
+    cmds:
+      - devcontainer up --workspace-folder .
+  down:
+    desc: Stop the devcontainer for this workspace
+    cmds:
+      - |
+        containers=$(docker ps -q --filter "label=devcontainer.local_folder=$PWD")
+        if [ -n "$containers" ]; then
+          docker stop $containers
+        fi
+  status:
+    desc: Show this workspace's container and port bindings
+    cmds:
+      - docker ps --filter "label=devcontainer.local_folder=$PWD" --format 'table {{"{{"}}.Names{{"}}"}}\t{{"{{"}}.Status{{"}}"}}\t{{"{{"}}.Ports{{"}}"}}'

@@ -1,0 +1,1 @@
+"""Project-aware devcontainer setup."""

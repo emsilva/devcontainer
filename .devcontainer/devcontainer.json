@@ -33,7 +33,6 @@
     },
     "ghcr.io/devcontainers/features/node:1": {
       "version": "24",
-      "installYarn": true,
       "pnpmVersion": "latest"
     },
     "ghcr.io/devcontainers/features/python:1": {
@@ -47,8 +46,6 @@
       "version": "latest"
     },
     "ghcr.io/va-h/devcontainers-features/uv:1": {},
-    "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {},
-    "ghcr.io/jsburckhardt/devcontainer-features/codex:1": {},
     "ghcr.io/devcontainers-extra/features/go-task:1": {},
     "ghcr.io/devcontainers-extra/features/fzf:1": {},
     "ghcr.io/dhoeric/features/google-cloud-cli:1": {
@@ -118,7 +115,8 @@
     "SAVEHIST": "10000",
     "UV_CACHE_DIR": "/home/vscode/.cache/uv",
     "GOMODCACHE": "/home/vscode/.cache/go-mod",
-    "DEVCONTAINER_SKIP_WELCOME": "${localEnv:DEVCONTAINER_SKIP_WELCOME}"
+    "DEVCONTAINER_SKIP_WELCOME": "${localEnv:DEVCONTAINER_SKIP_WELCOME}",
+    "PATH": "/home/vscode/.local/bin:/home/vscode/.opencode/bin:${containerEnv:PATH}"
   },
   "mounts": [
     "source=${localWorkspaceFolderBasename}-shell-history,target=/commandhistory,type=volume",

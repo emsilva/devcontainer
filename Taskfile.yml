@@ -1,6 +1,34 @@
 version: '3'
 
 tasks:
+  setup:
+    desc: Configure a project with the interactive wizard (task setup -- --project PATH)
+    interactive: true
+    cmds:
+      - bash scripts/setup.sh {{.CLI_ARGS}}
+  up:
+    desc: Start the development container
+    cmds: [{task: 'devcontainer:up'}]
+  down:
+    desc: Stop the development container
+    cmds: [{task: 'devcontainer:down'}]
+  status:
+    desc: Show the workspace container and published ports
+    cmds: [{task: 'devcontainer:status'}]
+  build:
+    desc: Build the development container
+    cmds:
+      - devcontainer build --workspace-folder .
+  test:
+    desc: Run discovery, rendering, preferences, Git and launch tests
+    cmds:
+      - python3 -m unittest discover -s tests -v
+  check:
+    desc: Validate Python syntax, shell scripts and whitespace
+    cmds:
+      - python3 -m compileall -q devcontainer_setup
+      - shellcheck install.sh scripts/*.sh .devcontainer/scripts/*.sh templates/scripts/*.sh
+      - git diff --check
   rebuild:
     desc: Rebuild the dev container with the Dev Containers CLI
     preconditions:

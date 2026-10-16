@@ -1,0 +1,37 @@
+{
+  "chezmoi": {
+    "version": "2.73.1",
+    "amd64": {
+      "url": "https://github.com/twpayne/chezmoi/releases/download/v2.73.1/chezmoi_2.73.1_linux_amd64.tar.gz",
+      "sha256": "a3f958acb7d0e5d53fa43c2eec9bc8ae3b4fba8bcbfdce29a8881ca3ffc20a53"
+    },
+    "arm64": {
+      "url": "https://github.com/twpayne/chezmoi/releases/download/v2.73.1/chezmoi_2.73.1_linux_arm64.tar.gz",
+      "sha256": "e60275b27f505ae2086bfb87b144eacf7377a89803120f6bd933d1852a93b0c6"
+    }
+  },
+  "devtunnel": {
+    "version": "sha256-pinned-2026-10-16",
+    "amd64": {
+      "url": "https://tunnelsassetsprod.blob.core.windows.net/cli/linux-x64-devtunnel",
+      "sha256": "723d6aebdc226064aef321258fb17c8a2770c9cc2bd05004c0fb83e72b302c3f"
+    },
+    "arm64": {
+      "url": "https://tunnelsassetsprod.blob.core.windows.net/cli/linux-arm64-devtunnel",
+      "sha256": "b537f270a55d57f23b7621cec0b09806aa9ada119713b33e9255284179b76bde"
+    }
+  },
+  "bun": {
+    "version": "1.4.3",
+    "amd64": {
+      "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-linux-x64.zip",
+      "sha256": "3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18",
+      "member": "bun-linux-x64/bun"
+    },
+    "arm64": {
+      "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-linux-aarch64.zip",
+      "sha256": "efa9813da5ed72423bf847f916e8d2c47c0d776add972354026a75e10da9aa21",
+      "member": "bun-linux-aarch64/bun"
+    }
+  }
+}

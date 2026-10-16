@@ -1,0 +1,16 @@
+{
+  "sourceRef": "ec987b5a09f97c86e7f4d55b410bcf82cced9bc9",
+  "files": {
+    ".devcontainer/Taskfile.yml": "725069178f9c5feadc5a6798edaebf97952068a1aca2e8e74aa60d7f89efbfd4",
+    ".devcontainer/devcontainer-lock.json": "3140b57c6a7d9712ac7c58fe5f23c1c4736eefa88f4033edc90c385721e86c37",
+    ".devcontainer/devcontainer.env.example": "5b956ce402ef270df0a160183ebe5708ceb1f487f30b17f703e8a5d35fb62715",
+    ".devcontainer/devcontainer.json": "2a83ae49b859b3df38aea09567be38ec6b5dee76c6357cbb0eb3936cbc2fc692",
+    ".devcontainer/scripts/on-create.sh": "57325e8745baab8323ad068c9819a63752a637b0340a4952965712bdd7272eb7",
+    ".devcontainer/scripts/post-create.sh": "2afa44a20ae58ee3ad69d9ffe2de47c2c542bdc800c3ba2203765ca2c221bd73",
+    ".devcontainer/scripts/post-start.sh": "a8c6a83bd598e2cd56f2912cd0a71460636af57715461910c708b5647dd9ebad",
+    ".devcontainer/scripts/setup-dotfiles.sh": "3947bc079a451ab20319882e4cd210ecc7b233eaa691de69257662de52fa6bc3",
+    ".devcontainer/scripts/upgrade-codex.sh": "5d5195c4a812c7af87a3f9add1ebf453126fa192544e83edb884ebd66fb79df4",
+    ".devcontainer/scripts/validate-devcontainer.sh": "d604b88ac6032052e5b568f3c90bcf8a69b4a7df6c3e1e539349b7d6a48a0b25",
+    ".devcontainer/scripts/validate-host.sh": "af5ab5a5150b2bfc61bb9802935a3372d7f2f2abfd90c660e78d7558ec1be82f"
+  }
+}
