@@ -67,5 +67,13 @@
 - [x] Exercise the real Gum UI through a pseudo-terminal, including cancellation, review/edit, and a confirmed temporary-repository commit; prove remembered dotfiles on another repo.
 - [x] Scan Mainstage without changing it and inspect the generated dry run against its existing Taskfile, CI, Node24, tunnel, and policy workflows.
 - [x] Build selected configurations and run tool/hook validation when the Docker runtime permits; capture any external failures without claiming build success.
-- [ ] Request independent review against `git merge-base origin/main HEAD`, address findings, then rerun integrated gates and smoke tests personally.
-- [ ] Commit final green changes locally. Do not push or allocate a real Codespace without the wizard's explicit runtime approval; report that live demonstration separately if not approved during this session.
+- [x] Request independent review against `git merge-base origin/main HEAD`, address findings, then rerun integrated gates and smoke tests personally.
+- [x] Commit final green changes locally. Do not push or allocate a real Codespace without the wizard's explicit runtime approval; report that live demonstration separately if not approved during this session.
+
+## Local validation receipt
+
+At implementation commit `c5346cfe9889416ec43eea65af7686003e706055`, Root ran all 115 tests on Python 3.11 and `task check` successfully. Independent whole-branch review against the merge-base with `origin/main` has no remaining Critical or Important findings.
+
+Real Gum smokes covered review/diff, confirmed scoped commits, cross-project dotfiles prefill, and cancellation without checkout changes. The final consumer fixture combined an existing `Taskfile.yaml` and pnpm 9.15.4; its installed runner validated successfully and its original `task up`/`task test` commands still ran. Root also migrated the actual historical template through a real Git transaction, validated it, and confirmed repeat parity. Mainstage scanning and candidate rendering leave the consuming checkout unchanged and preserve its existing Taskfile operations.
+
+Runtime acceptance remains pending: the minimal Dev Containers image build failed with curl exit 60 (self-signed certificate chain), reproduced directly in the unchanged Microsoft base image. No successful image build, live Codespaces allocation/personalization/opening demonstration, image-size comparison, or cold-time measurement is claimed. Nothing was pushed or published; the implementation remains on the local feature branch.
