@@ -1,11 +1,91 @@
-# Polyglot Devcontainer
+# Project-aware Devcontainer
+
+A terminal wizard that recommends the tools a project needs, generates a selective
+devcontainer, and asks before committing. It can also push the setup branch and
+create/open a GitHub Codespace after the same explicit review.
+
+From this checkout, configure another project:
+
+```bash
+task setup -- --project /path/to/project
+```
+
+For first installation from another project, run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/emsilva/devcontainer/main/install.sh | sh
+```
+
+The wizard uses Python 3.11+, Git, and curl on the host. Gum is reused when
+installed, otherwise a pinned, checksum-verified binary is cached under your user
+cache directory. GitHub CLI and authentication are needed for Codespaces launch.
+
+## Setup wizard
+
+- Detects nested Python, Ruby, Go, Node, and Rust projects from manifests, runtime
+  declarations, source patterns, CI, and workflow commands. Ignore rules are weak
+  hints, never sufficient to select another language on their own.
+- Includes Python and `uv` in every environment for project and agent scratch work.
+- Starts with dotfiles and Claude Code/Codex enabled. Enter `emsilva/dotfiles` or
+  your own repository; it is prefilled next time you configure another project.
+- Stores personal preferences in
+  `${XDG_CONFIG_HOME:-$HOME/.config}/devcontainer-setup/config.json`, outside Git.
+  Dotfiles apply inside the development container, not on the host.
+- Fetches eligible machine sizes for the selected GitHub repository and offers an
+  idle timeout, browser/VS Code opening, and optional region/retention settings.
+- Shows the exact file diff before approval. Commits only the setup files,
+  preserves unrelated work, and stops if hooks change reviewed content.
+- Keeps a selected configuration plus its Feature lockfile and small helpers in
+  the project. The wizard itself stays in the versioned user cache.
+
+Installed projects use these commands:
+
+```bash
+task devcontainer:setup
+task devcontainer:check
+task devcontainer:upgrade:self
+task devcontainer:setup -- --resume <codespace-name>
+```
+
+Read-only commands work without a terminal and do not change the project or save
+preferences:
+
+```bash
+task setup -- --project /path/to/project --scan
+task setup -- --project /path/to/project --dry-run
+task setup -- --project /path/to/project --check
+```
+
+Re-running setup uses the recorded selections. Upgrades are deliberate and keep
+custom project ports, hooks, and editor settings. Existing unmanaged configurations
+require explicit adoption; local edits to managed helpers stop an overwrite.
+
+Commit-only mode performs no push or Codespaces allocation. Launch mode explicitly
+confirms the branch, push, machine, and opening action; commits and pushes survive
+a later launch failure, and the retry reuses the recorded codespace. Personal
+settings and launch receipts stay local. Private dotfiles need working repository
+access inside the destination container.
+
+## Development
+
+```bash
+task test     # fixture tests, including real temporary Git repositories
+task check    # Python syntax, ShellCheck, whitespace
+task build    # build the canonical development container; needs Dev Containers CLI
+task up
+task status
+task down
+```
+
+The canonical `.devcontainer` below is the broad catalog and explicit polyglot
+preset. The setup wizard selects a smaller subset for each consuming project.
 
 An Ubuntu 24.04 dev container for everyday polyglot work (Go, Python, Node, Ruby, Rust)
 that prefers official Dev Container features over custom bootstrap scripts, pins versions
 for reproducibility, and applies **your own** shell config via [chezmoi](https://chezmoi.io).
 Built for **GitHub Codespaces** first; also works locally via the Dev Containers CLI / VS Code.
 
-## What you get
+## Polyglot catalog
 
 - **Base image:** `mcr.microsoft.com/devcontainers/base:ubuntu-24.04`
 - **Languages & runtimes** (pinned major.minor — patch floats, majors are bumped deliberately):
@@ -28,9 +108,11 @@ Built for **GitHub Codespaces** first; also works locally via the Dev Containers
 
 ## Reproducibility
 
-Tool versions are pinned in `devcontainer.json`, and feature artifacts are pinned by
-sha256 digest in `devcontainer-lock.json` (committed). Rebuilds and Codespaces prebuilds no
-longer silently jump versions.
+Feature artifacts are pinned by SHA256 in `devcontainer-lock.json`. Generated
+configurations also pin supported installer options. A Feature lock pins its
+installer, not everything it downloads: agent Features without version controls,
+some bundled tools, and operating-system packages can still change. The generated
+metadata records these limitations rather than claiming a fully frozen image.
 
 - Deliberately refresh the pins: `task devcontainer:upgrade:lock` (review the diff, commit).
 - Dependabot opens weekly PRs to bump feature + GitHub Action versions (`.github/dependabot.yml`).
@@ -81,7 +163,7 @@ stays in `postCreate`. Restoring man pages (`apt` + `unminimize`, slow) is **opt
 
 ## Bootstrap & update
 
-Pull this `.devcontainer` into any clean git repo:
+Run the wizard from a Git project (unrelated unstaged edits may remain):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/emsilva/devcontainer/main/install.sh | sh

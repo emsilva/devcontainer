@@ -16,6 +16,7 @@ class FakeGitHub:
     def __init__(self):
         self.calls = []
         self.fail_personalization = False
+        self.remote_sha = 'a' * 40
 
     def __call__(self, args, **kwargs):
         self.calls.append(args)
@@ -29,8 +30,13 @@ class FakeGitHub:
             elif endpoint.startswith('user/codespaces/new-space'):
                 output = json.dumps({'name': 'new-space', 'state': 'Available',
                     'repository': {'full_name': 'owner/project'}, 'git_status': {'ref': 'setup/devcontainer'}})
-        if args[1:3] == ['codespace', 'ssh'] and self.fail_personalization:
-            return subprocess.CompletedProcess(args, 1, '', 'private dotfiles access denied')
+        if args[1:3] == ['codespace', 'ssh']:
+            if args[-1].endswith('git rev-parse HEAD'):
+                output = self.remote_sha + '\n'
+            if 'git merge --ff-only' in args[-1]:
+                self.remote_sha = 'a' * 40
+            if self.fail_personalization:
+                return subprocess.CompletedProcess(args, 1, '', 'private dotfiles access denied')
         return subprocess.CompletedProcess(args, 0, output, '')
 
 
@@ -107,6 +113,7 @@ class CodespacesTests(unittest.TestCase):
         self.assertEqual(self.runner.calls, [])
 
     def test_reuse_uses_supported_rebuild_command_and_never_creates(self):
+        self.runner.remote_sha = 'b' * 40
         class Plan:
             branch = 'setup/devcontainer'
             def push(self):
@@ -115,6 +122,27 @@ class CodespacesTests(unittest.TestCase):
                         None, self.receipt, resume='new-space')
         self.assertIn(['gh', 'codespace', 'rebuild', '--codespace', 'new-space'], self.runner.calls)
         self.assertFalse(any(c[1:3] == ['codespace', 'create'] for c in self.runner.calls))
+
+    def test_retry_of_current_codespace_skips_rebuild(self):
+        class Plan:
+            branch = 'setup/devcontainer'
+            def push(self):
+                return 'a' * 40
+        self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+                        None, self.receipt, resume='new-space')
+        self.assertFalse(any(c[1:3] == ['codespace', 'rebuild'] for c in self.runner.calls))
+
+    def test_remote_revision_must_equal_reviewed_commit_before_opening(self):
+        self.runner.remote_sha = 'b' * 40
+        class Plan:
+            branch = 'setup/devcontainer'
+            def push(self):
+                return 'a' * 40
+        with self.assertRaisesRegex(ValueError, 'reviewed commit'):
+            self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+                            None, self.receipt)
+        self.assertFalse(any(c[1:3] == ['codespace', 'code'] for c in self.runner.calls))
+        self.assertTrue(self.receipt.exists())
 
 
 if __name__ == '__main__':

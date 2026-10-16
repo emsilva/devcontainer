@@ -18,6 +18,7 @@ from .codespaces import Codespaces
 from .discovery import scan
 from .git_ops import GitPlan, ReviewChanged, git, proposed_branch
 from .preferences import load_preferences, save_preferences
+from .releases import fetch_release
 from .render import render, validate
 from .ui import Cancelled, Gum, cache_home
 
@@ -112,9 +113,21 @@ def dotfiles_repository(value: str) -> str:
     if re.fullmatch(r'git@[A-Za-z0-9.-]+:[A-Za-z0-9_./-]+', value):
         return value
     parsed = urlsplit(value)
-    if parsed.scheme in {'https', 'ssh'} and parsed.hostname and not parsed.password:
+    if (parsed.scheme in {'https', 'ssh'} and parsed.hostname and not parsed.password
+            and not parsed.query and (parsed.scheme == 'ssh' or not parsed.username)):
         return value
     raise ValueError('Use owner/repo, HTTPS, or SSH without embedded passwords/tokens.')
+
+
+def repository_access(repo: str) -> bool:
+    target = repo if '://' in repo or repo.startswith('git@') else f'https://github.com/{repo.removesuffix(".git")}.git'
+    try:
+        result = subprocess.run(['git', 'ls-remote', '--exit-code', '--', target, 'HEAD'],
+                                env=dict(os.environ, GIT_TERMINAL_PROMPT='0'),
+                                capture_output=True, text=True, timeout=20)
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def _ensure_runner(ref: str) -> None:
@@ -176,6 +189,18 @@ def _preferences_after_commit(project: Path, preferences: dict) -> None:
         print(f'Setup is committed, but personal settings could not be saved: {error}', file=sys.stderr)
 
 
+def upgrade_handoff(project: Path, current_ref: str, resume: str | None) -> int | None:
+    release, revision = fetch_release(os.environ.get('SETUP_DEVCONTAINER_REPO', 'https://github.com/emsilva/devcontainer.git'),
+                                      os.environ.get('SETUP_DEVCONTAINER_REF', 'main'))
+    if revision == current_ref:
+        return None
+    args = ['bash', str(release / 'scripts/setup.sh'), '--project', str(project), '--upgrade-loaded']
+    if resume:
+        args += ['--resume', resume]
+    result = subprocess.run(args, env=dict(os.environ, DEVCONTAINER_SETUP_REF=revision))
+    return result.returncode
+
+
 def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
     print('\nRecommendations (Python + uv are always included):', flush=True)
     for name, entry in found['runtimes'].items():
@@ -218,13 +243,26 @@ def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
     if chosen['dotfiles']:
         while True:
             try:
-                preferences['dotfiles_repo'] = dotfiles_repository(ui.input('Dotfiles repository', preferences['dotfiles_repo']))
+                repo = dotfiles_repository(ui.input('Dotfiles repository', preferences['dotfiles_repo']))
+                if repo != preferences['dotfiles_repo']:
+                    print('Checking dotfiles repository access...', flush=True)
+                    if not repository_access(repo) and not ui.confirm('Could not verify access. Continue with this repository?', False):
+                        continue
+                preferences['dotfiles_repo'] = repo
                 break
             except ValueError as error:
                 print(error, file=sys.stderr)
     chosen['agents'] = ui.confirm('Include Claude Code and Codex?', preferences['agentic_tools'])
     preferences['apply_dotfiles'], preferences['agentic_tools'] = chosen['dotfiles'], chosen['agents']
-    chosen['polyglot'] = ui.confirm('Advanced: use the full polyglot preset?', chosen.get('polyglot', False))
+    if ui.confirm('Advanced environment options?', False):
+        for name, version in chosen['runtimes'].items():
+            chosen['runtimes'][name] = ui.input(f'{name} version', version)
+        ports = ui.input('Forwarded ports (comma-separated)', ','.join(map(str, chosen['ports'])))
+        try:
+            chosen['ports'] = sorted({int(value.strip()) for value in ports.split(',') if value.strip()})
+        except ValueError as error:
+            raise ValueError('Forwarded ports must be comma-separated numbers.') from error
+        chosen['polyglot'] = ui.confirm('Use the full polyglot preset?', chosen.get('polyglot', False))
     return chosen
 
 
@@ -285,8 +323,12 @@ def interactive(project: Path, found: dict, metadata: dict, ref: str, resume: st
               f'\nTools: {", ".join(chosen["tools"]) or "baseline only"}'
               f'\nAgents: {chosen["agents"]}; dotfiles: {preferences["dotfiles_repo"] if chosen["dotfiles"] else "disabled"}'
               f'\nFiles: {", ".join(plan.changed) or "already configured"}', flush=True)
-        if chosen['agents'] and 'node' not in chosen['runtimes']:
-            print('Dependency: coding-agent tools also install Node.', flush=True)
+        generated_config = json.loads(files['.devcontainer/devcontainer.json'])
+        marker = generated_config['customizations']['devcontainerSetup']
+        for detail in marker.get('dependencies', {}).values():
+            print(f'Dependency: {detail}', flush=True)
+        for detail in marker.get('pinningLimitations', {}).values():
+            print(f'Version note: {detail}', flush=True)
         if launch:
             print(f'Launch: {launch["machine"]}, idle {launch["idle_timeout"]}, {launch["client"]}', flush=True)
         while True:
@@ -339,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument('--dry-run', action='store_true', help='Print the recommended configuration diff; no changes')
     mode.add_argument('--check', action='store_true', help='Validate the installed project configuration')
     parser.add_argument('--upgrade', action='store_true', help='Review an explicit generator-version upgrade')
+    parser.add_argument('--upgrade-loaded', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--resume', metavar='CODESPACE', help='Reuse the named codespace after confirmation')
     args = parser.parse_args(argv)
     try:
@@ -367,7 +410,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise ValueError('Interactive setup requires a terminal. Use --scan, --dry-run, or --check for read-only commands.')
-        if metadata and metadata.get('sourceRef') != ref and not args.upgrade:
+        if args.upgrade and not args.upgrade_loaded:
+            result = upgrade_handoff(project, ref, args.resume)
+            if result is not None:
+                return result
+        if metadata and metadata.get('sourceRef') != ref and not (args.upgrade or args.upgrade_loaded):
             raise ValueError('This project uses a different generator revision. Run its installed task, or use --upgrade to review updating it.')
         return interactive(project, found, metadata, ref, args.resume)
     except Cancelled:

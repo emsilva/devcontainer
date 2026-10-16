@@ -104,10 +104,9 @@ class Codespaces:
                retention: str | None = None, workspace: str | None = None) -> str:
         self._repository(repo)
         sha = plan.push()
-        available = self.machines(repo, plan.branch, '.devcontainer/devcontainer.json')
-        if machine not in {entry['name'] for entry in available}:
-            raise ValueError(f'Selected machine {machine} is unavailable for the pushed configuration; '
-                             'setup is committed and pushed. Rerun to choose an available machine.')
+        folder = workspace or f'/workspaces/{repo.split("/")[1]}'
+        if not folder.startswith('/') or '${' in folder:
+            raise ValueError('Resolve the custom workspace path before remote validation.')
         name = resume
         if name:
             data = self.get(name)
@@ -116,18 +115,11 @@ class Codespaces:
                 raise ValueError('The selected codespace belongs to a different repository or branch.')
             if data.get('git_status', {}).get('has_uncommitted_changes') or data.get('git_status', {}).get('has_unpushed_changes'):
                 raise ValueError('The existing codespace has user changes. Preserve them before reuse.')
-            if data.get('state') in {'Shutdown', 'ShutDown'}:
-                self.command('api', f'user/codespaces/{name}/start', '--method', 'POST')
-            self.wait(name)
-            folder = workspace or f'/workspaces/{repo.split("/")[1]}'
-            if not folder.startswith('/') or '${' in folder:
-                raise ValueError('Resolve the custom workspace path before reusing this codespace.')
-            # A fast-forward is the only permitted update; remote divergence fails closed.
-            command = (f'cd {shlex.quote(folder)} && test -z "$(git status --porcelain)" && '
-                       f'git fetch origin {shlex.quote(plan.branch)} && git merge --ff-only {shlex.quote(sha)}')
-            self.command('codespace', 'ssh', '--codespace', name, '--', command)
-            self.command('codespace', 'rebuild', '--codespace', name)
         else:
+            available = self.machines(repo, plan.branch, '.devcontainer/devcontainer.json')
+            if machine not in {entry['name'] for entry in available}:
+                raise ValueError(f'Selected machine {machine} is unavailable for the pushed configuration; '
+                                 'setup is committed and pushed. Rerun to choose an available machine.')
             args = ['codespace', 'create', '--repo', repo, '--branch', plan.branch,
                     '--machine', machine, '--idle-timeout', idle_timeout,
                     '--devcontainer-path', '.devcontainer/devcontainer.json']
@@ -142,10 +134,21 @@ class Codespaces:
         self._save_receipt(receipt, {'codespace': name, 'repository': repo, 'branch': plan.branch,
                                     'commit': sha, 'machine': machine, 'client': client})
         try:
+            if resume and data.get('state') in {'Shutdown', 'ShutDown'}:
+                self.command('api', f'user/codespaces/{name}/start', '--method', 'POST')
             self.wait(name)
-            folder = workspace or f'/workspaces/{repo.split("/")[1]}'
-            if not folder.startswith('/') or '${' in folder:
-                raise ValueError('Resolve the custom workspace path before remote validation.')
+            revision_command = f'cd {shlex.quote(folder)} && git rev-parse HEAD'
+            current = self.command('codespace', 'ssh', '--codespace', name, '--', revision_command)
+            if resume and current != sha:
+                # A fast-forward is the only permitted update; divergence fails closed.
+                command = (f'cd {shlex.quote(folder)} && test -z "$(git status --porcelain)" && '
+                           f'git fetch origin {shlex.quote(plan.branch)} && git merge --ff-only {shlex.quote(sha)}')
+                self.command('codespace', 'ssh', '--codespace', name, '--', command)
+                self.command('codespace', 'rebuild', '--codespace', name)
+                self.wait(name)
+                current = self.command('codespace', 'ssh', '--codespace', name, '--', revision_command)
+            if current != sha:
+                raise ValueError('The codespace is not at the reviewed commit; inspect its Git state before resuming.')
             self.command('codespace', 'ssh', '--codespace', name, '--',
                          f'cd {shlex.quote(folder)} && bash .devcontainer/scripts/validate-selected.sh')
             if dotfiles_repo:

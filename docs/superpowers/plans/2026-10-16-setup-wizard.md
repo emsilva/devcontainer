@@ -31,41 +31,41 @@
 
 **Owner:** discovery worker. **Files:** `devcontainer_setup/discovery.py`, `devcontainer_setup/preferences.py`, `tests/test_discovery.py`, `tests/test_preferences.py`.
 
-- [ ] Write unittest fixtures in temporary Git repositories for nested Node24/CI/Docker, Python/Ruby/Go pins, generic gitignore, ignored scratch, conflicts, and workflow tool recommendations.
-- [ ] Run `python3 -m unittest discover -s tests -p 'test_discovery.py' -v`; confirm missing detection behavior fails.
-- [ ] Implement the shared `scan` contract using `git ls-files -cz --others --exclude-standard`, bounded text reads, manifest parsing, evidence weighting, and explicit conflicts.
-- [ ] Write persistence tests for fresh defaults, XDG fallback, two projects sharing preferences, malformed input, atomic writes, and file modes; run red.
-- [ ] Implement `load_preferences`, `save_preferences`, and `config_path` with JSON parsing and atomic replacement; rerun both test files green and commit only owned paths.
+- [x] Write unittest fixtures in temporary Git repositories for nested Node24/CI/Docker, Python/Ruby/Go pins, generic gitignore, ignored scratch, conflicts, and workflow tool recommendations.
+- [x] Run `python3 -m unittest discover -s tests -p 'test_discovery.py' -v`; confirm missing detection behavior fails.
+- [x] Implement the shared `scan` contract using `git ls-files -cz --others --exclude-standard`, bounded text reads, manifest parsing, evidence weighting, and explicit conflicts.
+- [x] Write persistence tests for fresh defaults, XDG fallback, two projects sharing preferences, malformed input, atomic writes, and file modes; run red.
+- [x] Implement `load_preferences`, `save_preferences`, and `config_path` with JSON parsing and atomic replacement; rerun both test files green and commit only owned paths.
 
 ### Task 2: Selective renderer and helpers
 
 **Owner:** rendering worker. **Files:** `devcontainer_setup/render.py`, `templates/**`, `tests/test_render.py`.
 
-- [ ] Write tests asserting baseline Python/uv, selected feature/lock closure, no unrelated polyglot tools, no personal URL, idempotent output, preserved custom ports/commands, and conflicting managed edits.
-- [ ] Run `python3 -m unittest discover -s tests -p 'test_render.py' -v`; observe failures before implementing.
-- [ ] Implement the shared render/validate contracts, deriving feature pins from the canonical config/lock and copying only selected templates.
-- [ ] Provide build-time installation for selected additional binaries with verified pinned artifacts; tiny runtime helpers handle permissions, dotfiles, and selected tool validation.
-- [ ] Generate Taskfile integration without replacing consumer operations; existing legacy polyglot installs require explicit reviewed migration, never recursive deletion.
-- [ ] Rerun renderer tests green, shellcheck owned helpers, and commit owned paths.
+- [x] Write tests asserting baseline Python/uv, selected feature/lock closure, no unrelated polyglot tools, no personal URL, idempotent output, preserved custom ports/commands, and conflicting managed edits.
+- [x] Run `python3 -m unittest discover -s tests -p 'test_render.py' -v`; observe failures before implementing.
+- [x] Implement the shared render/validate contracts, deriving feature pins from the canonical config/lock and copying only selected templates.
+- [x] Provide build-time installation for selected additional binaries with verified pinned artifacts; tiny runtime helpers handle permissions, dotfiles, and selected tool validation.
+- [x] Generate Taskfile integration without replacing consumer operations; existing legacy polyglot installs require explicit reviewed migration, never recursive deletion.
+- [x] Rerun renderer tests green, shellcheck owned helpers, and commit owned paths.
 
 ### Task 3: Wizard, Git transactions, and launch
 
 **Owner:** root. **Files:** `devcontainer_setup/__init__.py`, `__main__.py`, `ui.py`, `git_ops.py`, `codespaces.py`, `scripts/setup.sh`, `install.sh`, root and consumer Taskfiles, orchestration tests, README, CI.
 
-- [ ] Test Git transactions with real temporary repos: unrelated staged changes, unchanged setup, reviewed-path race, hook failure/rewrite, branch behavior, divergence, exact tree contents, and reviewed diff.
-- [ ] Implement candidate review/apply/commit with explicit selected paths, snapshot verification, and normal hooks; use argument arrays for subprocesses.
-- [ ] Test GitHub boundary responses: machine discovery, push-before-create, exact remote SHA, existing-resource retry, and personalization command quoting; implement launch using `gh` without live test allocations.
-- [ ] Add Gum adapter and CLI options `--project`, `--scan`, `--check`, `--dry-run`, `--upgrade`, `--resume`, with terminal-only mutation and user confirmation.
-- [ ] Wire initial bootstrap and pinned consumer runner; add `setup`, `up`, `down`, `status`, `build`, `test`, and `check` tasks, preserving existing commands.
-- [ ] Add documentation and CI tests; commit after relevant gates pass.
+- [x] Test Git transactions with real temporary repos: unrelated staged changes, unchanged setup, reviewed-path race, hook failure/rewrite, branch behavior, divergence, exact tree contents, and reviewed diff.
+- [x] Implement candidate review/apply/commit with explicit selected paths, snapshot verification, and normal hooks; use argument arrays for subprocesses.
+- [x] Test GitHub boundary responses: machine discovery, push-before-create, exact remote SHA, existing-resource retry, and personalization command quoting; implement launch using `gh` without live test allocations.
+- [x] Add Gum adapter and CLI options `--project`, `--scan`, `--check`, `--dry-run`, `--upgrade`, `--resume`, with terminal-only mutation and user confirmation.
+- [x] Wire initial bootstrap and pinned consumer runner; add `setup`, `up`, `down`, `status`, `build`, `test`, and `check` tasks, preserving existing commands.
+- [x] Add documentation and CI tests; commit after relevant gates pass.
 
 ### Task 4: Integration and acceptance
 
 **Owner:** root with independent reviewer. **Files:** integration/smoke tests, documentation receipts, progress ledger.
 
-- [ ] Run `task test` and `task check`; review failures at the origin and rerun affected gates.
-- [ ] Exercise the real Gum UI through a pseudo-terminal, including cancellation, review/edit, and a confirmed temporary-repository commit; prove remembered dotfiles on another repo.
-- [ ] Scan Mainstage without changing it and inspect the generated dry run against its existing Taskfile, CI, Node24, tunnel, and policy workflows.
-- [ ] Build selected configurations and run tool/hook validation when the Docker runtime permits; capture any external failures without claiming build success.
+- [x] Run `task test` and `task check`; review failures at the origin and rerun affected gates.
+- [x] Exercise the real Gum UI through a pseudo-terminal, including cancellation, review/edit, and a confirmed temporary-repository commit; prove remembered dotfiles on another repo.
+- [x] Scan Mainstage without changing it and inspect the generated dry run against its existing Taskfile, CI, Node24, tunnel, and policy workflows.
+- [x] Build selected configurations and run tool/hook validation when the Docker runtime permits; capture any external failures without claiming build success.
 - [ ] Request independent review against `git merge-base origin/main HEAD`, address findings, then rerun integrated gates and smoke tests personally.
 - [ ] Commit final green changes locally. Do not push or allocate a real Codespace without the wizard's explicit runtime approval; report that live demonstration separately if not approved during this session.
