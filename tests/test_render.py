@@ -345,6 +345,57 @@ class RenderTests(unittest.TestCase):
         self.assertIn('compose', limitations)
         self.assertIn('none/v1/v2', limitations['compose'])
 
+    def refreshed_catalog(self):
+        source = self.project / 'refreshed-source'
+        (source / '.devcontainer').mkdir(parents=True)
+        for name in ('devcontainer.json', 'devcontainer-lock.json'):
+            shutil.copyfile(ROOT / '.devcontainer' / name, source / '.devcontainer' / name)
+        shutil.copytree(ROOT / 'templates', source / 'templates')
+        lock_path = source / '.devcontainer/devcontainer-lock.json'
+        lock = json.loads(lock_path.read_text())
+        updated = dict(lock['features'][PYTHON], version='1.8.99',
+                       resolved='ghcr.io/devcontainers/features/python@sha256:' + '9' * 64,
+                       integrity='sha256:' + '9' * 64)
+        lock['features'][PYTHON] = updated
+        lock_path.write_text(json.dumps(lock))
+        return source, updated
+
+    def test_same_source_rerun_retains_exact_existing_feature_lock(self):
+        from devcontainer_setup.render import render
+        original = self.render()
+        self.install(original)
+        source, refreshed = self.refreshed_catalog()
+        result = render(self.project, source, self.selection, REF)
+        previous = json.loads(original['.devcontainer/devcontainer-lock.json'])['features'][PYTHON]
+        actual = json.loads(result['.devcontainer/devcontainer-lock.json'])['features'][PYTHON]
+        self.assertNotEqual(previous, refreshed)
+        self.assertEqual(actual, previous)
+        self.assertEqual(original, result)
+
+    def test_new_source_refreshes_catalog_locks_and_preserves_custom_features(self):
+        from devcontainer_setup.render import render, validate
+        custom = 'ghcr.io/example/features/custom:1'
+        custom_lock = {'version': '1.2.3', 'integrity': 'sha256:' + 'c' * 64,
+                       'resolved': 'ghcr.io/example/features/custom@sha256:' + 'c' * 64}
+        dc = self.project / '.devcontainer'
+        dc.mkdir()
+        canonical = json.loads((ROOT / '.devcontainer/devcontainer.json').read_text())
+        (dc / 'devcontainer.json').write_text(json.dumps({'image': canonical['image'],
+                                                        'features': {custom: {'version': '1.2.3'}}}))
+        (dc / 'devcontainer-lock.json').write_text(json.dumps({'features': {custom: custom_lock}}))
+        initial = self.render(polyglot=True)
+        self.install(initial)
+        source, refreshed = self.refreshed_catalog()
+        result = render(self.project, source, dict(self.selection, polyglot=True), 'b' * 40)
+        actual = json.loads(result['.devcontainer/devcontainer-lock.json'])['features']
+        self.assertEqual(actual[PYTHON], refreshed)
+        self.assertEqual(actual[custom], custom_lock)
+        self.assertEqual(self.config(result)['features'][custom], {'version': '1.2.3'})
+        self.assertEqual(self.config(result)['customizations']['devcontainerSetup']['sourceRef'], 'b' * 40)
+        self.install(result)
+        self.assertEqual(validate(self.project), [])
+        self.assertEqual(result, render(self.project, source, dict(self.selection, polyglot=True), 'b' * 40))
+
     def test_source_ref_must_be_immutable(self):
         from devcontainer_setup.render import render
         with self.assertRaisesRegex(ValueError, 'revision|source|40'):

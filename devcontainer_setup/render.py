@@ -346,15 +346,20 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
         config = desired
     if ('image' in config) == ('build' in config):
         raise ValueError('Choose exactly one devcontainer image or build configuration')
-    # Reuse existing resolved feature records for ordinary reruns, including custom polyglot features.
+    # Ordinary reruns retain exact locks; an explicit generator revision change
+    # refreshes known catalog records while retaining user-only Features.
     existing_lock = _read(_safe_path(project, LOCK)).get('features', {}) if (project / LOCK).exists() else {}
+    refresh_catalog = bool(marker and marker.get('sourceRef') != source_ref)
     locked = {}
     pending = list(config['features'])
     while pending:
         name = pending.pop()
         if name in locked:
             continue
-        entry = existing_lock.get(name, catalog_lock.get(name))
+        if refresh_catalog and name in catalog_lock:
+            entry = catalog_lock[name]
+        else:
+            entry = existing_lock.get(name, catalog_lock.get(name))
         if not entry or not re.fullmatch(r'.+@sha256:[0-9a-f]{64}', entry.get('resolved', '')):
             raise ValueError(f'Missing resolved lock for selected feature: {name}')
         locked[name] = copy.deepcopy(entry)
