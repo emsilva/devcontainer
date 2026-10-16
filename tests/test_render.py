@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -411,6 +412,91 @@ class RenderTests(unittest.TestCase):
         self.assertIn('yarn', metadata['dependencies'])
         self.assertIn('Feature', metadata['dependencies']['yarn'])
         self.assertIn('yarn', files['.devcontainer/scripts/validate-selected.sh'].decode())
+
+    def test_docker_pins_exist_in_both_microsoft_noble_architecture_indices(self):
+        availability = json.loads((ROOT / 'tests/fixtures/moby-noble-packages.json').read_text())
+        docker = self.config(self.render(tools=['docker']))['features'][
+            'ghcr.io/devcontainers/features/docker-in-docker:2']
+        self.assertIs(docker['moby'], True)
+        for architecture, index in availability['architectures'].items():
+            for package, option in [('moby-engine', 'version'), ('moby-cli', 'version'),
+                                    ('moby-buildx', 'mobyBuildxVersion')]:
+                with self.subTest(architecture=architecture, package=package):
+                    available = index['packages'][package]['available_versions']
+                    # The locked Feature soft-matches the upstream version before the distro suffix.
+                    upstream = {version.split('-')[0] for version in available}
+                    self.assertIn(docker[option], upstream)
+                    if package != 'moby-buildx':
+                        self.assertNotIn('29.9.1', upstream)  # The failing Docker CE-derived pin.
+
+    @staticmethod
+    def cli_lock_bytes(lock):
+        # Dev Containers CLI 0.83.3 generateLockfile/writeLockfile field order.
+        records = {name: {key: entry[key] for key in
+                         ('version', 'resolved', 'integrity', 'dependsOn') if key in entry}
+                   for name, entry in sorted(lock['features'].items())}
+        return json.dumps({'features': records}, indent=2, ensure_ascii=False).encode()
+
+    def install_legacy_lock(self):
+        files = self.render(polyglot=True)
+        lock_name = '.devcontainer/devcontainer-lock.json'
+        config_name = '.devcontainer/devcontainer.json'
+        lock = json.loads(files[lock_name])
+        files[lock_name] = (json.dumps(lock, indent=2, sort_keys=True, ensure_ascii=False) + '\n').encode()
+        config = self.config(files)
+        config['customizations']['devcontainerSetup']['managedFiles'][lock_name] = hashlib.sha256(files[lock_name]).hexdigest()
+        files[config_name] = json.dumps(config).encode()
+        self.install(files)
+        return lock
+
+    def test_generated_lock_matches_native_cli_bytes_including_dependencies(self):
+        files = self.render(polyglot=True)
+        content = files['.devcontainer/devcontainer-lock.json']
+        lock = json.loads(content)
+        self.assertTrue(any(entry.get('dependsOn') for entry in lock['features'].values()))
+        self.assertEqual(content, self.cli_lock_bytes(lock))
+
+    def test_legacy_lock_native_cli_normalization_is_safe_to_validate_and_render(self):
+        from devcontainer_setup.render import validate
+        lock = self.install_legacy_lock()
+        lock_path = self.project / '.devcontainer/devcontainer-lock.json'
+        native = self.cli_lock_bytes(lock)
+        lock_path.write_bytes(native)
+        self.assertEqual(validate(self.project), [])
+        updated = self.render(polyglot=True)
+        self.assertEqual(json.loads(updated['.devcontainer/devcontainer-lock.json']), lock)
+        self.assertEqual(updated['.devcontainer/devcontainer-lock.json'], native)
+        self.assertEqual(lock_path.read_bytes(), native)  # Rendering remains read-only.
+        self.install(updated)
+        self.assertEqual(validate(self.project), [])
+        self.assertEqual(updated, self.render(polyglot=True))
+
+    def test_legacy_lock_normalization_rejects_changed_digest_or_dependencies(self):
+        from devcontainer_setup.render import validate
+        for change in ('resolved', 'integrity', 'dependsOn'):
+            with self.subTest(change=change):
+                lock = self.install_legacy_lock()
+                entry = lock['features'][PYTHON]
+                entry[change] = (['ghcr.io/devcontainers/features/common-utils:2'] if change == 'dependsOn'
+                                 else ('ghcr.io/devcontainers/features/python@' if change == 'resolved' else '')
+                                 + 'sha256:' + 'e' * 64)
+                lock_path = self.project / '.devcontainer/devcontainer-lock.json'
+                changed = self.cli_lock_bytes(lock)
+                lock_path.write_bytes(changed)
+                self.assertTrue(any('Modified managed helper/file' in error for error in validate(self.project)))
+                with self.assertRaisesRegex(ValueError, 'Modified or missing managed file'):
+                    self.render(polyglot=True)
+                self.assertEqual(lock_path.read_bytes(), changed)
+                # Reset only this temporary test checkout for the next independent mutation.
+                shutil.rmtree(self.project / '.devcontainer')
+
+    def test_legacy_lock_arbitrary_reformatting_remains_protected(self):
+        from devcontainer_setup.render import validate
+        lock = self.install_legacy_lock()
+        (self.project / '.devcontainer/devcontainer-lock.json').write_text(json.dumps(lock))
+        self.assertTrue(any('Modified managed helper/file' in error for error in validate(self.project)))
+        with self.assertRaisesRegex(ValueError, 'Modified or missing managed file'):
+            self.render(polyglot=True)
 
     def test_supported_docker_secondary_pin_and_compose_limitation(self):
         config = self.config(self.render(tools=['docker']))

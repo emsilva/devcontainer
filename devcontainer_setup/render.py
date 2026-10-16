@@ -27,7 +27,7 @@ PINNED_OPTIONS = {
     FEATURE + 'azure-cli:1': {'version': '2.91.0'},
     FEATURE + 'github-cli:1': {'version': '2.102.0'},
     FEATURE + 'rust:1': {'version': '1.99.1'},
-    FEATURE + 'docker-in-docker:2': {'version': '29.9.1', 'mobyBuildxVersion': '0.38.0'},
+    FEATURE + 'docker-in-docker:2': {'version': '29.9.0', 'mobyBuildxVersion': '0.38.0'},
     FEATURE + 'node:1': {'nvmVersion': '0.40.8'},
     FEATURE + 'kubectl-helm-minikube:1': {'version': '1.37.1', 'helm': '4.3.1'},
     'ghcr.io/dhoeric/features/google-cloud-cli:1': {'version': '589.0.0'},
@@ -38,6 +38,34 @@ PINNED_OPTIONS = {
 
 def _json(value):
     return (json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True) + '\n').encode()
+
+
+def _lock_json(value):
+    """Match Dev Containers CLI generateLockfile/writeLockfile bytes (no newline)."""
+    order = ('version', 'resolved', 'integrity', 'dependsOn')
+    records = {}
+    for name, entry in sorted(value['features'].items()):
+        keys = [key for key in order if key in entry]
+        keys.extend(sorted(entry.keys() - set(order)))
+        records[name] = {key: entry[key] for key in keys}
+    normalized = {'features': records}
+    normalized.update({key: value[key] for key in sorted(value.keys() - {'features'})})
+    return json.dumps(normalized, indent=2, ensure_ascii=False).encode()
+
+
+def _managed_matches(relative, data, digest):
+    if _digest(data) == digest:
+        return True
+    if relative != LOCK:
+        return False
+    # CLI 0.83.3 rewrites old generated locks from sorted keys + newline to
+    # native field order without a newline. Reconstruct the *old* bytes and
+    # verify their recorded digest; any value/dependency change still fails.
+    try:
+        value = json.loads(data)
+        return data == _lock_json(value) and _digest(_json(value)) == digest
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return False
 
 
 def _digest(data):
@@ -208,7 +236,7 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
             raise ValueError('Unsupported or malformed managed devcontainer metadata')
         for relative, digest in marker.get('managedFiles', {}).items():
             managed = _safe_path(project, relative)
-            if not managed.is_file() or _digest(managed.read_bytes()) != digest:
+            if not managed.is_file() or not _managed_matches(relative, managed.read_bytes(), digest):
                 raise ValueError(f'Modified or missing managed file: {relative}')
     legacy_files = {}
     if current and not marker and selected['polyglot']:
@@ -388,7 +416,7 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
             raise ValueError(f'Missing resolved lock for selected feature: {name}')
         locked[name] = copy.deepcopy(entry)
         pending.extend(entry.get('dependsOn', []))
-    files[LOCK] = _json({'features': {name: locked[name] for name in sorted(locked)}})
+    files[LOCK] = _lock_json({'features': locked})
     for relative, data in files.items():
         destination = _safe_path(project, relative)
         if destination.exists() and not (marker and relative in marker.get('managedFiles', {})):
@@ -461,7 +489,7 @@ def validate(project: Path) -> list[str]:
             target = _safe_path(project, relative)
             if not target.is_file():
                 errors.append(f'Missing managed helper/file: {relative}')
-            elif _digest(target.read_bytes()) != digest:
+            elif not _managed_matches(relative, target.read_bytes(), digest):
                 errors.append(f'Modified managed helper/file: {relative}')
         for required_file in ['.devcontainer/scripts/validate-selected.sh', '.devcontainer/scripts/post-create-selected.sh', '.devcontainer/scripts/setup-wizard.sh']:
             if required_file not in marker.get('managedFiles', {}):
