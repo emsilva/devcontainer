@@ -24,7 +24,7 @@ def _pair(service, ui):
         return True
     spaces = service.spaces()
     if not spaces:
-        raise ValueError('No matching Codespace. Create one with task codespaces first.')
+        raise ValueError('No matching Codespace. Create one with task devcontainer:setup first.')
     labels = [display_text(s['name']) for s in spaces]
     name = spaces[0]['name'] if len(spaces) == 1 else spaces[labels.index(ui.choose('Choose Codespace', labels))]['name']
     selected_space = next(s for s in spaces if s['name'] == name)
@@ -64,8 +64,12 @@ def _continue(service, ui, row, destination, source):
         if not ui.confirm('Adopt this existing conversation for managed continuation?', default=False):
             return
         service.adopt(row['agent'], row['session_id'])
-    if destination == 'codespace' and not service.is_remote and not _remote_ready(service, ui):
-        return
+        row['ownership'] = dict(ownership, status='idle')
+    needs_remote = destination == 'codespace' or source == 'codespace' or status in ('transferred', 'transferring')
+    if needs_remote and not service.is_remote:
+        if not _remote_ready(service, ui):
+            return
+        service.ensure_sync()
     service.remember(row['agent'], row['session_id'], destination)
     code = service.continue_session(row['agent'], row['session_id'], destination)
     if code:
@@ -121,31 +125,61 @@ def run(project, state, *, ui=None, service=None) -> int:
     if service.is_remote:
         _say('Continue locally in this Codespace. To return a conversation to your Mac, run task work on your Mac.')
     try:
+        if not service.is_remote:
+            try:
+                if service.binding():
+                    service.ensure_sync()
+            except (ValueError, OSError, RuntimeError) as exc:
+                _say('Scratch sync unavailable: ' + str(exc))
         while True:
             try:
                 local = 'codespace' if service.is_remote else 'mac'
                 rows = [dict(r, location=local) for r in service.inventory()['sessions']]
-                preferences = service.preferences()
+                try:
+                    preferences = service.preferences()
+                except (ValueError, OSError, RuntimeError) as exc:
+                    _say(exc)
+                    preferences = {}
+                remote_status = 'Codespace not paired'
+                sync_status = 'Scratch sync unavailable'
+                try:
+                    status = service.sync_status()
+                    phase = status.get('phase', status.get('status', 'stopped'))
+                    sync_status = 'Scratch sync: ' + dict(synchronized='Synchronized', syncing='Connecting; reconciliation pending', waiting='Waiting for Codespace', conflicts='Conflicts', stopped='Stopped', connecting='Connecting').get(phase, display_text(phase))
+                except (ValueError, OSError, RuntimeError) as exc:
+                    _say(exc)
                 # Remote catalog discovery is read-only and never starts a space.
-                if not service.is_remote and service.binding():
-                    space = service.space()
-                    if space and str(space.get('state', '')).lower() in ('available', 'running'):
-                        remote_rows = service.inventory(remote=True)['sessions']
-                        rows.extend(dict(row, location='codespace') for row in remote_rows)
+                if not service.is_remote:
+                    try:
+                        if service.binding():
+                            space = service.space()
+                            remote_status = 'Codespace: ' + display_text((space or {}).get('state', 'unavailable'))
+                            if space and str(space.get('state', '')).lower() in ('available', 'running'):
+                                remote_rows = service.inventory(remote=True)['sessions']
+                                rows.extend(dict(row, location='codespace') for row in remote_rows)
+                    except (ValueError, OSError, RuntimeError) as exc:
+                        remote_status = 'Codespace unavailable'
+                        _say('Codespace unavailable: ' + str(exc))
                 rows.sort(key=lambda r: float(r.get('updated_at') or 0), reverse=True)
                 matches = [r for r in rows if r['agent'] == preferences.get('agent') and r['session_id'] == preferences.get('session_id')]
                 remembered = next((r for r in matches if r['location'] == preferences.get('location')), matches[0] if matches else None)
                 options = []
                 if remembered:
-                    options += ['Continue here · ' + _label(remembered)]
+                    options += [('Continue in Codespace · ' if service.is_remote else 'Continue on this Mac · ') + _label(remembered)]
                     if not service.is_remote:
-                        options += ['Continue there · ' + _label(remembered)]
+                        options += ['Continue in Codespace · ' + _label(remembered)]
                 options += ['Other conversation', 'New conversation', 'Settings and troubleshooting', 'Exit']
-                choice = ui.choose('Work on this project', options, selected=options[0])
+                root = getattr(getattr(service, 'project', project), 'root', None)
+                project_name = display_text(getattr(root, 'name', 'Project'))
+                host = 'Codespace' if service.is_remote else 'this Mac'
+                title = f'{project_name} · {host} · {sync_status}'
+                if not service.is_remote:
+                    title += ' · ' + remote_status
+                choice = ui.choose(title, options, selected=options[0])
                 if choice == 'Exit':
                     return 0
                 if choice.startswith('Continue '):
-                    destination = local if choice.startswith('Continue here') else 'codespace'
+                    destination = local if choice.startswith('Continue on this Mac') or service.is_remote else 'codespace'
                     _attempt(ui, lambda: _continue(service, ui, remembered, destination, remembered['location']))
                 elif choice == 'Other conversation':
                     if not rows:
@@ -156,10 +190,10 @@ def run(project, state, *, ui=None, service=None) -> int:
                     if selected == 'Back':
                         continue
                     row = rows[labels.index(selected)]
-                    actions = ['Continue here'] + ([] if service.is_remote else ['Continue there']) + ['Back']
+                    actions = (['Continue in Codespace'] if service.is_remote else ['Continue on this Mac', 'Continue in Codespace']) + ['Back']
                     action = ui.choose('Continue conversation', actions)
                     if action != 'Back':
-                        _attempt(ui, lambda: _continue(service, ui, row, local if action == 'Continue here' else 'codespace', row['location']))
+                        _attempt(ui, lambda: _continue(service, ui, row, local if action == 'Continue on this Mac' or service.is_remote else 'codespace', row['location']))
                 elif choice == 'New conversation':
                     agent = ui.choose('New conversation on this machine', ['Codex', 'Claude', 'Back'])
                     if agent != 'Back':
