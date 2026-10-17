@@ -5,8 +5,9 @@ available on the Mac and a Codespace for any repository using this devcontainer.
 Continue the same conversation, with one machine writing at a time. Share only
 the selected project's memory, never the user's complete cross-project library.
 
-This is a proposed design with a local Codex compatibility probe. It is not an
-implemented sync feature or a completed cross-host continuation demonstration.
+This is a proposed design with a completed synthetic Codex cross-host spike.
+It is not an implemented sync feature. See the
+[Codex round-trip report](codex-session-sync.md) for evidence and remaining gates.
 
 ## Identity and paths
 
@@ -57,10 +58,12 @@ was copied. No `turn/start` was submitted and no copy was sent to a Codespace.
   returned a first page of 100 items with a continuation cursor.
 - The temporary server and copy were removed after the probe.
 
-This supports a snapshot plus native-resume adapter. Complete item pagination,
-source/destination history fingerprints, round-trip continuity, and the actual
-CLI experience on both operating systems still require verification. A
-successful metadata read alone is not the acceptance gate.
+The subsequent [cross-host spike](codex-session-sync.md) verified complete turn
+and item pagination, exact history equality after import, same-ID round-trip
+continuation, runtime paths, project-memory isolation, and a Mac terminal UI
+resume. It used synthetic data and a loopback provider. Remote terminal UI,
+authentication reuse, automatic memory generation, and an ownership protocol
+remain rollout gates. A successful metadata read alone is not the acceptance gate.
 
 References: [thread APIs](https://learn.chatgpt.com/docs/app-server#threads),
 [resume working directory](https://learn.chatgpt.com/docs/developer-commands#codex-resume).
@@ -88,11 +91,13 @@ Reference: [Claude sessions and storage](https://code.claude.com/docs/en/session
 - Claude's per-repository auto memory is a direct candidate for scoped Markdown
   sync. Use a stable project directory or configure `autoMemoryDirectory` with
   the appropriate host-local absolute path.
-- Codex's local memory store combines generated material across conversations
-  and projects. Its documented configuration does not provide a per-repository
-  memory-export interface. The proposed adapter must build a project-only memory
-  pack from positively identified project inputs, or use an explicit project
-  notes layer. This adapter and its isolation guarantees remain unproven.
+- Codex's default memory store combines generated material across conversations
+  and projects. Use a separate repository-scoped `CODEX_HOME` for new work. The
+  cross-host spike demonstrated isolated synthetic memory delivery from separate
+  homes, with an explicit current-context refresh after resume. Automatic memory
+  generation and the normal launcher's settings/authentication integration remain
+  untested. Importing project-only material from the existing shared library also
+  remains unproven; do not copy that library wholesale.
 - Keep each tool's memory format separate. Provide project-relative references
   in new portable notes, preserve source evidence, and resolve host paths in a
   generated view. Conflicting edits must remain recoverable.
