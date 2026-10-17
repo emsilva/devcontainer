@@ -99,6 +99,11 @@ It reconnects to an already running space. Run `task work:cs` after a Mac reboot
 Connections wait up to 45 seconds for a successful SSH handshake after the local
 forward opens. Only this harmless probe is retried; project operations run once.
 
+After enabling a saved Herdr machine, workspace discovery waits up to 45 seconds
+for its remote API to become ready. Codespace restarts can leave its persisted
+socket present before the server is listening. Only read-only discovery is
+retried; workspace creation and focus requests are sent once.
+
 An owned SSH alias in `~/.ssh/config` connects Herdr through GitHub's native SSH
 proxy. Real Herdr traffic reports activity to Codespaces; silent connections
 retain the configured idle timeout. This proxy also has a GET-only capability:
