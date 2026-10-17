@@ -47,10 +47,10 @@ class TransportTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('gh'), 'requires actual gh offline compatibility gate')
     def test_actual_gh_shutdown_and_available_shutdown_race_never_post_upstream(self):
         for states in (['Shutdown'], ['Available', 'Shutdown']):
-            with self.subTest(states=states), self.api(states) as api:
+            with self.subTest(states=states), tempfile.TemporaryDirectory() as gh_home, self.api(states) as api:
                 if states[0] == 'Available':
                     self.assertIn(b'Available', self.request(api, '/user/codespaces/bound-name')[1])
-                env = api.child_env({'PATH': os.environ['PATH'], 'GH_TOKEN': 'real-secret', 'GITHUB_TOKEN': 'other-secret', 'GH_DEBUG': 'api'})
+                env = api.child_env({'PATH': os.environ['PATH'], 'HOME': gh_home, 'GH_TOKEN': 'real-secret', 'GITHUB_TOKEN': 'other-secret', 'GH_DEBUG': 'api'})
                 self.assertNotIn('real-secret', repr(env))
                 self.assertNotIn('other-secret', repr(env))
                 result = subprocess.run(['gh', 'codespace', 'ports', 'forward', '2222:0', '-c', 'bound-name'], env=env, capture_output=True, timeout=15)

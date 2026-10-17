@@ -47,7 +47,11 @@ special files, and names that collide by case are refused; check status/logs.
 
 State lives in
 `${XDG_STATE_HOME:-~/.local/state}/devcontainer-setup/projects/<repository-id>/`.
-Identity uses the normalized origin host and owner/repository, including across
+When the default `.local/state` ancestors are group-writable or unsafe (as in
+a standard Codespace), private state instead uses `~/.devcontainer-state/`
+without changing those directories. That fallback remains stable after creation.
+Explicit absolute `XDG_STATE_HOME` overrides remain authoritative and must have
+safe ancestors. Identity uses the normalized origin host and owner/repository, including across
 SSH/HTTPS spellings. Repositories with the same directory name stay separate.
 The configured checkout path is also checked. One project identity has one
 configured sync pair; a different worktree must not silently rebind that pair.
@@ -97,7 +101,10 @@ usual directories; this does not require a project-specific `CODEX_HOME`.
 
 Current project notes are supplied on managed launch. The generated project
 Codex configuration disables native global memory generation/use for this
-workflow. Existing historical memory cannot be removed without rewriting the
+workflow. Managed Codex commands also disable the memory feature for their
+process, preventing queued global consolidation. Managed Claude commands disable
+auto memory for their process and rebuild the system prompt so current notes
+apply when resuming. Existing historical memory cannot be removed without rewriting the
 conversation; strict export refuses detected global-memory context. Normal
 personal instructions and tool settings still apply on each host.
 
