@@ -78,9 +78,10 @@ def backup(root: Path, state: Path) -> Path:
     return path
 
 
-def _remote(connection, remote_root, *, snapshot=False):
+def _remote(connection, remote_root, *, snapshot=False, allow_missing_scratch=False):
     # Execute the canonical identity implementation on native remote Python.
     # Do not duplicate identity normalization or rely on directory basenames.
+    # Identity probes must also accept older checkouts before scratch is seeded.
     source = Path(project_state.__file__).read_bytes()
     code = '''import base64,io,json,os,pathlib,sys,tarfile,types
 m=types.ModuleType("_project_sync_state");sys.modules[m.__name__]=m
@@ -88,7 +89,8 @@ exec(compile(base64.b64decode(__SOURCE__),"project-state.py","exec"),m.__dict__)
 p=m.discover_project(pathlib.Path(__ROOT__))
 s=p.root/".scratch"
 if s.is_symlink():raise ValueError("Remote scratch symlink")
-if not s.is_dir():raise ValueError("Remote .scratch missing; configure project continuity remotely first")
+if s.exists() and not s.is_dir():raise ValueError("Remote scratch is not a directory")
+if not s.is_dir() and (__SNAPSHOT__ or not __ALLOW_MISSING__):raise ValueError("Remote .scratch missing; configure project continuity remotely first")
 for parent,dirs,files in os.walk(s,followlinks=False):
  names=set()
  for name in dirs+files:
@@ -102,7 +104,7 @@ if __SNAPSHOT__:
  with tarfile.open(fileobj=b,mode="w:gz",dereference=False) as t:t.add(s,arcname=".scratch")
  sys.stdout.buffer.write(b.getvalue())
 else:print(json.dumps({"identity":p.identity,"root":str(p.root)}))
-'''.replace('__SOURCE__', repr(base64.b64encode(source).decode())).replace('__ROOT__', repr(remote_root)).replace('__SNAPSHOT__', repr(snapshot))
+'''.replace('__SOURCE__', repr(base64.b64encode(source).decode())).replace('__ROOT__', repr(remote_root)).replace('__SNAPSHOT__', repr(snapshot)).replace('__ALLOW_MISSING__', repr(allow_missing_scratch))
     return connection.python(code, timeout=90)
 
 
@@ -137,7 +139,7 @@ def configure(root: Path, state: Path, codespace: str, remote_root: str) -> dict
             raise ValueError('Scratch pairing already exists; preserve it and explicitly review a rebind.')
         with CodespaceConnection(codespace, state=Path(state)) as connection:
             connection.accept_new = True  # Explicit configure is the sole TOFU boundary.
-            remote = json.loads(_remote(connection, remote_root))
+            remote = json.loads(_remote(connection, remote_root, allow_missing_scratch=True))
             if remote.get('identity') != project.identity or remote.get('root') != remote_root:
                 raise ValueError('Remote repository identity/checkout does not match the selected local repository.')
         _write(config_path, candidate)
