@@ -191,7 +191,9 @@ class EndpointTests(unittest.TestCase):
             events.append(('export', kwargs['generation']))
             return dict(source_host='mac', generation=kwargs['generation'], session_id=SID, files=[])
         def history(*args, **kwargs):
-            self.assertEqual(ownership.owner_status(state, 'codex', SID)['status'], 'running')
+            with self.assertRaisesRegex(ValueError, 'Session lease is active'):
+                with ownership.managed_lease(state, 'codex', SID, 'mac'):
+                    pass
             events.append(('history', 0))
             return {'turns': [], 'items': []}
         with mock.patch.object(module, 'host_id', return_value='mac'), mock.patch.object(module.sessions, 'export_snapshot', side_effect=export), mock.patch.object(module.agents, 'native_history', side_effect=history):
@@ -350,3 +352,32 @@ class EndpointTests(unittest.TestCase):
             with self.assertRaises(ValueError) as caught:
                 endpoint.call('import')
             self.assertNotIn('SECRET_TOKEN', str(caught.exception))
+
+    def test_history_save_and_begin_transfer_exclude_an_interleaving_managed_launch(self):
+        from devcontainer_setup.project_sync import ownership
+        import threading
+        state = self.root / 'atomic-source'
+        with ownership.managed_lease(state, 'codex', SID, 'mac', new=True):
+            pass
+        endpoint = module.LocalEndpoint(self.project, state)
+        real_save = module._save
+        competing = []
+        def contender():
+            try:
+                with ownership.managed_lease(state, 'codex', SID, 'mac'):
+                    competing.append('acquired')
+            except ValueError:
+                competing.append('refused')
+        def save(path, value, **kwargs):
+            if Path(path) == state / 'handoffs/source' / f'codex-{SID}.json' and 'history' in value and 'result' not in value:
+                thread = threading.Thread(target=contender)
+                thread.start()
+                thread.join(timeout=5)
+                self.assertFalse(thread.is_alive(), 'Concurrent lease attempt did not resolve')
+            return real_save(path, value, **kwargs)
+        def export(*args, **kwargs):
+            return dict(source_host='mac', generation=kwargs['generation'], session_id=SID, files=[])
+        with mock.patch.object(module.sessions, 'export_snapshot', side_effect=export), mock.patch.object(module.agents, 'native_history', return_value={'turns': [], 'items': []}), mock.patch.object(module, '_save', side_effect=save):
+            result = endpoint.call('source_prepare', agent='codex', session_id=SID, request_id=str(uuid.uuid4()), destination_host='codespace')
+        self.assertEqual(competing, ['refused'])
+        self.assertEqual(result['bundle']['generation'], result['transfer']['generation'])

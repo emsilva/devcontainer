@@ -129,12 +129,13 @@ class LocalEndpoint:
             if current.get('status') == 'idle' and current.get('host') == host and current.get('generation') == record['generation']:
                 # Validate strict project scope before any native API/lease writes.
                 self._export(agent, session_id, host, current['generation'])
-                with ownership.managed_lease(self.state, agent, session_id, host):
+                def prepare():
                     self._export(agent, session_id, host, current['generation'])
-                    history = agents.native_history(self.project, session_id, env=self.env) if agent == 'codex' else None
-                record['history'] = history
-                _save(pointer, record)
-                transfer = ownership.begin_transfer(self.state, agent, session_id, host, destination_host)
+                    record['history'] = agents.native_history(self.project, session_id, env=self.env) if agent == 'codex' else None
+                    _save(pointer, record)
+                # Capture history and commit transferring under one ownership
+                # lease. No managed launch can append in an idle-state gap.
+                transfer = ownership.begin_transfer(self.state, agent, session_id, host, destination_host, prepare=prepare)
             elif (current.get('status') == 'transferring' and current.get('host') == host
                     and current.get('destination_host') == destination_host
                     and current.get('generation') == record['generation'] + 1 and 'history' in record):
