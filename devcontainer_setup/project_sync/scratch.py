@@ -187,8 +187,9 @@ def start(root: Path, state: Path) -> dict:
         package = __package__
         package_parent = Path(__file__).resolve().parents[len(package.split('.'))]
         env = dict(os.environ)
-        env['PYTHONPATH'] = str(package_parent) + (os.pathsep + env['PYTHONPATH'] if env.get('PYTHONPATH') else '')
-        child = subprocess.Popen([sys.executable, '-m', package + '.scratch', '--supervise',
+        bootstrap = ('import sys,runpy; sys.path.insert(0,' + repr(str(package_parent))
+                     + '); runpy.run_module(' + repr(package + '.scratch') + ',run_name="__main__")')
+        child = subprocess.Popen([sys.executable, '-I', '-B', '-c', bootstrap, '--supervise',
                                   str(root), str(state), nonce], cwd=root, env=env,
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
