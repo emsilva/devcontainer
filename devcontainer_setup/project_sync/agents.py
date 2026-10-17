@@ -10,7 +10,7 @@ import threading
 import time
 
 from .ownership import managed_lease
-from .sessions import _codex_index, _read, assert_quiescent, claude_namespace, native_home, session_uuid
+from .sessions import _codex_index, _metadata, _parent, _read, assert_quiescent, claude_namespace, native_home, session_uuid
 
 MEMORY_CONFIG = {'memories.use_memories': False, 'memories.generate_memories': False}
 
@@ -150,6 +150,30 @@ def _history(client, session_id):
     return result
 
 
+def _codex_dependencies(home, session_id):
+    index = _codex_index(Path(home))
+    if session_id not in index:
+        return []
+    chain, seen, sid = [], set(), session_id
+    while sid is not None:
+        if sid in seen or sid not in index:
+            raise ValueError('Missing or cyclic native ancestor dependency')
+        seen.add(sid)
+        chain.append((sid, index[sid]))
+        _, metadata = _metadata(index[sid])
+        sid = _parent(metadata)
+    return list(reversed(chain))
+
+
+def _resume_ancestors(client, project, dependencies):
+    # Native fork pagination resolves ancestors through native indexes. Merely
+    # copying their files does not populate those indexes on a fresh host.
+    for sid, _ in dependencies[:-1]:
+        response = client.call('thread/resume', dict(threadId=sid, **_runtime(project)))
+        if response['thread']['id'] != sid:
+            raise ValueError('Native ancestor reconciliation selected wrong session')
+
+
 def native_history(project, session_id, *, env=None, executable=('codex',), timeout=60):
     """Rebuild native indexes by exact-ID resume and drain every history page.
 
@@ -157,7 +181,10 @@ def native_history(project, session_id, *, env=None, executable=('codex',), time
     API may append runtime settings; call before export and before acceptance.
     """
     session_uuid(session_id)
+    dependencies = _codex_dependencies(native_home('codex', env), session_id)
+    assert_quiescent(path for _, path in dependencies)
     with CodexClient(project, env=env, executable=executable, timeout=timeout) as client:
+        _resume_ancestors(client, project, dependencies)
         resumed = client.call('thread/resume', dict(threadId=session_id, **_runtime(project)))
         if resumed['thread']['id'] != session_id or resumed['thread']['cwd'] != str(project.root):
             raise ValueError('Native resume selected wrong session or runtime cwd')
@@ -187,6 +214,20 @@ def create_codex_session(project, *, state, host, env=None, executable=('codex',
         raise
 
 
+def inject_project_context(project, session_id, *, env=None, executable=('codex',)):
+    """Append current project context through native history, without a model turn."""
+    session_uuid(session_id)
+    context = project_context(project)
+    dependencies = _codex_dependencies(native_home('codex', env), session_id)
+    assert_quiescent(path for _, path in dependencies)
+    with CodexClient(project, env=env, executable=executable) as client:
+        _resume_ancestors(client, project, dependencies)
+        response = client.call('thread/resume', dict(threadId=session_id, **_runtime(project)))
+        if response['thread']['id'] != session_id or response.get('runtimeWorkspaceRoots') != [str(project.root)]:
+            raise ValueError('Native resume selected wrong identity or runtime roots')
+        client.call('thread/inject_items', dict(threadId=session_id, items=[dict(type='message', role='developer', content=[dict(type='input_text', text=context)])]))
+
+
 def native_paths(project, agent, session_id, home, *, state=None):
     """Exact session files for quiescence checks; snapshot validates closure."""
     session_uuid(session_id)
@@ -195,7 +236,7 @@ def native_paths(project, agent, session_id, home, *, state=None):
         index = _codex_index(home)
         if session_id not in index:
             raise ValueError('Exact native session UUID does not exist')
-        return [index[session_id]]
+        return [path for _, path in _codex_dependencies(home, session_id)]
     if agent == 'claude':
         parent = home / 'projects' / claude_namespace(project.root) / (session_id + '.jsonl')
         if not parent.exists():
@@ -216,7 +257,7 @@ def launch(project, agent, session_id, *, state, host, home=None, new=False, ext
     context = project_context(project)
     command = list(executable or (agent,))
     if agent == 'codex':
-        command += ['resume', '--cd', str(project.root), '-c', 'memories.use_memories=false', '-c', 'memories.generate_memories=false', session_id, context]
+        command += ['resume', '--cd', str(project.root), '-c', 'memories.use_memories=false', '-c', 'memories.generate_memories=false', session_id]
     elif agent == 'claude':
         command += ['--session-id' if new else '--resume', session_id, '--append-system-prompt', context]
     else:
@@ -229,6 +270,8 @@ def launch(project, agent, session_id, *, state, host, home=None, new=False, ext
     with managed_lease(state, agent, session_id, host, new=new):
         if not new:
             assert_quiescent(native_paths(project, agent, session_id, resolved_home, state=state))
+            if agent == 'codex':
+                inject_project_context(project, session_id, env=values)
         elif agent == 'claude':
             candidate = resolved_home / 'projects' / claude_namespace(project.root) / (session_id + '.jsonl')
             if candidate.exists():

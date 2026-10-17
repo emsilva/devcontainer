@@ -206,6 +206,38 @@ class SessionTests(unittest.TestCase):
             self.apply(bundle)
         self.assertFalse(self.target.exists())
 
+    def test_modern_world_state_and_token_usage_records_preserved_exactly(self):
+        path = self.rollout(extra=[dict(type='world_state', ordinal=4, payload=dict(full=True, state=dict(model='fixture'))), dict(type='token_usage_record', ordinal=11, payload=dict(thread_id=self.sid, usage=dict(input_tokens=1, output_tokens=1)))])
+        self.apply(self.bundle())
+        self.assertEqual((self.target / path.relative_to(self.home)).read_bytes(), path.read_bytes())
+
+    def test_native_subagent_dependency_is_an_explicit_refusal(self):
+        self.rollout(extra=[dict(type='response_item', payload=dict(type='function_call', name='spawn_agent', arguments='{}'))])
+        with self.assertRaisesRegex(ValueError, 'subagent'):
+            self.bundle()
+
+    def test_malformed_native_payload_is_a_validation_error(self):
+        self.rollout(extra=[dict(type='response_item', payload=['unsupported'])])
+        with self.assertRaisesRegex(ValueError, 'payload'):
+            self.bundle()
+
+    def test_wrong_native_root_id_and_forged_subagent_manifest_refused(self):
+        path = self.rollout()
+        bundle = self.bundle()
+        path.write_bytes(path.read_bytes().replace(self.sid.encode(), str(uuid.uuid4()).encode(), 1))
+        with self.assertRaisesRegex(ValueError, 'ID|identity'):
+            self.bundle()
+
+    def test_forged_subagent_manifest_refused_before_writes(self):
+        self.rollout()
+        forged = self.bundle()
+        entry = forged['files'][0]
+        data = base64.b64decode(entry['data']) + b'{"type":"response_item","payload":{"type":"function_call","name":"functions.spawn_agent"}}\n'
+        entry.update(data=base64.b64encode(data).decode(), size=len(data), sha256=hashlib.sha256(data).hexdigest())
+        with self.assertRaisesRegex(ValueError, 'subagent'):
+            self.apply(forged)
+        self.assertFalse(self.target.exists())
+
     def test_version_gap_refused(self):
         path = self.rollout()
         path.write_bytes(path.read_bytes().replace(b'0.164.0', b'9.0.0'))

@@ -126,7 +126,7 @@ for line in sys.stdin:
     if 'id' not in request: continue
     if method == 'initialize': result = {}
     elif method in ('thread/start', 'thread/resume'):
-        result = {'thread': {'id': sid, 'cwd': params['cwd']}, 'runtimeWorkspaceRoots': params['runtimeWorkspaceRoots']}
+        result = {'thread': {'id': params.get('threadId', sid), 'cwd': params['cwd']}, 'runtimeWorkspaceRoots': params['runtimeWorkspaceRoots']}
     elif method == 'thread/inject_items': result = {}
     elif method in ('thread/turns/list', 'thread/items/list'):
         page = params.get('cursor', 'first')
@@ -134,7 +134,7 @@ for line in sys.stdin:
     else: raise RuntimeError(method)
     print(json.dumps({'id': request['id'], 'result': result}), flush=True)
 ''')
-        env = dict(os.environ, FIXTURE_ID=self.sid, FIXTURE_LOG=str(self.root / 'requests.jsonl'))
+        env = dict(os.environ, FIXTURE_ID=self.sid, FIXTURE_LOG=str(self.root / 'requests.jsonl'), CODEX_HOME=str(self.root / 'codex'))
         return (sys.executable, str(path)), env
 
     def test_native_history_drains_every_page_and_selects_destination_runtime(self):
@@ -148,6 +148,30 @@ for line in sys.stdin:
         self.assertEqual(resume['runtimeWorkspaceRoots'], [str(self.root)])
         self.assertEqual(resume['cwd'], str(self.root))
         self.assertFalse(resume['config']['memories.use_memories'])
+
+    def test_native_history_rebuilds_ancestor_indexes_before_fork(self):
+        executable, env = self.fake_server()
+        parent = str(uuid.uuid4())
+        directory = Path(env['CODEX_HOME']) / 'sessions'
+        directory.mkdir(parents=True)
+        for sid, ancestor in ((parent, None), (self.sid, parent)):
+            metadata = dict(id=sid, cwd=str(self.root), cli_version='0.164.0', source='cli')
+            if ancestor:
+                metadata['history_base'] = dict(thread_id=ancestor, end_byte_offset=0, end_ordinal_exclusive=0)
+            (directory / ('rollout-' + sid + '.jsonl')).write_text(json.dumps(dict(type='session_meta', payload=metadata)) + '\n')
+        self.api.native_history(self.project, self.sid, env=env, executable=executable)
+        requests = [json.loads(line) for line in (self.root / 'requests.jsonl').read_text().splitlines()]
+        resumed = [row['params']['threadId'] for row in requests if row['method'] == 'thread/resume']
+        self.assertEqual(resumed, [parent, self.sid])
+
+    def test_inject_current_context_does_not_start_model_turn(self):
+        executable, env = self.fake_server()
+        self.api.inject_project_context(self.project, self.sid, env=env, executable=executable)
+        requests = [json.loads(line) for line in (self.root / 'requests.jsonl').read_text().splitlines()]
+        methods = [row['method'] for row in requests]
+        self.assertIn('thread/resume', methods)
+        self.assertIn('thread/inject_items', methods)
+        self.assertNotIn('turn/start', methods)
 
     def test_codex_bootstrap_injects_notes_without_starting_model_turn(self):
         notes = self.root / '.scratch/memory/CONTEXT.md'

@@ -20,13 +20,17 @@ from .state import atomic_write, locked, read_json
 
 SCHEMA = 1
 MAX_BYTES = 256 * 1024 * 1024
-CODEX_RECORDS = {'session_meta', 'response_item', 'event_msg', 'turn_context', 'compacted'}
+CODEX_RECORDS = {'session_meta', 'response_item', 'event_msg', 'turn_context', 'compacted', 'world_state', 'token_usage_record'}
 CLAUDE_RECORDS = {'user', 'assistant', 'system', 'summary', 'progress', 'queue-operation', 'file-history-snapshot', 'custom-title', 'agent-name', 'agent-color', 'pr-link', 'last-prompt', 'saved_hook_context', 'bridge-pointer'}
 MEMORY_MARKERS = (b'<memory_summary>', b'<memory_context>', b'<memory_citation>', b'<oai-mem-citation>', b'========= MEMORY_SUMMARY BEGINS', b'/.codex/memories/', b'\\.codex\\memories\\')
 
 
 def session_uuid(value):
-    if not isinstance(value, str) or str(uuid.UUID(value)) != value:
+    try:
+        valid = isinstance(value, str) and str(uuid.UUID(value)) == value
+    except (ValueError, TypeError, AttributeError):
+        valid = False
+    if not valid:
         raise ValueError('An exact canonical session UUID is required')
     return value
 
@@ -107,6 +111,8 @@ def _records(data, agent):
         allowed = CODEX_RECORDS if agent == 'codex' else CLAUDE_RECORDS
         if not isinstance(row, dict) or row.get('type') not in allowed:
             raise ValueError('Unsupported native record type')
+        if agent == 'codex' and not isinstance(row.get('payload'), dict):
+            raise ValueError('Unsupported native record payload')
         rows.append(row)
     return rows
 
@@ -150,6 +156,19 @@ def _metadata(path):
     session_uuid(meta.get('id'))
     _version('codex', meta.get('cli_version'))
     return data, meta
+
+
+def _validate_codex_dependencies(rows, meta, physical_id):
+    if meta.get('id') != physical_id and not meta.get('history_base'):
+        raise ValueError('Native root session ID does not match physical identity')
+    if isinstance(meta.get('source'), dict):
+        raise ValueError('Unsupported Codex subagent source dependency')
+    for row in rows:
+        payload = row['payload']
+        name = payload.get('name', '')
+        event = payload.get('type', '')
+        if (isinstance(name, str) and name.rsplit('.', 1)[-1] in ('spawn_agent', 'spawn_agents_on_csv')) or (isinstance(event, str) and event.startswith('collab_agent_spawn')):
+            raise ValueError('Unsupported Codex subagent dependency; transfer tree is not proven')
 
 
 def _parent(meta):
@@ -244,10 +263,7 @@ def export_snapshot(project, agent, session_id, home, *, source_host, generation
             _scope(meta.get('cwd'), origin_root)
             # Native subagent closure cannot be reconstructed safely from opaque
             # tool responses. Fail explicitly until a native tree fixture proves it.
-            if isinstance(meta.get('source'), dict):
-                raise ValueError('Unsupported Codex subagent source dependency')
-            if any(r.get('payload', {}).get('name') in ('spawn_agent', 'spawn_agents_on_csv') for r in _records(data, agent)):
-                raise ValueError('Unsupported Codex subagent dependency; transfer tree is not proven')
+            _validate_codex_dependencies(_records(data, agent), meta, sid)
             parent = _parent(meta)
             if parent:
                 visit(parent)
@@ -347,6 +363,7 @@ def _preflight(project, agent, session_id, home, bundle):
             if rows[0]['type'] != 'session_meta' or sum(r['type'] == 'session_meta' for r in rows) != 1:
                 raise ValueError('Unsupported native metadata')
             meta = rows[0].get('payload', {})
+            _validate_codex_dependencies(rows, meta, sid)
             session_uuid(meta.get('id'))
             _version(agent, meta.get('cli_version'))
             _scope(meta.get('cwd'), entry['origin_root'])
