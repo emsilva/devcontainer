@@ -145,7 +145,8 @@ def recover_local(state, agent, session_id, host, *, native_paths):
         return _write(path, dict(receipt, status='idle', pid=None))
 
 
-def begin_transfer(state, agent, session_id, host, destination_host):
+def begin_transfer(state, agent, session_id, host, destination_host, *, prepare=None):
+    """Capture native state and transfer custody under one uninterrupted lease."""
     if not destination_host or destination_host == host:
         raise ValueError('Transfer needs a distinct destination host')
     path, _ = _paths(state, agent, session_id)
@@ -155,6 +156,8 @@ def begin_transfer(state, agent, session_id, host, destination_host):
         if current['status'] == 'transferring' and current.get('host') == host and current.get('destination_host') == destination_host:
             return current
         _owned(current, host)
+        if prepare is not None:
+            prepare()
         return _write(path, dict(current, status='transferring', nonce=str(uuid.uuid4()), destination_host=destination_host, generation=current['generation'] + 1, pid=None))
 
 

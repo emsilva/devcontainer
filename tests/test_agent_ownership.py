@@ -33,6 +33,25 @@ class OwnershipTests(unittest.TestCase):
             self.assertIn('lease', attempt.stderr)
         self.assertEqual(self.api.owner_status(self.source, 'codex', self.sid)['status'], 'idle')
 
+    def test_transfer_preparation_is_exclusive_and_failure_preserves_owner(self):
+        with self.api.managed_lease(self.source, 'codex', self.sid, 'a', new=True):
+            pass
+        original = self.api.owner_status(self.source, 'codex', self.sid)
+        def fail():
+            with self.assertRaisesRegex(ValueError, 'lease'):
+                with self.api.managed_lease(self.source, 'codex', self.sid, 'a'):
+                    pass
+            raise RuntimeError('Native capture failed')
+        with self.assertRaisesRegex(RuntimeError, 'capture failed'):
+            self.api.begin_transfer(self.source, 'codex', self.sid, 'a', 'b', prepare=fail)
+        self.assertEqual(self.api.owner_status(self.source, 'codex', self.sid), original)
+        prepared = []
+        transfer = self.api.begin_transfer(self.source, 'codex', self.sid, 'a', 'b', prepare=lambda: prepared.append(True))
+        self.assertEqual(prepared, [True])
+        self.assertEqual(transfer['status'], 'transferring')
+        self.assertEqual(self.api.begin_transfer(self.source, 'codex', self.sid, 'a', 'b', prepare=lambda: prepared.append(False)), transfer)
+        self.assertEqual(prepared, [True])
+
     def test_four_stage_transfer_blocks_both_sides_until_committed(self):
         with self.api.managed_lease(self.source, 'codex', self.sid, 'a', new=True):
             pass
