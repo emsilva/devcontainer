@@ -46,10 +46,53 @@ class HerdrTests(unittest.TestCase):
         create = run.call_args_list[1].args[0]
         self.assertIn(str(self.project.root), create)
         self.assertIn('--no-focus', create)
-        with mock.patch.dict(os.environ, {'HERDR_ENV': ''}), mock.patch.object(herdr.subprocess, 'call', return_value=0) as call:
+        with mock.patch.dict(os.environ, {'HERDR_ENV': ''}), \
+                mock.patch.object(herdr.subprocess, 'run', side_effect=[
+                    completed({'result': {'workspaces': [{'workspace_id': 'outside',
+                        'worktree': {'checkout_path': str(self.project.root)}}]}}), completed({'result': {}})]), \
+                mock.patch.object(herdr.subprocess, 'call', return_value=0) as call:
             self.assertEqual(herdr.open_local(self.project, self.state), 0)
         self.assertEqual(call.call_args.kwargs['cwd'], self.project.root)
         self.assertIn('--session', call.call_args.args[0])
+
+    def test_outside_existing_session_focuses_recovery_checkout_before_attach(self):
+        with mock.patch.dict(os.environ, {'HERDR_ENV': ''}), \
+                mock.patch.object(herdr.subprocess, 'run', side_effect=[
+                    completed({'result': {'workspaces': [{'workspace_id': 'old-root',
+                        'worktree': {'checkout_path': '/old/local/checkout'}}]}}),
+                    completed({'result': {'workspace': {'workspace_id': 'recovery-root'}}}),
+                    completed({'result': {}})]) as run, \
+                mock.patch.object(herdr.subprocess, 'Popen') as popen, \
+                mock.patch.object(herdr.subprocess, 'call', return_value=0):
+            self.assertEqual(herdr.open_local(self.project, self.state), 0)
+        prefix = ['herdr', '--session', 'project-' + 'a' * 24]
+        self.assertEqual(run.call_args_list[0].args[0], prefix + ['workspace', 'list'])
+        self.assertEqual(run.call_args_list[-1].args[0], prefix + ['workspace', 'focus', 'recovery-root'])
+        popen.assert_not_called()
+
+    def test_outside_stopped_session_starts_detached_then_focuses_actual_root(self):
+        stopped = subprocess.CompletedProcess([], 1, '', json.dumps({'error': {'code': 'server_not_running'}}))
+        with mock.patch.dict(os.environ, {'HERDR_ENV': ''}), \
+                mock.patch.object(herdr.subprocess, 'run', side_effect=[stopped,
+                    completed({'result': {'workspaces': []}}),
+                    completed({'result': {'workspace': {'workspace_id': 'recovered'}}}), completed({'result': {}})]) as run, \
+                mock.patch.object(herdr.subprocess, 'Popen') as popen, \
+                mock.patch.object(herdr.subprocess, 'call', return_value=0):
+            self.assertEqual(herdr.open_local(self.project, self.state), 0)
+        self.assertEqual(popen.call_args.args[0], ['herdr', '--session', 'project-' + 'a' * 24, 'server'])
+        self.assertTrue(popen.call_args.kwargs['start_new_session'])
+        self.assertEqual(popen.call_args.kwargs['cwd'], self.project.root)
+        self.assertEqual(popen.call_args.kwargs['stdin'], subprocess.DEVNULL)
+        self.assertEqual(run.call_args_list[-1].args[0][-2:], ['focus', 'recovered'])
+
+    def test_outside_protocol_failure_does_not_start_another_server(self):
+        broken = subprocess.CompletedProcess([], 1, '', json.dumps({'error': {'code': 'protocol_mismatch'}}))
+        with mock.patch.dict(os.environ, {'HERDR_ENV': ''}), \
+                mock.patch.object(herdr.subprocess, 'run', return_value=broken), \
+                mock.patch.object(herdr.subprocess, 'Popen') as popen:
+            with self.assertRaisesRegex(ValueError, 'Herdr command failed'):
+                herdr.open_local(self.project, self.state)
+        popen.assert_not_called()
 
     def test_remote_reuses_exact_tuple_and_checkout_then_nested_copy_preserves_settings(self):
         config = self.home / '.config/herdr/config.toml'

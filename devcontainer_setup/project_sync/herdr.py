@@ -8,10 +8,15 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import time as clock
 import tomllib
 
 from .ssh_hosts import configure_ssh
-from .state import atomic_write, read_json
+from .state import _parent, _regular, atomic_write, read_json
+
+
+class _NotRunning(ValueError):
+    """The native API explicitly reported an absent named-session server."""
 
 
 def _json(args: list[str]):
@@ -22,6 +27,12 @@ def _json(args: list[str]):
     except subprocess.TimeoutExpired:
         raise ValueError('Herdr did not respond; inspect the project connection and retry.') from None
     if result.returncode:
+        try:
+            absent = json.loads(result.stderr).get('error', {}).get('code') == 'server_not_running'
+        except (ValueError, TypeError, AttributeError):
+            absent = False
+        if absent:
+            raise _NotRunning('Herdr session is stopped')
         raise ValueError('Herdr command failed: ' + ' '.join(args[:3]))
     try:
         return json.loads(result.stdout)
@@ -108,7 +119,33 @@ def open_local(project, state: Path) -> int:
     if os.environ.get('HERDR_ENV') == '1':
         _workspace(project, str(project.root), [])
         return 0
-    return subprocess.call(['herdr', '--session', _session(project)], cwd=project.root)
+    prefix = ['--session', _session(project)]
+    try:
+        _workspace(project, str(project.root), prefix)
+    except _NotRunning:
+        # A restored named session can contain an older checkout. Start its
+        # native persistent server, then select the actual recovery root before
+        # attaching a client. Never reset or close its existing workspaces.
+        log = Path(state) / 'herdr-local-server.log'
+        with _parent(log, create=True, private=True) as (parent, name):
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         0o600, dir_fd=parent)
+            with os.fdopen(fd, 'ab') as output:
+                _regular(output.fileno())
+                os.fchmod(output.fileno(), 0o600)
+                child = subprocess.Popen(['herdr', *prefix, 'server'], cwd=project.root,
+                        stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
+                        start_new_session=True)
+        deadline = clock.monotonic() + 15
+        while True:
+            try:
+                _workspace(project, str(project.root), prefix)
+                break
+            except _NotRunning:
+                if child.poll() is not None or clock.monotonic() >= deadline:
+                    raise ValueError(f'Project Herdr server did not start; inspect {log}') from None
+                clock.sleep(.1)
+    return subprocess.call(['herdr', *prefix], cwd=project.root)
 
 
 def open_remote(project, state: Path, remote_root: str) -> int:
