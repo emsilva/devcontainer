@@ -246,6 +246,63 @@ def native_paths(project, agent, session_id, home, *, state=None):
     raise ValueError('Unsupported agent')
 
 
+def _managed_arguments(agent, arguments):
+    """Parse a bounded native option grammar without exposing custody overrides.
+
+    Single-value options are emitted with '=' so a value cannot become another
+    native option. Variadic native options take one value per occurrence here;
+    use comma-separated tool names, or repeat the option for additional values.
+    """
+    if agent == 'codex':
+        flags = {'--no-daemon', '--no-alt-screen', '--strict-config', '--search', '--oss', '--approve-for-me', '--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust'}
+        values = {'--model', '--local-provider', '--sandbox', '--ask-for-approval', '--image'}
+        aliases = {'-m': '--model', '-s': '--sandbox', '-a': '--ask-for-approval', '-i': '--image'}
+    elif agent == 'claude':
+        flags = {'--print', '--verbose', '--strict-mcp-config', '--safe-mode', '--disable-slash-commands', '--no-chrome', '--include-partial-messages', '--include-hook-events', '--replay-user-messages', '--ax-screen-reader', '--restricted', '--allow-dangerously-skip-permissions', '--dangerously-skip-permissions'}
+        values = {'--output-format', '--input-format', '--model', '--fallback-model', '--effort', '--max-budget-usd', '--json-schema', '--tools', '--allowed-tools', '--disallowed-tools', '--mcp-config', '--permission-mode', '--permission-prompts', '--name', '--autocompact'}
+        aliases = {'-p': '--print', '-n': '--name', '--allowedTools': '--allowed-tools', '--disallowedTools': '--disallowed-tools'}
+    else:
+        raise ValueError('Unsupported managed agent')
+    arguments, parsed, prompts = list(arguments), [], []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        index += 1
+        if not isinstance(argument, str) or '\0' in argument:
+            raise ValueError('Managed native arguments must be strings without NUL')
+        if argument == '--':
+            prompts.extend(arguments[index:])
+            break
+        if not argument.startswith('-'):
+            prompts.append(argument)
+            continue
+        name, separator, value = argument.partition('=')
+        if name.startswith('-') and not name.startswith('--') and len(name) > 2:
+            short = name[:2]
+            if aliases.get(short) not in values:
+                raise ValueError('Unsupported managed native option: ' + argument)
+            name, separator, value = short, '=', argument[2:]
+        name = aliases.get(name, name)
+        if name in flags and not separator:
+            parsed.append(name)
+        elif name in values:
+            if not separator:
+                if index == len(arguments):
+                    raise ValueError('Managed native option requires a value: ' + name)
+                value = arguments[index]
+                index += 1
+            if not isinstance(value, str) or '\0' in value:
+                raise ValueError('Invalid managed native option value')
+            parsed.append(name + '=' + value)
+        else:
+            raise ValueError('Unsupported managed native option: ' + argument)
+    if len(prompts) > 1 or any(not isinstance(value, str) or '\0' in value for value in prompts):
+        raise ValueError('Managed native launch accepts one literal prompt')
+    if agent == 'claude' and prompts and prompts[0] in {'agents', 'attach', 'auth', 'auto-mode', 'doctor', 'gateway', 'import', 'install', 'logs', 'mcp', 'plugin', 'plugins', 'purge', 'respawn', 'rm', 'setup-token', 'stop', 'kill', 'ultrareview', 'update', 'upgrade'}:
+        raise ValueError('Native subcommands are unsupported during managed launch')
+    return parsed + (['--', prompts[0]] if prompts else [])
+
+
 def _launch_owned(project, agent, session_id, *, state, host, home=None, new=False, extra_args=(), env=None, executable=None):
     """Run the ordinary interactive CLI under a durable process-held lease."""
     session_uuid(session_id)
@@ -264,11 +321,7 @@ def _launch_owned(project, agent, session_id, *, state, host, home=None, new=Fal
         values['CLAUDE_CODE_DISABLE_AUTO_MEMORY'] = '1'
     else:
         raise ValueError('Unsupported agent')
-    # Native session selectors, cwd switches and background launch break custody.
-    forbidden = {'--resume', '--session-id', '--fork-session', '--continue', '--last', '--remote', '--bg', '--background', '--cd', '-C', '--system-prompt-snapshot'}
-    if any(arg.split('=', 1)[0] in forbidden for arg in extra_args):
-        raise ValueError('Extra arguments may not override managed session identity, cwd or process lifetime')
-    command.extend(extra_args)
+    command.extend(_managed_arguments(agent, extra_args))
     with managed_lease(state, agent, session_id, host, new=new, _with_fd=True) as (receipt, lease_fd):
         if not new:
             assert_quiescent(native_paths(project, agent, session_id, resolved_home, state=state))
@@ -298,6 +351,7 @@ def launch(project, agent, session_id, *, state, host, home=None, new=False, ext
     release it. Stdin/stdout/stderr and the terminal process group are inherited.
     """
     session_uuid(session_id)
+    extra_args = _managed_arguments(agent, extra_args)
     payload = dict(project=dict(root=str(project.root), remote=project.remote, identity=project.identity, project_id=project.project_id), agent=agent, session_id=session_id, state=str(state), host=host, home=str(home) if home is not None else None, new=new, extra_args=list(extra_args), executable=list(executable) if executable else None)
     read_fd, write_fd = os.pipe()
     module_root = Path(__file__).resolve().parents[len(__package__.split('.'))]

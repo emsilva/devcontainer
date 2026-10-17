@@ -237,6 +237,28 @@ for line in sys.stdin:
         from devcontainer_setup.project_sync.ownership import owner_status
         self.assertEqual(owner_status(self.state, 'codex', self.sid)['status'], 'idle')
 
+    def test_managed_arguments_refuse_native_selector_aliases_and_policy_overrides_before_spawn(self):
+        from unittest.mock import patch
+        forbidden = {
+            'claude': [('-r', str(uuid.uuid4())), ('-r' + str(uuid.uuid4()),), ('-c',), ('--from-pr=24',), ('--teleport', 'foreign'), ('-wother',), ('--worktree',), ('--cloud',), ('--background',), ('--session-id=' + str(uuid.uuid4()),), ('--settings', '{"env":{"CLAUDE_CODE_DISABLE_AUTO_MEMORY":"0"}}'), ('--system-prompt', 'foreign'), ('--append-system-prompt=foreign',), ('--system-prompt-snapshot=on',), ('--agents', '{}'), ('--no-session-persistence',), ('auth',)],
+            'codex': [('-C/other/project',), ('--cd=/other/project',), ('--worktree',), ('--last',), ('--remote=unix://other',), ('-cfeatures.memories=true',), ('--config', 'memories.use_memories=true'), ('--enable=memories',), ('-pprofile',), ('--add-dir=/other/project',)],
+        }
+        for agent, cases in forbidden.items():
+            for arguments in cases:
+                with self.subTest(agent=agent, arguments=arguments):
+                    with patch.object(self.api.subprocess, 'Popen', side_effect=AssertionError('Spawn reached')):
+                        with self.assertRaisesRegex(ValueError, 'managed|supported'):
+                            self.api.launch(self.project, agent, self.sid, state=self.state, host='a', new=agent == 'claude', extra_args=arguments)
+
+    def test_managed_argument_parser_preserves_supported_options_and_literal_prompt(self):
+        claude = ('--print', '--output-format', 'json', '--tools', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--safe-mode', 'Explain --resume without changing sessions')
+        self.assertEqual(self.api._managed_arguments('claude', claude), ['--print', '--output-format=json', '--tools=', '--strict-mcp-config', '--mcp-config={"mcpServers":{}}', '--safe-mode', '--', 'Explain --resume without changing sessions'])
+        self.assertEqual(self.api._managed_arguments('codex', ('--no-daemon', '-mexample-model', '-s', 'read-only', '--', '-C is literal prompt text')), ['--no-daemon', '--model=example-model', '--sandbox=read-only', '--', '-C is literal prompt text'])
+        for arguments in (('--model',), ('--print=yes',), ('first prompt', 'second prompt')):
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(ValueError):
+                    self.api._managed_arguments('claude', arguments)
+
     def test_managed_claude_launch_holds_lease_normal_environment_and_project_notes(self):
         notes = self.root / '.scratch/memory/project.md'
         notes.parent.mkdir(parents=True)
