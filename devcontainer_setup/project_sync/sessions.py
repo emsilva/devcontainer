@@ -1,16 +1,11 @@
-"""Strict native transcript snapshots. Historical bytes are never rewritten.
-
-Only the selected transcript dependency closure is eligible. Native databases,
-credentials, settings and global memory are deliberately outside this format.
-"""
+"""Validated native transcript formats; no custody or same-ID import protocol."""
 from __future__ import annotations
 
-import base64
 import copy
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
 import shutil
 import stat
@@ -18,9 +13,6 @@ import subprocess
 import uuid
 import unicodedata
 
-from .state import atomic_write, locked, read_json
-
-SCHEMA = 1
 MAX_BYTES = 256 * 1024 * 1024
 CODEX_RECORDS = {'session_meta', 'response_item', 'event_msg', 'turn_context', 'compacted', 'world_state', 'token_usage_record'}
 CLAUDE_RECORDS = {'user', 'assistant', 'system', 'summary', 'progress', 'queue-operation', 'file-history-snapshot', 'custom-title', 'agent-name', 'agent-color', 'pr-link', 'last-prompt', 'saved_hook_context', 'bridge-pointer', 'attachment', 'atis-latch', 'api-request-shape', 'api-request-blob', 'api-request', 'cost-state', 'mode'}
@@ -105,6 +97,14 @@ def _records(data, agent):
     if any(marker in data for marker in MEMORY_MARKERS):
         raise ValueError('Native global memory context prevents strict project-only export')
     rows = []
+    def personal_memory(value):
+        if isinstance(value, str):
+            return any(marker.decode() in value for marker in MEMORY_MARKERS)
+        if isinstance(value, dict):
+            return any(personal_memory(key) or personal_memory(child) for key, child in value.items())
+        if isinstance(value, list):
+            return any(personal_memory(child) for child in value)
+        return False
     for line in data.splitlines():
         try:
             row = json.loads(line)
@@ -113,6 +113,8 @@ def _records(data, agent):
         allowed = CODEX_RECORDS if agent == 'codex' else CLAUDE_RECORDS
         if not isinstance(row, dict) or row.get('type') not in allowed:
             raise ValueError('Unsupported native record type')
+        if personal_memory(row):
+            raise ValueError('Native global memory context prevents strict project-only export')
         if agent == 'codex' and not isinstance(row.get('payload'), dict):
             raise ValueError('Unsupported native record payload')
         if agent == 'codex' and row['type'] == 'response_item':
@@ -231,21 +233,6 @@ def _validate_claude(rows, sid, roots, *, child=False):
         raise ValueError('Cannot establish Claude project scope')
 
 
-def _validate_retained(data, agent, sid, roots, *, child=False):
-    rows = _records(data, agent)
-    if agent == 'codex':
-        if rows[0]['type'] != 'session_meta' or sum(row['type'] == 'session_meta' for row in rows) != 1:
-            raise ValueError('Unsupported retained native metadata')
-        meta = rows[0]['payload']
-        session_uuid(meta.get('id'))
-        _version(agent, meta.get('cli_version'))
-        _validate_codex_dependencies(rows, meta, sid)
-        _validate_codex_scope(rows, roots)
-    else:
-        _validate_claude(rows, sid, roots, child=child)
-    return rows
-
-
 def _version(agent, version):
     if not isinstance(version, str) or not re.fullmatch(r'(?:0\.(163|164)\.\d+|0\.164\.0-alpha\.1)' if agent == 'codex' else r'2\.1\.\d+', version):
         raise ValueError(f'Unsupported {agent} native version: {version!r}')
@@ -272,21 +259,6 @@ def _codex_index(home):
     return found
 
 
-def _metadata(path):
-    if path.suffix != '.jsonl':
-        raise ValueError('Unsupported compressed native transcript; decompress with the native tool first')
-    data = _read(path)
-    rows = _records(data, 'codex')
-    if rows[0]['type'] != 'session_meta' or sum(r['type'] == 'session_meta' for r in rows) != 1:
-        raise ValueError('Expected one leading native session metadata record')
-    meta = rows[0].get('payload')
-    if not isinstance(meta, dict):
-        raise ValueError('Invalid native session metadata')
-    session_uuid(meta.get('id'))
-    _version('codex', meta.get('cli_version'))
-    return data, meta
-
-
 def _validate_codex_dependencies(rows, meta, physical_id):
     if meta.get('id') != physical_id and not meta.get('history_base'):
         raise ValueError('Native root session ID does not match physical identity')
@@ -307,13 +279,6 @@ def _parent(meta):
             raise ValueError('Unsupported history ancestor reference')
         return session_uuid(base.get('thread_id'))
     return None
-
-
-def _scope(cwd, root, *, child=False):
-    if not isinstance(cwd, str) or not Path(cwd).is_absolute():
-        raise ValueError('Cannot establish native project scope')
-    if Path(cwd) != Path(root) and not (child and Path(cwd).is_relative_to(root)):
-        raise ValueError('Native transcript belongs to another project checkout')
 
 
 def display_text(value, limit=120):
@@ -356,74 +321,6 @@ def _catalog_metadata(data, agent, path):
     return dict(title=title or prompt or 'Untitled conversation', updated_at=path.stat().st_mtime)
 
 
-def list_sessions(project, agent, home, *, state=None):
-    home = Path(home)
-    result = []
-    if agent == 'codex':
-        for sid, path in _codex_index(home).items():
-            try:
-                data, meta = _metadata(path)
-                _scope(meta.get('cwd'), _imported_origin(project, state, path, home, data))
-            except ValueError:
-                continue
-            result.append(dict(session_id=sid, agent=agent, cwd=meta['cwd'], version=meta['cli_version'], path=str(path), **_catalog_metadata(data, agent, path)))
-    elif agent == 'claude':
-        directory = home / 'projects' / claude_namespace(project.root)
-        for path in directory.glob('*.jsonl'):
-            try:
-                sid = session_uuid(path.stem)
-                data = _read(path)
-                rows = _records(data, agent)
-                scopes = _imported_scopes(project, state, path, home, data)
-                _validate_claude(rows, sid, scopes)
-            except ValueError:
-                continue
-            result.append(dict(session_id=sid, agent=agent, cwd=str(project.root), path=str(path), **_catalog_metadata(data, agent, path)))
-    else:
-        raise ValueError('Unsupported agent')
-    return sorted(result, key=lambda item: (-item['updated_at'], item['session_id']))
-
-
-def _git(project):
-    def run(*args):
-        result = subprocess.run(['git', '-C', str(project.root), *args], capture_output=True, text=True)
-        return result.stdout.rstrip('\n') if result.returncode == 0 else None
-    return dict(head=run('rev-parse', 'HEAD'), branch=run('symbolic-ref', '--short', 'HEAD'), status=run('status', '--porcelain'))
-
-
-def _imported_origin(project, state, path, home, data):
-    if state is not None:
-        for receipt_path in (Path(state) / 'imports').glob('*/receipt.json'):
-            receipt = read_json(receipt_path)
-            if receipt.get('status') != 'complete' or receipt.get('project_id') != project.project_id:
-                continue
-            manifest = read_json(receipt_path.parent / 'manifest.json')
-            for entry in manifest['files']:
-                relative = PurePosixPath(entry['path'])
-                if manifest['agent'] == 'claude' and relative.parts[0] == 'projects':
-                    relative = PurePosixPath('projects', claude_namespace(project.root), *relative.parts[2:])
-                if home / relative == path and data.startswith(base64.b64decode(entry['data'])):
-                    return entry['origin_root']
-    return str(project.root)
-
-
-def _imported_scopes(project, state, path, home, data):
-    roots = {str(project.root)}
-    if state is not None:
-        for receipt_path in (Path(state) / 'imports').glob('*/receipt.json'):
-            receipt = read_json(receipt_path)
-            if receipt.get('status') != 'complete' or receipt.get('project_id') != project.project_id:
-                continue
-            manifest = read_json(receipt_path.parent / 'manifest.json')
-            for entry in manifest['files']:
-                relative = PurePosixPath(entry['path'])
-                if manifest['agent'] == 'claude' and relative.parts[0] == 'projects':
-                    relative = PurePosixPath('projects', claude_namespace(project.root), *relative.parts[2:])
-                if home / relative == path and data.startswith(base64.b64decode(entry['data'])):
-                    roots.update(entry['scope_roots'])
-    return sorted(roots)
-
-
 def _scoped_roots(cwd, roots, child=False):
     if not isinstance(cwd, str) or not Path(cwd).is_absolute() or '..' in Path(cwd).parts:
         raise ValueError('Invalid native project scope path')
@@ -433,221 +330,3 @@ def _scoped_roots(cwd, roots, child=False):
         if isinstance(cwd, str) and (cwd == root or (child and Path(cwd).is_relative_to(root))):
             return
     raise ValueError('Native transcript belongs to another project checkout')
-
-
-def export_snapshot(project, agent, session_id, home, *, source_host, generation, agent_version=None, state=None):
-    session_uuid(session_id)
-    home = Path(home)
-    files, ancestry, paths = [], {}, []
-    version = agent_version
-    if agent == 'codex':
-        index = _codex_index(home)
-        visiting, visited = set(), set()
-        def visit(sid):
-            nonlocal version
-            if sid in visiting:
-                raise ValueError('Cyclic history ancestor dependency')
-            if sid in visited:
-                return
-            if sid not in index:
-                raise ValueError('Missing selected session or required history ancestor: ' + sid)
-            visiting.add(sid)
-            path = index[sid]
-            data, meta = _metadata(path)
-            origin_root = _imported_origin(project, state, path, home, data)
-            scopes = _imported_scopes(project, state, path, home, data)
-            _scope(meta.get('cwd'), origin_root)
-            # Native subagent closure cannot be reconstructed safely from opaque
-            # tool responses. Fail explicitly until a native tree fixture proves it.
-            _validate_codex_dependencies(_records(data, agent), meta, sid)
-            _validate_codex_scope(_records(data, agent), scopes)
-            parent = _parent(meta)
-            if parent:
-                visit(parent)
-                parent_data = _read(index[parent])
-                offset = meta['history_base']['end_byte_offset']
-                if offset > len(parent_data) or (offset and parent_data[offset - 1:offset] != b'\n'):
-                    raise ValueError('Invalid ancestor complete-record byte offset')
-                ancestry[sid] = parent
-            if sid == session_id:
-                version = meta['cli_version']
-            files.append(dict(path=path.relative_to(home).as_posix(), kind='transcript', session_id=sid, origin_root=origin_root, scope_roots=scopes, data=base64.b64encode(data).decode(), sha256=hashlib.sha256(data).hexdigest(), size=len(data)))
-            paths.append(path)
-            visiting.remove(sid)
-            visited.add(sid)
-        visit(session_id)
-    elif agent == 'claude':
-        _version(agent, version)
-        parent = home / 'projects' / claude_namespace(project.root) / f'{session_id}.jsonl'
-        paths = [parent]
-        descendants = parent.with_suffix('')
-        if descendants.exists():
-            for path in descendants.rglob('*'):
-                if path.is_file() or path.is_symlink():
-                    relative = path.relative_to(descendants).as_posix()
-                    if not re.fullmatch(r'subagents/agent-[A-Za-z0-9_-]+\.jsonl', relative):
-                        raise ValueError('Unsupported Claude subagent state: ' + relative)
-                    paths.append(path)
-        tasks = home / 'tasks' / session_id
-        if tasks.exists():
-            for path in tasks.iterdir():
-                if not re.fullmatch(r'[0-9]+\.json', path.name):
-                    raise ValueError('Unsupported Claude task or lock state')
-                paths.append(path)
-        for path in paths:
-            data = _read(path)
-            origin_root = _imported_origin(project, state, path, home, data)
-            scopes = _imported_scopes(project, state, path, home, data)
-            kind = 'task' if path.parent == tasks else 'transcript'
-            if kind == 'transcript':
-                rows = _records(data, agent)
-                _validate_claude(rows, session_id, scopes, child=path != parent)
-            else:
-                task = json.loads(data)
-                if not isinstance(task, dict) or str(task.get('id')) != path.stem:
-                    raise ValueError('Invalid Claude task binding')
-            files.append(dict(path=path.relative_to(home).as_posix(), kind=kind, session_id=session_id, origin_root=origin_root, scope_roots=scopes, data=base64.b64encode(data).decode(), sha256=hashlib.sha256(data).hexdigest(), size=len(data)))
-    else:
-        raise ValueError('Unsupported agent')
-    assert_quiescent(paths)
-    for item, path in zip(files, paths):
-        if hashlib.sha256(_read(path)).hexdigest() != item['sha256']:
-            raise ValueError('Session changed during export')
-    if sum(item['size'] for item in files) > MAX_BYTES:
-        raise ValueError('Snapshot exceeds size limit')
-    return dict(schema=SCHEMA, agent=agent, agent_version=version, session_id=session_id, project=dict(identity=project.identity, project_id=project.project_id, root=str(project.root), git=_git(project)), source_host=source_host, generation=generation, ancestry=ancestry, files=files)
-
-
-def _preflight(project, agent, session_id, home, bundle):
-    if not isinstance(bundle, dict) or set(bundle) != {'schema', 'agent', 'agent_version', 'session_id', 'project', 'source_host', 'generation', 'ancestry', 'files'}:
-        raise ValueError('Invalid snapshot manifest schema')
-    if bundle['schema'] != SCHEMA or bundle['agent'] != agent or bundle['session_id'] != session_uuid(session_id):
-        raise ValueError('Wrong snapshot version, agent or session')
-    _version(agent, bundle['agent_version'])
-    source = bundle['project']
-    if source.get('identity') != project.identity or source.get('project_id') != project.project_id:
-        raise ValueError('Wrong project identity')
-    if not isinstance(bundle['generation'], int) or bundle['generation'] < 0 or not bundle['source_host']:
-        raise ValueError('Invalid ownership generation/source')
-    if not isinstance(bundle['files'], list) or not bundle['files']:
-        raise ValueError('Empty snapshot')
-    seen, ids, ancestry, result = set(), set(), {}, []
-    for entry in bundle['files']:
-        if not isinstance(entry, dict) or set(entry) != {'path', 'kind', 'session_id', 'origin_root', 'scope_roots', 'data', 'sha256', 'size'}:
-            raise ValueError('Invalid native inventory entry')
-        rel = PurePosixPath(entry['path'])
-        if rel.is_absolute() or '..' in rel.parts or str(rel) != entry['path'] or entry['path'] in seen:
-            raise ValueError('Unsafe or duplicate native inventory path')
-        seen.add(entry['path'])
-        try:
-            data = base64.b64decode(entry['data'], validate=True)
-        except (ValueError, TypeError) as exc:
-            raise ValueError('Invalid snapshot file encoding') from exc
-        if len(data) != entry['size'] or hashlib.sha256(data).hexdigest() != entry['sha256']:
-            raise ValueError('Snapshot digest/size mismatch')
-        sid = session_uuid(entry['session_id'])
-        _scoped_roots(entry['origin_root'], entry['scope_roots'])
-        if agent == 'codex':
-            if entry['kind'] != 'transcript' or len(rel.parts) < 2 or rel.parts[0] not in ('sessions', 'archived_sessions') or not rel.name.endswith(sid + '.jsonl') or sid in ids:
-                raise ValueError('Invalid or duplicate Codex native path/ID')
-            rows = _records(data, agent)
-            if rows[0]['type'] != 'session_meta' or sum(r['type'] == 'session_meta' for r in rows) != 1:
-                raise ValueError('Unsupported native metadata')
-            meta = rows[0].get('payload', {})
-            _validate_codex_dependencies(rows, meta, sid)
-            session_uuid(meta.get('id'))
-            _version(agent, meta.get('cli_version'))
-            _scope(meta.get('cwd'), entry['origin_root'])
-            _validate_codex_scope(rows, entry['scope_roots'])
-            parent = _parent(meta)
-            if parent:
-                ancestry[sid] = parent
-            ids.add(sid)
-            target_rel = rel
-        else:
-            prefix = ('projects', claude_namespace(source['root']))
-            if rel.parts[:2] == prefix and (rel.parts[2:] == (sid + '.jsonl',) or (len(rel.parts) == 5 and rel.parts[2] == sid and rel.parts[3] == 'subagents' and re.fullmatch(r'agent-[A-Za-z0-9_-]+\.jsonl', rel.name))):
-                if entry['kind'] != 'transcript' or sid != session_id:
-                    raise ValueError('Wrong Claude transcript binding')
-                rows = _records(data, agent)
-                _validate_claude(rows, sid, entry['scope_roots'], child=len(rel.parts) == 5)
-                target_rel = PurePosixPath('projects', claude_namespace(project.root), *rel.parts[2:])
-                if len(rel.parts) == 3:
-                    ids.add(sid)
-            elif rel.parts[:2] == ('tasks', sid) and len(rel.parts) == 3 and re.fullmatch(r'[0-9]+\.json', rel.name) and entry['kind'] == 'task' and sid == session_id:
-                task = json.loads(data)
-                if not isinstance(task, dict) or str(task.get('id')) != rel.stem:
-                    raise ValueError('Wrong Claude task binding')
-                target_rel = rel
-            else:
-                raise ValueError('Unsupported Claude native path')
-        destination = _safe(home / target_rel)
-        old = _read(destination) if destination.exists() else None
-        if old is not None and entry['kind'] == 'transcript':
-            _validate_retained(old, agent, sid, sorted(set(entry['scope_roots']) | {str(project.root)}), child=agent == 'claude' and len(target_rel.parts) == 5)
-        if old is None:
-            action = 'create'
-        elif old == data:
-            action = 'identical'
-        elif entry['kind'] == 'transcript' and data.startswith(old) and old.endswith(b'\n'):
-            action = 'append'
-        elif entry['kind'] == 'transcript' and old.startswith(data):
-            action = 'local-ahead'
-        else:
-            raise ValueError('Native history/task diverges: ' + str(target_rel))
-        result.append(dict(path=str(target_rel), destination=destination, data=data, old=old, action=action))
-    if session_id not in ids or ancestry != bundle['ancestry'] or any(parent not in ids for parent in ancestry.values()):
-        raise ValueError('Missing or inconsistent session/ancestor dependency')
-    if agent == 'codex':
-        closure, sid = set(), session_id
-        while sid is not None:
-            if sid in closure:
-                raise ValueError('Cyclic ancestor closure')
-            closure.add(sid)
-            sid = ancestry.get(sid)
-        if closure != ids:
-            raise ValueError('Snapshot includes unrelated sessions outside selected dependency closure')
-        by_id = {entry['session_id']: entry for entry in bundle['files']}
-        for sid, parent in ancestry.items():
-            meta = _records(base64.b64decode(by_id[sid]['data']), agent)[0]['payload']
-            parent_data = base64.b64decode(by_id[parent]['data'])
-            offset = meta['history_base']['end_byte_offset']
-            if offset > len(parent_data) or (offset and parent_data[offset - 1:offset] != b'\n'):
-                raise ValueError('Invalid ancestor complete-record byte offset')
-    if sum(len(item['data']) for item in result) > MAX_BYTES:
-        raise ValueError('Snapshot exceeds size limit')
-    return result
-
-
-def import_snapshot(project, agent, session_id, home, bundle, *, state):
-    """All-bundle preflight, private rollback copies, atomic per-file commit.
-
-    A receipt marked prepared is an interrupted operation, never an import ACK.
-    Retrying the same bundle safely completes an interrupted compatible import.
-    """
-    home, state = Path(home), Path(state)
-    with locked(state / 'native-import.lock'):
-        plan = _preflight(project, agent, session_id, home, bundle)
-        assert_quiescent(item['destination'] for item in plan)
-        bundle_id = hashlib.sha256(json.dumps(bundle, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-        directory = state / 'imports' / bundle_id
-        receipt = dict(schema=1, bundle_id=bundle_id, agent=agent, session_id=session_id, project_id=project.project_id, source_host=bundle['source_host'], generation=bundle['generation'], status='prepared', files=[dict(path=item['path'], action=item['action']) for item in plan])
-        for index, item in enumerate(plan):
-            if item['action'] in ('create', 'append'):
-                backup = directory / 'backup' / str(index)
-                if item['old'] is not None and not backup.exists():
-                    atomic_write(backup, item['old'])
-                atomic_write(directory / 'staged' / str(index), item['data'])
-        atomic_write(directory / 'manifest.json', json.dumps(bundle, sort_keys=True).encode() + b'\n')
-        atomic_write(directory / 'receipt.json', json.dumps(receipt, sort_keys=True).encode() + b'\n')
-        for item in plan:
-            path = item['destination']
-            current = _read(path) if path.exists() else None
-            if current != item['old']:
-                raise ValueError('Destination changed after preflight; recovery receipt retained')
-            if item['action'] in ('create', 'append'):
-                assert_quiescent([path])
-                atomic_write(path, item['data'])
-        receipt['status'] = 'complete'
-        atomic_write(directory / 'receipt.json', json.dumps(receipt, sort_keys=True).encode() + b'\n')
-        return receipt
