@@ -160,11 +160,35 @@ request_path = "request.wav"
         self.assertEqual(call.call_args_list[0].args[0], ['herdr', 'machine', 'enable', 'opaque-disabled'])
 
     def test_null_checkout_metadata_and_duplicate_labels_do_not_select_wrong_workspace(self):
-        with mock.patch.object(herdr.subprocess, 'run', side_effect=[
-            completed({'result': {'workspaces': [{'workspace_id': 'wrong', 'label': 'repo', 'worktree': None}]}}),
-            completed({'result': {'workspace': {'workspace_id': 'new'}}}), completed({'result': {}})]) as run:
+        def native(args, **kwargs):
+            if args[1:3] == ['workspace', 'list']:
+                return completed({'result': {'workspaces': [{'workspace_id': 'wrong', 'label': 'repo', 'worktree': None}]}})
+            if args[1:3] == ['pane', 'list']:
+                return completed({'result': {'panes': [{'workspace_id': 'wrong', 'cwd': '/other',
+                                                      'foreground_cwd': str(self.project.root)}]}})
+            if args[1:3] == ['workspace', 'create']:
+                return completed({'result': {'workspace': {'workspace_id': 'new'}}})
+            return completed({'result': {}})
+        with mock.patch.object(herdr.subprocess, 'run', side_effect=native) as run:
             self.assertEqual(herdr.open_local(self.project, self.state), 0)
         self.assertEqual(run.call_args_list[-1].args[0], ['herdr', 'workspace', 'focus', 'new'])
+
+    def test_native_workspace_without_worktree_metadata_reuses_its_launch_directory(self):
+        rows = {'result': {'workspaces': [
+            {'workspace_id': 'existing', 'label': 'repo', 'focused': True}]}}
+        panes = {'result': {'panes': [{'workspace_id': 'existing',
+                  'cwd': str(self.project.root), 'foreground_cwd': str(self.project.root / 'src')}]}}
+        def native(args, **kwargs):
+            if args[1:3] == ['workspace', 'list']: return completed(rows)
+            if args[1:3] == ['pane', 'list']: return completed(panes)
+            if args[1:3] == ['workspace', 'create']:
+                return completed({'result': {'workspace': {'workspace_id': 'duplicate'}}})
+            return completed({'result': {}})
+        with mock.patch.object(herdr.subprocess, 'run', side_effect=native) as run:
+            self.assertEqual(herdr.open_local(self.project, self.state), 0)
+        self.assertEqual(run.call_args_list[1].args[0], ['herdr', 'pane', 'list', '--workspace', 'existing'])
+        self.assertEqual(run.call_args_list[-1].args[0], ['herdr', 'workspace', 'focus', 'existing'])
+        self.assertFalse(any('create' in call.args[0] for call in run.call_args_list))
 
 
 if __name__ == '__main__':
