@@ -89,9 +89,12 @@ def shortcut(project, state, *, agent, destination=None, resume=False, ui=None, 
     if service.is_remote and destination == 'mac':
         raise ValueError('Run this shortcut on your Mac to return a conversation there')
     try:
-        if not service.is_remote and service.binding():
+        paired = False
+        if not service.is_remote:
             try:
-                service.ensure_sync()
+                paired = bool(service.binding())
+                if paired:
+                    service.ensure_sync()
             except (ValueError, OSError, RuntimeError) as exc:
                 _say('Scratch sync unavailable: ' + str(exc))
         if destination != here:
@@ -99,6 +102,7 @@ def shortcut(project, state, *, agent, destination=None, resume=False, ui=None, 
             if not _remote_ready(service, ui):
                 return 0
             service.ensure_sync()
+            paired = True
 
         def start_new():
             if destination == here:
@@ -108,7 +112,7 @@ def shortcut(project, state, *, agent, destination=None, resume=False, ui=None, 
         if not resume:
             return start_new()
         rows = [dict(row, location=here) for row in service.inventory()['sessions'] if row['agent'] == agent]
-        if not service.is_remote and service.binding():
+        if not service.is_remote and paired:
             try:
                 space = service.space()
                 if space and str(space.get('state', '')).lower() in ('available', 'running'):

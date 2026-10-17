@@ -21,6 +21,16 @@ class Shortcuts(unittest.TestCase):
         with patch.object(work, 'Gum', side_effect=AssertionError('No menu is required')):
             self.assertEqual(work.shortcut(None, None, agent='codex', service=Service()), 0)
 
+    def test_broken_pairing_preserves_fresh_and_existing_local_work(self):
+        service = Service([row()])
+        service.binding = Mock(side_effect=ValueError('Pairing is invalid'))
+        self.run_shortcut(service, agent='codex')
+        self.run_shortcut(service, UI('Repair'), agent='codex', resume=True)
+        self.assertIn(('new', 'codex'), service.calls)
+        self.assertEqual(service.calls[-1], ('continue', 'codex', 'private-id', 'mac'))
+        with self.assertRaisesRegex(ValueError, 'Pairing is invalid'):
+            self.run_shortcut(service, agent='codex', destination='codespace')
+
     def test_remote_new_uses_explicit_destination(self):
         service = Service()
         service.new_session = Mock(return_value=(0, 'new-id'))

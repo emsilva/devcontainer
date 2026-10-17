@@ -128,7 +128,8 @@ def integrate_continuity(project: Path, files: dict[str, bytes], enabled: bool) 
     aliases += [f'agent:{verb}' for verb in ('codex', 'claude', 'sessions', 'handoff', 'recover')]
     additions = ''
     for alias in aliases:
-        if re.search(r'^  [\'\"]?' + re.escape(alias) + r'[\'\"]?:', body, re.M):
+        key = re.escape(alias)
+        if re.search(rf'''^  (?:{key}:(?=\s|$)|'{key}':|"{key}":)''', body, re.M):
             continue
         additions += (f'  {alias}:\n' + ('    interactive: true\n' if alias == 'work' or alias.startswith('work:') else '') + '    cmds:\n'
                       f'      - task: devcontainer:{alias}\n'

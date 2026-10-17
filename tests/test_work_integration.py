@@ -90,6 +90,14 @@ class WorkIntegrationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('work --agent codex', result.stderr + result.stdout)
 
+    def test_existing_longer_or_quoted_shortcut_does_not_hide_shorter_aliases(self):
+        for owner in ("work:codex:cs:\n    cmds: ['echo owner-codex']", '"work:codex": {cmds: ["echo owner-codex"]}'):
+            with self.subTest(owner=owner):
+                self.install("version: '3'\ntasks:\n  " + owner + '\n')
+                result = subprocess.run(['task', '--list-all', '--json'], cwd=self.root, capture_output=True, text=True, check=True)
+                names = {row['name'] for row in json.loads(result.stdout)['tasks']}
+                self.assertTrue({'work', 'work:codex', 'work:codex:cs', 'work:claude', 'work:claude:cs'} <= names, sorted(names))
+
     def test_cli_dispatches_shortcut_and_requires_agent_for_resume_or_destination(self):
         from devcontainer_setup.project_sync.__main__ import parser, run
         with patch('sys.stdin.isatty', return_value=True), patch('sys.stdout.isatty', return_value=True), \
