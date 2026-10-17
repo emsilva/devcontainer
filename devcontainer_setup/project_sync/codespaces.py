@@ -156,4 +156,3 @@ print(json.dumps(roots))
                 print('Waiting for Codespace to become Available…', file=sys.stderr)
                 last_state = state
             time.sleep(min(2, max(0, deadline - time.monotonic())))
-

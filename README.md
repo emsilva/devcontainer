@@ -23,7 +23,7 @@ The wizard asks you to:
 2. Apply dotfiles, enabled by default. Enter a repo such as `emsilva/dotfiles`;
    the wizard remembers it for your next project.
 3. Keep scratch files and project notes synced with your Mac, enabled by default.
-   This also enables Codex and Claude conversation handoff.
+   This also enables recovery of supported completed Codex and Claude turns.
 4. Choose commit-only setup or a Codespace. For a new Codespace, select its machine
    size and idle timeout, then open it in a browser or VS Code. Reuse shows the
    existing Codespace's actual settings.

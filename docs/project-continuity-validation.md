@@ -25,6 +25,10 @@ Observed results:
   both a fresh native store and the normal profile; source transcripts stayed
   byte-identical. A real Claude source/fork turn retained the same context and
   preserved its source and import alias.
+- Both restored conversations then completed another real turn. Fresh checkpoints
+  captured those continued children without issues and passed a second recovery:
+  Codex's native history contained both turns, and Claude's next native fork
+  passed dependency and provenance preflight.
 
 Owned fixture sessions, SSH aliases, workers and checkouts were removed. The
 Codespace was returned to its initial stopped state. Global native configuration
@@ -33,7 +37,7 @@ retained outside Git in the maintainer's test lab.
 
 ## Regression gates
 
-The release check ran 376 tests successfully, with one expected skip on the
+The release check ran 380 tests successfully, with one expected skip on the
 case-insensitive Mac filesystem. The pinned real Mutagen stop/restart/deletion
 gate ran. `task check` passed Python compilation, ShellCheck and whitespace checks.
 An independent whole-branch review approved the final implementation after
