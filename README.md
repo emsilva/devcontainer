@@ -23,7 +23,7 @@ The wizard asks you to:
 2. Apply dotfiles, enabled by default. Enter a repo such as `emsilva/dotfiles`;
    the wizard remembers it for your next project.
 3. Keep scratch files and project notes synced with your Mac, enabled by default.
-   This also enables Codex and Claude conversation handoff.
+   This also enables recovery of supported completed Codex and Claude turns.
 4. Choose commit-only setup or a Codespace. For a new Codespace, select its machine
    size and idle timeout, then open it in a browser or VS Code. Reuse shows the
    existing Codespace's actual settings.
@@ -41,7 +41,10 @@ small helpers, and a Taskfile include. Personal preferences live in
 
 | Command | Action |
 |---|---|
-| `task work` | Continue a conversation here or in its Codespace |
+| `task work` | Open local project work in Herdr |
+| `task work:codex` / `task work:claude` | Start a new conversation here |
+| `task work:cs` | Open Codespace Herdr and back up work to this Mac |
+| `task work:status` / `task work:stop` | Check protection / stop this project’s worker |
 | `task devcontainer:setup` | Review or change the setup |
 | `task devcontainer:setup -- --scan` | Show runtime and tool recommendations |
 | `task devcontainer:setup -- --dry-run` | Preview the recommended file changes |
@@ -66,39 +69,47 @@ task devcontainer:upgrade:agents
 Fresh containers install the current vendor releases. Normal setup keeps valid
 installations; the update command refreshes them explicitly.
 
-## Keep project work across Mac and Codespace
+## Keep working when Codespaces is unavailable
 
-Keep **Sync scratch files and project notes with your Mac** enabled in setup. Put temporary
-project files in `.scratch/` and shared working notes in `.scratch/memory/`.
-Only the folder's README and ignore rules are committed. Setup adds instructions
-to `AGENTS.md` and `CLAUDE.md` while preserving your existing guidance.
+Enable project continuity in setup. On your Mac, run:
 
-Run this on your Mac for daily work:
+```sh
+task work:cs
+```
+
+This starts the paired Codespace if needed, opens its persistent Herdr session,
+and starts a Mac worker. Work in Codex or Claude there. The worker keeps verified
+checkpoints of committed history, staged and unstaged code, nonignored new files,
+`.scratch/`, project notes, and supported completed conversation turns on your Mac.
+The first entry seeds a separate remote checkout from your desktop; existing
+checkouts and their edits are preserved.
+
+When credits run out or the Codespace is unreachable, run:
 
 ```sh
 task work
 ```
 
-Choose **Continue on this Mac**, **Continue in Codespace**, or start a new Codex
-or Claude conversation. The menu remembers your selection and shows conversations
-by title and last activity. Moving to the Codespace opens an interactive remote
-terminal; exit the agent to return to the menu. Use the Mac menu to bring it back.
+Herdr opens a separate local recovery checkout from the last checkpoint actually
+received on this Mac. No working Codespace or remote release is required. Your
+original Mac checkout stays intact. Repeated entry reuses the recovery checkout,
+preserving new local edits.
 
-Setup connects scratch sync to the Codespace you selected. With commit-only
-setup, the menu helps you connect one later. It discovers matching checkouts and
-asks when a choice is needed. A stopped Codespace starts from an explicitly named
-menu action. If your project already defines `work`, use `task devcontainer:work`.
+Use `task work:codex` or `task work:claude` for a fresh conversation in the active
+local workspace. Add `-- --resume` to choose a project conversation. Across hosts,
+a native fork continues the checkpoint under a new ID; source histories remain
+intact. Native profiles and sign-in stay on each host.
 
-Sync runs in the background, waits when the Codespace stops, and restarts when
-you run `task work` after a Mac reboot. Deletions sync too; conflicts preserve
-both versions and need resolution before switching. Private state stays outside Git.
+Put temporary files in `.scratch/` and shared project notes in `.scratch/memory/`.
+Scratch uses automatic two-way safe sync; conflicts preserve both versions and
+are reported. Setup adds project-memory guidance to `AGENTS.md` and `CLAUDE.md`.
+Only scratch markers are tracked by Git.
 
-Source code still moves through Git. Before switching machines, keep both
-checkouts on the same branch and commit, with clean working trees. The launcher
-checks this, waits for scratch synchronization, and transfers the selected
-conversation after its writer exits. Native profiles and authentication stay on
-each host. Existing conversations need explicit adoption; unsupported histories
-remain preserved. See [advanced commands and recovery](docs/project-continuity.md).
+Keep the Mac awake and connected while working remotely. `task work:status`
+reports the actual last received checkpoint and any unsupported conversations;
+scratch synchronization alone does not certify code or conversation protection.
+Use `task work:stop` to stop this project’s worker. See
+[recovery details and limitations](docs/project-continuity.md).
 
 ## Resume a Codespace setup
 

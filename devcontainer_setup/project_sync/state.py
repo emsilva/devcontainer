@@ -268,18 +268,3 @@ def locked(path: Path, blocking: bool = False):
                 fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
-
-
-def host_id(env: Mapping | None = None) -> str:
-    """Persist a private installation UUID, independent of hostname changes."""
-    directory = _state_home(env) / 'devcontainer-setup'
-    path = directory / 'host.json'
-    with locked(directory / 'host.lock', blocking=True):
-        try:
-            value = read_json(path)['host_id']
-        except FileNotFoundError:
-            value = str(uuid.uuid4())
-            atomic_write(path, json.dumps({'host_id': value}).encode() + b'\n')
-        if not isinstance(value, str) or str(uuid.UUID(value)) != value:
-            raise ValueError('Invalid persisted host identity')
-        return value

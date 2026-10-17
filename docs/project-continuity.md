@@ -1,183 +1,102 @@
-# Scratch, notes, and conversation handoff
+# Project continuity
 
-Enable **Sync scratch files and project notes with your Mac** in `task devcontainer:setup`. Review and commit the
-generated changes, push them, and rebuild the Codespace if setup adds SSH support.
-Both checkouts need the generated helpers and `.scratch` markers.
+Run `task work:cs` on the Mac to work in a Codespace through Herdr. Run `task work`
+to work locally, including when GitHub is unreachable. Use one host at a time for
+the same conversation. Herdr, GitHub CLI, Python, and each native agent must be
+available on their respective hosts; setup installs the container tools.
 
-## Daily work
+## Daily commands
 
-Run `task work` from your project on the Mac. The menu remembers your conversation
-and offers continuation on this Mac or in the paired Codespace. It uses titles
-or prompt previews and last activity, so UUIDs are only needed for advanced commands.
-Use `task devcontainer:work` when the project already has its own `work` target.
+| Command | Result |
+| --- | --- |
+| `task work:cs` | Explicitly start/connect Codespace, back it up to Mac, attach Herdr |
+| `task work` | Open local Herdr; recover remote work when switching back |
+| `task work:codex` / `task work:claude` | Fresh native conversation on the current host |
+| `task work:codex -- --resume` | Choose a scoped conversation, including recoverable checkpoints |
+| `task work:claude -- --resume` | Choose a Claude conversation |
+| `task work:status` | Actual Mac receipt time, worker state, scratch conflicts, conversation issues |
+| `task work:stop` | Stop only this project’s owned sync/backup worker |
 
-Setup pairs its selected Codespace and starts scratch sync. Commit-only setup
-defers pairing to the menu. Matching Codespaces and checkout paths are discovered;
-multiple matches require a selection. A stopped Codespace needs the explicit
-start action. Continuing remotely opens a managed agent in an interactive SSH
-terminal. Exit the agent to return to the menu; choose the Mac action to bring
-the conversation back. From a Codespace terminal, the menu launches local
-conversations; returning custody to the Mac is coordinated from the Mac.
+If a project already has a custom `work` task, use `task devcontainer:work` and the
+other `devcontainer:work:*` tasks. Setup preserves custom root tasks.
 
-Both Git checkouts must have the same branch and commit and clean working trees
-before moving a conversation. Resolve mismatches with your normal Git workflow;
-the launcher does not commit, push, pull, or merge source code. Scratch conflicts
-also block a move. Settings shows status and affected paths; preserve the wanted
-file contents on both sides, then retry. The existing handoff receipts make an
-interrupted transfer retryable without selecting a new owner.
+## What gets protected
 
-Opening the menu starts an already configured scratch worker if needed, including
-after a Mac restart. A stopped Codespace stays stopped until explicitly started.
-New conversations begin on the machine running the menu. Existing conversations
-ask for explicit adoption before managed launch; an active writer must exit first.
-The low-level operations below remain available for scripts and troubleshooting.
+The Mac worker checkpoints the remote Git HEAD and its reachable history, exact
+index (including staged bytes), tracked and nonignored working files, deletions,
+file modes, safe links, and ignored `.scratch/` contents. A checkpoint is acknowledged
+only after every referenced object has arrived and passed its SHA256 check.
+Interrupted transfers leave the last good receipt intact.
 
-## Scratch files and project notes
+Checkpoints live in private host-local state, normally
+`~/.local/state/devcontainer-setup/projects/<project-id>/checkpoints/`. They are
+immutable, deduplicated by content, and currently retained without automatic
+pruning. Large repositories and long conversations consume local disk and take
+longer to checkpoint. Individual objects above 256 MiB refuse transfer. Do not treat the five-second polling delay as a guaranteed
+recovery-point interval: collection and transfer take additional time.
 
-`.scratch/` is for experiments, temporary inputs, investigation output, and notes
-that belong to the project but should stay out of commits. Its `.gitignore` and
-README are tracked; working contents are ignored even by `git add --all`.
-Keep shared agent notes under `.scratch/memory/`. Promote lasting documentation
-into the repository when it is ready for review.
+Ignored build outputs outside `.scratch/` are excluded. Unborn repositories,
+submodules, special files, split indexes, unsafe/colliding paths and unstable file
+reads can refuse a checkpoint. Sparse checkout support is unproven. Inspect the
+reported checkpoint failure before relying on protection.
 
-The Mac runs the sync controller. Pair one existing, running Codespace with the
-exact remote checkout under persistent `/workspaces`:
+## Conversations and memory
 
-```sh
-task scratch:configure -- --codespace NAME --remote-root /workspaces/PROJECT
-task scratch:start
-task scratch:status
-task scratch:logs -- --follow
-task scratch:backup
-task scratch:stop
-```
+Collectors read native transcripts without changing the running conversation.
+They retain only a verified stable prefix ending at a supported completed turn,
+including required native ancestors. Native formats that cannot be validated are
+reported explicitly; originals remain untouched. Unfinished turns can be lost
+if the Codespace disappears before a supported completed prefix reaches the Mac.
 
-Start is idempotent and survives closing the launching terminal. It reconnects
-after a network interruption and waits when the Codespace is stopped. It does
-not start Codespaces or install a login service. Run `task work` after restarting
-the Mac. The first connection records the selected Codespace's SSH host key;
-later connections require that key.
+Cross-host continuation creates a native fork with a new ID and verifies retained
+history. No source writer-release protocol is needed. Authentication, native global
+SQLite files, profiles, and personal memory libraries are never replicated.
+Existing source histories are never resumed just to collect a checkpoint.
 
-Requirements on the Mac: Python 3.11+, Git, Task, OpenSSH, and GitHub CLI 2.102.0.
-The CLI version is guarded because background no-start enforcement was tested
-against its actual forwarding behavior. Select a GitHub account with the
-process environment `DEVCONTAINER_GH_USER=USERNAME` if your active account cannot
-access the Codespace. The existing `~/.ssh/codespaces.auto` key must already be
-authorized by Codespaces, and sshd must listen on port 2222 as configured by the
-wizard. Sync never edits your global SSH configuration.
+Shared project memory belongs in `.scratch/memory/`. Managed launch reads those
+notes, and generated project Codex policy disables global memory for this workflow.
+A historical conversation containing global-memory or unrelated-project context
+may be refused rather than silently stripped or exported.
+Codex child-agent histories and Claude Agent/Task sidecars currently refuse
+continuation until their full dependency closure is supported. Conversations
+started from nested subdirectories are not currently discovered; launch the
+managed commands from the checkout root. These limits do not block code backups.
 
-Mutagen 0.18.1 installs lazily into private project state, authenticated with
-platform-specific SHA256 pins. It uses `two-way-safe`, so conflicting changes
-are reported rather than automatically selecting a winner. Resolve a conflict
-by preserving the desired contents on both endpoints. Deletions propagate.
-Tracked root markers, VCS files, and common caches are excluded. Symlinks,
-special files, and names that collide by case are refused; check status/logs.
+## Recovery preserves working copies
 
-State lives in
-`${XDG_STATE_HOME:-~/.local/state}/devcontainer-setup/projects/<repository-id>/`.
-When the default `.local/state` ancestors are group-writable or unsafe (as in
-a standard Codespace), private state instead uses `~/.devcontainer-state/`
-without changing those directories. That fallback remains stable after creation.
-Explicit absolute `XDG_STATE_HOME` overrides remain authoritative and must have
-safe ancestors. Identity uses the normalized origin host and owner/repository, including across
-SSH/HTTPS spellings. Repositories with the same directory name stay separate.
-The configured checkout path is also checked. One project identity has one
-configured sync pair; a different worktree must not silently rebind that pair.
-An initialized registry whose ancestors become unsafe requires explicit repair
-or migration. The command refuses to create a replacement identity. Ambiguous
-existing registries and symlink ancestors also require review.
-Long custom state paths can exceed the operating system's Unix socket limit;
-select a shorter absolute `XDG_STATE_HOME` before pairing if the command reports
-that limit. Keep the same override for subsequent commands.
+First Codespace entry preserves its existing work as a checkpoint, then creates a
+separate desktop-seeded checkout under `/workspaces/.devcontainer-work/<project-id>/`.
+Herdr focuses that exact checkout. Repeated remote entry reuses it.
 
-`scratch:backup` writes a private, immutable local archive outside Git. Initial
-sync and handoff also preserve recovery snapshots. There is no automatic backup
-retention policy; remove old backups deliberately after reviewing their contents.
+Switching back creates a new private local checkout under the project state’s
+`recovered/` directory and focuses it in Herdr. Existing Mac code and index are
+preserved. Once working locally, later remote receipts cannot overwrite the active
+local checkout. Switching to Codespace again creates another remote checkout from
+the active desktop work. Push normal project changes through Git as usual.
 
-## Continue a conversation on the other host
+Recovery uses the last checkpoint received on this Mac. A sleeping, disconnected,
+or powered-off Mac receives nothing. `task work:status` is the authority for the
+last receipt; a green scratch connection alone is insufficient.
 
-Use managed entrypoints on both hosts:
+## Transport and advanced scratch controls
 
-```sh
-task agent:codex                         # select a local conversation or start one
-task agent:claude -- --new
-task agent:sessions -- --agent codex
-task agent:codex -- --session UUID
-```
+The foreground command can start a stopped Codespace. The background worker has
+an enforced GET-only GitHub API capability and cannot start it or spend credits.
+It reconnects to an already running space. Run `task work:cs` after a Mac reboot.
 
-Sign in to each native CLI separately on each host; handoff does not transfer
-authentication. Keep your code and branch commits synchronized through Git.
+An owned SSH alias in `~/.ssh/config` points Herdr at the worker’s dedicated live
+forward. Its host key and private include stay in project state. Existing SSH
+settings and Herdr configuration are preserved; nested remote attach uses only a
+child-specific Herdr configuration.
 
-Supported native options go after a second separator, for example
-`task agent:codex -- --session UUID -- --no-daemon`. Identity, cwd, fork, and
-background overrides are rejected because they would break session ownership.
-Generic config, profile, settings, and prompt overrides are also refused so they
-cannot bypass the project memory policy. Use the native CLI directly for workflows
-outside managed custody.
+Scratch synchronization remains two-way safe. Deletions propagate; simultaneous
+conflicting changes remain for explicit resolution. The owned session’s identity
+and endpoints are verified before it can be stopped or retargeted. Old bindings,
+backups, and retired handoff data are retained privately.
 
-Exit the agent before transferring. Run handoff from the Mac, using its existing
-scratch pairing. The Codespace must already be running:
+Advanced commands remain available: `task scratch:configure -- --codespace NAME
+--remote-root /workspaces/PROJECT`, `scratch:start`, `scratch:status`, `scratch:logs`,
+`scratch:backup`, and `scratch:stop`. Prefer the daily `work` entrypoints.
 
-```sh
-task agent:handoff -- --agent codex --session UUID --to codespace --dry-run
-task agent:handoff -- --agent codex --session UUID --to codespace
-```
-
-In the Codespace run `task agent:codex -- --session UUID`. Exit there before
-returning ownership with `--to mac` from the Mac. Substitute `claude` for Claude
-Code. Scratch notes sync separately; wait for a clean scratch status before
-switching if you need the latest notes immediately.
-
-Handoff copies the selected native transcript and supported dependencies, with
-byte digests and recovery receipts. It retains the same conversation UUID.
-Historical messages and paths are preserved; the native runtime receives the
-destination checkout path. Codex indexes are rebuilt with its native API and all
-history pages compared. Credentials, native databases, global settings, and
-personal memory libraries do not cross hosts. Native profiles stay in their
-usual directories; this does not require a project-specific `CODEX_HOME`.
-
-Current project notes are supplied on managed launch. The generated project
-Codex configuration disables native global memory generation/use for this
-workflow. Managed Codex commands also disable the memory feature for their
-process, preventing queued global consolidation. Managed Claude commands disable
-auto memory for their process and rebuild the system prompt so current notes
-apply when resuming. Existing historical memory cannot be removed without rewriting the
-conversation; strict export refuses detected global-memory context. Normal
-personal instructions and tool settings still apply on each host.
-
-## Adoption and recovery
-
-Existing conversations have unknown ownership until explicitly adopted. Check
-their UUID and project before adopting on the host that currently owns them:
-
-```sh
-task agent:recover -- --agent codex --session UUID --adopt
-```
-
-Adoption validates scope and checks for active writers. It cannot replace an
-existing ownership receipt. Managed launches hold an OS lease for their duration;
-handoff transfers durable custody through matching source/destination receipts.
-Do not bypass these commands with a plain native CLI for a managed conversation.
-Advisory locks cannot prevent an independent tool from opening the same history.
-
-If a local managed process crashed, inspect it and then use
-`task agent:recover -- --agent codex --session UUID --crashed-local`. A live
-process or uncertain remote transfer blocks recovery. For an interrupted handoff,
-rerun the same handoff command: matching receipts can complete it without
-selecting a new owner. Preserve state/backups when investigating a refusal.
-There is no force takeover command.
-
-## Format boundaries
-
-Native formats change frequently. Unsupported formats fail before acceptance
-and preserve existing data. The adapters recognize Codex 0.163/0.164 and Claude
-Code 2.1 native records; detailed executed versions and fixtures are recorded in
-the [spike reports](spikes/project-agent-state.md).
-
-Codex inherited forks include their required ancestors. Codex subagent trees,
-compressed histories, unknown records, and histories with unrelated project
-scope are refused until their dependency closure is proven. Claude supports
-parent transcripts, recognized subagent JSONL files, and numeric task JSON;
-unrecognized task locks or sidecars are refused. Divergent histories are never
-merged automatically. Compatible destination-ahead bytes are preserved, but
-handoff requires verified matching conversation history before granting custody.
+See [validation evidence](project-continuity-validation.md) for the exercised live
+workflow and failure cases.

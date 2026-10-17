@@ -20,6 +20,8 @@ RUNTIMES = {'python', 'node', 'ruby', 'go', 'rust'}
 CONFIG = '.devcontainer/devcontainer.json'
 LOCK = '.devcontainer/devcontainer-lock.json'
 NAMESPACE = 'devcontainerSetup'
+RETIRED_HELPERS = {'.devcontainer/scripts/project_sync/' + name + '.py'
+                   for name in ('work', 'workflows', 'handoff', 'ownership')}
 PINNED_OPTIONS = {
     FEATURE + 'aws-cli:1': {'version': '2.38.1'},
     FEATURE + 'azure-cli:1': {'version': '2.91.0'},
@@ -240,7 +242,7 @@ def _validate_agent_environment(config):
         incompatible(f'require remoteEnv.PATH to begin with {prefix}')
 
 
-def render(project: Path, source: Path, selections: dict, source_ref: str) -> dict[str, bytes]:
+def render(project: Path, source: Path, selections: dict, source_ref: str) -> dict[str, bytes | None]:
     """Return the exact candidate files; never write to the consumer checkout."""
     project, source = Path(project), Path(source)
     if not re.fullmatch(r'[0-9a-f]{40}', source_ref):
@@ -447,9 +449,14 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
                 continue
             if destination.read_bytes() != data:
                 raise ValueError(f'Existing unmanaged file requires reviewed migration: {relative}')
-    # Obsolete files stay untouched and remain protected; cleanup is a separate explicit review.
+    # Only an explicit retirement allowlist may remove an unchanged owned helper.
+    # These deletions travel through the same diff/index/hook gates as additions.
     managed_files = dict(marker.get('managedFiles', {})) if marker else dict(legacy_files)
     managed_files.update({relative: _digest(data) for relative, data in files.items()})
+    for relative in RETIRED_HELPERS & managed_files.keys():
+        if relative not in files:
+            files[relative] = None
+            del managed_files[relative]
     snapshot = copy.deepcopy(desired)
     dependencies = {}
     limitations = {}

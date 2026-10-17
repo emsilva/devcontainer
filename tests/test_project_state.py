@@ -11,8 +11,22 @@ import uuid
 from unittest import mock
 
 from devcontainer_setup.project_sync.state import (
-    Project, atomic_write, discover_project, host_id, locked, read_json, state_dir,
+    Project, atomic_write, discover_project, locked, read_json, state_dir,
 )
+
+
+def host_id(env):
+    """Build an old host registry fixture to verify preserved namespace selection."""
+    from devcontainer_setup.project_sync.state import _state_home
+    directory = _state_home(env) / 'devcontainer-setup'
+    path = directory / 'host.json'
+    with locked(directory / 'host.lock', blocking=True):
+        try:
+            return read_json(path)['host_id']
+        except FileNotFoundError:
+            value = str(uuid.uuid4())
+            atomic_write(path, json.dumps({'host_id': value}).encode() + b'\n')
+            return value
 
 
 class StateTests(unittest.TestCase):
@@ -110,17 +124,6 @@ class StateTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         self.assertTrue(path.exists())  # Do not unlink lock inodes and split ownership.
 
-    def test_host_id_is_stable_private_and_environment_specific(self):
-        a = {'HOME': str(self.root), 'XDG_STATE_HOME': str(self.root / 'a')}
-        b = {'HOME': str(self.root), 'XDG_STATE_HOME': str(self.root / 'b')}
-        first = host_id(a)
-        self.assertEqual(str(uuid.UUID(first)), first)
-        self.assertEqual(host_id(a), first)
-        self.assertNotEqual(host_id(b), first)
-        files = [p for p in (self.root / 'a').rglob('*') if p.is_file()]
-        self.assertTrue(files)
-        self.assertTrue(all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in files))
-
 
 class NamespacePrivacyTests(unittest.TestCase):
     def setUp(self):
@@ -163,25 +166,6 @@ except BlockingIOError:
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o755)
         self.assertEqual(stat.S_IMODE((self.root / 'state').stat().st_mode), 0o755)
-
-    def test_host_identity_secures_namespace_without_changing_home_or_xdg_parent(self):
-        env = {'HOME': str(self.root), 'XDG_STATE_HOME': str(self.root / 'state')}
-        original = host_id(env)
-        code = """from pathlib import Path
-import stat, sys
-path = Path(sys.argv[1])
-if stat.S_IMODE(path.parent.stat().st_mode) & 0o022:
-    path.unlink()
-    path.write_text('{"host_id":"00000000-0000-0000-0000-000000000000"}')
-    sys.exit(42)
-sys.exit(0)
-"""
-        child = subprocess.run([sys.executable, '-c', code, str(self.namespace / 'host.json')])
-        self.assertEqual(child.returncode, 0, 'Public namespace permitted host identity replacement')
-        self.assertEqual(host_id(env), original)
-        self.assertEqual(stat.S_IMODE(self.namespace.stat().st_mode), 0o700)
-        for parent in (self.root, self.root / 'state'):
-            self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o755)
 
     def test_atomic_write_secures_all_namespace_directories(self):
         atomic_write(self.directory / 'record.json', b'{}')

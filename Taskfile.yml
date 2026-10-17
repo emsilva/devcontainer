@@ -2,10 +2,33 @@ version: '3'
 
 tasks:
   work:
-    desc: Continue a project conversation here or in its Codespace
+    desc: Open local project work in Herdr
     interactive: true
     cmds:
       - bash scripts/project-sync.sh work {{.CLI_ARGS}}
+  work:cs:
+    desc: Open Codespace Herdr with continuous recovery on this Mac
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh work --codespace {{.CLI_ARGS}}
+  work:status:
+    desc: Show the last checkpoint received on this Mac
+    cmds:
+      - bash scripts/project-sync.sh work --status {{.CLI_ARGS}}
+  work:stop:
+    desc: Stop this project backup and scratch worker
+    cmds:
+      - bash scripts/project-sync.sh work --stop {{.CLI_ARGS}}
+  work:codex:
+    desc: Start Codex here; add -- --resume to choose a conversation
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh work --agent codex {{.CLI_ARGS}}
+  work:claude:
+    desc: Start Claude here; add -- --resume to choose a conversation
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh work --agent claude {{.CLI_ARGS}}
   setup:
     desc: Configure a project with the interactive wizard (task setup -- --project PATH)
     interactive: true
@@ -29,71 +52,29 @@ tasks:
     cmds:
       - python3 -m unittest discover -s tests -v
   scratch:configure:
-    desc: Project continuity scratch configure
-    interactive: true
+    desc: Advanced scratch configure
     cmds:
       - bash scripts/project-sync.sh scratch configure {{.CLI_ARGS}}
-
   scratch:start:
-    desc: Project continuity scratch start
-    interactive: true
+    desc: Advanced scratch start
     cmds:
       - bash scripts/project-sync.sh scratch start {{.CLI_ARGS}}
-
   scratch:stop:
-    desc: Project continuity scratch stop
-    interactive: true
+    desc: Advanced scratch stop
     cmds:
       - bash scripts/project-sync.sh scratch stop {{.CLI_ARGS}}
-
   scratch:status:
-    desc: Project continuity scratch status
-    interactive: true
+    desc: Advanced scratch status
     cmds:
       - bash scripts/project-sync.sh scratch status {{.CLI_ARGS}}
-
   scratch:logs:
-    desc: Project continuity scratch logs
-    interactive: true
+    desc: Advanced scratch logs
     cmds:
       - bash scripts/project-sync.sh scratch logs {{.CLI_ARGS}}
-
   scratch:backup:
-    desc: Project continuity scratch backup
-    interactive: true
+    desc: Advanced scratch backup
     cmds:
       - bash scripts/project-sync.sh scratch backup {{.CLI_ARGS}}
-
-  agent:codex:
-    desc: Project continuity agent codex
-    interactive: true
-    cmds:
-      - bash scripts/project-sync.sh agent codex {{.CLI_ARGS}}
-
-  agent:claude:
-    desc: Project continuity agent claude
-    interactive: true
-    cmds:
-      - bash scripts/project-sync.sh agent claude {{.CLI_ARGS}}
-
-  agent:sessions:
-    desc: Project continuity agent sessions
-    interactive: true
-    cmds:
-      - bash scripts/project-sync.sh agent sessions {{.CLI_ARGS}}
-
-  agent:handoff:
-    desc: Project continuity agent handoff
-    interactive: true
-    cmds:
-      - bash scripts/project-sync.sh agent handoff {{.CLI_ARGS}}
-
-  agent:recover:
-    desc: Project continuity agent recover
-    interactive: true
-    cmds:
-      - bash scripts/project-sync.sh agent recover {{.CLI_ARGS}}
-
   check:
     desc: Validate Python syntax, shell scripts and whitespace
     cmds:

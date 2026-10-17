@@ -39,17 +39,23 @@ class ProjectSyncCLITests(unittest.TestCase):
         self.assertIn('scratch:configure', result.stderr)
         self.assertNotIn('Traceback', result.stderr)
 
-    def test_recovery_requires_explicit_scope_and_choice(self):
+    def test_old_handoff_surface_removed(self):
         result = self.run_cli('agent', 'recover')
         self.assertEqual(result.returncode, 2)
-        self.assertIn('--session', result.stderr)
+        self.assertIn('invalid choice', result.stderr)
+
+    def test_work_status_is_offline_and_does_not_create_state(self):
+        result = self.run_cli('work', '--status')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNone(json.loads(result.stdout)['last_mac_checkpoint'])
+        self.assertFalse(self.state.exists())
 
     def test_help_and_invalid_project_never_touch_normal_profiles(self):
         result = self.run_cli('--help')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('scratch', result.stdout)
         (self.root / '.git/config').write_text('[core]\n repositoryformatversion=0\n')
-        result = self.run_cli('agent', 'sessions', '--agent', 'codex')
+        result = self.run_cli('work', '--status')
         self.assertEqual(result.returncode, 1)
         self.assertIn('origin', result.stderr)
         self.assertFalse(self.state.exists())

@@ -1,73 +1,33 @@
+"""Metadata rendering remains bounded and ignores native instruction envelopes."""
 import json
-import os
+from pathlib import Path
 import tempfile
 import unittest
-import uuid
-from pathlib import Path
-from types import SimpleNamespace
-from devcontainer_setup.project_sync.sessions import list_sessions, claude_namespace
+
+from devcontainer_setup.project_sync.sessions import _catalog_metadata
 
 
 class CatalogTests(unittest.TestCase):
-    def test_codex_prompt_skips_native_instruction_and_environment_records(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp).resolve()
-            project = SimpleNamespace(root=home / 'repo')
-            sid = str(uuid.uuid4())
-            path = home / 'sessions' / (sid + '.jsonl')
-            path.parent.mkdir()
-            rows = [dict(type='session_meta', payload=dict(id=sid, cwd=str(project.root), cli_version='0.163.0')),
-                    dict(type='response_item', payload=dict(type='message', role='user', content=[
-                        dict(type='input_text', text='# AGENTS.md instructions for /project\n<INSTRUCTIONS>Guidance</INSTRUCTIONS>'),
-                        dict(type='input_text', text='<environment_context>Local runtime</environment_context>')])),
-                    dict(type='response_item', payload=dict(type='message', role='user', content=[
-                        dict(type='input_text', text='Repair conversation handoff')]))]
-            path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
-            self.assertEqual(list_sessions(project, 'codex', home)[0]['title'], 'Repair conversation handoff')
+    def metadata(self, rows, agent='codex'):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'session.jsonl'
+            data = b''.join(json.dumps(row).encode() + b'\n' for row in rows)
+            path.write_bytes(data)
+            return _catalog_metadata(data, agent, path)
 
-    def test_titles_recency_scope_and_malformed(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp).resolve()
-            project = SimpleNamespace(root=home / 'repo')
-            directory = home / 'sessions'
-            directory.mkdir()
-            ids = [str(uuid.uuid4()) for _ in range(4)]
-            for i, sid in enumerate(ids):
-                rows = [dict(type='session_meta', payload=dict(id=sid, cwd=str(project.root if i != 2 else home / 'other'), cli_version='0.164.0')),
-                        dict(type='response_item', payload=dict(type='message', role='user', content=[dict(type='input_text', text='Fix\x1b[31m it\nnow')]))]
-                path = directory / (sid + '.jsonl')
-                path.write_text(''.join(json.dumps(r) + '\n' for r in rows) if i != 3 else '{bad}\n')
-                os.utime(path, (100 + i, 100 + i))
-            result = list_sessions(project, 'codex', home)
-            self.assertEqual([r['session_id'] for r in result], ids[1::-1])
-            self.assertEqual(result[0]['title'], 'Fix it now')
-            self.assertEqual(result[0]['updated_at'], 101)
+    def test_codex_prompt_skips_native_instruction_and_environment_records(self):
+        rows = [dict(type='response_item', payload=dict(type='message', role='user', content=[dict(type='input_text', text='# AGENTS.md instructions for /project\n<INSTRUCTIONS>Guidance</INSTRUCTIONS>'), dict(type='input_text', text='<environment_context>Local runtime</environment_context>')])), dict(type='response_item', payload=dict(type='message', role='user', content=[dict(type='input_text', text='Repair conversation recovery')]))]
+        self.assertEqual(self.metadata(rows)['title'], 'Repair conversation recovery')
+
+    def test_titles_are_bounded_and_strip_terminal_and_unicode_controls(self):
+        rows = [dict(type='session_meta', payload=dict(title='Title\x1b]0;bad\x07\u202e here'))]
+        self.assertEqual(self.metadata(rows)['title'], 'Title here')
+        rows[0]['payload']['title'] = 'x' * 200
+        self.assertEqual(len(self.metadata(rows)['title']), 120)
 
     def test_claude_title_and_missing_title(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp).resolve()
-            project = SimpleNamespace(root=home / 'repo')
-            directory = home / 'projects' / claude_namespace(project.root)
-            directory.mkdir(parents=True)
-            sid = str(uuid.uuid4())
-            path = directory / (sid + '.jsonl')
-            rows = [dict(type='user', cwd=str(project.root), sessionId=sid, message=dict(role='user', content='First question'))]
-            path.write_text(''.join(json.dumps(r)+'\n' for r in rows))
-            self.assertEqual(list_sessions(project, 'claude', home)[0]['title'], 'First question')
-            rows.append(dict(type='custom-title', customTitle='My title' + 'x'*200))
-            path.write_text(''.join(json.dumps(r)+'\n' for r in rows))
-            self.assertEqual(len(list_sessions(project, 'claude', home)[0]['title']), 120)
-            rows[0]['message']['content'] = ''
-            path.write_text(json.dumps(rows[0])+'\n')
-            self.assertEqual(list_sessions(project, 'claude', home)[0]['title'], 'Untitled conversation')
-
-    def test_codex_native_title_over_prompt_and_control_sanitization(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp).resolve()
-            project = SimpleNamespace(root=home / 'repo')
-            sid = str(uuid.uuid4())
-            path = home / 'sessions' / (sid + '.jsonl')
-            path.parent.mkdir()
-            rows = [dict(type='session_meta', payload=dict(id=sid, cwd=str(project.root), cli_version='0.164.0', title='Title\x1b]0;bad\x07\u202e here'))]
-            path.write_text(''.join(json.dumps(r)+'\n' for r in rows))
-            self.assertEqual(list_sessions(project, 'codex', home)[0]['title'], 'Title here')
+        rows = [dict(type='user', message=dict(role='user', content='First question'))]
+        self.assertEqual(self.metadata(rows, 'claude')['title'], 'First question')
+        rows.append(dict(type='custom-title', customTitle='My project title'))
+        self.assertEqual(self.metadata(rows, 'claude')['title'], 'My project title')
+        self.assertEqual(self.metadata([dict(type='user', message=dict(role='user', content=''))], 'claude')['title'], 'Untitled conversation')

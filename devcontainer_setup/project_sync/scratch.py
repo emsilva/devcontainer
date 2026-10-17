@@ -172,12 +172,17 @@ def status(state: Path) -> dict:
 def start(root: Path, state: Path) -> dict:
     state = Path(state).absolute()
     root = Path(root).resolve()
+    if (state / 'scratch-retarget.json').exists():
+        raise ValueError('An interrupted scratch retarget is pending; run task work to finish its owned transition first')
     _config(root, state)
     _private_location(root, state)
     _scratch(root)
+    current = status(state)
+    if current.get('running') and current.get('checkpoint_version') != 1:
+        stop(state)
     with locked(state / 'scratch-control.lock', blocking=True):
         current = status(state)
-        if current['running']:
+        if current['running'] and current.get('checkpoint_version') == 1:
             return current
         if current.get('phase') != 'stopped' and current.get('session'):
             _recover_session(state, current)
@@ -280,28 +285,6 @@ def inspect_sync(root, state):
     return _reconciliation(info) if info else dict(phase='connecting', conflicts=[])
 
 
-def flush(root, state):
-    config = _config(root, state)
-    runtime = status(Path(state))
-    if not runtime.get('running') or runtime.get('phase') != 'syncing':
-        raise ValueError('Scratch sync is not connected; start sync and wait before switching')
-    receipt = _saved_session(state, config)
-    if receipt is None:
-        raise ValueError('Scratch session is not ready; wait and retry')
-    binary = install_mutagen(state)
-    info = _session_info(binary, state, receipt)
-    if info is None:
-        raise ValueError('Scratch session is not ready; wait and retry')
-    current = _reconciliation(info)
-    if current['phase'] == 'conflicts':
-        raise ValueError('Scratch conflicts: ' + ', '.join(current['conflicts']))
-    _mutagen(binary, state, 'sync', 'flush', info['identifier'], timeout=120)
-    current = _reconciliation(_session_info(binary, state, receipt) or {})
-    if current['phase'] != 'synchronized':
-        raise ValueError('Scratch reconciliation is not verified; inspect conflicts and wait before switching')
-    return current
-
-
 def _pause_saved_session(binary, state, receipt):
     info = _session_info(binary, state, receipt)
     if info is not None:
@@ -368,6 +351,85 @@ class _Shutdown(BaseException):
     pass
 
 
+def complete_retarget(state):
+    """Finish a prior explicit owned transition before choosing another one."""
+    state = Path(state)
+    try:
+        intent = read_json(state / 'scratch-retarget.json')
+    except FileNotFoundError:
+        return
+    candidate = intent['candidate']
+    return retarget(Path(candidate['root']), state, candidate['codespace'], candidate['remote_root'])
+
+
+def retarget(root, state, codespace, remote_root):
+    """Explicitly replace a verified owned scratch binding, retaining its receipts."""
+    state = Path(state)
+    project = discover_project(Path(root))
+    _scratch(project.root)
+    if (not Path(remote_root).is_absolute() or '..' in Path(remote_root).parts
+            or any(c in remote_root for c in '\r\n\0')):
+        raise ValueError('Invalid remote checkout path')
+    candidate = dict(version=1, identity=project.identity, root=str(project.root),
+                     codespace=codespace, remote_root=remote_root)
+    intent_path = state / 'scratch-retarget.json'
+    if not intent_path.exists() or status(state).get('running'):
+        stop(state)
+    with locked(state / 'scratch-control.lock', blocking=True):
+        path = state / CONFIG
+        if intent_path.exists():
+            intent = read_json(intent_path)
+            if intent.get('schema') != 1 or intent.get('candidate') != candidate:
+                raise ValueError('An interrupted scratch retarget needs its original destination; previous data preserved')
+            previous = intent['previous']
+            actual = read_json(path)
+            if actual not in (previous, candidate):
+                raise ValueError('Scratch binding changed during interrupted retarget')
+            receipt = intent.get('receipt')
+            archive = Path(intent['archive'])
+            if archive.parent != state / 'retired-bindings':
+                raise ValueError('Invalid scratch retarget archive')
+            saved = _saved_session(state)
+            if saved is not None and saved != receipt:
+                raise ValueError('Scratch receipt changed during interrupted retarget')
+            if receipt:
+                binary = install_mutagen(state)
+                # The durable intent was written only after verifying the owned
+                # baseline. Its exact receipt permits absence after termination.
+                info = _session_info(binary, state, {**receipt, 'established': False})
+                if info is not None:
+                    _mutagen(binary, state, 'sync', 'terminate', info['identifier'])
+                _write(archive / SESSION, receipt)
+                (state / SESSION).unlink(missing_ok=True)
+            _write(archive / CONFIG, previous)
+            _write(path, candidate)
+            intent_path.unlink()
+            return candidate
+        if not path.exists():
+            _write(path, candidate)
+            return candidate
+        previous = read_json(path)
+        if previous == candidate:
+            return candidate
+        if previous.get('identity') != project.identity:
+            raise ValueError('Cannot retarget another project identity')
+        receipt = _saved_session(state, previous)
+        archive = state / 'retired-bindings' / (str(time.time_ns()) + '-' + secrets.token_hex(4))
+        _write(archive / CONFIG, previous)
+        if receipt:
+            binary = install_mutagen(state)
+            info = _session_info(binary, state, receipt)
+            _write(intent_path, dict(schema=1, previous=previous, candidate=candidate,
+                                    receipt=receipt, archive=str(archive)))
+            if info is not None:
+                _mutagen(binary, state, 'sync', 'terminate', info['identifier'])
+            _write(archive / SESSION, receipt)
+            (state / SESSION).unlink()
+        _write(path, candidate)
+        intent_path.unlink(missing_ok=True)
+    return candidate
+
+
 def supervise(root: Path, state: Path, nonce=None) -> None:
     root, state = Path(root).resolve(), Path(state).absolute()
     nonce = nonce or secrets.token_hex(24)
@@ -390,7 +452,8 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
         logger.addHandler(handler)
         receipt = _saved_session(state, config)
         runtime = {'pid': os.getpid(), 'nonce': nonce, 'process_identity': _process_identity(os.getpid()),
-                   'phase': 'starting', 'session': receipt['name'] if receipt else None}
+                   'phase': 'starting', 'session': receipt['name'] if receipt else None,
+                   'checkpoint_version': 1}
         def update(phase, **values):
             runtime.update(phase=phase, **values)
             _write(state / RUNTIME, runtime)
@@ -412,6 +475,8 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                         if remote.get('identity') != config['identity'] or remote.get('root') != config['remote_root']:
                             raise ValueError('Remote repository identity changed; refusing synchronization.')
                         connection.ssh_config(state / 'ssh-config')
+                        from .ssh_hosts import refresh_ssh
+                        refresh_ssh(state)
                         if receipt is None:
                             session = 'scratch-' + nonce
                             receipt = {'name': session, 'nonce': nonce, 'binding': config, 'established': False}
@@ -441,6 +506,16 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                         update('syncing')
                         backoff = 2
                         logger.info('Scratch connection established.')
+                        def checkpoint():
+                            from .replication import checkpoint_remote
+                            try:
+                                saved = checkpoint_remote(connection, discover_project(root), state, config['remote_root'])
+                                update('syncing', checkpoint=saved, checkpoint_error=None)
+                            except Exception:
+                                # Leave the last acknowledged checkpoint intact;
+                                # scratch reconciliation does not imply code protection.
+                                update('syncing', checkpoint_error='Checkpoint incomplete; previous recovery data preserved')
+                        checkpoint()
                         while not exiting.wait(5):
                             if connection.child.poll() is not None:
                                 raise ValueError('Codespace forward disconnected; waiting to reconnect.')
@@ -450,6 +525,7 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                                 raise ValueError('Remote repository identity changed; synchronization paused.')
                             summary = _mutagen(binary, state, 'sync', 'list', session)
                             update('syncing', detail=summary)
+                            checkpoint()
                 except Exception as error:
                     if receipt:
                         try:

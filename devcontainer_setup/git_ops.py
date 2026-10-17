@@ -58,7 +58,9 @@ changed = (tree != os.environ['DEVCONTAINER_REVIEWED_TREE']
            or branch != os.environ['DEVCONTAINER_REVIEWED_BRANCH'])
 for name, expected in json.loads(pathlib.Path(os.environ['DEVCONTAINER_REVIEW_MANIFEST']).read_text()).items():
     path = pathlib.Path(name)
-    if not path.is_file() or path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+    if ((expected is None and (path.exists() or path.is_symlink()))
+            or (expected is not None and (not path.is_file() or path.is_symlink()
+                or hashlib.sha256(path.read_bytes()).hexdigest() != expected))):
         changed = True
 if changed:
     print('Setup review changed during Git hooks; review the new diff before committing.', file=sys.stderr)
@@ -67,7 +69,7 @@ if changed:
 
 
 class GitPlan:
-    def __init__(self, project: Path, files: dict[str, bytes], branch: str | None = None):
+    def __init__(self, project: Path, files: dict[str, bytes | None], branch: str | None = None):
         self.project = Path(git(Path(project), 'rev-parse', '--show-toplevel')).resolve()
         self.files = dict(files)
         self.head = git(self.project, 'rev-parse', '--verify', 'HEAD', check=False)
@@ -105,8 +107,9 @@ class GitPlan:
         lines: list[str] = []
         for name in self.changed:
             old = (self.original[name] or b'').decode('utf-8', errors='replace').splitlines(keepends=True)
-            new = self.files[name].decode('utf-8', errors='replace').splitlines(keepends=True)
-            lines.extend(difflib.unified_diff(old, new, fromfile=f'a/{name}', tofile=f'b/{name}'))
+            new = (self.files[name] or b'').decode('utf-8', errors='replace').splitlines(keepends=True)
+            lines.extend(difflib.unified_diff(old, new, fromfile=f'a/{name}',
+                tofile='/dev/null' if self.files[name] is None else f'b/{name}'))
         return ''.join(lines)
 
     def apply(self) -> None:
@@ -128,6 +131,9 @@ class GitPlan:
             git(self.project, 'switch', '-c', self.branch)
         for name in self.changed:
             path = self.project / name
+            if self.files[name] is None:
+                path.unlink()
+                continue
             path.parent.mkdir(parents=True, exist_ok=True)
             mode = path.stat().st_mode & 0o777 if path.exists() else (0o755 if name.endswith('.sh') else 0o644)
             fd, staged = tempfile.mkstemp(prefix='.setup-', dir=path.parent)
@@ -158,6 +164,9 @@ class GitPlan:
             index_git('read-tree', self.head or '--empty')
             filemode = git(self.project, 'config', '--bool', 'core.filemode', check=False) != 'false'
             for name in self.changed:
+                if self.files[name] is None:
+                    index_git('update-index', '--force-remove', '--', name)
+                    continue
                 original = index_git('ls-files', '--stage', '--', name)
                 mode = '100755' if (self.project / name).stat().st_mode & 0o100 else '100644'
                 if original and not filemode:
@@ -172,7 +181,8 @@ class GitPlan:
         for name in self.changed:
             self._safe_path(name)
             path = self.project / name
-            if not path.exists() or path.read_bytes() != self.files[name]:
+            actual = path.read_bytes() if path.exists() else None
+            if actual != self.files[name]:
                 return True
         return False
 
@@ -189,7 +199,12 @@ class GitPlan:
             raise ValueError('Hooks staged unrelated files; preserve and unstage them before retrying.')
         for name in self.changed:
             self._safe_path(name)
-            self.files[name] = (self.project / name).read_bytes()
+            path = self.project / name
+            if self.files[name] is None:
+                if path.exists():
+                    raise ValueError('A hook recreated a retired helper; preserve it and review migration manually')
+            else:
+                self.files[name] = path.read_bytes()
         self.reviewed_tree = self._build_reviewed_tree()
         git(self.project, 'add', '--', *self.changed)
 
@@ -217,7 +232,7 @@ class GitPlan:
                 target.write_text(_GUARD)
                 target.chmod(0o755)
             manifest = root / 'review.json'
-            manifest.write_text(json.dumps({name: _digest(self.files[name]) for name in self.changed}))
+            manifest.write_text(json.dumps({name: _digest(self.files[name]) if self.files[name] is not None else None for name in self.changed}))
             env = dict(os.environ, DEVCONTAINER_ORIGINAL_HOOKS=str(hooks), DEVCONTAINER_REVIEWED_TREE=tree,
                        DEVCONTAINER_REVIEW_MANIFEST=str(manifest),
                        DEVCONTAINER_REVIEWED_HEAD=self.head, DEVCONTAINER_REVIEWED_BRANCH=self.branch)

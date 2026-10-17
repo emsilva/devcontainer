@@ -26,6 +26,26 @@ class GitPlanTests(unittest.TestCase):
         git(self.root, 'commit', '-m', 'Initial')
         self.files = {'.devcontainer/devcontainer.json': b'{"name":"Test"}\n'}
 
+    def test_reviewed_deletion_is_committed_without_other_edits(self):
+        plan = GitPlan(self.root, {'app.txt': None})
+        self.assertIn('/dev/null', plan.diff())
+        plan.apply()
+        sha = plan.commit()
+        self.assertFalse((self.root / 'app.txt').exists())
+        self.assertEqual(git(self.root, 'diff-tree', '--no-commit-id', '--name-status', '-r', sha), 'D\tapp.txt')
+
+    def test_hook_cannot_recreate_retired_helper_or_gain_review_acceptance(self):
+        hook = self.root / '.git/hooks/pre-commit'
+        hook.write_text('#!/bin/sh\nprintf resurrected > app.txt\ngit add app.txt\n')
+        hook.chmod(0o755)
+        plan = GitPlan(self.root, {'app.txt': None})
+        plan.apply()
+        with self.assertRaises(ReviewChanged):
+            plan.commit()
+        with self.assertRaisesRegex(ValueError, 'recreated'):
+            plan.accept_hook_changes()
+        self.assertEqual((self.root / 'app.txt').read_text(), 'resurrected')
+
     def test_commit_contains_only_reviewed_files_and_preserves_other_edits(self):
         (self.root / 'app.txt').write_text('owner edit\n')
         plan = GitPlan(self.root, self.files, branch=proposed_branch(self.root))
