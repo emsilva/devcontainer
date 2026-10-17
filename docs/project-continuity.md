@@ -13,7 +13,7 @@ Keep shared agent notes under `.scratch/memory/`. Promote lasting documentation
 into the repository when it is ready for review.
 
 The Mac runs the sync controller. Pair one existing, running Codespace with the
-exact remote checkout:
+exact remote checkout under persistent `/workspaces`:
 
 ```sh
 task scratch:configure -- --codespace NAME --remote-root /workspaces/PROJECT
@@ -55,6 +55,9 @@ safe ancestors. Identity uses the normalized origin host and owner/repository, i
 SSH/HTTPS spellings. Repositories with the same directory name stay separate.
 The configured checkout path is also checked. One project identity has one
 configured sync pair; a different worktree must not silently rebind that pair.
+An initialized registry whose ancestors become unsafe requires explicit repair
+or migration. The command refuses to create a replacement identity. Ambiguous
+existing registries and symlink ancestors also require review.
 Long custom state paths can exceed the operating system's Unix socket limit;
 select a shorter absolute `XDG_STATE_HOME` before pairing if the command reports
 that limit. Keep the same override for subsequent commands.
@@ -74,9 +77,15 @@ task agent:sessions -- --agent codex
 task agent:codex -- --session UUID
 ```
 
-Native options go after a second separator, for example
+Sign in to each native CLI separately on each host; handoff does not transfer
+authentication. Keep your code and branch commits synchronized through Git.
+
+Supported native options go after a second separator, for example
 `task agent:codex -- --session UUID -- --no-daemon`. Identity, cwd, fork, and
 background overrides are rejected because they would break session ownership.
+Generic config, profile, settings, and prompt overrides are also refused so they
+cannot bypass the project memory policy. Use the native CLI directly for workflows
+outside managed custody.
 
 Exit the agent before transferring. Run handoff from the Mac, using its existing
 scratch pairing. The Codespace must already be running:

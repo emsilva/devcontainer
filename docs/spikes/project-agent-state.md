@@ -5,9 +5,10 @@ available on the Mac and a Codespace for any repository using this devcontainer.
 Continue the same conversation, with one machine writing at a time. Share only
 the selected project's memory, never the user's complete cross-project library.
 
-This is a proposed design with a completed synthetic Codex cross-host spike.
-It is not an implemented sync feature. See the
-[Codex round-trip report](codex-session-sync.md) for evidence and remaining gates.
+This document records the initial design. The feature is now implemented;
+see the [implementation evidence](project-continuity-implementation.md) and
+[current commands](../project-continuity.md). The earlier
+[Codex round-trip report](codex-session-sync.md) retains the original spike.
 
 ## Identity and paths
 
