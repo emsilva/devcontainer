@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -24,6 +25,45 @@ class ScratchTests(unittest.TestCase):
         self.scratch = self.root / '.scratch'
         self.scratch.mkdir()
         self.module = importlib.import_module('devcontainer_setup.project_sync.scratch')
+
+    def test_pair_older_checkout_without_scratch_before_seeding_it(self):
+        remote = self.root.parent / 'legacy-codespace'
+        shutil.copytree(self.root, remote, ignore=shutil.ignore_patterns('.scratch'))
+        class LocalPython:
+            def __init__(self, *args, **kwargs): pass
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def python(self, code, payload=b'', timeout=60):
+                return subprocess.run(['python3', '-I', '-B', '-c', code], input=payload,
+                                      capture_output=True, check=True, timeout=timeout).stdout
+        before = subprocess.check_output(['git', '-C', str(remote), 'status', '--porcelain'])
+        with patch.object(self.module, 'CodespaceConnection', LocalPython):
+            binding = self.module.configure(self.root, self.state, 'bound-name', str(remote))
+        self.assertEqual(binding['identity'], 'github.com/owner/repo')
+        self.assertEqual(binding['remote_root'], str(remote))
+        self.assertFalse((remote / '.scratch').exists(), 'Identity discovery must leave the legacy checkout unchanged')
+        self.assertEqual(subprocess.check_output(['git', '-C', str(remote), 'status', '--porcelain']), before)
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.module._remote(LocalPython(), str(remote))
+        with self.assertRaises(subprocess.CalledProcessError) as caught:
+            self.module._remote(LocalPython(), str(remote), snapshot=True)
+        self.assertIn(b'Remote .scratch missing', caught.exception.stderr)
+
+    def test_remote_identity_still_refuses_existing_unsafe_scratch(self):
+        class LocalPython:
+            def python(self, code, payload=b'', timeout=60):
+                return subprocess.run(['python3', '-I', '-B', '-c', code], input=payload,
+                                      capture_output=True, check=True, timeout=timeout).stdout
+        self.scratch.rmdir()
+        self.scratch.write_text('owner file')
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.module._remote(LocalPython(), str(self.root))
+        self.assertEqual(self.scratch.read_text(), 'owner file')
+        self.scratch.unlink()
+        self.scratch.symlink_to(self.root / 'missing-owner-directory')
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.module._remote(LocalPython(), str(self.root))
+        self.assertTrue(self.scratch.is_symlink())
 
     def test_backup_preserves_ignored_binary_and_is_immutable(self):
         (self.scratch / '.gitignore').write_text('*\n')
@@ -315,9 +355,22 @@ class ScratchTests(unittest.TestCase):
         with patch.object(tools, 'urlopen', side_effect=[ConnectionResetError('reset'), io.BytesIO(b'archive')]) as request:
             self.assertEqual(tools._download('https://example.invalid/archive'), b'archive')
             self.assertEqual(request.call_count, 2)
-        with patch.object(tools, 'urlopen', side_effect=ConnectionResetError('reset')):
-            with self.assertRaisesRegex(ValueError, 'download'):
+        with patch.object(tools, 'urlopen', side_effect=ConnectionResetError('reset')), \
+                patch('subprocess.run', return_value=subprocess.CompletedProcess(['curl'], 22, b'', b'private detail')):
+            with self.assertRaisesRegex(ValueError, 'download') as caught:
                 tools._download('https://example.invalid/archive')
+            self.assertNotIn('private', str(caught.exception))
+
+    def test_tool_download_uses_curl_when_python_body_keeps_resetting(self):
+        from devcontainer_setup.project_sync import tools
+        def curl(args, **kwargs):
+            self.assertEqual(args[0], 'curl')
+            Path(args[args.index('--output') + 1]).write_bytes(b'complete archive')
+            return subprocess.CompletedProcess(args, 0, b'', b'')
+        with patch.object(tools, 'urlopen', side_effect=ConnectionResetError('reset')), \
+                patch('subprocess.run', side_effect=curl) as request:
+            self.assertEqual(tools._download('https://example.invalid/archive'), b'complete archive')
+        self.assertEqual(request.call_count, 1)
 
     def test_failed_create_without_session_is_retryable_and_never_cleanup_required(self):
         from types import SimpleNamespace

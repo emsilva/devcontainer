@@ -6,7 +6,9 @@ import json
 import os
 from pathlib import Path
 import platform
+import subprocess
 import tarfile
+import tempfile
 from urllib.request import urlopen
 
 VERSION = '0.18.1'
@@ -21,12 +23,34 @@ def _download(url):
             with urlopen(url, timeout=60) as response:
                 data = response.read(100 * 1024 * 1024 + 1)
             break
-        except OSError as error:
+        except OSError:
             if attempt == 2:
-                raise ValueError('Pinned Mutagen download failed; retry when the network is available.') from error
+                data = _curl_download(url)
+                break
     if len(data) > 100 * 1024 * 1024:
         raise ValueError('Mutagen archive exceeds download limit.')
     return data
+
+
+def _curl_download(url):
+    # curl is already a host prerequisite and can handle large release assets
+    # when Python's HTTP connection repeatedly resets. The caller still checks
+    # the complete archive size and the installer verifies its pinned SHA-256.
+    with tempfile.TemporaryDirectory(prefix='mutagen-download-') as directory:
+        target = Path(directory) / 'archive.tar.gz'
+        try:
+            result = subprocess.run(
+                ['curl', '--fail', '--location', '--silent', '--show-error',
+                 '--retry', '1', '--retry-all-errors', '--retry-max-time', '60',
+                 '--connect-timeout', '15', '--max-time', '60',
+                 '--max-filesize', str(100 * 1024 * 1024), '--output', str(target), '--', url],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=125)
+        except (OSError, subprocess.TimeoutExpired):
+            raise ValueError('Pinned Mutagen download failed; retry when the network is available.') from None
+        if result.returncode or not target.is_file():
+            raise ValueError('Pinned Mutagen download failed; retry when the network is available.')
+        with target.open('rb') as source:
+            return source.read(100 * 1024 * 1024 + 1)
 
 
 def install_mutagen(state: Path, *, asset=None) -> Path:
