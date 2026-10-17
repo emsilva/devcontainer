@@ -77,13 +77,115 @@ def _scopes(project, state):
     return sorted(scopes)
 
 
-def _receipt_scopes(project, state, path, data):
-    scopes = set(_scopes(project, state))
+def _claude_child_scopes(project, receipt, path, data, store, destination_roots):
+    """Authorize historical roots only through an owned native fork's history."""
+    if receipt.get('schema') != SCHEMA or receipt.get('status') != 'complete' or receipt.get('agent') != 'claude':
+        return set()
+    result = receipt.get('result', {})
+    child_id = result.get('session_id')
+    destination = receipt.get('destination_root')
+    if (not isinstance(destination, str) or destination not in destination_roots
+            or path.name != str(child_id) + '.jsonl'
+            or path.parent.name != sessions.claude_namespace(destination)):
+        return set()
+    sessions.session_uuid(child_id)
+    source_id = sessions.session_uuid(receipt.get('source_session_id'))
+    files = receipt.get('files', [])
+    if len(files) != 1 or files[0].get('source_session_id') != source_id or not files[0].get('created'):
+        raise ValueError('Claude fork provenance has no exact owned source alias')
+    item = files[0]
+    alias_id = sessions.session_uuid(item.get('physical_alias'))
+    alias = Path(item.get('destination', ''))
+    if alias != path.with_name(alias_id + '.jsonl'):
+        raise ValueError('Claude fork source alias belongs to another destination')
+    alias_data = _stable_prefix(alias)
+    size = item.get('size')
+    digest = item.get('sha256')
+    if (type(size) is not int or size != len(alias_data) or alias.stat().st_size != size
+            or hashlib.sha256(alias_data).hexdigest() != digest):
+        raise ValueError('Claude fork source alias changed from its immutable checkpoint')
+    try:
+        retained = store.read(digest)
+    except (KeyError, OSError, ValueError) as exc:
+        raise ValueError('Claude fork source checkpoint blob is missing') from exc
+    if retained != alias_data:
+        raise ValueError('Claude fork source alias does not match its retained blob')
+    if item.get('inode') is not None:
+        info = alias.stat(follow_symlinks=False)
+        if [info.st_dev, info.st_ino] != item['inode']:
+            raise ValueError('Claude fork source alias inode ownership changed')
+    original = sessions._records(alias_data, 'claude')
+    sessions._validate_claude(original, source_id, item.get('scope_roots'))
+    provenance = result.get('provenance', {})
+    final = original[-1]
+    if (provenance.get('agent') != 'claude' or provenance.get('source_session_id') != source_id
+            or provenance.get('cutoff') != dict(turn_id=final.get('uuid'), bytes=size)
+            or final.get('type') != 'assistant'
+            or final.get('message', {}).get('stop_reason') not in ('end_turn', 'stop_sequence')):
+        raise ValueError('Claude fork receipt does not bind its completed source history')
+    # Native Claude retains message/attachment UUIDs and payloads. Forking changes
+    # only the session/cwd envelopes and the user's promptId; attachments may move.
+    inherited = [row for row in original if 'uuid' in row]
+    child = sessions._records(data, 'claude')
+    by_uuid = {}
+    for position, row in enumerate(child):
+        if 'uuid' in row:
+            by_uuid.setdefault(row['uuid'], []).append((position, row))
+    inherited_ids = [row['uuid'] for row in inherited]
+    if len(inherited_ids) != len(set(inherited_ids)) or not inherited_ids:
+        raise ValueError('Ambiguous Claude inherited source identities')
+    positions = []
+    for source in inherited:
+        matches = by_uuid.get(source['uuid'], [])
+        if len(matches) != 1:
+            raise ValueError('Claude fork is missing its exact inherited history prefix')
+        position, candidate = matches[0]
+        positions.append(position)
+        expected, actual = dict(source), dict(candidate)
+        if 'sessionId' in expected:
+            if actual.pop('sessionId', None) != child_id:
+                raise ValueError('Claude fork inherited session identity changed')
+            expected.pop('sessionId')
+        if 'cwd' in expected:
+            if actual.pop('cwd', None) != destination:
+                raise ValueError('Claude fork inherited runtime checkout changed')
+            expected.pop('cwd')
+        if source['type'] == 'user' and 'promptId' in expected:
+            sessions.session_uuid(actual.pop('promptId', None))
+            expected.pop('promptId')
+        if actual != expected:
+            raise ValueError('Claude fork inherited history content changed')
+    source_messages = [row['uuid'] for row in inherited if row['type'] in ('user', 'assistant')]
+    child_messages = [row.get('uuid') for row in child if row['type'] in ('user', 'assistant')]
+    if child_messages[:len(source_messages)] != source_messages:
+        raise ValueError('Claude fork inherited conversation is not its history prefix')
+    if any(row.get('uuid') not in inherited_ids for row in child[:max(positions) + 1] if 'uuid' in row):
+        raise ValueError('Claude fork mixed unrelated rows into inherited history')
+    # Unused receipt roots grant no authority. Only structural roots actually in
+    # the immutable inherited history become approved historical project scopes.
+    roots = set()
+    for row in original:
+        if 'cwd' in row:
+            roots.add(row['cwd'])
+        attachment = row.get('attachment', {})
+        if attachment.get('type') == 'environment':
+            snapshot = attachment.get('snapshot', {})
+            roots.add(snapshot.get('workingDirectory'))
+            roots.update(snapshot.get('additionalWorkingDirectories', []))
+    if provenance.get('source_root') not in roots:
+        raise ValueError('Claude fork source root disagrees with immutable history')
+    return roots
+
+
+def _receipt_scopes(project, state, path, data, store):
+    destination_roots = _scopes(project, state)
+    scopes = set(destination_roots)
     if state is not None:
         for receipt_path in (Path(state) / 'conversation-imports').glob('*/receipt.json'):
             receipt = read_json(receipt_path)
             if receipt.get('project_id') != project.project_id or receipt.get('identity') != project.identity:
                 continue
+            scopes.update(_claude_child_scopes(project, receipt, path, data, store, destination_roots))
             for item in receipt.get('files', []):
                 if str(path) != item.get('destination'):
                     continue
@@ -156,7 +258,7 @@ def _codex_entry(project, store, sid, index, *, state, scopes):
             raise ValueError('Invalid native session metadata')
         sessions.session_uuid(meta.get('id'))
         sessions._version('codex', meta.get('cli_version'))
-        approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, data)))
+        approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, data, store)))
         sessions._scoped_roots(meta.get('cwd'), approved)
         parent = sessions._parent(meta)
         inherited = None
@@ -190,9 +292,8 @@ def _codex_entry(project, store, sid, index, *, state, scopes):
         raise ValueError('Native dependency closure exceeds size limit')
     for item in files:
         item['blob'] = store.put(retained[item['session_id']])
-    primary = next(item for item in files if item['session_id'] == sid)
     meta = _rows(retained[sid])[0]['payload']
-    return dict(schema=SCHEMA, agent='codex', session_id=sid, project_id=project.project_id, identity=project.identity, source_root=meta['cwd'], scope_roots=primary['scope_roots'], cutoff=dict(turn_id=cutoff, bytes=len(retained[sid])), files=files, title=sessions._catalog_metadata(retained[sid], 'codex', index[sid])['title'], updated_at=index[sid].stat().st_mtime)
+    return dict(schema=SCHEMA, agent='codex', session_id=sid, project_id=project.project_id, identity=project.identity, source_root=meta['cwd'], scope_roots=sorted({root for item in files for root in item['scope_roots']}), cutoff=dict(turn_id=cutoff, bytes=len(retained[sid])), files=files, title=sessions._catalog_metadata(retained[sid], 'codex', index[sid])['title'], updated_at=index[sid].stat().st_mtime)
 
 
 def _claude_entry(project, store, sid, path, *, state, scopes):
@@ -213,7 +314,7 @@ def _claude_entry(project, store, sid, path, *, state, scopes):
         raise ValueError('No validated completed Claude turn yet')
     kept = b''.join(data.splitlines(keepends=True)[:end])
     valid = sessions._records(kept, 'claude')
-    approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, kept)))
+    approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, kept, store)))
     sessions._validate_claude(valid, sid, approved)
     versions = [row['version'] for row in valid if 'version' in row]
     if not versions:
@@ -266,7 +367,7 @@ def capture_conversations(project, store, *, state=None, env=None):
             meta = row.get('payload', {})
             if not isinstance(meta, dict):
                 raise ValueError('Invalid native session metadata')
-            approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, first)))
+            approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, first, store)))
             if meta.get('cwd') not in approved:
                 continue
             result['entries'].append(_codex_entry(project, store, sid, index, state=state, scopes=scopes))

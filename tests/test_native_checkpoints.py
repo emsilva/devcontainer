@@ -141,6 +141,28 @@ class NativeCheckpointTests(NativeFixture):
         self.assertEqual(len(result['issues']), 1)
         self.assertIn('metadata', result['issues'][0]['reason'])
 
+    def test_recheckpointed_codex_child_carries_validated_ancestor_scope_union(self):
+        parent = self.codex()
+        raw = parent.read_bytes()
+        destination = self.root / 'codex-next-checkout'
+        subprocess.run(['git', 'init', '-q', str(destination)], check=True)
+        subprocess.run(['git', '-C', str(destination), 'remote', 'add', 'origin', self.project.remote], check=True)
+        dp = discover_project(destination)
+        child_id, turn_id = str(uuid.uuid4()), str(uuid.uuid4())
+        child = self.codex(child_id, parent=(parent, len(raw), len(raw.splitlines())), rows=[dict(type='event_msg', payload=dict(type='task_started', turn_id=turn_id)), dict(type='event_msg', payload=dict(type='task_complete', turn_id=turn_id))])
+        child_rows = [json.loads(line) for line in child.read_bytes().splitlines()]
+        child_rows[0]['payload']['cwd'] = str(destination)
+        child_rows[0]['payload']['runtime_workspace_roots'] = [str(destination)]
+        child.write_bytes(lines(child_rows))
+        state = self.root / 'codex-next-state'
+        receipt = state / 'conversation-imports/prior/receipt.json'
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps(dict(schema=1, agent='codex', status='complete', identity=dp.identity, project_id=dp.project_id, destination_root=str(destination), files=[dict(destination=str(parent), size=len(raw), sha256=hashlib.sha256(raw).hexdigest(), scope_roots=[str(self.project.root)])])))
+        captured = self.api.capture_conversations(dp, self.store, state=state, env=self.env)
+        entry = next(item for item in captured['entries'] if item['session_id'] == child_id)
+        self.assertEqual(set(entry['scope_roots']), {str(destination), str(self.project.root)})
+        self.api._preflight(dp, self.store, entry)
+
     def test_global_memory_and_other_project_are_not_exported(self):
         self.codex(rows=[dict(type='event_msg', payload=dict(type='task_started', turn_id=self.turn)), dict(type='response_item', payload=dict(type='message', role='developer', content=[dict(type='input_text', text='<memory_summary>personal</memory_summary>')])), dict(type='event_msg', payload=dict(type='task_complete', turn_id=self.turn))])
         result = self.capture()
@@ -264,6 +286,94 @@ class NativeRestoreTests(NativeFixture):
         again = self.api.capture_conversations(self.project, self.store, state=self.root / 'state', env=self.env)
         self.assertEqual(again['issues'], [])
         self.assertEqual([x['session_id'] for x in again['entries']], [self.sid])
+
+
+class ContinuedClaudeTests(NativeFixture):
+    def test_native_string_blob_verifies_canonical_text_block_hash_and_request_digest(self):
+        import copy
+        def digest(value):return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+        shape = dict(system=[dict(type='text', text='Project system prompt')], tools=[])
+        message = dict(role='system', content='Inherited project environment', output_config=dict(effort='medium'))
+        canonical = dict(message, content=[dict(type='text', text=message['content'])])
+        request = dict(shape, messages=[copy.deepcopy(canonical)])
+        request['messages'][0]['content'][0]['cache_control'] = dict(type='ephemeral')
+        rows = [dict(type='user', uuid=str(uuid.uuid4()), message=dict(role='user', content='Project question')), dict(type='api-request-shape', shapeHash=digest(shape), shape=shape), dict(type='api-request-blob', hash=digest(canonical), message=message), dict(type='api-request', shapeHash=digest(shape), keep=0, tail=[digest(canonical)], params={}, cacheControl=[dict(path=['messages', 0, 'content', 0], value=dict(type='ephemeral'))], requestDigest=digest(request)), dict(type='assistant', uuid=str(uuid.uuid4()), message=dict(role='assistant', content=[dict(type='text', text='ORCHID')], stop_reason='end_turn'))]
+        path = self.claude(rows=rows)
+        original = path.read_bytes()
+        captured = self.capture()
+        self.assertEqual(captured['issues'], [])
+        self.assertEqual(self.store.read(captured['entries'][0]['files'][0]['blob']), original)
+        rows[2]['message']['output_config']['effort'] = 'high'
+        self.claude(rows=rows)
+        captured = self.capture()
+        self.assertEqual(captured['entries'], [])
+        self.assertIn('digest', captured['issues'][0]['reason'])
+
+    def forked_fixture(self):
+        import copy
+        from devcontainer_setup.project_sync.sessions import claude_namespace
+        source = self.project
+        rows = [dict(type='user', uuid=str(uuid.uuid4()), promptId=str(uuid.uuid4()), message=dict(role='user', content='Say ORCHID')), dict(type='attachment', uuid=str(uuid.uuid4()), attachment=dict(type='environment', snapshot=dict(workingDirectory=str(source.root), additionalWorkingDirectories=[]))), dict(type='assistant', uuid=str(uuid.uuid4()), message=dict(role='assistant', content=[dict(type='text', text='ORCHID')], stop_reason='end_turn'))]
+        parent = self.claude(rows=rows)
+        entry = self.capture()['entries'][0]
+        destination = self.root / 'fork-destination'
+        subprocess.run(['git', 'init', '-q', str(destination)], check=True)
+        subprocess.run(['git', '-C', str(destination), 'remote', 'add', 'origin', source.remote], check=True)
+        dp = discover_project(destination)
+        state = self.root / 'continued-state'
+        result = self.api.restore_conversation(dp, self.store, entry, state=state, env=self.env)
+        child_id = result['session_id']
+        alias_id = result['argv'][result['argv'].index('--resume') + 1]
+        directory = Path(self.env['CLAUDE_CONFIG_DIR']) / 'projects' / claude_namespace(destination)
+        alias = directory / (alias_id + '.jsonl')
+        inherited = [json.loads(line) for line in alias.read_bytes().splitlines()]
+        for row in inherited:
+            row['sessionId'] = child_id
+            row['cwd'] = str(destination)
+            if row['type'] == 'user':row['promptId'] = str(uuid.uuid4())
+        inherited.extend([dict(type='user', uuid=str(uuid.uuid4()), sessionId=child_id, cwd=str(destination), version='2.1.302', message=dict(role='user', content='Recall the word')), dict(type='assistant', uuid=str(uuid.uuid4()), sessionId=child_id, cwd=str(destination), version='2.1.302', message=dict(role='assistant', content=[dict(type='text', text='ORCHID')], stop_reason='end_turn'))])
+        child = directory / (child_id + '.jsonl')
+        child.write_bytes(lines(inherited))
+        receipt = next((state / 'conversation-imports').glob('*/receipt.json'))
+        return source, dp, state, result, alias, child, receipt
+
+    def test_materialized_fork_keeps_historical_environment_and_can_export_again(self):
+        source, dp, state, result, alias, child, receipt = self.forked_fixture()
+        captured = self.api.capture_conversations(dp, self.store, state=state, env=self.env)
+        self.assertEqual(captured['issues'], [])
+        entry = next(item for item in captured['entries'] if item['session_id'] == result['session_id'])
+        self.assertIn(str(source.root), entry['scope_roots'])
+        self.assertEqual(self.store.read(entry['files'][0]['blob']), child.read_bytes())
+        self.api._preflight(dp, self.store, entry)
+        second = self.api.restore_conversation(dp, self.store, entry, state=self.root / 'second-recovery', env=self.env)
+        self.assertNotEqual(second['session_id'], result['session_id'])
+
+    def test_modified_alias_wrong_child_and_receipt_scope_mismatch_refuse(self):
+        import copy
+        source, dp, state, result, alias, child, receipt_path = self.forked_fixture()
+        original_alias = alias.read_bytes()
+        original_child = child.read_bytes()
+        original_receipt = json.loads(receipt_path.read_bytes())
+        for defect in ('alias', 'alias_digest', 'child_content', 'child_id', 'destination', 'source_id', 'unused_scope'):
+            alias.chmod(0o600);alias.write_bytes(original_alias);alias.chmod(0o400)
+            child.write_bytes(original_child)
+            receipt = copy.deepcopy(original_receipt)
+            if defect in ('alias', 'alias_digest'):
+                alias.chmod(0o600);alias.write_bytes(original_alias.replace(b'ORCHID', b'VIOLET'));alias.chmod(0o400)
+                if defect == 'alias_digest':receipt['files'][0]['sha256'] = hashlib.sha256(alias.read_bytes()).hexdigest()
+            elif defect == 'child_content':
+                child.write_bytes(original_child.replace(b'ORCHID', b'VIOLET', 1))
+            elif defect == 'child_id':receipt['result']['session_id'] = str(uuid.uuid4())
+            elif defect == 'destination':receipt['destination_root'] = str(self.root / 'foreign-checkout')
+            elif defect == 'source_id':receipt['source_session_id'] = str(uuid.uuid4())
+            else:
+                receipt['files'][0]['scope_roots'].append('/foreign-unused-scope')
+                child.write_bytes(original_child + lines([dict(type='assistant', uuid=str(uuid.uuid4()), sessionId=result['session_id'], cwd='/foreign-unused-scope', version='2.1.302', message=dict(role='assistant', content=[dict(type='text', text='foreign')], stop_reason='end_turn'))]))
+            receipt_path.write_text(json.dumps(receipt))
+            with self.subTest(defect=defect):
+                captured = self.api.capture_conversations(dp, self.store, state=state, env=self.env)
+                self.assertNotIn(result['session_id'], [item['session_id'] for item in captured['entries']])
+                self.assertTrue(captured['issues'])
 
 
 class NativePublicationTests(NativeFixture):

@@ -205,10 +205,16 @@ def _validate_claude(rows, sid, roots, *, child=False):
             key, value, known = ('shapeHash', row.get('shape'), shapes) if kind == 'api-request-shape' else ('hash', row.get('message'), blobs)
             if not isinstance(value, dict):
                 raise ValueError('Invalid Claude request dependency')
-            digest = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
-            if row.get(key) != digest:
+            candidates = [value]
+            if kind == 'api-request-blob' and isinstance(value.get('content'), str):
+                # Native resumed request caches may compact text blocks to a
+                # string on disk while hashing the original block representation.
+                # Preserve every other field and still verify the recorded hash.
+                candidates.append(dict(value, content=[dict(type='text', text=value['content'])]))
+            matched = next((candidate for candidate in candidates if row.get(key) == hashlib.sha256(json.dumps(candidate, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()), None)
+            if matched is None:
                 raise ValueError('Invalid Claude request dependency digest')
-            known[digest] = value
+            known[row[key]] = matched
         elif kind == 'api-request':
             keep, tail = row.get('keep'), row.get('tail')
             if (not isinstance(row.get('shapeHash'), str) or row['shapeHash'] not in shapes or type(keep) is not int or not 0 <= keep <= len(previous)
