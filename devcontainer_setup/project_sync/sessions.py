@@ -13,7 +13,7 @@ import subprocess
 import uuid
 import unicodedata
 
-from .state import _parent
+from .state import _parent as _state_parent
 
 MAX_BYTES = 256 * 1024 * 1024
 CODEX_RECORDS = {'session_meta', 'response_item', 'event_msg', 'turn_context', 'compacted', 'world_state', 'token_usage_record'}
@@ -63,7 +63,7 @@ def _safe(path):
 
 def _read(path):
     path = _safe(path)
-    with _parent(path) as (parent, name):
+    with _state_parent(path) as (parent, name):
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
         with os.fdopen(fd, 'rb') as source:
             before = os.fstat(source.fileno())
