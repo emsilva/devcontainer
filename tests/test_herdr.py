@@ -14,6 +14,14 @@ def completed(value):
     return subprocess.CompletedProcess([], 0, json.dumps(value), '')
 
 
+def cold_socket_error(reason='Connection refused (os error 111)'):
+    # Captured native failure after a real stopped Codespace was started:
+    # machine enable returns before the remote saved session recreates its API.
+    return subprocess.CompletedProcess([], 1, '',
+        'Error: Custom { kind: ConnectionAborted, error: "remote SSH connection failed: '
+        'failed to connect to remote Herdr API socket /fixture/herdr.sock: ' + reason + '" }')
+
+
 class HerdrTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -161,6 +169,69 @@ request_path = "request.wav"
                 mock.patch.object(herdr.subprocess, 'call', return_value=0) as call:
             self.assertEqual(herdr.open_remote(self.project, self.state, '/remote'), 0)
         self.assertEqual(call.call_args_list[0].args[0], ['herdr', 'machine', 'enable', 'opaque-disabled'])
+
+    def test_cold_remote_api_waits_before_reusing_the_existing_launch_directory(self):
+        machine = {'id': 'opaque-machine', 'target': 'alias', 'session': 'project-' + 'a' * 24, 'enabled': False}
+        rows = {'result': {'workspaces': [{'workspace_id': 'existing', 'focused': True}]}}
+        panes = {'result': {'panes': [{'workspace_id': 'existing', 'cwd': '/remote'}]}}
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr.subprocess, 'run', side_effect=[completed([machine]),
+                    cold_socket_error(), cold_socket_error('No such file or directory (os error 2)'),
+                    completed(rows), completed(panes), completed({'result': {}})]) as run, \
+                mock.patch.object(herdr.subprocess, 'call', return_value=0) as call, \
+                mock.patch.object(herdr.clock, 'sleep') as sleep:
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote'), 0)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(call.call_args_list, [mock.call(['herdr', 'machine', 'enable', 'opaque-machine'])])
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(commands.count(['herdr', '--machine', 'opaque-machine', 'workspace', 'list']), 3)
+        self.assertEqual(commands[-1], ['herdr', '--machine', 'opaque-machine', 'workspace', 'focus', 'existing'])
+        self.assertFalse(any('create' in command for command in commands))
+
+    def test_cold_api_deadline_fails_without_creating_or_focusing_a_workspace(self):
+        with mock.patch.object(herdr.subprocess, 'run', return_value=cold_socket_error()) as run, \
+                mock.patch.object(herdr.clock, 'monotonic', side_effect=[100, 100, 100, 146]), \
+                mock.patch.object(herdr.clock, 'sleep'):
+            with self.assertRaisesRegex(ValueError, 'Herdr.*45 seconds'):
+                herdr._workspace(self.project, '/remote', ['--machine', 'opaque-machine'])
+        self.assertEqual(len(run.call_args_list), 1)
+        self.assertLessEqual(run.call_args.kwargs['timeout'], 15)
+        self.assertEqual(run.call_args.args[0][-2:], ['workspace', 'list'])
+
+    def test_remote_read_probe_timeout_can_recover_without_replaying_a_mutation(self):
+        rows = {'result': {'workspaces': [{'workspace_id': 'existing', 'worktree': {'checkout_path': '/remote'}}]}}
+        with mock.patch.object(herdr.subprocess, 'run', side_effect=[
+                subprocess.TimeoutExpired(['herdr'], 15), completed(rows), completed({'result': {}})]) as run, \
+                mock.patch.object(herdr.clock, 'sleep'):
+            herdr._workspace(self.project, '/remote', ['--machine', 'opaque-machine'])
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(commands.count(['herdr', '--machine', 'opaque-machine', 'workspace', 'focus', 'existing']), 1)
+
+    def test_permanent_remote_errors_fail_immediately_and_keep_native_details_private(self):
+        for stderr in ('Host key verification failed. private-detail',
+                       'Permission denied (publickey). private-detail',
+                       json.dumps({'error': {'code': 'permission_denied', 'message': 'private-detail'}})):
+            with self.subTest(stderr=stderr), \
+                    mock.patch.object(herdr.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '', stderr)) as run, \
+                    mock.patch.object(herdr.clock, 'sleep') as sleep:
+                with self.assertRaisesRegex(ValueError, 'workspace list') as failure:
+                    herdr._workspace(self.project, '/remote', ['--machine', 'opaque-machine'])
+                self.assertNotIn('private-detail', str(failure.exception))
+                self.assertEqual(run.call_count, 1)
+                sleep.assert_not_called()
+
+    def test_create_and_focus_are_never_retried_when_the_remote_api_drops(self):
+        for operation in ('create', 'focus'):
+            rows = [] if operation == 'create' else [
+                {'workspace_id': 'existing', 'worktree': {'checkout_path': '/remote'}}]
+            with self.subTest(operation=operation), \
+                    mock.patch.object(herdr.subprocess, 'run', side_effect=[
+                        completed({'result': {'workspaces': rows}}), cold_socket_error()]) as run, \
+                    mock.patch.object(herdr.clock, 'sleep') as sleep:
+                with self.assertRaisesRegex(ValueError, 'workspace ' + operation):
+                    herdr._workspace(self.project, '/remote', ['--machine', 'opaque-machine'])
+                self.assertEqual(run.call_count, 2)
+                sleep.assert_not_called()
 
     def test_null_checkout_metadata_and_duplicate_labels_do_not_select_wrong_workspace(self):
         def native(args, **kwargs):

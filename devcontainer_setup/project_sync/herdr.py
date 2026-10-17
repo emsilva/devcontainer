@@ -16,12 +16,19 @@ class _NotRunning(ValueError):
     """The native API explicitly reported an absent named-session server."""
 
 
-def _json(args: list[str]):
+class _RemoteNotReady(ValueError):
+    """A read-only probe found the saved remote session's API still starting."""
+
+
+def _json(args: list[str], *, timeout=90):
+    remote_probe = args[:1] == ['--machine'] and args[2:] == ['workspace', 'list']
     try:
-        result = subprocess.run(['herdr', *args], capture_output=True, text=True, timeout=90)
+        result = subprocess.run(['herdr', *args], capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
         raise ValueError('Herdr is required; install it from https://herdr.dev.') from None
     except subprocess.TimeoutExpired:
+        if remote_probe:
+            raise _RemoteNotReady('Herdr remote API has not answered yet') from None
         raise ValueError('Herdr did not respond; inspect the project connection and retry.') from None
     if result.returncode:
         try:
@@ -30,7 +37,12 @@ def _json(args: list[str]):
             absent = False
         if absent:
             raise _NotRunning('Herdr session is stopped')
-        raise ValueError('Herdr command failed: ' + ' '.join(args[:3]))
+        if (remote_probe and 'failed to connect to remote Herdr API socket ' in result.stderr
+                and any(reason in result.stderr for reason in (
+                    'Connection refused (os error 111)', 'No such file or directory (os error 2)'))):
+            raise _RemoteNotReady('Herdr remote API socket is still starting')
+        operation = args[:4] if args[:1] in (['--machine'], ['--session']) else args[:2]
+        raise ValueError('Herdr command failed: ' + ' '.join(operation))
     try:
         return json.loads(result.stdout)
     except (ValueError, TypeError):
@@ -43,10 +55,32 @@ def _session(project) -> str:
     return 'project-' + project.project_id
 
 
+def _workspace_list(prefix):
+    if prefix[:1] != ['--machine']:
+        return _json([*prefix, 'workspace', 'list'])
+    # Enabling a saved machine starts its GUI connection asynchronously. After
+    # a Codespace restart the persisted Unix socket may outlive its API server.
+    # Finish this read-only readiness handshake before any workspace mutation.
+    deadline, waiting = clock.monotonic() + 45, False
+    while True:
+        remaining = deadline - clock.monotonic()
+        if remaining <= 0:
+            raise ValueError('Herdr remote API was not ready within 45 seconds; inspect the saved machine connection and retry task work:cs.')
+        try:
+            return _json([*prefix, 'workspace', 'list'], timeout=min(15, remaining))
+        except (_RemoteNotReady, _NotRunning):
+            if not waiting:
+                print('Waiting for Herdr’s remote session to become ready…', flush=True)
+                waiting = True
+            remaining = deadline - clock.monotonic()
+            if remaining > 0:
+                clock.sleep(min(.5, remaining))
+
+
 def _workspace(project, root: str, prefix: list[str]):
     if not isinstance(root, str) or not root.startswith('/') or any(c in root for c in '\0\r\n') or '..' in Path(root).parts:
         raise ValueError('Herdr checkout must be an absolute path without traversal')
-    response = _json([*prefix, 'workspace', 'list'])
+    response = _workspace_list(prefix)
     try:
         rows = response['result']['workspaces']
         matches = [row for row in rows if (row.get('worktree') or {}).get('checkout_path') == root]
