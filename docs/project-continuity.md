@@ -97,3 +97,6 @@ backups, and retired handoff data are retained privately.
 Advanced commands remain available: `task scratch:configure -- --codespace NAME
 --remote-root /workspaces/PROJECT`, `scratch:start`, `scratch:status`, `scratch:logs`,
 `scratch:backup`, and `scratch:stop`. Prefer the daily `work` entrypoints.
+
+See [validation evidence](project-continuity-validation.md) for the exercised live
+workflow and failure cases.
