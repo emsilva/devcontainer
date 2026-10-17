@@ -390,16 +390,114 @@ def _preflight(project, store, entry):
     return agent, sid, by_id, order
 
 
-def _create(path, data, mode=0o600):
-    """Create a native import without ever replacing an existing identity."""
-    with _parent(path, create=True) as (parent, name):
-        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
-        with os.fdopen(fd, 'wb') as output:
-            output.write(data)
-            os.fchmod(output.fileno(), mode)
-            output.flush()
-            os.fsync(output.fileno())
+def _owned_content(parent, name, intent, *, growing=False):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+                or before.st_nlink not in (1, 2)
+                or [before.st_dev, before.st_ino] != intent['inode']):
+            raise ValueError('Native publication inode ownership changed')
+        size = intent['size']
+        if before.st_size < size or (not growing and before.st_size != size):
+            raise ValueError('Incomplete staged native publication')
+        data = os.pread(fd, size, 0)
+        if len(data) != size or hashlib.sha256(data).hexdigest() != intent['sha256'] or os.pread(fd, size, 0) != data:
+            raise ValueError('Native publication content changed')
+        after = os.fstat(fd)
+        named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if ((before.st_dev, before.st_ino) != (named.st_dev, named.st_ino)
+                or after.st_size < before.st_size or after.st_nlink not in (1, 2)):
+            raise ValueError('Native publication changed during validation')
+        return after
+    finally:
+        os.close(fd)
+
+
+def _publish(intent):
+    """Finish only a durably journaled inode; link never replaces a final path."""
+    target, stage = Path(intent['destination']), Path(intent['staged_path'])
+    if (stage.parent != target.parent or not re.fullmatch(r'\.devcontainer-import-[0-9a-f]{32}\.tmp', stage.name)):
+        raise ValueError('Invalid native publication staging path')
+    with _parent(target, create=True) as (parent, name):
+        def present(filename):
+            try:
+                return os.stat(filename, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                return None
+        final, staged = present(name), present(stage.name)
+        if final is not None:
+            final = _owned_content(parent, name, intent, growing=True)
+            if staged is not None:
+                _owned_content(parent, stage.name, intent)
+                os.unlink(stage.name, dir_fd=parent)
+                os.fsync(parent)
+            elif final.st_nlink != 1:
+                raise ValueError('Native publication has an unowned hard link')
+            return True
+        if staged is None:
+            return False  # A failed prepublication journal may have no file.
+        _owned_content(parent, stage.name, intent)
+        os.link(stage.name, name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
         os.fsync(parent)
+        os.unlink(stage.name, dir_fd=parent)
+        os.fsync(parent)
+        return True
+
+
+def _create(path, data, mode=0o600, *, journal):
+    """Stage, fsync, journal ownership, then publish without replacement."""
+    with _parent(path, create=True) as (parent, name):
+        temporary = '.devcontainer-import-' + uuid.uuid4().hex + '.tmp'
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        recorded = False
+        try:
+            try:
+                remaining = memoryview(data)
+                while remaining:
+                    count = os.write(fd, remaining)
+                    if count <= 0:
+                        raise OSError('Native staged write made no progress')
+                    remaining = remaining[count:]
+                os.fchmod(fd, mode)
+                os.fsync(fd)
+                info = os.fstat(fd)
+            finally:
+                os.close(fd)
+            os.fsync(parent)
+            intent = dict(destination=str(path), staged_path=str(path.parent / temporary),
+                          inode=[info.st_dev, info.st_ino], size=len(data), sha256=hashlib.sha256(data).hexdigest())
+            journal(intent)
+            recorded = True
+            if not _publish(intent):
+                raise ValueError('Journaled native stage disappeared before publication')
+        finally:
+            # Once journaled, retain the stage on interruption so retry can prove
+            # a publication between link and unlink. Before that it is private.
+            if not recorded:
+                try:
+                    os.unlink(temporary, dir_fd=parent)
+                    os.fsync(parent)
+                except FileNotFoundError:
+                    pass
+
+
+def _repair_publications(prior, home, agent, project, by_id):
+    for item in prior.get('files', []):
+        if not item.get('created') or not item.get('staged_path'):
+            continue
+        sid = item.get('source_session_id')
+        if sid not in by_id or item.get('sha256') != by_id[sid][0]['sha256'] or item.get('size') != len(by_id[sid][1]):
+            raise ValueError('Publication intent does not match the retained checkpoint')
+        target = Path(item['destination'])
+        if agent == 'codex':
+            valid = target.is_relative_to(home / 'sessions') and target.name == by_id[sid][0]['path']
+        else:
+            alias = sessions.session_uuid(item.get('physical_alias'))
+            valid = target == home / 'projects' / sessions.claude_namespace(project.root) / (alias + '.jsonl')
+        if not valid:
+            raise ValueError('Native publication target is outside its owned profile scope')
+        _publish(item)
 
 
 def _codex_argv(project, sid):
@@ -493,16 +591,29 @@ def restore_conversation(project, store, entry, *, state=None, env=None):
                     client.call('thread/resume', dict(threadId=result['session_id'], **agents._runtime(project)))
                     client.call('thread/inject_items', dict(threadId=result['session_id'], items=[dict(type='message', role='developer', content=[dict(type='input_text', text=agents.project_context(project))])]))
             return result
+        prior_import = (prior.get('status') == 'importing' and prior.get('project_id') == project.project_id
+                        and prior.get('identity') == project.identity and prior.get('destination_root') == str(project.root))
+        if prior_import:
+            _repair_publications(prior, home, agent, project, by_id)
         receipt = dict(schema=SCHEMA, status='importing', project_id=project.project_id, identity=project.identity, agent=agent, source_session_id=sid, destination_root=str(project.root), files=[])
         provenance = dict(agent=agent, source_session_id=sid, source_root=entry['source_root'], cutoff=entry['cutoff'], checkpoint=key)
         if agent == 'claude':
             # A physical alias gives the native fork its bounded source without
             # replacing or reading beyond any active same-ID original.
-            alias = str(uuid.uuid4())
+            previous_alias = next((item for item in prior.get('files', []) if item.get('physical_alias') and item.get('source_session_id') == sid), None) if prior_import else None
+            alias = previous_alias['physical_alias'] if previous_alias else str(uuid.uuid4())
             target = sessions._safe(home / 'projects' / sessions.claude_namespace(project.root) / (alias + '.jsonl'))
             item, data, _ = by_id[sid]
-            _create(target, data, mode=0o400)
-            receipt['files'].append(dict(destination=str(target), physical_alias=alias, source_session_id=sid, size=len(data), sha256=item['sha256'], scope_roots=item['scope_roots']))
+            base = dict(destination=str(target), physical_alias=alias, source_session_id=sid, size=len(data), sha256=item['sha256'], scope_roots=item['scope_roots'], created=True)
+            if target.exists():
+                if not previous_alias or _stable_prefix(target) != data or target.stat().st_size != len(data):
+                    raise ValueError('Existing Claude import alias is not the owned checkpoint')
+                receipt['files'].append(previous_alias)
+            else:
+                def journal(intent):
+                    receipt['files'].append(dict(base, **intent))
+                    atomic_write(receipt_path, json.dumps(receipt, sort_keys=True).encode() + b'\n')
+                _create(target, data, mode=0o400, journal=journal)
             new = str(uuid.uuid4())
             result = dict(session_id=new, argv=_claude_argv(project, sid=new, parent=alias), env={'CLAUDE_CODE_DISABLE_AUTO_MEMORY': '1'}, provenance=provenance)
             receipt.update(status='complete', result=result)
@@ -540,11 +651,16 @@ def restore_conversation(project, store, entry, *, state=None, env=None):
         # may reconcile only the exact inode we created, never a foreign source.
         for current in order:
             item, data, _ = by_id[current]
+            base = dict(destination=str(targets[current]), size=len(data), sha256=item['sha256'], scope_roots=item['scope_roots'], source_session_id=current, created=current in reconcile)
             if current in newly_created:
-                _create(targets[current], data)
-            info = targets[current].stat(follow_symlinks=False)
-            receipt['files'].append(dict(destination=str(targets[current]), size=len(data), sha256=item['sha256'], scope_roots=item['scope_roots'], source_session_id=current, created=current in reconcile, inode=[info.st_dev, info.st_ino]))
-            atomic_write(receipt_path, json.dumps(receipt, sort_keys=True).encode() + b'\n')
+                def journal(intent):
+                    receipt['files'].append(dict(base, **intent))
+                    atomic_write(receipt_path, json.dumps(receipt, sort_keys=True).encode() + b'\n')
+                _create(targets[current], data, journal=journal)
+            else:
+                info = targets[current].stat(follow_symlinks=False)
+                receipt['files'].append(dict(base, inode=[info.st_dev, info.st_ino]))
+                atomic_write(receipt_path, json.dumps(receipt, sort_keys=True).encode() + b'\n')
         expected = _expected(by_id, order)
         with agents.CodexClient(project, env=env) as client:
             for current in reconcile:

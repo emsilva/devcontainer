@@ -266,6 +266,101 @@ class NativeRestoreTests(NativeFixture):
         self.assertEqual([x['session_id'] for x in again['entries']], [self.sid])
 
 
+class NativePublicationTests(NativeFixture):
+    def prepare(self):
+        self.codex()
+        entry = self.capture()['entries'][0]
+        env = dict(self.env, CODEX_HOME=str(self.root / 'publication-native'))
+        return entry, env, self.root / 'publication-state'
+
+    def test_failed_publish_intent_writes_no_final_native_identity(self):
+        entry, env, state = self.prepare()
+        with patch.object(self.api, 'atomic_write', side_effect=OSError('fixture journal unavailable')):
+            with self.assertRaisesRegex(OSError, 'journal unavailable'):
+                self.api.restore_conversation(self.project, self.store, entry, state=state, env=env)
+        self.assertEqual(list(Path(env['CODEX_HOME']).rglob('*.jsonl')), [])
+
+    def test_interrupted_partial_stage_write_never_publishes_native_identity(self):
+        entry, env, state = self.prepare()
+        write = os.write
+        count = [0]
+        def partial(fd, data):
+            count[0] += 1
+            if count[0] == 1:
+                return write(fd, data[:max(1, len(data) // 2)])
+            raise OSError('fixture interrupted staged write')
+        with patch.object(self.api.os, 'write', side_effect=partial), patch.object(self.api.agents, 'CodexClient', side_effect=AssertionError('native writer reached before staging fault')):
+            with self.assertRaisesRegex(OSError, 'staged write'):
+                self.api.restore_conversation(self.project, self.store, entry, state=state, env=env)
+        self.assertEqual(list(Path(env['CODEX_HOME']).rglob('*.jsonl')), [])
+
+    def test_foreign_final_created_during_publication_is_never_overwritten_or_resumed(self):
+        entry, env, state = self.prepare()
+        link = os.link
+        foreign = b'foreign native history remains intact\n'
+        def collision(source, target, **kwargs):
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=kwargs['dst_dir_fd'])
+            try: os.write(fd, foreign)
+            finally: os.close(fd)
+            return link(source, target, **kwargs)
+        with patch.object(self.api.os, 'link', side_effect=collision), self.assertRaises(FileExistsError):
+            self.api.restore_conversation(self.project, self.store, entry, state=state, env=env)
+        final = next(Path(env['CODEX_HOME']).rglob('*.jsonl'))
+        with patch.object(self.api.agents, 'CodexClient', side_effect=AssertionError('foreign native identity resumed')), self.assertRaisesRegex(ValueError, 'ownership'):
+            self.api.restore_conversation(self.project, self.store, entry, state=state, env=env)
+        self.assertEqual(final.read_bytes(), foreign)
+
+    def test_claude_retry_reuses_journaled_readonly_alias_after_complete_receipt_failure(self):
+        path = self.claude()
+        entry = self.capture()['entries'][0]
+        state = self.root / 'claude-publish-state'
+        write = self.api.atomic_write
+        count = [0]
+        def interrupt(path, data, *args, **kwargs):
+            count[0] += 1
+            if count[0] == 2:
+                raise OSError('fixture complete receipt unavailable')
+            return write(path, data, *args, **kwargs)
+        with patch.object(self.api, 'atomic_write', side_effect=interrupt), self.assertRaisesRegex(OSError, 'complete receipt'):
+            self.api.restore_conversation(self.project, self.store, entry, state=state, env=self.env)
+        aliases = [candidate for candidate in path.parent.glob('*.jsonl') if candidate != path]
+        self.assertEqual(len(aliases), 1)
+        result = self.api.restore_conversation(self.project, self.store, entry, state=state, env=self.env)
+        self.assertEqual(result['argv'][result['argv'].index('--resume') + 1], aliases[0].stem)
+        self.assertEqual(len(list(path.parent.glob('*.jsonl'))), 2)
+        self.assertEqual(aliases[0].read_bytes(), path.read_bytes())
+        self.assertEqual(aliases[0].stat().st_mode & 0o777, 0o400)
+
+    def test_interrupted_after_publication_retries_only_owned_published_inode(self):
+        entry, env, state = self.prepare()
+        calls = []
+        child = str(uuid.uuid4())
+        class Client:
+            def __init__(inner, *args, **kwargs): pass
+            def __enter__(inner): return inner
+            def __exit__(inner, *args): pass
+            def call(inner, method, params):
+                calls.append((method, params))
+                if method == 'thread/resume':return dict(thread=dict(id=params['threadId']))
+                if method == 'thread/fork':return dict(thread=dict(id=child, cwd=str(self.project.root)), runtimeWorkspaceRoots=[str(self.project.root)])
+                return {}
+        link = os.link
+        def interrupted(*args, **kwargs):
+            link(*args, **kwargs)
+            raise OSError('fixture interruption after publication')
+        with patch.object(self.api.os, 'link', side_effect=interrupted), patch.object(self.api.agents, 'CodexClient', Client), patch.object(self.api.agents, '_history', return_value=dict(turns=[dict(id=self.turn, status='completed')], items=[])):
+            with self.assertRaisesRegex(OSError, 'after publication'):
+                self.api.restore_conversation(self.project, self.store, entry, state=state, env=env)
+        self.assertEqual(calls, [])
+        with patch.object(self.api.agents, 'CodexClient', Client), patch.object(self.api.agents, '_history', return_value=dict(turns=[dict(id=self.turn, status='completed')], items=[])):
+            result = self.api.restore_conversation(self.project, self.store, entry, state=state, env=env)
+        self.assertEqual(result['session_id'], child)
+        self.assertEqual([params['threadId'] for method, params in calls if method == 'thread/resume'], [self.sid])
+        finals = list(Path(env['CODEX_HOME']).rglob('*.jsonl'))
+        self.assertEqual(len(finals), 1)
+        self.assertEqual(finals[0].stat().st_nlink, 1)
+
+
 class NativeRetryTests(NativeFixture):
     def test_interrupted_owned_import_can_retry_without_resuming_foreign_original(self):
         self.codex()
