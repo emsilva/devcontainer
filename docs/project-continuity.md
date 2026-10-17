@@ -1,8 +1,36 @@
 # Scratch, notes, and conversation handoff
 
-Select project continuity in `task devcontainer:setup`. Review and commit the
+Enable **Sync scratch files and project notes with your Mac** in `task devcontainer:setup`. Review and commit the
 generated changes, push them, and rebuild the Codespace if setup adds SSH support.
 Both checkouts need the generated helpers and `.scratch` markers.
+
+## Daily work
+
+Run `task work` from your project on the Mac. The menu remembers your conversation
+and offers continuation on this Mac or in the paired Codespace. It uses titles
+or prompt previews and last activity, so UUIDs are only needed for advanced commands.
+Use `task devcontainer:work` when the project already has its own `work` target.
+
+Setup pairs its selected Codespace and starts scratch sync. Commit-only setup
+defers pairing to the menu. Matching Codespaces and checkout paths are discovered;
+multiple matches require a selection. A stopped Codespace needs the explicit
+start action. Continuing remotely opens a managed agent in an interactive SSH
+terminal. Exit the agent to return to the menu; choose the Mac action to bring
+the conversation back. From a Codespace terminal, the menu launches local
+conversations; returning custody to the Mac is coordinated from the Mac.
+
+Both Git checkouts must have the same branch and commit and clean working trees
+before moving a conversation. Resolve mismatches with your normal Git workflow;
+the launcher does not commit, push, pull, or merge source code. Scratch conflicts
+also block a move. Settings shows status and affected paths; preserve the wanted
+file contents on both sides, then retry. The existing handoff receipts make an
+interrupted transfer retryable without selecting a new owner.
+
+Opening the menu starts an already configured scratch worker if needed, including
+after a Mac restart. A stopped Codespace stays stopped until explicitly started.
+New conversations begin on the machine running the menu. Existing conversations
+ask for explicit adoption before managed launch; an active writer must exit first.
+The low-level operations below remain available for scripts and troubleshooting.
 
 ## Scratch files and project notes
 
@@ -26,7 +54,7 @@ task scratch:stop
 
 Start is idempotent and survives closing the launching terminal. It reconnects
 after a network interruption and waits when the Codespace is stopped. It does
-not start Codespaces or install a login service. Start it again after restarting
+not start Codespaces or install a login service. Run `task work` after restarting
 the Mac. The first connection records the selected Codespace's SSH host key;
 later connections require that key.
 

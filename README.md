@@ -22,7 +22,8 @@ The wizard asks you to:
    workflows, and ignore rules. Ignore rules are supporting hints.
 2. Apply dotfiles, enabled by default. Enter a repo such as `emsilva/dotfiles`;
    the wizard remembers it for your next project.
-3. Optionally enable project scratch sync and conversation handoff.
+3. Keep scratch files and project notes synced with your Mac, enabled by default.
+   This also enables Codex and Claude conversation handoff.
 4. Choose commit-only setup or a Codespace. For a new Codespace, select its machine
    size and idle timeout, then open it in a browser or VS Code. Reuse shows the
    existing Codespace's actual settings.
@@ -40,6 +41,7 @@ small helpers, and a Taskfile include. Personal preferences live in
 
 | Command | Action |
 |---|---|
+| `task work` | Continue a conversation here or in its Codespace |
 | `task devcontainer:setup` | Review or change the setup |
 | `task devcontainer:setup -- --scan` | Show runtime and tool recommendations |
 | `task devcontainer:setup -- --dry-run` | Preview the recommended file changes |
@@ -66,39 +68,37 @@ installations; the update command refreshes them explicitly.
 
 ## Keep project work across Mac and Codespace
 
-Enable **project scratch sync and conversation handoff** in setup. Put temporary
+Keep **Sync scratch files and project notes with your Mac** enabled in setup. Put temporary
 project files in `.scratch/` and shared working notes in `.scratch/memory/`.
 Only the folder's README and ignore rules are committed. Setup adds instructions
 to `AGENTS.md` and `CLAUDE.md` while preserving your existing guidance.
 
-Pair the checkouts once, from your Mac, while the Codespace is running:
+Run this on your Mac for daily work:
 
 ```sh
-task scratch:configure -- --codespace NAME --remote-root /workspaces/PROJECT
-task scratch:start
-task scratch:status
+task work
 ```
 
-Sync runs in the background and waits when the Codespace stops. Use
-`task scratch:stop` to pause it. Deletions sync too; conflicts preserve both
-versions for you to resolve. Private backups and control state stay outside Git.
+Choose **Continue on this Mac**, **Continue in Codespace**, or start a new Codex
+or Claude conversation. The menu remembers your selection and shows conversations
+by title and last activity. Moving to the Codespace opens an interactive remote
+terminal; exit the agent to return to the menu. Use the Mac menu to bring it back.
 
-Use `task agent:codex` or `task agent:claude` for conversations you plan to move.
-After exiting the conversation, hand off its exact UUID from your Mac:
+Setup connects scratch sync to the Codespace you selected. With commit-only
+setup, the menu helps you connect one later. It discovers matching checkouts and
+asks when a choice is needed. A stopped Codespace starts from an explicitly named
+menu action. If your project already defines `work`, use `task devcontainer:work`.
 
-```sh
-task agent:handoff -- --agent codex --session UUID --to codespace
-# In the Codespace:
-task agent:codex -- --session UUID
-# After exiting there, run on the Mac:
-task agent:handoff -- --agent codex --session UUID --to mac
-task agent:codex -- --session UUID
-```
+Sync runs in the background, waits when the Codespace stops, and restarts when
+you run `task work` after a Mac reboot. Deletions sync too; conflicts preserve
+both versions and need resolution before switching. Private state stays outside Git.
 
-Claude uses the same commands with `claude`. The managed commands preserve native
-profiles and authentication and enforce one writer at a time. Existing
-conversations require explicit adoption. See [configuration, recovery, and
-supported histories](docs/project-continuity.md) before moving an existing chat.
+Source code still moves through Git. Before switching machines, keep both
+checkouts on the same branch and commit, with clean working trees. The launcher
+checks this, waits for scratch synchronization, and transfers the selected
+conversation after its writer exits. Native profiles and authentication stay on
+each host. Existing conversations need explicit adoption; unsupported histories
+remain preserved. See [advanced commands and recovery](docs/project-continuity.md).
 
 ## Resume a Codespace setup
 
