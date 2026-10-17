@@ -13,6 +13,8 @@ import subprocess
 import uuid
 import unicodedata
 
+from .state import _parent
+
 MAX_BYTES = 256 * 1024 * 1024
 CODEX_RECORDS = {'session_meta', 'response_item', 'event_msg', 'turn_context', 'compacted', 'world_state', 'token_usage_record'}
 CLAUDE_RECORDS = {'user', 'assistant', 'system', 'summary', 'progress', 'queue-operation', 'file-history-snapshot', 'custom-title', 'agent-name', 'agent-color', 'pr-link', 'last-prompt', 'saved_hook_context', 'bridge-pointer', 'attachment', 'atis-latch', 'api-request-shape', 'api-request-blob', 'api-request', 'cost-state', 'mode'}
@@ -61,12 +63,14 @@ def _safe(path):
 
 def _read(path):
     path = _safe(path)
-    with path.open('rb') as source:
-        before = os.fstat(source.fileno())
-        if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_BYTES:
-            raise ValueError('Unsupported native file size/type')
-        data = source.read(MAX_BYTES + 1)
-        after = os.fstat(source.fileno())
+    with _parent(path) as (parent, name):
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        with os.fdopen(fd, 'rb') as source:
+            before = os.fstat(source.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > MAX_BYTES:
+                raise ValueError('Unsupported native file size/type')
+            data = source.read(MAX_BYTES + 1)
+            after = os.fstat(source.fileno())
     if any(getattr(before, key) != getattr(after, key) for key in ("st_ino", "st_dev", "st_size", "st_mtime_ns", "st_ctime_ns")) or len(data) != after.st_size:
         raise ValueError('Native file changed during snapshot')
     return data

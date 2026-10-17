@@ -133,6 +133,14 @@ class NativeCheckpointTests(NativeFixture):
         self.assertNotIn(leaf_id, [x['session_id'] for x in result['entries']])
         self.assertTrue(any('ordinal' in x['reason'] for x in result['issues']))
 
+    def test_malformed_leading_metadata_is_an_issue_instead_of_stopping_backups(self):
+        path = self.codex()
+        path.write_bytes(b'[]\n' + b''.join(path.read_bytes().splitlines(keepends=True)[1:]))
+        result = self.capture()
+        self.assertEqual(result['entries'], [])
+        self.assertEqual(len(result['issues']), 1)
+        self.assertIn('metadata', result['issues'][0]['reason'])
+
     def test_global_memory_and_other_project_are_not_exported(self):
         self.codex(rows=[dict(type='event_msg', payload=dict(type='task_started', turn_id=self.turn)), dict(type='response_item', payload=dict(type='message', role='developer', content=[dict(type='input_text', text='<memory_summary>personal</memory_summary>')])), dict(type='event_msg', payload=dict(type='task_complete', turn_id=self.turn))])
         result = self.capture()

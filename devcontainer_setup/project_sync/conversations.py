@@ -77,7 +77,7 @@ def _scopes(project, state):
     return sorted(scopes)
 
 
-def _receipt_scopes(project, state, path, data, home):
+def _receipt_scopes(project, state, path, data):
     scopes = set(_scopes(project, state))
     if state is not None:
         for receipt_path in (Path(state) / 'conversation-imports').glob('*/receipt.json'):
@@ -156,7 +156,7 @@ def _codex_entry(project, store, sid, index, *, state, scopes):
             raise ValueError('Invalid native session metadata')
         sessions.session_uuid(meta.get('id'))
         sessions._version('codex', meta.get('cli_version'))
-        approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, data, path)))
+        approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, data)))
         sessions._scoped_roots(meta.get('cwd'), approved)
         parent = sessions._parent(meta)
         inherited = None
@@ -213,7 +213,7 @@ def _claude_entry(project, store, sid, path, *, state, scopes):
         raise ValueError('No validated completed Claude turn yet')
     kept = b''.join(data.splitlines(keepends=True)[:end])
     valid = sessions._records(kept, 'claude')
-    approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, kept, home)))
+    approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, kept)))
     sessions._validate_claude(valid, sid, approved)
     versions = {row['version'] for row in valid if 'version' in row}
     if not versions:
@@ -259,10 +259,12 @@ def capture_conversations(project, store, *, state=None, env=None):
                         raise ValueError('Native metadata requires a regular file without hard links')
                     first = source.readline(min(sessions.MAX_BYTES, 1024 * 1024) + 1)
             row = json.loads(first)
+            if not isinstance(row, dict):
+                raise ValueError('Invalid native session metadata')
             meta = row.get('payload', {})
             if not isinstance(meta, dict):
                 raise ValueError('Invalid native session metadata')
-            approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, first, path)))
+            approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, first)))
             if meta.get('cwd') not in approved:
                 continue
             result['entries'].append(_codex_entry(project, store, sid, index, state=state, scopes=scopes))

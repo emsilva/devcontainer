@@ -96,3 +96,20 @@ class NativeFormatTests(unittest.TestCase):
                 return dict(data=[], nextCursor='same')
         with self.assertRaisesRegex(ValueError, 'stalled'):
             _history(Stalled(), self.sid)
+
+    def test_native_reader_rejects_symlink_swap_after_path_preflight(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            native = root / 'native.jsonl'
+            private = root / 'unrelated-private.json'
+            native.write_bytes(b'project transcript')
+            private.write_bytes(b'fixture unrelated private contents')
+            safe = sessions._safe
+            def swap(path):
+                checked = safe(path)
+                native.unlink()
+                native.symlink_to(private)
+                return checked
+            with patch.object(sessions, '_safe', side_effect=swap), self.assertRaises((ValueError, OSError)):
+                sessions._read(native)
