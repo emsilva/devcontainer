@@ -355,9 +355,22 @@ class ScratchTests(unittest.TestCase):
         with patch.object(tools, 'urlopen', side_effect=[ConnectionResetError('reset'), io.BytesIO(b'archive')]) as request:
             self.assertEqual(tools._download('https://example.invalid/archive'), b'archive')
             self.assertEqual(request.call_count, 2)
-        with patch.object(tools, 'urlopen', side_effect=ConnectionResetError('reset')):
-            with self.assertRaisesRegex(ValueError, 'download'):
+        with patch.object(tools, 'urlopen', side_effect=ConnectionResetError('reset')), \
+                patch('subprocess.run', return_value=subprocess.CompletedProcess(['curl'], 22, b'', b'private detail')):
+            with self.assertRaisesRegex(ValueError, 'download') as caught:
                 tools._download('https://example.invalid/archive')
+            self.assertNotIn('private', str(caught.exception))
+
+    def test_tool_download_uses_curl_when_python_body_keeps_resetting(self):
+        from devcontainer_setup.project_sync import tools
+        def curl(args, **kwargs):
+            self.assertEqual(args[0], 'curl')
+            Path(args[args.index('--output') + 1]).write_bytes(b'complete archive')
+            return subprocess.CompletedProcess(args, 0, b'', b'')
+        with patch.object(tools, 'urlopen', side_effect=ConnectionResetError('reset')), \
+                patch('subprocess.run', side_effect=curl) as request:
+            self.assertEqual(tools._download('https://example.invalid/archive'), b'complete archive')
+        self.assertEqual(request.call_count, 1)
 
     def test_failed_create_without_session_is_retryable_and_never_cleanup_required(self):
         from types import SimpleNamespace
