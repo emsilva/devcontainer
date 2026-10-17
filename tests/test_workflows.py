@@ -78,6 +78,34 @@ class WorkflowTests(unittest.TestCase):
         with patch.object(scratch,'_config',return_value={}),patch.object(scratch,'status',return_value={'phase':'syncing','running':False}):
             with self.assertRaisesRegex(ValueError,'not connected'): scratch.flush(self.root,self.root/'private')
 
+    def test_switch_waits_for_new_worker_then_flushes(self):
+        service = self.service()
+        phases = [{'phase': 'connecting'}, {'phase': 'synchronized'}]
+        with patch.object(service, 'sync_status', side_effect=phases) as status, \
+                patch.object(scratch, 'flush', return_value={'phase': 'synchronized'}) as flush, \
+                patch('devcontainer_setup.project_sync.workflows.time.sleep') as sleep:
+            service.sync_ready()
+        self.assertEqual(status.call_count, 2)
+        sleep.assert_called_once()
+        flush.assert_called_once_with(service.project.root, service.state)
+
+    def test_switch_wait_refuses_conflicts_stopped_worker_and_deadline(self):
+        for value, message in (({'phase': 'conflicts', 'conflicts': ['notes.md']}, 'notes.md'),
+                               ({'phase': 'stopped'}, 'not running')):
+            service = self.service()
+            with patch.object(service, 'sync_status', return_value=value), \
+                    patch.object(scratch, 'flush') as flush:
+                with self.assertRaisesRegex(ValueError, message):
+                    service.sync_ready()
+                flush.assert_not_called()
+        service = self.service()
+        with patch.object(service, 'sync_status', return_value={'phase': 'connecting'}), \
+                patch('devcontainer_setup.project_sync.workflows.time.monotonic', side_effect=[0, 91]), \
+                patch.object(scratch, 'flush') as flush:
+            with self.assertRaisesRegex(ValueError, 'timed out'):
+                service.sync_ready()
+            flush.assert_not_called()
+
     def test_remote_reuse_still_checks_git_and_sync(self):
         s=self.service(); s.is_remote=False
         local=dict(host='local',git={'branch':'main','head':'1','status':''},sessions=[])

@@ -212,7 +212,25 @@ print(json.dumps(roots))
         return scratch.stop(self.state)
 
     def sync_ready(self):
-        scratch.flush(self.project.root, self.state)
+        # A newly started supervisor returns before SSH and Mutagen reconcile.
+        # Wait here so first use has the same transfer barrier as a warm worker.
+        deadline = time.monotonic() + 90
+        announced = False
+        while True:
+            status = self.sync_status()
+            phase = status.get('phase')
+            if phase == 'synchronized':
+                return scratch.flush(self.project.root, self.state)
+            if phase == 'conflicts':
+                raise ValueError('Scratch conflicts: ' + ', '.join(status.get('conflicts', [])))
+            if phase in ('stopped', 'cleanup_required'):
+                raise ValueError('Scratch sync is not running; start it from Settings and retry.')
+            if time.monotonic() >= deadline:
+                raise ValueError('Scratch synchronization timed out. Check Settings and troubleshooting, then retry.')
+            if not announced:
+                print('Waiting for scratch synchronization...', flush=True)
+                announced = True
+            time.sleep(1)
 
     @staticmethod
     def _check_git(left, right):
