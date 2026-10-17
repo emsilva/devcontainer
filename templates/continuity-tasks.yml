@@ -4,7 +4,7 @@
     cmds:
       - bash .devcontainer/scripts/project-sync.sh work {{.CLI_ARGS}}
   work:cs:
-    desc: Open Codespace Herdr with continuous recovery on this Mac
+    desc: Connect Codespace to local Herdr with continuous recovery on this Mac
     interactive: true
     cmds:
       - bash .devcontainer/scripts/project-sync.sh work --codespace {{.CLI_ARGS}}

@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
-import tomllib
 import unittest
 from unittest import mock
 
@@ -94,7 +93,7 @@ class HerdrTests(unittest.TestCase):
                 herdr.open_local(self.project, self.state)
         popen.assert_not_called()
 
-    def test_remote_reuses_exact_tuple_and_checkout_then_nested_copy_preserves_settings(self):
+    def test_remote_inside_herdr_reuses_machine_without_nested_client_or_settings_changes(self):
         config = self.home / '.config/herdr/config.toml'
         config.parent.mkdir(parents=True)
         original = '''[experimental]
@@ -119,16 +118,8 @@ request_path = "request.wav"
                 mock.patch.object(herdr.subprocess, 'call', return_value=0) as call:
             self.assertEqual(herdr.open_remote(self.project, self.state, '/workspaces/recovered'), 0)
         self.assertEqual(run.call_args_list[1].args[0][:3], ['herdr', '--machine', 'opaque-machine'])
-        self.assertEqual(call.call_args.args[0], ['herdr', '--remote', 'alias', '--session', 'project-' + 'a' * 24])
-        child = call.call_args.kwargs['env']
-        self.assertEqual(child['HERDR_ENV'], '1')
-        self.assertEqual(child['HOME'], str(self.home))
-        nested = tomllib.loads(Path(child['HERDR_CONFIG_PATH']).read_text())
-        self.assertTrue(nested['experimental']['allow_nested'])
-        self.assertEqual(nested['experimental']['other'], 'preserve')
-        self.assertTrue(nested['session']['resume_agents_on_restore'])
-        self.assertEqual(nested['ui']['sound']['path'], str(config.parent / 'sounds/bell.wav'))
-        self.assertEqual(nested['ui']['sound']['done_path'], '/absolute/done.wav')
+        call.assert_not_called()
+        self.assertFalse((self.state / 'herdr-nested.toml').exists())
         self.assertEqual(config.read_text(), original)
         self.assertNotIn('HERDR_CONFIG_PATH', os.environ)
         self.assertEqual(read_json(self.state / 'herdr-machine.json')['machine_id'], 'opaque-machine')
@@ -147,7 +138,19 @@ request_path = "request.wav"
             self.assertEqual(herdr.open_remote(self.project, self.state, '/remote'), 0)
         self.assertEqual(calls[0], ['herdr', 'machine', 'add', 'alias', '--label', 'repo (Codespace)',
                                   '--remote-session', 'project-' + 'a' * 24])
-        self.assertIn('--remote', calls[-1])
+        self.assertEqual(len(calls), 1)
+
+    def test_remote_outside_herdr_opens_local_ui_for_the_saved_codespace_group(self):
+        machine = {'id': 'existing-id', 'target': 'alias', 'session': 'project-' + 'a' * 24, 'enabled': True}
+        with mock.patch.dict(os.environ, {'HERDR_ENV': ''}), \
+                mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr.subprocess, 'run', side_effect=[completed([machine]),
+                    completed({'result': {'workspaces': []}}),
+                    completed({'result': {'workspace': {'workspace_id': 'existing-w'}}}), completed({'result': {}})]), \
+                mock.patch.object(herdr.subprocess, 'call', return_value=0) as call:
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote'), 0)
+        self.assertEqual(call.call_args.args[0], ['herdr'])
+        self.assertEqual(call.call_args.kwargs['cwd'], self.project.root)
 
     def test_disabled_machine_enable_uses_native_text_output(self):
         machine = {'id': 'opaque-disabled', 'target': 'alias', 'session': 'project-' + 'a' * 24, 'enabled': False}

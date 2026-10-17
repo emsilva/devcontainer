@@ -43,7 +43,7 @@ small helpers, and a Taskfile include. Personal preferences live in
 |---|---|
 | `task work` | Open local project work in Herdr |
 | `task work:codex` / `task work:claude` | Start a new conversation here |
-| `task work:cs` | Open Codespace Herdr and back up work to this Mac |
+| `task work:cs` | Connect Codespace to local Herdr and back up work to this Mac |
 | `task work:disconnect` | Disconnect this project's Codespace from the local Herdr UI |
 | `task work:status` / `task work:stop` | Check protection / stop this project’s worker |
 | `task devcontainer:setup` | Review or change the setup |
@@ -78,8 +78,9 @@ Enable project continuity in setup. On your Mac, run:
 task work:cs
 ```
 
-This starts the paired Codespace if needed, opens its persistent Herdr session,
-and starts a Mac worker. Work in Codex or Claude there. The worker keeps verified
+This starts the paired Codespace if needed, connects its saved machine in local Herdr,
+and starts a Mac worker. Select the project's Codespace group to work in Codex or
+Claude there. The worker keeps verified
 checkpoints of committed history, staged and unstaged code, nonignored new files,
 `.scratch/`, project notes, and supported completed conversation turns on your Mac.
 The first entry seeds a separate remote checkout from your desktop; existing
