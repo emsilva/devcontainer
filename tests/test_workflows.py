@@ -108,6 +108,10 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(scratch.flush(self.root,self.root/'private')['phase'],'synchronized')
             self.assertEqual(inventory.call_count,2); self.assertEqual(command.call_args.args[2:],('sync','flush','sync_owned'))
 
+    def test_status_does_not_call_dead_worker_syncing(self):
+        with patch.object(scratch,'status',return_value={'phase':'syncing','running':False}):
+            self.assertEqual(scratch.inspect_sync(self.root,self.root/'private')['phase'],'stopped')
+
 def sessions_module():
     from devcontainer_setup.project_sync import sessions
     return sessions

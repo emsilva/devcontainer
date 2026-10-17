@@ -267,7 +267,9 @@ def _reconciliation(info):
 
 def inspect_sync(root, state):
     runtime = status(Path(state))
-    if not runtime.get('running') or runtime.get('phase') in ('stopped', 'cleanup_required'):
+    if not runtime.get('running'):
+        return dict(runtime, phase='cleanup_required' if runtime.get('phase') == 'cleanup_required' else 'stopped')
+    if runtime.get('phase') in ('stopped', 'cleanup_required'):
         return runtime
     config = _config(root, state)
     receipt = _saved_session(state, config)
