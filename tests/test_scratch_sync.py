@@ -153,15 +153,20 @@ class ScratchTests(unittest.TestCase):
         own = {'pid': 99999999, 'nonce': 'a' * 48, 'session': 'scratch-' + 'a' * 48,
                'phase': 'syncing', 'process_identity': 'gone'}
         atomic_write(self.state / 'scratch-runtime.json', json.dumps(own).encode())
-        with patch.object(self.module, 'install_mutagen', return_value=Path('/fake/mutagen')), patch.object(self.module, '_mutagen') as command:
+        receipt = {'name': own['session'], 'nonce': own['nonce'], 'binding': {}, 'established': True, 'identifier': 'sync_owned'}
+        atomic_write(self.state / 'scratch-session.json', json.dumps(receipt).encode())
+        inventory = json.dumps([{'name': own['session'], 'identifier': 'sync_owned'}])
+        with patch.object(self.module, 'install_mutagen', return_value=Path('/fake/mutagen')), patch.object(self.module, '_mutagen', return_value=inventory) as command:
             result = self.module.stop(self.state)
             self.assertFalse(result['running'])
             self.assertEqual(result['phase'], 'stopped')
-            self.assertIn(('sync', 'terminate', own['session']), [call.args[2:] for call in command.call_args_list])
+            self.assertIn(('sync', 'pause', 'sync_owned'), [call.args[2:] for call in command.call_args_list])
+            self.assertFalse(any(call.args[2:4] == ('sync', 'terminate') for call in command.call_args_list))
         own.update(session='unrelated-user-session', phase='syncing')
         atomic_write(self.state / 'scratch-runtime.json', json.dumps(own).encode())
         with patch.object(self.module, '_mutagen') as command:
-            self.module.stop(self.state)
+            with self.assertRaisesRegex(ValueError, 'disagree'):
+                self.module.stop(self.state)
             command.assert_not_called()
 
     def test_remote_identity_uses_canonical_discovery_and_snapshots_ignored_files(self):
@@ -178,11 +183,11 @@ class ScratchTests(unittest.TestCase):
 
     def test_disconnection_pauses_only_owned_session_before_reconnect(self):
         from types import SimpleNamespace
-        config = {'identity': 'github.com/owner/repo', 'codespace': 'bound-name',
+        config = {'identity': 'github.com/owner/repo', 'codespace': 'bound-name', 'root': str(self.root),
                   'remote_root': '/workspaces/repo'}
         class Event:
             def __init__(self): self.waits = iter([False, True])
-            def is_set(self): return False
+            def is_set(self): return getattr(self, 'stopped', False)
             def set(self): pass
             def wait(self, timeout): return next(self.waits)
         class Connection:
@@ -191,12 +196,19 @@ class ScratchTests(unittest.TestCase):
             def __exit__(self, *args): pass
             def ssh_config(self, path): pass
         remote = json.dumps({'identity': config['identity'], 'root': config['remote_root']}).encode()
-        with patch.object(self.module, '_config', return_value=config), patch.object(self.module, 'CodespaceConnection', Connection), patch.object(self.module, 'install_mutagen', return_value=Path('/fake/tool')), patch.object(self.module, '_remote', side_effect=[remote, b'archive']), patch.object(self.module, 'backup'), patch.object(self.module.threading, 'Event', Event), patch.object(self.module.signal, 'signal'), patch.object(self.module, '_mutagen', return_value='') as command:
+        created = []
+        def invoke(binary, state, *args, **kwargs):
+            if args[:2] == ('sync', 'create'): created.append(True)
+            if args[:2] == ('sync', 'list'):
+                return json.dumps([{'name': 'scratch-' + 'b' * 48, 'identifier': 'sync_owned'}]) if created else '[]'
+            return ''
+        with patch.object(self.module, '_config', return_value=config), patch.object(self.module, 'CodespaceConnection', Connection), patch.object(self.module, 'install_mutagen', return_value=Path('/fake/tool')), patch.object(self.module, '_remote', side_effect=[remote, b'archive']), patch.object(self.module, 'backup'), patch.object(self.module.threading, 'Event', Event), patch.object(self.module.signal, 'signal'), patch.object(self.module, '_mutagen', side_effect=invoke) as command:
             self.module.supervise(self.root, self.state, 'b' * 48)
         calls = [call.args[2:] for call in command.call_args_list]
-        pause = ('sync', 'pause', 'scratch-' + 'b' * 48)
+        pause = ('sync', 'pause', 'sync_owned')
         self.assertIn(pause, calls)
-        self.assertLess(calls.index(pause), calls.index(('sync', 'terminate', 'scratch-' + 'b' * 48)))
+        self.assertLess(calls.index(pause), calls.index(('daemon', 'stop')))
+        self.assertFalse(any(call[:2] == ('sync', 'terminate') for call in calls))
 
     def test_stop_interrupts_owned_forward_startup(self):
         import time
@@ -253,3 +265,153 @@ class ScratchTests(unittest.TestCase):
         with patch.object(tools, 'urlopen', side_effect=ConnectionResetError('reset')):
             with self.assertRaisesRegex(ValueError, 'download'):
                 tools._download('https://example.invalid/archive')
+
+    def test_failed_create_without_session_is_retryable_and_never_cleanup_required(self):
+        from types import SimpleNamespace
+        config = {'identity': 'github.com/owner/repo', 'codespace': 'bound-name', 'root': str(self.root),
+                  'remote_root': '/workspaces/repo'}
+        class Event:
+            def __init__(self): self.waits = iter([False, True])
+            def is_set(self): return getattr(self, 'stopped', False)
+            def set(self): pass
+            def wait(self, timeout): return next(self.waits)
+        class Connection:
+            def __init__(self, *args, **kwargs): self.child = SimpleNamespace(poll=lambda: 1)
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def ssh_config(self, path): pass
+        remote = json.dumps({'identity': config['identity'], 'root': config['remote_root']}).encode()
+        def command(binary, state, *args, **kwargs):
+            if args[:2] == ('sync', 'create'): raise ValueError('fixture create failed before session existed')
+            if args[:2] == ('sync', 'list'): return '[]'
+            if args[:2] == ('sync', 'pause') or args[:2] == ('sync', 'terminate'):
+                raise ValueError('missing session')
+            return ''
+        with patch.object(self.module, '_config', return_value=config), patch.object(self.module, 'CodespaceConnection', Connection), patch.object(self.module, 'install_mutagen', return_value=Path('/fake/tool')), patch.object(self.module, '_remote', side_effect=[remote, b'archive', remote, b'archive']), patch.object(self.module, 'backup'), patch.object(self.module.threading, 'Event', Event), patch.object(self.module.signal, 'signal'), patch.object(self.module, '_mutagen', side_effect=command) as commands:
+            self.module.supervise(self.root, self.state, 'c' * 48)
+        runtime = json.loads((self.state / 'scratch-runtime.json').read_text())
+        self.assertEqual(runtime['phase'], 'stopped')
+        self.assertEqual(sum(call.args[2:4] == ('sync', 'create') for call in commands.call_args_list), 2)
+        self.assertFalse(any(call.args[2:4] == ('sync', 'terminate') for call in commands.call_args_list))
+
+    def test_normal_stop_preserves_owned_session_baseline_and_receipt(self):
+        from types import SimpleNamespace
+        config = {'identity': 'github.com/owner/repo', 'codespace': 'bound-name', 'root': str(self.root),
+                  'remote_root': '/workspaces/repo'}
+        class Event:
+            def is_set(self): return getattr(self, 'stopped', False)
+            def set(self): pass
+            def wait(self, timeout):
+                self.stopped = True
+                return True
+        class Connection:
+            def __init__(self, *args, **kwargs): self.child = SimpleNamespace(poll=lambda: None)
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def ssh_config(self, path): pass
+        remote = json.dumps({'identity': config['identity'], 'root': config['remote_root']}).encode()
+        created = []
+        def command(binary, state, *args, **kwargs):
+            if args[:2] == ('sync', 'create'): created.append(True)
+            if args[:2] == ('sync', 'list'):
+                return json.dumps([{'name': 'scratch-' + 'd' * 48, 'identifier': 'sync_' + 'D' * 43}]) if created else '[]'
+            return ''
+        with patch.object(self.module, '_config', return_value=config), patch.object(self.module, 'CodespaceConnection', Connection), patch.object(self.module, 'install_mutagen', return_value=Path('/fake/tool')), patch.object(self.module, '_remote', side_effect=[remote, b'archive']), patch.object(self.module, 'backup'), patch.object(self.module.threading, 'Event', Event), patch.object(self.module.signal, 'signal'), patch.object(self.module, '_mutagen', side_effect=command) as commands:
+            self.module.supervise(self.root, self.state, 'd' * 48)
+        self.assertFalse(any(call.args[2:4] == ('sync', 'terminate') for call in commands.call_args_list))
+        self.assertTrue((self.state / 'scratch-session.json').is_file())
+        saved = json.loads((self.state / 'scratch-session.json').read_text())
+        self.assertEqual(saved['identifier'], 'sync_' + 'D' * 43)
+        self.assertTrue(saved['established'])
+
+    @unittest.skipUnless(os.environ.get('MUTAGEN_TEST_BINARY'), 'set MUTAGEN_TEST_BINARY to the pinned official binary for real restart gate')
+    def test_actual_mutagen_offline_deletion_survives_controller_stop_restart(self):
+        from devcontainer_setup.project_sync.state import atomic_write
+        binary = Path(os.environ['MUTAGEN_TEST_BINARY']).resolve()
+        temporary_root = '/private/tmp' if Path('/private/tmp').is_dir() else '/tmp'
+        with tempfile.TemporaryDirectory(prefix='t2-restart-', dir=temporary_root) as temporary:
+            state = Path(temporary).resolve()
+            alpha, beta = state / 'alpha/.scratch', state / 'beta/.scratch'
+            alpha.mkdir(parents=True); beta.mkdir(parents=True)
+            (alpha / 'delete-me').write_bytes(b'baseline content')
+            nonce = 'e' * 48
+            name = 'scratch-' + nonce
+            runtime = {'pid': 99999999, 'nonce': nonce, 'session': name, 'phase': 'syncing'}
+            created = False
+            try:
+                self.module._mutagen(binary, state, 'sync', 'create', str(alpha), str(beta), '--name=' + name,
+                                     '--mode=two-way-safe', '--hash=sha256', '--no-global-configuration')
+                created = True
+                self.module._mutagen(binary, state, 'sync', 'flush', name)
+                info = json.loads(self.module._mutagen(binary, state, 'sync', 'list', '--template={{json .}}'))[0]
+                receipt = {'name': name, 'nonce': nonce, 'identifier': info['identifier'], 'established': True,
+                           'binding': {'root': str(alpha.parent), 'remote_root': str(beta.parent),
+                                       'identity': 'github.com/fixture/restart', 'codespace': 'fixture-name'}}
+                atomic_write(state / 'scratch-session.json', json.dumps(receipt).encode())
+                atomic_write(state / 'scratch-runtime.json', json.dumps(runtime).encode())
+                with patch.object(self.module, 'install_mutagen', return_value=binary):
+                    self.module._recover_session(state, runtime)
+                (alpha / 'delete-me').unlink()
+                # Listing restarts the same isolated daemon from durable data.
+                after = json.loads(self.module._mutagen(binary, state, 'sync', 'list', '--template={{json .}}'))
+                self.assertEqual([entry['identifier'] for entry in after], [info['identifier']])
+                self.module._mutagen(binary, state, 'sync', 'resume', info['identifier'])
+                self.module._mutagen(binary, state, 'sync', 'flush', info['identifier'])
+                self.assertFalse((alpha / 'delete-me').exists(), 'offline deletion was resurrected on the source')
+                self.assertFalse((beta / 'delete-me').exists(), 'offline deletion failed to propagate')
+            finally:
+                if created:
+                    current = json.loads(self.module._mutagen(binary, state, 'sync', 'list', '--template={{json .}}'))
+                    if any(entry['name'] == name for entry in current):
+                        self.module._mutagen(binary, state, 'sync', 'terminate', name)
+                self.module._mutagen(binary, state, 'daemon', 'stop')
+
+    def test_supervisor_reuses_exact_saved_baseline_after_stop_or_create_interruption(self):
+        from types import SimpleNamespace
+        from devcontainer_setup.project_sync.state import atomic_write
+        config = {'identity': 'github.com/owner/repo', 'codespace': 'bound-name', 'root': str(self.root),
+                  'remote_root': '/workspaces/repo'}
+        class Event:
+            def is_set(self): return getattr(self, 'stopped', False)
+            def set(self): pass
+            def wait(self, timeout):
+                self.stopped = True
+                return True
+        class Connection:
+            def __init__(self, *args, **kwargs): self.child = SimpleNamespace(poll=lambda: None)
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def ssh_config(self, path): pass
+        remote = json.dumps({'identity': config['identity'], 'root': config['remote_root']}).encode()
+        name, identifier = 'scratch-' + 'a' * 48, 'sync_preserved'
+        for established in (True, False):
+            with self.subTest(established=established):
+                receipt = {'name': name, 'nonce': 'a' * 48, 'binding': config, 'established': established}
+                if established: receipt['identifier'] = identifier
+                atomic_write(self.state / 'scratch-session.json', json.dumps(receipt).encode())
+                def command(binary, state, *args, **kwargs):
+                    if args[:2] == ('sync', 'create'): self.fail('existing baseline must never be recreated')
+                    if args[:2] == ('sync', 'list'):
+                        return json.dumps([{'name': name, 'identifier': identifier}])
+                    return ''
+                with patch.object(self.module, '_config', return_value=config), patch.object(self.module, 'CodespaceConnection', Connection), patch.object(self.module, 'install_mutagen', return_value=Path('/fake/tool')), patch.object(self.module, '_remote', return_value=remote), patch.object(self.module, 'backup') as backup, patch.object(self.module.threading, 'Event', Event), patch.object(self.module.signal, 'signal'), patch.object(self.module, '_mutagen', side_effect=command) as commands:
+                    self.module.supervise(self.root, self.state, 'f' * 48)
+                self.assertIn(('sync', 'resume', identifier), [call.args[2:] for call in commands.call_args_list])
+                backup.assert_not_called()
+                saved = json.loads((self.state / 'scratch-session.json').read_text())
+                self.assertEqual(saved['identifier'], identifier)
+                runtime = json.loads((self.state / 'scratch-runtime.json').read_text())
+                self.assertEqual(runtime['session'], name)
+                self.assertEqual(runtime['nonce'], 'f' * 48)
+
+    def test_only_planned_session_absence_is_retryable_and_inventory_failure_is_not_absence(self):
+        receipt = {'name': 'scratch-' + 'a' * 48, 'nonce': 'a' * 48, 'binding': {}, 'established': False}
+        with patch.object(self.module, '_mutagen', return_value='[]'):
+            self.assertIsNone(self.module._session_info(Path('/fake/tool'), self.state, receipt))
+            receipt['established'] = True
+            with self.assertRaisesRegex(ValueError, 'baseline is missing'):
+                self.module._session_info(Path('/fake/tool'), self.state, receipt)
+        receipt['established'] = False
+        with patch.object(self.module, '_mutagen', side_effect=ValueError('fixture daemon unavailable')):
+            with self.assertRaisesRegex(ValueError, 'daemon unavailable'):
+                self.module._session_info(Path('/fake/tool'), self.state, receipt)

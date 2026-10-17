@@ -98,3 +98,16 @@ class TransportTests(unittest.TestCase):
                 connection.python('print("{}")')
             self.assertEqual(stable.read_bytes(), b'existing validated binding')
             self.assertTrue((state / 'ssh-probe-config').is_file())
+
+    def test_remote_python_ignores_checkout_and_python_environment_before_bootstrap(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        module = importlib.import_module('devcontainer_setup.project_sync.transport')
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp).resolve()
+            connection = module.CodespaceConnection('bound-name', state=state)
+            connection.port = 12345
+            connection.key = state / 'key'
+            with patch.object(module.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=b'{}')) as run:
+                connection.python('print("{}")')
+            self.assertTrue(run.call_args.args[0][-1].startswith('python3 -I -B -c '))

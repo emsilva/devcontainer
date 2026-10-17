@@ -24,6 +24,7 @@ from .transport import CodespaceConnection
 
 CONFIG = 'scratch.json'
 RUNTIME = 'scratch-runtime.json'
+SESSION = 'scratch-session.json'
 _CHILDREN = {}
 
 
@@ -206,15 +207,63 @@ def start(root: Path, state: Path) -> dict:
         raise ValueError('Scratch supervisor startup timed out.')
 
 
-def _recover_session(state, runtime):
-    nonce = runtime.get('nonce')
-    session = runtime.get('session')
+def _saved_session(state, config=None):
+    path = Path(state) / SESSION
+    if not path.exists():
+        return None
+    receipt = read_json(path)
+    nonce = receipt.get('nonce')
     if (not isinstance(nonce, str) or len(nonce) != 48
             or any(c not in '0123456789abcdef' for c in nonce)
-            or session != 'scratch-' + nonce):
+            or receipt.get('name') != 'scratch-' + nonce
+            or not isinstance(receipt.get('binding'), dict)
+            or not isinstance(receipt.get('established'), bool)):
+        raise ValueError('Invalid owned scratch session receipt; existing state was preserved.')
+    if config is not None and receipt['binding'] != config:
+        raise ValueError('Saved scratch session belongs to a different pairing; existing baseline was preserved.')
+    return receipt
+
+
+def _session_info(binary, state, receipt):
+    # List all sessions so an absent selector is distinguishable from a failed
+    # daemon/API request. Never infer absence from arbitrary command failure.
+    entries = json.loads(_mutagen(binary, state, 'sync', 'list', '--template={{json .}}'))
+    if not isinstance(entries, list):
+        raise ValueError('Invalid Mutagen session inventory; existing state was preserved.')
+    matches = [entry for entry in entries if entry.get('name') == receipt['name']]
+    if len(matches) > 1:
+        raise ValueError('Duplicate owned Mutagen session names; existing state was preserved.')
+    if not matches:
+        if receipt['established']:
+            raise ValueError('Saved Mutagen baseline is missing; restore private state before restarting sync.')
+        return None
+    info = matches[0]
+    identifier = info.get('identifier')
+    if not isinstance(identifier, str) or not identifier.startswith('sync_'):
+        raise ValueError('Invalid Mutagen session identifier.')
+    if receipt.get('identifier') is not None and receipt['identifier'] != identifier:
+        raise ValueError('Owned Mutagen session identity changed; existing baseline was preserved.')
+    receipt.update(identifier=identifier, established=True)
+    _write(Path(state) / SESSION, receipt)
+    return info
+
+
+def _pause_saved_session(binary, state, receipt):
+    info = _session_info(binary, state, receipt)
+    if info is not None:
+        _mutagen(binary, state, 'sync', 'pause', info['identifier'])
+    return info
+
+
+def _recover_session(state, runtime):
+    receipt = _saved_session(state)
+    if receipt is None:
+        # A runtime nonce alone is not an authority to mutate a foreign session.
         return
+    if runtime.get('session') != receipt['name']:
+        raise ValueError('Runtime and saved scratch session disagree; existing state was preserved.')
     binary = install_mutagen(state)
-    _mutagen(binary, state, 'sync', 'terminate', session)
+    _pause_saved_session(binary, state, receipt)
     _mutagen(binary, state, 'daemon', 'stop')
     _write(state / RUNTIME, {**runtime, 'phase': 'stopped', 'process_identity': None})
 
@@ -282,17 +331,20 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
         logger = logging.getLogger('project-sync-' + nonce)
         logger.setLevel(logging.INFO)
         logger.addHandler(handler)
+        receipt = _saved_session(state, config)
         runtime = {'pid': os.getpid(), 'nonce': nonce, 'process_identity': _process_identity(os.getpid()),
-                   'phase': 'starting', 'session': None}
+                   'phase': 'starting', 'session': receipt['name'] if receipt else None}
         def update(phase, **values):
             runtime.update(phase=phase, **values)
             _write(state / RUNTIME, runtime)
         update('starting')
         binary = None
-        session = None
+        session = receipt['name'] if receipt else None
         try:
             binary = install_mutagen(state)
             _transport_wrapper(state)
+            if receipt:
+                _pause_saved_session(binary, state, receipt)
             backoff = 2
             while not exiting.is_set():
                 try:
@@ -303,25 +355,32 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                         if remote.get('identity') != config['identity'] or remote.get('root') != config['remote_root']:
                             raise ValueError('Remote repository identity changed; refusing synchronization.')
                         connection.ssh_config(state / 'ssh-config')
-                        if session is None:
+                        if receipt is None:
+                            session = 'scratch-' + nonce
+                            receipt = {'name': session, 'nonce': nonce, 'binding': config, 'established': False}
+                            _write(state / SESSION, receipt)
+                            update('preparing', session=session)
+                        info = _session_info(binary, state, receipt)
+                        if info is None:
                             backup(root, state)
                             remote_snapshot = _remote(connection, config['remote_root'], snapshot=True)
                             remote_backup = _archive_path(state, 'remote')
                             atomic_write(remote_backup, remote_snapshot, mode=0o400)
-                            session = 'scratch-' + nonce
                             ignores = ['/.gitignore', '/README.md', '.DS_Store', '__pycache__',
                                        '.venv', 'node_modules', '.cache', '.project-sync', '.handoff', '.mutagen']
                             args = ['sync', 'create', str(root / '.scratch'),
                                     'project-sync:' + config['remote_root'] + '/.scratch',
                                     '--name=' + session, '--mode=two-way-safe', '--hash=sha256',
-                                    '--symlink-mode=ignore', '--no-global-configuration', '--ignore-vcs']
+                                    '--symlink-mode=ignore', '--no-global-configuration', '--ignore-vcs', '--paused']
                             args += ['--ignore=' + item for item in ignores]
                             # Record the owned name before create; partial creation
                             # can then be cleaned without touching another session.
                             update('creating', session=session)
                             _mutagen(binary, state, *args, timeout=120)
-                        else:
-                            _mutagen(binary, state, 'sync', 'resume', session)
+                            info = _session_info(binary, state, receipt)
+                            if info is None:
+                                raise ValueError('Mutagen create returned without a session; retrying safely.')
+                        _mutagen(binary, state, 'sync', 'resume', info['identifier'])
                         update('syncing')
                         backoff = 2
                         logger.info('Scratch connection established.')
@@ -335,9 +394,9 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                             summary = _mutagen(binary, state, 'sync', 'list', session)
                             update('syncing', detail=summary)
                 except Exception as error:
-                    if session:
+                    if receipt:
                         try:
-                            _mutagen(binary, state, 'sync', 'pause', session)
+                            _pause_saved_session(binary, state, receipt)
                         except Exception:
                             update('cleanup_required', error='Owned session could not be paused; refusing reconnect.')
                             logger.info('Owned session could not be paused; stopping supervisor.')
@@ -357,12 +416,12 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
             for sig in (signal.SIGTERM, signal.SIGINT):
                 signal.signal(sig, lambda *_: None)
             cleanup_ok = True
-            if binary is not None and session:
+            if binary is not None and receipt:
                 try:
-                    _mutagen(binary, state, 'sync', 'terminate', session)
+                    _pause_saved_session(binary, state, receipt)
                 except Exception:
                     cleanup_ok = False
-                    logger.info('Owned Mutagen session cleanup requires retry: %s', session)
+                    logger.info('Owned Mutagen session pause requires retry: %s', session)
             if binary is not None:
                 try:
                     _mutagen(binary, state, 'daemon', 'stop')

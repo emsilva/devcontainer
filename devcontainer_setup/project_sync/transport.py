@@ -240,7 +240,7 @@ class CodespaceConnection:
         path = self.state / 'ssh-probe-config'
         self.ssh_config(path)
         result = subprocess.run(
-            ['ssh', '-F', str(path), '-T', 'project-sync', 'python3 -c ' + shlex.quote(code)],
+            ['ssh', '-F', str(path), '-T', 'project-sync', 'python3 -I -B -c ' + shlex.quote(code)],
             input=payload, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=clean_env(self.env), timeout=timeout)
         if result.returncode:
