@@ -248,6 +248,57 @@ def _session_info(binary, state, receipt):
     return info
 
 
+def _reconciliation(info):
+    conflicts = info.get('conflicts', [])
+    paths = []
+    for conflict in conflicts[:100]:
+        path = conflict.get('root', '') if isinstance(conflict, dict) else ''
+        paths.append(''.join(c for c in str(path) if c.isprintable())[:300])
+    if conflicts:
+        return dict(phase='conflicts', conflicts=paths)
+    connected = all(info.get(side, {}).get('connected') is True for side in ('alpha', 'beta'))
+    clean = (connected and not info.get('paused') and info.get('status') == 'watching'
+             and not info.get('lastError') and not info.get('excludedConflicts')
+             and not any(info.get(side, {}).get('scanProblems') or info.get(side, {}).get('transitionProblems')
+                         or info.get(side, {}).get('excludedScanProblems') or info.get(side, {}).get('excludedTransitionProblems')
+                         for side in ('alpha', 'beta')))
+    return dict(phase='synchronized' if clean else 'waiting', conflicts=[])
+
+
+def inspect_sync(root, state):
+    runtime = status(Path(state))
+    if not runtime.get('running') or runtime.get('phase') in ('stopped', 'cleanup_required'):
+        return runtime
+    config = _config(root, state)
+    receipt = _saved_session(state, config)
+    if receipt is None:
+        return dict(phase='connecting', conflicts=[])
+    info = _session_info(install_mutagen(state), state, receipt)
+    return _reconciliation(info) if info else dict(phase='connecting', conflicts=[])
+
+
+def flush(root, state):
+    config = _config(root, state)
+    runtime = status(Path(state))
+    if not runtime.get('running') or runtime.get('phase') != 'syncing':
+        raise ValueError('Scratch sync is not connected; start sync and wait before switching')
+    receipt = _saved_session(state, config)
+    if receipt is None:
+        raise ValueError('Scratch session is not ready; wait and retry')
+    binary = install_mutagen(state)
+    info = _session_info(binary, state, receipt)
+    if info is None:
+        raise ValueError('Scratch session is not ready; wait and retry')
+    current = _reconciliation(info)
+    if current['phase'] == 'conflicts':
+        raise ValueError('Scratch conflicts: ' + ', '.join(current['conflicts']))
+    _mutagen(binary, state, 'sync', 'flush', info['identifier'], timeout=120)
+    current = _reconciliation(_session_info(binary, state, receipt) or {})
+    if current['phase'] != 'synchronized':
+        raise ValueError('Scratch reconciliation is not verified; inspect conflicts and wait before switching')
+    return current
+
+
 def _pause_saved_session(binary, state, receipt):
     info = _session_info(binary, state, receipt)
     if info is not None:
