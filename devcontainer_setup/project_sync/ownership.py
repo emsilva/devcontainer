@@ -87,7 +87,7 @@ def run_native_child(state, agent, session_id, command, *, cwd, env, receipt, le
     child = None
     try:
         gate = 'import os,sys; fd=int(sys.argv[1]); token=os.read(fd,1); os.close(fd); token==b"1" or sys.exit(125); os.execvpe(sys.argv[2],sys.argv[2:],os.environ)'
-        child = subprocess.Popen([sys.executable, '-c', gate, str(gate_read), *command], cwd=cwd, env=env, pass_fds=(gate_read, lease_fd))
+        child = subprocess.Popen([sys.executable, '-I', '-B', '-c', gate, str(gate_read), *command], cwd=cwd, env=env, pass_fds=(gate_read, lease_fd))
         os.close(gate_read)
         gate_read = -1
         receipt['native_pid'] = child.pid

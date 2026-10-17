@@ -377,6 +377,10 @@ class RenderTests(unittest.TestCase):
         (upstream / 'devcontainer_setup').mkdir()
         for name in ('__init__.py', 'releases.py', 'ui.py', '__main__.py'):
             shutil.copyfile(ROOT / 'devcontainer_setup' / name, upstream / 'devcontainer_setup' / name)
+        terminal = upstream / 'devcontainer_setup/project_sync'
+        terminal.mkdir()
+        for name in ('__init__.py', 'terminal.py'):
+            shutil.copyfile(ROOT / 'devcontainer_setup/project_sync' / name, terminal / name)
         def git(*args):
             return subprocess.check_output(['git', '-C', str(upstream), *args], text=True).strip()
         git('init', '-b', 'main')

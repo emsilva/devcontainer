@@ -16,6 +16,7 @@ import shutil
 import stat
 import subprocess
 import uuid
+import unicodedata
 
 from .state import atomic_write, locked, read_json
 
@@ -315,6 +316,46 @@ def _scope(cwd, root, *, child=False):
         raise ValueError('Native transcript belongs to another project checkout')
 
 
+def display_text(value, limit=120):
+    """Bound and strip terminal escape sequences and Unicode controls."""
+    if not isinstance(value, str):
+        return ''
+    value = re.sub(r'\x1b\][^\x07]*(?:\x07|\x1b\\)', '', value[:8192])
+    value = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', value)
+    value = ''.join(' ' if c.isspace() else c for c in value if c.isspace() or not unicodedata.category(c).startswith('C'))
+    return ' '.join(value.split())[:limit]
+
+
+def _catalog_metadata(data, agent, path):
+    # Validation has already consumed a bounded native snapshot. Metadata never
+    # reads global indexes or unrelated histories.
+    rows = _records(data, agent)
+    title, prompt = '', ''
+    for row in rows:
+        payload = row.get('payload', {}) if agent == 'codex' else row
+        candidate = payload.get('title') or payload.get('thread_name') or payload.get('customTitle')
+        if candidate:
+            title = display_text(candidate)
+        message = payload if agent == 'codex' else row.get('message', {})
+        if not isinstance(message, dict):
+            continue
+        if not prompt and message.get('role') == 'user':
+            content = message.get('content', '')
+            if isinstance(content, list):
+                texts = [item.get('text', '') for item in content
+                         if isinstance(item, dict) and isinstance(item.get('text', ''), str)]
+                if agent == 'codex':
+                    # Native Codex serializes its instruction/environment envelope
+                    # as a user message before the developer's actual question.
+                    texts = [text for text in texts if not text.lstrip().startswith(
+                        ('# AGENTS.md instructions for ', '<environment_context>'))]
+                content = ' '.join(texts)
+            prompt = display_text(content)
+        if agent == 'codex' and not prompt and payload.get('type') == 'user_message':
+            prompt = display_text(payload.get('message'))
+    return dict(title=title or prompt or 'Untitled conversation', updated_at=path.stat().st_mtime)
+
+
 def list_sessions(project, agent, home, *, state=None):
     home = Path(home)
     result = []
@@ -325,7 +366,7 @@ def list_sessions(project, agent, home, *, state=None):
                 _scope(meta.get('cwd'), _imported_origin(project, state, path, home, data))
             except ValueError:
                 continue
-            result.append(dict(session_id=sid, agent=agent, cwd=meta['cwd'], version=meta['cli_version'], path=str(path)))
+            result.append(dict(session_id=sid, agent=agent, cwd=meta['cwd'], version=meta['cli_version'], path=str(path), **_catalog_metadata(data, agent, path)))
     elif agent == 'claude':
         directory = home / 'projects' / claude_namespace(project.root)
         for path in directory.glob('*.jsonl'):
@@ -337,10 +378,10 @@ def list_sessions(project, agent, home, *, state=None):
                 _validate_claude(rows, sid, scopes)
             except ValueError:
                 continue
-            result.append(dict(session_id=sid, agent=agent, cwd=str(project.root), path=str(path)))
+            result.append(dict(session_id=sid, agent=agent, cwd=str(project.root), path=str(path), **_catalog_metadata(data, agent, path)))
     else:
         raise ValueError('Unsupported agent')
-    return sorted(result, key=lambda item: item['session_id'])
+    return sorted(result, key=lambda item: (-item['updated_at'], item['session_id']))
 
 
 def _git(project):

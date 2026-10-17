@@ -190,6 +190,13 @@ class ReleaseTests(unittest.TestCase):
         for name in ('__init__.py', 'releases.py', 'ui.py'):
             shutil.copyfile(implementation / 'devcontainer_setup' / name,
                             self.source / 'devcontainer_setup' / name)
+        # ui is now the compatibility import for the shared consumer adapter.
+        # Build a complete release fixture, like the real fetched source tree.
+        terminal = self.source / 'devcontainer_setup/project_sync'
+        terminal.mkdir()
+        for name in ('__init__.py', 'terminal.py'):
+            shutil.copyfile(implementation / 'devcontainer_setup/project_sync' / name,
+                            terminal / name)
         (self.source / 'scripts/setup.sh').write_text('printf "trusted-runner\\n"\n')
         (self.source / 'devcontainer_setup/helper.py').write_text('VALUE = 1\n')
         return self.commit()

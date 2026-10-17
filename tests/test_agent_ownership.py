@@ -285,6 +285,37 @@ pathlib.Path(os.environ['FIXTURE_OUTPUT']).write_text(json.dumps({'args':sys.arg
         self.assertEqual(result['memory'], '1')
         self.assertEqual(result['args'][result['args'].index('--system-prompt-snapshot') + 1], 'off')
 
+    def test_consumer_guardian_and_gate_ignore_python_poison_and_write_no_bytecode(self):
+        import shutil
+        consumer = self.root / 'consumer'
+        consumer.mkdir()
+        package = consumer / 'project_sync'
+        shutil.copytree(Path(self.api.__file__).parent, package,
+                        ignore=shutil.ignore_patterns('__pycache__'))
+        poison = self.root / 'ambient'
+        poison.mkdir()
+        marker = self.root / 'poison-ran'
+        payload = 'from pathlib import Path; Path(' + repr(str(marker)) + ').touch()'
+        (poison / 'sitecustomize.py').write_text(payload)
+        (self.root / 'sitecustomize.py').write_text(payload)
+        (self.root / 'json.py').write_text(payload + '; raise RuntimeError("checkout import poison")')
+        native = self.root / 'native.sh'
+        native.write_text('#!/bin/sh\nexit 0\n')
+        native.chmod(0o700)
+        code = ('import sys; sys.path.insert(0,' + repr(str(consumer)) + '); '
+                'from pathlib import Path; from project_sync.agents import launch; '
+                'from project_sync.state import Project; p=Path(' + repr(str(self.root)) + '); '
+                'sys.exit(launch(Project(p,"https://github.com/test/project","github.com/test/project","a"*24),'
+                '"claude",' + repr(self.sid) + ',state=p/"state",host="a",new=True,executable=('
+                + repr(str(native)) + ',)))')
+        result = subprocess.run([sys.executable, '-I', '-B', '-c', code], cwd=self.root,
+                                env=dict(os.environ, PYTHONPATH=str(poison),
+                                         CLAUDE_CONFIG_DIR=str(self.root / 'native-home')),
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(marker.exists(), 'Helper executed ambient Python startup code')
+        self.assertEqual(list(package.rglob('__pycache__')), [])
+
     def test_native_writer_survives_wrapper_and_guardian_crash_without_takeover(self):
         child = self.root / 'idle_native.py'
         child.write_text("import os,sys\nfor fd in range(3,256):\n try: os.close(fd)\n except OSError: pass\nprint(str(os.getpid())+' '+str(os.getppid()),flush=True)\nsys.stdin.readline()\n")

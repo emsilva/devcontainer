@@ -357,7 +357,7 @@ def launch(project, agent, session_id, *, state, host, home=None, new=False, ext
     module_root = Path(__file__).resolve().parents[len(__package__.split('.'))]
     code = 'import sys; sys.path.insert(0, ' + repr(str(module_root)) + '); from ' + __package__ + '.agents import _guardian_main; sys.exit(_guardian_main(int(sys.argv[1])))'
     try:
-        guardian = subprocess.Popen([sys.executable, '-c', code, str(read_fd)], env=env, pass_fds=(read_fd,))
+        guardian = subprocess.Popen([sys.executable, '-I', '-B', '-c', code, str(read_fd)], env=env, pass_fds=(read_fd,))
         os.close(read_fd)
         read_fd = -1
         with os.fdopen(write_fd, 'wb') as output:

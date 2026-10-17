@@ -20,7 +20,7 @@ from .state import atomic_write, discover_project, host_id, locked, read_json, s
 from .transport import CodespaceConnection
 
 MAX_RPC_BYTES = 384 * 1024 * 1024
-_OPERATIONS = {'describe', 'status', 'backup', 'inspect', 'source_prepare', 'target_prepare', 'import', 'verify', 'accept', 'complete', 'activate'}
+_OPERATIONS = {'inventory', 'describe', 'status', 'backup', 'inspect', 'source_prepare', 'target_prepare', 'import', 'verify', 'accept', 'complete', 'activate'}
 _MODULES = ('__init__', 'state', 'sessions', 'ownership', 'agents', 'tools', 'transport', 'scratch', 'handoff')
 
 _REASONS = {
@@ -153,6 +153,12 @@ class LocalEndpoint:
             raise ValueError('Unsupported handoff operation')
         if operation == 'describe':
             return dict(host=host_id(self.env), root=str(self.project.root), identity=self.project.identity, project_id=self.project.project_id)
+        if operation == 'inventory':
+            rows = []
+            for agent in ('codex', 'claude'):
+                for row in sessions.list_sessions(self.project, agent, sessions.native_home(agent, self.env), state=self.state):
+                    rows.append(dict(row, ownership=ownership.owner_status(self.state, agent, row['session_id'])))
+            return dict(host=host_id(self.env), git=sessions._git(self.project), sessions=rows)
         if operation == 'backup':
             return dict(path=str(backup(self.project.root, self.state)))
         agent, session_id = values['agent'], sessions.session_uuid(values['session_id'])

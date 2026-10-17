@@ -1,6 +1,11 @@
 version: '3'
 
 tasks:
+  work:
+    desc: Continue a project conversation here or in its Codespace
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh work {{.CLI_ARGS}}
   setup:
     desc: Configure a project with the interactive wizard (task setup -- --project PATH)
     interactive: true

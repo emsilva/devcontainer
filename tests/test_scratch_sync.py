@@ -110,20 +110,37 @@ class ScratchTests(unittest.TestCase):
         pin = json.loads(tools.MANIFEST.read_text())['mutagen']['platforms'][system + '_' + arch]['sha256']
         atomic_write(directory / 'mutagen', binary, 0o700)
         atomic_write(directory / 'receipt.json', json.dumps({'archive_sha256': pin, 'files': {'mutagen': hashlib.sha256(binary).hexdigest()}}).encode())
-        code = 'from pathlib import Path; from devcontainer_setup.project_sync.scratch import start; import json; print(json.dumps(start(Path(' + repr(str(self.root)) + '),Path(' + repr(str(self.state)) + '))))'
+        import shutil
+        consumer = Path(self.temp.name) / 'consumer'
+        package = consumer / 'project_sync'
+        shutil.copytree(Path(self.module.__file__).parent, package,
+                        ignore=shutil.ignore_patterns('__pycache__'))
+        shutil.copyfile(tools.MANIFEST, package / 'sync-tools.json')
+        poison = Path(self.temp.name) / 'ambient'
+        poison.mkdir()
+        marker = Path(self.temp.name) / 'poison-ran'
+        payload = 'from pathlib import Path; Path(' + repr(str(marker)) + ').touch()'
+        (poison / 'sitecustomize.py').write_text(payload)
+        (self.root / 'sitecustomize.py').write_text(payload)
+        (self.root / 'json.py').write_text(payload + '; raise RuntimeError("checkout import poison")')
+        code = ('import sys; sys.path.insert(0,' + repr(str(consumer)) + '); '
+                'from pathlib import Path; from project_sync.scratch import start; import json; '
+                'print(json.dumps(start(Path(' + repr(str(self.root)) + '),Path(' + repr(str(self.state)) + '))))')
         env = dict(os.environ)
-        env['PYTHONPATH'] = str(Path(__file__).resolve().parents[1])
+        env['PYTHONPATH'] = str(poison)
         env['HOME'] = str(Path(self.temp.name).resolve())
-        launcher = subprocess.run([os.sys.executable, '-c', code], env=env, capture_output=True, text=True, timeout=15)
+        launcher = subprocess.run([os.sys.executable, '-I', '-B', '-c', code], env=env, capture_output=True, text=True, timeout=15)
         self.assertEqual(launcher.returncode, 0, launcher.stderr)
         started = json.loads(launcher.stdout)
         try:
+            self.assertFalse(marker.exists(), 'Supervisor executed ambient Python startup code')
+            self.assertEqual(list(package.rglob('__pycache__')), [])
             self.assertTrue(self.module.status(self.state)['running'])
             self.assertEqual(self.module.start(self.root, self.state)['pid'], started['pid'])
             self.assertFalse(self.module.stop(self.state)['running'])
             self.assertFalse(self.module.stop(self.state)['running'])
             # Restart from another shell creates a distinct nonce and process.
-            again = subprocess.run([os.sys.executable, '-c', code], env=env, capture_output=True, text=True, timeout=15)
+            again = subprocess.run([os.sys.executable, '-I', '-B', '-c', code], env=env, capture_output=True, text=True, timeout=15)
             self.assertEqual(again.returncode, 0, again.stderr)
             self.assertNotEqual(json.loads(again.stdout)['nonce'], started['nonce'])
             deadline = time.monotonic() + 5
@@ -173,7 +190,7 @@ class ScratchTests(unittest.TestCase):
         (self.scratch / 'remote.bin').write_bytes(b'\x00remote fixture')
         class LocalPython:
             def python(self, code, payload=b'', timeout=60):
-                return subprocess.run([os.sys.executable, '-c', code], input=payload,
+                return subprocess.run([os.sys.executable, '-I', '-B', '-c', code], input=payload,
                                       capture_output=True, timeout=timeout, check=True).stdout
         identity = json.loads(self.module._remote(LocalPython(), str(self.root)))
         self.assertEqual(identity['identity'], 'github.com/owner/repo')
@@ -415,3 +432,13 @@ class ScratchTests(unittest.TestCase):
         with patch.object(self.module, '_mutagen', side_effect=ValueError('fixture daemon unavailable')):
             with self.assertRaisesRegex(ValueError, 'daemon unavailable'):
                 self.module._session_info(Path('/fake/tool'), self.state, receipt)
+
+    def test_mutagen_timeout_is_actionable_private_and_never_repeated(self):
+        for operation in ('create', 'list', 'flush'):
+            with self.subTest(operation=operation):
+                timeout = subprocess.TimeoutExpired(['mutagen', 'private-detail'], 30, stderr='private-stderr')
+                with patch.object(self.module.subprocess, 'run', side_effect=timeout) as run:
+                    with self.assertRaisesRegex(ValueError, 'Mutagen command timed out; inspect session status before retrying') as caught:
+                        self.module._mutagen('/fake/tool', self.state, 'sync', operation)
+                self.assertNotIn('private-', str(caught.exception))
+                self.assertEqual(run.call_count, 1)

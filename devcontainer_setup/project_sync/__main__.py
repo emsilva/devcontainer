@@ -17,6 +17,7 @@ def parser():
     result = argparse.ArgumentParser(description='Synchronize project scratch files and hand off native agent sessions.')
     result.add_argument('--project', type=Path, default=Path.cwd())
     groups = result.add_subparsers(dest='group', required=True)
+    groups.add_parser('work', help='Continue a project conversation here or in its Codespace')
     sync = groups.add_parser('scratch').add_subparsers(dest='action', required=True)
     configure = sync.add_parser('configure', help='Pair this checkout with an already running Codespace')
     configure.add_argument('--codespace')
@@ -75,6 +76,12 @@ def _select_session(project, agent, state):
 
 
 def run(args, extra=()):
+    if args.group == 'work':
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            raise ValueError('task work requires a terminal. For scripts, use scratch status or agent sessions.')
+        from .work import run as work
+        project = discover_project(args.project.resolve())
+        return work(project, state_dir(project))
     project = discover_project(args.project.resolve())
     state = state_dir(project)
     if args.group == 'scratch':

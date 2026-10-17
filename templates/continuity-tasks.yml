@@ -1,3 +1,8 @@
+  work:
+    desc: Continue a project conversation here or in its Codespace
+    interactive: true
+    cmds:
+      - bash .devcontainer/scripts/project-sync.sh work {{.CLI_ARGS}}
   scratch:configure:
     desc: Pair this project's scratch directory with an existing Codespace
     interactive: true

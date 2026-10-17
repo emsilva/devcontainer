@@ -111,3 +111,69 @@ class TransportTests(unittest.TestCase):
             with patch.object(module.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=b'{}')) as run:
                 connection.python('print("{}")')
             self.assertTrue(run.call_args.args[0][-1].startswith('python3 -I -B -c '))
+
+    def test_github_token_timeout_is_actionable_and_private(self):
+        from unittest.mock import patch
+        from devcontainer_setup.project_sync import transport
+        error = subprocess.TimeoutExpired(['gh', 'private-token-detail'], 20, output='secret-output')
+        with patch.object(transport.subprocess, 'run', side_effect=error) as run:
+            with self.assertRaisesRegex(ValueError, 'authentication timed out') as caught:
+                transport.github_token({})
+        self.assertNotIn('private-token-detail', str(caught.exception))
+        self.assertNotIn('secret-output', str(caught.exception))
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertEqual(run.call_count, 1)
+
+    def test_gh_version_timeout_is_actionable_before_connection(self):
+        from unittest.mock import patch
+        from devcontainer_setup.project_sync import transport
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve()
+            (home / '.ssh').mkdir()
+            (home / '.ssh/codespaces.auto').touch()
+            connection = transport.CodespaceConnection('bound-name', state=home / 'state', env={'HOME': tmp})
+            with patch.object(transport.subprocess, 'run', side_effect=subprocess.TimeoutExpired('private-command', 10)) as run:
+                with self.assertRaisesRegex(ValueError, 'GitHub CLI check timed out'):
+                    connection.__enter__()
+            self.assertEqual(run.call_count, 1)
+            self.assertIsNone(connection.api)
+            self.assertIsNone(connection.child)
+
+    def test_python_timeout_is_actionable_and_context_cleans_connection(self):
+        from unittest.mock import patch, Mock, MagicMock
+        from devcontainer_setup.project_sync import transport
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve()
+            (home / '.ssh').mkdir()
+            (home / '.ssh/codespaces.auto').touch()
+            connection = transport.CodespaceConnection('bound-name', state=home / 'state', env={'HOME': tmp, 'GH_TOKEN': 'fixture'})
+            api = MagicMock()
+            child = Mock()
+            child.poll.return_value = None
+            version = Mock(stdout='gh version ' + transport.SUPPORTED_GH + ' (fixture)')
+            timeout = subprocess.TimeoutExpired('private-python-code', 60, stderr=b'private-stderr')
+            with patch.object(transport, 'ReadOnlyAPI', return_value=api), patch.object(transport.subprocess, 'Popen', return_value=child), patch.object(transport.socket, 'create_connection'), patch.object(transport.subprocess, 'run', side_effect=[version, timeout]) as run:
+                with self.assertRaisesRegex(ValueError, 'Remote Python/SSH timed out') as caught:
+                    with connection:
+                        connection.python('private-python-code')
+            self.assertNotIn('private-', str(caught.exception))
+            self.assertEqual(run.call_count, 2)
+            child.terminate.assert_called_once()
+            api.__exit__.assert_called_once()
+            self.assertIsNone(connection.api)
+
+    def test_failed_connection_entry_closes_read_only_api(self):
+        from unittest.mock import patch, Mock, MagicMock
+        from devcontainer_setup.project_sync import transport
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve()
+            (home / '.ssh').mkdir()
+            (home / '.ssh/codespaces.auto').touch()
+            connection = transport.CodespaceConnection('bound-name', state=home / 'state', env={'HOME': tmp, 'GH_TOKEN': 'fixture'})
+            api = MagicMock()
+            version = Mock(stdout='gh version ' + transport.SUPPORTED_GH + ' (fixture)')
+            with patch.object(transport, 'ReadOnlyAPI', return_value=api), patch.object(transport.subprocess, 'run', return_value=version), patch.object(transport.subprocess, 'Popen', side_effect=OSError('fixture forward unavailable')):
+                with self.assertRaises(OSError):
+                    connection.__enter__()
+            api.__exit__.assert_called_once()
+            self.assertIsNone(connection.api)

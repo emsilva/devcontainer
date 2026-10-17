@@ -187,8 +187,9 @@ def start(root: Path, state: Path) -> dict:
         package = __package__
         package_parent = Path(__file__).resolve().parents[len(package.split('.'))]
         env = dict(os.environ)
-        env['PYTHONPATH'] = str(package_parent) + (os.pathsep + env['PYTHONPATH'] if env.get('PYTHONPATH') else '')
-        child = subprocess.Popen([sys.executable, '-m', package + '.scratch', '--supervise',
+        bootstrap = ('import sys,runpy; sys.path.insert(0,' + repr(str(package_parent))
+                     + '); runpy.run_module(' + repr(package + '.scratch') + ',run_name="__main__")')
+        child = subprocess.Popen([sys.executable, '-I', '-B', '-c', bootstrap, '--supervise',
                                   str(root), str(state), nonce], cwd=root, env=env,
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
@@ -248,6 +249,59 @@ def _session_info(binary, state, receipt):
     return info
 
 
+def _reconciliation(info):
+    conflicts = info.get('conflicts', [])
+    paths = []
+    for conflict in conflicts[:100]:
+        path = conflict.get('root', '') if isinstance(conflict, dict) else ''
+        paths.append(''.join(c for c in str(path) if c.isprintable())[:300])
+    if conflicts:
+        return dict(phase='conflicts', conflicts=paths)
+    connected = all(info.get(side, {}).get('connected') is True for side in ('alpha', 'beta'))
+    clean = (connected and not info.get('paused') and info.get('status') == 'watching'
+             and not info.get('lastError') and not info.get('excludedConflicts')
+             and not any(info.get(side, {}).get('scanProblems') or info.get(side, {}).get('transitionProblems')
+                         or info.get(side, {}).get('excludedScanProblems') or info.get(side, {}).get('excludedTransitionProblems')
+                         for side in ('alpha', 'beta')))
+    return dict(phase='synchronized' if clean else 'waiting', conflicts=[])
+
+
+def inspect_sync(root, state):
+    runtime = status(Path(state))
+    if not runtime.get('running'):
+        return dict(runtime, phase='cleanup_required' if runtime.get('phase') == 'cleanup_required' else 'stopped')
+    if runtime.get('phase') in ('stopped', 'cleanup_required'):
+        return runtime
+    config = _config(root, state)
+    receipt = _saved_session(state, config)
+    if receipt is None:
+        return dict(phase='connecting', conflicts=[])
+    info = _session_info(install_mutagen(state), state, receipt)
+    return _reconciliation(info) if info else dict(phase='connecting', conflicts=[])
+
+
+def flush(root, state):
+    config = _config(root, state)
+    runtime = status(Path(state))
+    if not runtime.get('running') or runtime.get('phase') != 'syncing':
+        raise ValueError('Scratch sync is not connected; start sync and wait before switching')
+    receipt = _saved_session(state, config)
+    if receipt is None:
+        raise ValueError('Scratch session is not ready; wait and retry')
+    binary = install_mutagen(state)
+    info = _session_info(binary, state, receipt)
+    if info is None:
+        raise ValueError('Scratch session is not ready; wait and retry')
+    current = _reconciliation(info)
+    if current['phase'] == 'conflicts':
+        raise ValueError('Scratch conflicts: ' + ', '.join(current['conflicts']))
+    _mutagen(binary, state, 'sync', 'flush', info['identifier'], timeout=120)
+    current = _reconciliation(_session_info(binary, state, receipt) or {})
+    if current['phase'] != 'synchronized':
+        raise ValueError('Scratch reconciliation is not verified; inspect conflicts and wait before switching')
+    return current
+
+
 def _pause_saved_session(binary, state, receipt):
     info = _session_info(binary, state, receipt)
     if info is not None:
@@ -291,8 +345,11 @@ def stop(state: Path) -> dict:
 
 
 def _mutagen(binary, state, *args, timeout=30):
-    result = subprocess.run([str(binary), *args], env=mutagen_env(state),
-                            capture_output=True, text=True, timeout=timeout)
+    try:
+        result = subprocess.run([str(binary), *args], env=mutagen_env(state),
+                                capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise ValueError('Mutagen command timed out; inspect session status before retrying.') from None
     if result.returncode:
         raise ValueError('Mutagen command failed (' + args[0] + '); inspect session status.')
     return result.stdout[-32768:]

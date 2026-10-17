@@ -56,7 +56,10 @@ def github_token(env=None):
     args = ['gh', 'auth', 'token', '--hostname', 'github.com']
     if source.get('DEVCONTAINER_GH_USER'):
         args += ['--user', source['DEVCONTAINER_GH_USER']]
-    result = subprocess.run(args, env=clean_env(source), capture_output=True, text=True, timeout=20)
+    try:
+        result = subprocess.run(args, env=clean_env(source), capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired:
+        raise ValueError('GitHub authentication timed out; check GitHub CLI authentication and retry.') from None
     if result.returncode or not result.stdout.strip():
         raise ValueError('GitHub authentication unavailable; set GH_TOKEN or DEVCONTAINER_GH_USER.')
     return result.stdout.strip()
@@ -176,6 +179,8 @@ class CodespaceConnection:
             raise ValueError('Codespace SSH key missing (~/.ssh/codespaces.auto); configure SSH explicitly first.')
         try:
             version = subprocess.run(['gh', '--version'], env=clean_env(self.env), capture_output=True, text=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            raise ValueError('GitHub CLI check timed out; verify gh is responsive and retry.') from None
         except OSError as error:
             raise ValueError('GitHub CLI is required for scratch sync.') from error
         if not version.stdout.startswith('gh version ' + SUPPORTED_GH + ' '):
@@ -239,10 +244,13 @@ class CodespaceConnection:
     def python(self, code: str, payload: bytes = b'', timeout: int = 60) -> bytes:
         path = self.state / 'ssh-probe-config'
         self.ssh_config(path)
-        result = subprocess.run(
-            ['ssh', '-F', str(path), '-T', 'project-sync', 'python3 -I -B -c ' + shlex.quote(code)],
-            input=payload, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=clean_env(self.env), timeout=timeout)
+        try:
+            result = subprocess.run(
+                ['ssh', '-F', str(path), '-T', 'project-sync', 'python3 -I -B -c ' + shlex.quote(code)],
+                input=payload, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=clean_env(self.env), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise ValueError('Remote Python/SSH timed out; inspect Codespace connectivity and status before retrying.') from None
         if result.returncode:
             # Do not relay arbitrary upstream/credential-bearing stderr to logs.
             raise ValueError('Remote Python/SSH failed; verify pre-existing sshd on port 2222 and the dedicated host key.')
