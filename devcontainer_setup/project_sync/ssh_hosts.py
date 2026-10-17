@@ -1,6 +1,7 @@
 """A project-owned OpenSSH alias for the supervisor's existing live forward."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -47,20 +48,32 @@ def _block(alias: str, include: Path) -> bytes:
             f'# devcontainer-setup:{alias} end\n').encode()
 
 
-def _alias_config(state: Path, alias: str) -> bytes:
-    data = _read(state / 'ssh-config', private=True)
+def _alias_config(state: Path, alias: str, data: bytes | None = None) -> bytes:
+    owned = data is not None
+    if data is None:
+        data = _read(state / 'ssh-config', private=True)
     try:
         rows = [shlex.split(line, comments=True) for line in data.decode().splitlines()]
     except (ValueError, UnicodeDecodeError) as error:
         raise ValueError('Invalid worker SSH forward configuration') from error
     rows = [row for row in rows if row]
-    if not rows or rows[0] != ['Host', 'project-sync']:
+    if owned:
+        if not rows or rows[-1] != ['Host', '*']:
+            raise ValueError('Invalid pending SSH alias configuration')
+        rows.pop()
+    if not rows or rows[0] != ['Host', alias if owned else 'project-sync']:
         raise ValueError('Worker SSH forward must name project-sync')
     values = {}
     for row in rows[1:]:
         if len(row) != 2 or row[0].lower() in values:
             raise ValueError('Invalid worker SSH forward directive')
         values[row[0].lower()] = row[1]
+    extra = {'proxycommand': 'none', 'proxyjump': 'none',
+             'permitlocalcommand': 'no', 'remotecommand': 'none'}
+    if owned:
+        for key, value in extra.items():
+            if values.pop(key, None) != value:
+                raise ValueError('Unsafe pending SSH alias configuration')
     home = Path(os.environ.get('HOME') or Path.home())
     required = {'hostname': '127.0.0.1', 'user': 'vscode',
                 'identityfile': str(home / '.ssh/codespaces.auto'), 'identitiesonly': 'yes',
@@ -94,48 +107,142 @@ def _directory(config: Path) -> None:
         raise ValueError('SSH directory ownership or permissions are unsafe')
 
 
+def _optional_json(path: Path):
+    try:
+        return read_json(path)
+    except FileNotFoundError:
+        return None
+
+
+def _version(path: Path, *, private: bool = False):
+    try:
+        return _read(path, private=private), stat.S_IMODE(path.lstat().st_mode)
+    except FileNotFoundError:
+        return None, None
+
+
+def _digest(data: bytes | None):
+    return hashlib.sha256(data).hexdigest() if data is not None else None
+
+
+def _encode(value):
+    return json.dumps(value, sort_keys=True).encode() + b'\n'
+
+
+def _context(project_id, config, include):
+    return {'schema': 1, 'project_id': project_id, 'alias': 'devcontainer-' + project_id,
+            'config': str(config), 'include': str(include)}
+
+
+def _finish(state: Path, project_id: str, pending: dict) -> None:
+    """Replay only exact owned before/after versions; never guess at user edits."""
+    config, include, receipt = _paths(state)
+    context = _context(project_id, config, include)
+    paths = {'include': include, 'config': config, 'receipt': receipt}
+    if pending.get('context') != context or set(pending.get('artifacts', {})) != set(paths):
+        raise ValueError('Pending SSH transaction ownership conflicts with this project')
+    prepared = {}
+    for name, path in paths.items():
+        item = pending['artifacts'][name]
+        try:
+            data = base64.b64decode(item['data'], validate=True)
+            mode, before_mode = item['mode'], item['before_mode']
+            before, after = item['before'], item['after']
+            if (not isinstance(mode, int) or not 0 <= mode <= 0o777 or mode & 0o022
+                    or (before_mode is not None and (not isinstance(before_mode, int)
+                        or not 0 <= before_mode <= 0o777 or before_mode & 0o022))
+                    or (before is not None and (not isinstance(before, str) or not re.fullmatch('[0-9a-f]{64}', before)))
+                    or after != _digest(data) or (before is None) != (before_mode is None)):
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            raise ValueError('Invalid pending SSH transaction artifact') from None
+        current, current_mode = _version(path, private=name != 'config')
+        current_digest = _digest(current)
+        allowed_modes = set()
+        if current_digest == before:
+            allowed_modes.add(before_mode)
+        if current_digest == after:
+            allowed_modes.add(mode)
+        if current_mode not in allowed_modes:
+            raise ValueError(f'Owned SSH {name} was modified during a pending transaction; review required')
+        prepared[name] = (path, data, mode, current, current_mode)
+    # The journal must describe this producer's exact safe alias and receipt.
+    target_include = prepared['include'][1]
+    if _alias_config(state, context['alias'], target_include) != target_include:
+        raise ValueError('Invalid pending SSH alias bytes')
+    expected_receipt = _encode(dict(context, sha256=_digest(target_include)))
+    if prepared['receipt'][1] != expected_receipt:
+        raise ValueError('Invalid pending SSH receipt bytes')
+    block = _block(context['alias'], include)
+    target_config = prepared['config'][1]
+    if (target_config.count(block) != 1
+            or target_config.count(f'devcontainer-setup:{context["alias"]}'.encode()) != 2):
+        raise ValueError('Invalid pending SSH include ownership block')
+    config_item = pending['artifacts']['config']
+    if config_item['before'] != config_item['after']:
+        # Initial setup can only prepend the owned include to the exact bytes
+        # reviewed before the transaction. Refresh never rewrites global SSH.
+        original = target_config[len(block):]
+        if (not target_config.startswith(block)
+                or (_digest(original) if config_item['before'] is not None else None) != config_item['before']
+                or (config_item['before'] is None and original)):
+            raise ValueError('Invalid pending SSH global configuration transition')
+    for path, data, mode, current, current_mode in prepared.values():
+        if current != data or current_mode != mode:
+            atomic_write(path, data, mode=mode)
+    with _parent(state / 'herdr-ssh.pending.json', private=True) as (parent, name):
+        os.unlink(name, dir_fd=parent)
+        os.fsync(parent)
+
+
 def _configure(state: Path, project_id: str | None) -> str | None:
     config, include, receipt_path = _paths(state)
-    try:
-        receipt = read_json(receipt_path)
-    except FileNotFoundError:
-        if project_id is None:
-            return None  # Background reconnect never creates global SSH setup.
-        receipt = None
-    if project_id is None:
-        project_id = receipt.get('project_id')
-    if not isinstance(project_id, str) or not re.fullmatch('[0-9a-f]{24}', project_id):
-        raise ValueError('Invalid SSH alias project identity')
-    alias = 'devcontainer-' + project_id
-    block = _block(alias, include)
-    candidate = _alias_config(state, alias)
+    pending_path = state / 'herdr-ssh.pending.json'
+    pending = _optional_json(pending_path)
+    if project_id is None and pending is None and _optional_json(receipt_path) is None:
+        return None  # Background reconnect never initiates global SSH setup.
     _directory(config)
     with locked(config.parent / '.devcontainer-setup.lock', blocking=True):
-        try:
-            original = _read(config)
-            mode = stat.S_IMODE(config.lstat().st_mode)
-        except FileNotFoundError:
-            original, mode = b'', 0o600
+        pending = _optional_json(pending_path)
+        if project_id is None:
+            owner = pending.get('context', {}) if pending else (_optional_json(receipt_path) or {})
+            project_id = owner.get('project_id')
+        if not isinstance(project_id, str) or not re.fullmatch('[0-9a-f]{24}', project_id):
+            raise ValueError('Invalid SSH alias project identity')
+        if pending is not None:
+            _finish(state, project_id, pending)
+        # Finish a previous acknowledged intent before adapting a newer worker
+        # forward. In particular, its stale port never becomes new authority.
+        receipt = _optional_json(receipt_path)
+        context = _context(project_id, config, include)
+        alias = context['alias']
+        block = _block(alias, include)
+        candidate = _alias_config(state, alias)
+        original, mode = _version(config)
         if receipt is not None:
-            expected = {'schema': 1, 'project_id': project_id, 'alias': alias,
-                        'config': str(config), 'include': str(include)}
-            if any(receipt.get(key) != value for key, value in expected.items()):
+            if any(receipt.get(key) != value for key, value in context.items()):
                 raise ValueError('SSH alias ownership receipt conflicts with this project')
-            if original.count(block) != 1 or original.count(f'devcontainer-setup:{alias}'.encode()) != 2:
+            if original is None or original.count(block) != 1 or original.count(f'devcontainer-setup:{alias}'.encode()) != 2:
                 raise ValueError('Owned SSH include block is missing or modified')
             if hashlib.sha256(_read(include, private=True)).hexdigest() != receipt.get('sha256'):
                 raise ValueError('Owned SSH include was modified; review required')
         else:
-            if include.exists() or include.is_symlink() or alias.encode() in original:
+            if include.exists() or include.is_symlink() or alias.encode() in (original or b''):
                 raise ValueError('SSH alias already exists without an ownership receipt')
         digest = hashlib.sha256(candidate).hexdigest()
         if receipt is None or receipt['sha256'] != digest:
-            atomic_write(include, candidate)
-            atomic_write(receipt_path, json.dumps({'schema': 1, 'project_id': project_id, 'alias': alias,
-                         'config': str(config), 'include': str(include),
-                         'sha256': digest}, sort_keys=True).encode() + b'\n')
-        if receipt is None:
-            atomic_write(config, block + original, mode=mode)
+            targets = {'include': (include, candidate, 0o600),
+                       'config': (config, original if receipt else block + (original or b''), mode or 0o600),
+                       'receipt': (receipt_path, _encode(dict(context, sha256=digest)), 0o600)}
+            artifacts = {}
+            for name, (path, data, target_mode) in targets.items():
+                before, before_mode = _version(path, private=name != 'config')
+                artifacts[name] = {'before': _digest(before), 'before_mode': before_mode,
+                                   'after': _digest(data), 'mode': target_mode,
+                                   'data': base64.b64encode(data).decode()}
+            pending = {'context': context, 'artifacts': artifacts}
+            atomic_write(pending_path, _encode(pending))
+            _finish(state, project_id, pending)
     return alias
 
 

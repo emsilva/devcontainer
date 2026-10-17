@@ -113,6 +113,73 @@ class SSHHostsTests(unittest.TestCase):
         self.assertIn('permitlocalcommand no\n', result.stdout)
         self.assertNotIn('surprise-command', result.stdout)
 
+    def fail_write(self, destination):
+        original = ssh_hosts.atomic_write
+        def interrupted(path, data, mode=0o600):
+            if Path(path) == destination:
+                raise OSError('injected interrupted owned write')
+            return original(path, data, mode=mode)
+        return mock.patch.object(ssh_hosts, 'atomic_write', side_effect=interrupted)
+
+    def test_initial_global_write_interruption_replays_before_current_forward(self):
+        with self.fail_write(self.config), self.assertRaisesRegex(OSError, 'injected'):
+            ssh_hosts.configure_ssh(self.project, self.state)
+        self.assertEqual(self.config.read_bytes(), self.original)
+        self.assertTrue((self.state / 'herdr-ssh.pending.json').exists())
+        self.forward(33000)
+        alias = ssh_hosts.configure_ssh(self.project, self.state)
+        self.assertTrue(self.config.read_bytes().endswith(self.original))
+        self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o644)
+        self.assertFalse((self.state / 'herdr-ssh.pending.json').exists())
+        resolved = subprocess.run(['ssh', '-G', '-F', str(self.config), alias],
+                                  text=True, capture_output=True, check=True).stdout
+        self.assertIn('port 33000\n', resolved)
+
+    def test_refresh_receipt_interruption_replays_old_target_then_latest_forward(self):
+        alias = ssh_hosts.configure_ssh(self.project, self.state)
+        config_before = self.config.read_bytes()
+        receipt_path = self.state / 'herdr-ssh.json'
+        self.forward(32000)
+        with self.fail_write(receipt_path), self.assertRaisesRegex(OSError, 'injected'):
+            ssh_hosts.refresh_ssh(self.state)
+        interrupted_digest = __import__('hashlib').sha256((self.state / 'herdr-ssh-config').read_bytes()).hexdigest()
+        self.forward(34000)
+        real_write = ssh_hosts.atomic_write
+        written_receipts = []
+        def observe(path, data, mode=0o600):
+            if Path(path) == receipt_path:
+                written_receipts.append(json.loads(data)['sha256'])
+            return real_write(path, data, mode=mode)
+        with mock.patch.object(ssh_hosts, 'atomic_write', side_effect=observe):
+            ssh_hosts.refresh_ssh(self.state)
+        self.assertEqual(written_receipts[0], interrupted_digest)
+        self.assertEqual(len(written_receipts), 2)
+        self.assertNotEqual(written_receipts[0], written_receipts[1])
+        self.assertEqual(self.config.read_bytes(), config_before)
+        self.assertFalse((self.state / 'herdr-ssh.pending.json').exists())
+        resolved = subprocess.run(['ssh', '-G', '-F', str(self.config), alias],
+                                  text=True, capture_output=True, check=True).stdout
+        self.assertIn('port 34000\n', resolved)
+
+    def test_unknown_owner_edits_to_pending_artifacts_are_preserved_and_refused(self):
+        with self.fail_write(self.config), self.assertRaises(OSError):
+            ssh_hosts.configure_ssh(self.project, self.state)
+        paths = [self.config, self.state / 'herdr-ssh-config', self.state / 'herdr-ssh.json']
+        baseline = {path: path.read_bytes() if path.exists() else None for path in paths}
+        for target in paths:
+            with self.subTest(target=target.name):
+                for path, data in baseline.items():
+                    if data is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.write_bytes(data)
+                target.write_bytes(b'{"owner": "edited"}\n' if target.name.endswith('.json') else b'# owner edit\n')
+                before = {path: path.read_bytes() if path.exists() else None for path in paths}
+                with self.assertRaisesRegex(ValueError, 'pending|transaction|modified|ownership'):
+                    ssh_hosts.configure_ssh(self.project, self.state)
+                self.assertEqual({path: path.read_bytes() if path.exists() else None for path in paths}, before)
+                self.assertTrue((self.state / 'herdr-ssh.pending.json').exists())
+
 
 if __name__ == '__main__':
     unittest.main()
