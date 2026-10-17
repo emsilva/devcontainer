@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import secrets
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -179,6 +180,54 @@ def _ssh_problem(stderr):
     return ('SSH connection failed; inspect Codespace connectivity and the dedicated SSH configuration.', False)
 
 
+def _check_gh(env):
+    try:
+        version = subprocess.run(['gh', '--version'], env=clean_env(env), capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        raise ValueError('GitHub CLI check timed out; verify gh is responsive and retry.') from None
+    except OSError as error:
+        raise ValueError('GitHub CLI is required for project connections.') from error
+    if not version.stdout.startswith('gh version ' + SUPPORTED_GH + ' '):
+        raise ValueError('Scratch transport requires tested GitHub CLI ' + SUPPORTED_GH + '; run the offline compatibility gate before upgrading.')
+
+
+def herdr_stdio(codespace: str, state: str | Path) -> int:
+    """Proxy raw Herdr SSH bytes through native gh activity reporting.
+
+    This is the owned SSH alias's entrypoint, never the background sync path.
+    Its fresh API capability cannot start a Codespace during Herdr reconnect.
+    """
+    from .state import read_json
+    child, handlers = None, {}
+    def shutdown(number, *_):
+        raise SystemExit(128 + number)
+    try:
+        name, state = _name(codespace), Path(state)
+        if not state.is_absolute() or '..' in state.parts:
+            raise ValueError('Invalid proxy state')
+        if read_json(state / 'scratch.json').get('codespace') != name:
+            raise ValueError('Codespace binding changed')
+        key = Path(os.environ.get('HOME') or Path.home()) / '.ssh/codespaces.auto'
+        if not key.is_file():
+            raise ValueError('Paired SSH key missing')
+        _check_gh(os.environ)
+        for number in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
+            handlers[number] = signal.signal(number, shutdown)
+        with ReadOnlyAPI(name, github_token()) as api:
+            child = subprocess.Popen(['gh', 'codespace', 'ssh', '-c', name, '--stdio', '--', '-i', str(key)],
+                    env=api.child_env(), stderr=subprocess.DEVNULL, start_new_session=True)
+            return child.wait()
+    except (OSError, ValueError):
+        print('Herdr Codespace SSH proxy unavailable; run task work:cs to reconnect.', file=sys.stderr)
+        return 1
+    finally:
+        # gh --stdio is the byte-stream process itself, with no ssh grandchild.
+        # Reap it even when OpenSSH kills only this ProxyCommand wrapper.
+        _terminate(child)
+        for number, previous in handlers.items():
+            signal.signal(number, previous)
+
+
 class CodespaceConnection:
     def __init__(self, codespace: str, *, state: Path, env=None):
         self.codespace = _name(codespace)
@@ -195,14 +244,7 @@ class CodespaceConnection:
         self.key = Path(self.env.get('HOME', str(Path.home()))) / '.ssh/codespaces.auto'
         if not self.key.is_file():
             raise ValueError('Codespace SSH key missing (~/.ssh/codespaces.auto); configure SSH explicitly first.')
-        try:
-            version = subprocess.run(['gh', '--version'], env=clean_env(self.env), capture_output=True, text=True, timeout=10)
-        except subprocess.TimeoutExpired:
-            raise ValueError('GitHub CLI check timed out; verify gh is responsive and retry.') from None
-        except OSError as error:
-            raise ValueError('GitHub CLI is required for scratch sync.') from error
-        if not version.stdout.startswith('gh version ' + SUPPORTED_GH + ' '):
-            raise ValueError('Scratch transport requires tested GitHub CLI ' + SUPPORTED_GH + '; run the offline compatibility gate before upgrading.')
+        _check_gh(self.env)
         # Establish private state before accepting a host key. Shared SSH config
         # and ~/.ssh/known_hosts are never read or changed.
         atomic_write(self.state / '.transport-state', b'1\n')

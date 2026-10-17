@@ -30,7 +30,7 @@ class SSHHostsTests(unittest.TestCase):
         self.config.chmod(0o644)
         self.forward(31000)
 
-    def forward(self, port):
+    def forward(self, port, host='test-codespace'):
         text = f'''Host project-sync
   HostName 127.0.0.1
   Port {port}
@@ -39,7 +39,7 @@ class SSHHostsTests(unittest.TestCase):
   IdentitiesOnly yes
   BatchMode yes
   StrictHostKeyChecking yes
-  HostKeyAlias "test-codespace"
+  HostKeyAlias "{host}"
   UserKnownHostsFile "{self.state}/known_hosts"
   GlobalKnownHostsFile /dev/null
   ConnectTimeout 15
@@ -62,9 +62,20 @@ class SSHHostsTests(unittest.TestCase):
         resolved = subprocess.run(['ssh', '-G', '-F', str(self.config), alias], text=True,
                                   capture_output=True, check=True).stdout
         self.assertIn('hostname 127.0.0.1\n', resolved)
-        self.assertIn('port 31000\n', resolved)
+        self.assertIn('port 2222\n', resolved)
         self.assertIn('stricthostkeychecking true\n', resolved)
         self.assertIn('hostkeyalias test-codespace\n', resolved)
+
+    def test_herdr_alias_uses_native_proxy_instead_of_a_rotating_worker_port(self):
+        alias = ssh_hosts.configure_ssh(self.project, self.state)
+        include = (self.state / 'herdr-ssh-config').read_bytes()
+        self.forward(32000)
+        ssh_hosts.refresh_ssh(self.state)
+        self.assertEqual((self.state / 'herdr-ssh-config').read_bytes(), include)
+        resolved = subprocess.check_output(['ssh', '-G', '-F', str(self.config), alias], text=True)
+        self.assertIn('port 2222\n', resolved)
+        self.assertIn('herdr_stdio', resolved)
+        self.assertIn('stricthostkeychecking true\n', resolved)
 
     def test_refresh_only_updates_previously_owned_alias(self):
         ssh_hosts.refresh_ssh(self.state)
@@ -76,7 +87,7 @@ class SSHHostsTests(unittest.TestCase):
         self.assertEqual(self.config.read_bytes(), original)
         result = subprocess.run(['ssh', '-G', '-F', str(self.config), alias],
                                 capture_output=True, text=True, check=True)
-        self.assertIn('port 32000\n', result.stdout)
+        self.assertIn('port 2222\n', result.stdout)
 
     def test_modified_owned_include_or_root_block_is_refused(self):
         ssh_hosts.configure_ssh(self.project, self.state)
@@ -127,24 +138,25 @@ class SSHHostsTests(unittest.TestCase):
             ssh_hosts.configure_ssh(self.project, self.state)
         self.assertEqual(self.config.read_bytes(), self.original)
         self.assertTrue((self.state / 'herdr-ssh.pending.json').exists())
-        self.forward(33000)
+        self.forward(33000, 'replacement-codespace')
         alias = ssh_hosts.configure_ssh(self.project, self.state)
         self.assertTrue(self.config.read_bytes().endswith(self.original))
         self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o644)
         self.assertFalse((self.state / 'herdr-ssh.pending.json').exists())
         resolved = subprocess.run(['ssh', '-G', '-F', str(self.config), alias],
                                   text=True, capture_output=True, check=True).stdout
-        self.assertIn('port 33000\n', resolved)
+        self.assertIn('port 2222\n', resolved)
+        self.assertIn('hostkeyalias replacement-codespace\n', resolved)
 
     def test_refresh_receipt_interruption_replays_old_target_then_latest_forward(self):
         alias = ssh_hosts.configure_ssh(self.project, self.state)
         config_before = self.config.read_bytes()
         receipt_path = self.state / 'herdr-ssh.json'
-        self.forward(32000)
+        self.forward(32000, 'replacement-codespace')
         with self.fail_write(receipt_path), self.assertRaisesRegex(OSError, 'injected'):
             ssh_hosts.refresh_ssh(self.state)
         interrupted_digest = hashlib.sha256((self.state / 'herdr-ssh-config').read_bytes()).hexdigest()
-        self.forward(34000)
+        self.forward(34000, 'latest-codespace')
         real_write = ssh_hosts.atomic_write
         written_receipts = []
         def observe(path, data, mode=0o600):
@@ -160,7 +172,50 @@ class SSHHostsTests(unittest.TestCase):
         self.assertFalse((self.state / 'herdr-ssh.pending.json').exists())
         resolved = subprocess.run(['ssh', '-G', '-F', str(self.config), alias],
                                   text=True, capture_output=True, check=True).stdout
-        self.assertIn('port 34000\n', resolved)
+        self.assertIn('port 2222\n', resolved)
+        self.assertIn('hostkeyalias latest-codespace\n', resolved)
+
+    def test_legacy_pending_forward_replays_before_native_proxy_upgrade(self):
+        alias = 'devcontainer-' + self.project.project_id
+        current_alias = ssh_hosts._alias_config
+        native = current_alias(self.state, alias)
+        legacy = b'\n'.join(b'  ProxyCommand none' if line.startswith(b'  ProxyCommand ')
+                            else line.replace(b'port "2222"', b'port "31000"')
+                            for line in native.split(b'\n'))
+        def old_producer(state, name, data=None):
+            return legacy if data is None else current_alias(state, name, data)
+        with mock.patch.object(ssh_hosts, '_alias_config', side_effect=old_producer), self.fail_write(self.config):
+            with self.assertRaisesRegex(OSError, 'injected'):
+                ssh_hosts.configure_ssh(self.project, self.state)
+        self.assertEqual((self.state / 'herdr-ssh-config').read_bytes(), legacy)
+        self.assertTrue((self.state / 'herdr-ssh.pending.json').exists())
+        ssh_hosts.configure_ssh(self.project, self.state)
+        self.assertEqual((self.state / 'herdr-ssh-config').read_bytes(), native)
+        self.assertTrue(self.config.read_bytes().endswith(self.original))
+        self.assertFalse((self.state / 'herdr-ssh.pending.json').exists())
+
+    def test_pending_native_proxy_cannot_add_shell_commands(self):
+        with self.fail_write(self.config), self.assertRaises(OSError):
+            ssh_hosts.configure_ssh(self.project, self.state)
+        pending_path = self.state / 'herdr-ssh.pending.json'
+        pending = json.loads(pending_path.read_text())
+        import base64
+        entry = pending['artifacts']['include']
+        data = b'\n'.join(line + b'; touch /tmp/foreign' if line.startswith(b'  ProxyCommand ')
+                           else line for line in base64.b64decode(entry['data']).split(b'\n'))
+        entry['data'], entry['after'] = base64.b64encode(data).decode(), hashlib.sha256(data).hexdigest()
+        (self.state / 'herdr-ssh-config').write_bytes(data)
+        receipt_entry = pending['artifacts']['receipt']
+        receipt = json.loads(base64.b64decode(receipt_entry['data']))
+        receipt['sha256'] = entry['after']
+        receipt_data = ssh_hosts._encode(receipt)
+        receipt_entry['data'] = base64.b64encode(receipt_data).decode()
+        receipt_entry['after'] = hashlib.sha256(receipt_data).hexdigest()
+        pending_path.write_text(json.dumps(pending))
+        before = self.config.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'Unsafe pending SSH proxy command'):
+            ssh_hosts.configure_ssh(self.project, self.state)
+        self.assertEqual(self.config.read_bytes(), before)
 
     def test_unknown_owner_edits_to_pending_artifacts_are_preserved_and_refused(self):
         with self.fail_write(self.config), self.assertRaises(OSError):

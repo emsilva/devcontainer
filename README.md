@@ -84,6 +84,11 @@ checkpoints of committed history, staged and unstaged code, nonignored new files
 The first entry seeds a separate remote checkout from your desktop; existing
 checkouts and their edits are preserved.
 
+Herdr connects through GitHub's native SSH transport so its activity resets the
+Codespace idle timer. Silent connections can still time out normally. Background
+backups never restart the Codespace. Reopening reuses the workspace and sync worker.
+Updated helpers automatically replace an older worker when you reconnect.
+
 When credits run out or the Codespace is unreachable, run:
 
 ```sh

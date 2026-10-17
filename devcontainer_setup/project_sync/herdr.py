@@ -55,6 +55,25 @@ def _workspace(project, root: str, prefix: list[str]):
         matches = [row for row in rows if (row.get('worktree') or {}).get('checkout_path') == root]
     except (KeyError, TypeError, AttributeError):
         raise ValueError('Herdr did not return workspace checkout metadata') from None
+    if not matches:
+        # Ordinary `workspace create --cwd` entries have no worktree metadata.
+        # Pane cwd is the launch directory; foreground_cwd changes as a shell
+        # navigates and must never turn an unrelated workspace into a match.
+        for row in sorted(rows, key=lambda row: not row.get('focused', False)):
+            if row.get('worktree'):
+                continue
+            candidate = row.get('workspace_id')
+            if not isinstance(candidate, str) or not candidate or candidate.startswith('-'):
+                raise ValueError('Herdr returned an invalid workspace ID')
+            panes = _json([*prefix, 'pane', 'list', '--workspace', candidate])
+            try:
+                found = any(pane.get('workspace_id') == candidate and pane.get('cwd') == root
+                            for pane in panes['result']['panes'])
+            except (KeyError, TypeError, AttributeError):
+                raise ValueError('Herdr did not return pane launch directories') from None
+            if found:
+                matches.append(row)
+                break
     if matches:
         workspace_id = matches[0].get('workspace_id')
     else:

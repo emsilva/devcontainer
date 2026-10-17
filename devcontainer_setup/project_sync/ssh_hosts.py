@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import shlex
 import stat
+import sys
 
 from .state import _parent, _regular, atomic_write, locked, read_json
 
@@ -48,12 +49,28 @@ def _block(alias: str, include: Path) -> bytes:
             f'# devcontainer-setup:{alias} end\n').encode()
 
 
+def _proxy_command(state: Path, codespace: str) -> str:
+    package_parent = Path(__file__).resolve().parents[len(__package__.split('.'))]
+    bootstrap = ('import sys;sys.path.insert(0,' + repr(str(package_parent)) + ');from '
+                 + __package__ + '.transport import herdr_stdio;'
+                 'raise SystemExit(herdr_stdio(sys.argv[1],sys.argv[2]))')
+    args = [sys.executable, '-I', '-B', '-c', bootstrap, codespace, str(state)]
+    if any(char in arg for arg in args for char in '\r\n\0%'):
+        raise ValueError('Unsupported SSH proxy path')
+    return shlex.join(args)
+
+
 def _alias_config(state: Path, alias: str, data: bytes | None = None) -> bytes:
     owned = data is not None
     if data is None:
         data = _read(state / 'ssh-config', private=True)
     try:
-        rows = [shlex.split(line, comments=True) for line in data.decode().splitlines()]
+        rows = []
+        for line in data.decode().splitlines():
+            proxy_line = re.fullmatch(r'\s*ProxyCommand\s+(.*)', line, re.I)
+            # OpenSSH passes this directive's raw remainder to a shell. Compare
+            # it byte-for-byte rather than changing its shell quoting with split.
+            rows.append(['ProxyCommand', proxy_line[1]] if proxy_line else shlex.split(line, comments=True))
     except (ValueError, UnicodeDecodeError) as error:
         raise ValueError('Invalid worker SSH forward configuration') from error
     rows = [row for row in rows if row]
@@ -68,8 +85,8 @@ def _alias_config(state: Path, alias: str, data: bytes | None = None) -> bytes:
         if len(row) != 2 or row[0].lower() in values:
             raise ValueError('Invalid worker SSH forward directive')
         values[row[0].lower()] = row[1]
-    extra = {'proxycommand': 'none', 'proxyjump': 'none',
-             'permitlocalcommand': 'no', 'remotecommand': 'none'}
+    extra = {'proxyjump': 'none', 'permitlocalcommand': 'no', 'remotecommand': 'none'}
+    proxy = values.pop('proxycommand', None) if owned else None
     if owned:
         for key, value in extra.items():
             if values.pop(key, None) != value:
@@ -88,11 +105,20 @@ def _alias_config(state: Path, alias: str, data: bytes | None = None) -> bytes:
         raise ValueError('Invalid worker SSH forward port')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,99}', values['hostkeyalias']):
         raise ValueError('Invalid worker SSH forward host identity')
-    # Re-emit only the validated allowlist; never copy executable SSH options.
+    expected_proxy = _proxy_command(state, values['hostkeyalias'])
+    legacy = owned and proxy == 'none'
+    if owned and proxy != expected_proxy and not legacy:
+        raise ValueError('Unsafe pending SSH proxy command')
+    # Legacy journals replay byte-for-byte before upgrading to the native proxy.
+    # New aliases are independent of the worker's rotating local forward port.
+    if not legacy:
+        values['port'] = '2222'
+    # Never copy executable worker options; this producer owns the exact bootstrap.
     lines = [f'Host {alias}']
     for key, value in values.items():
         lines.append(f'  {key} {_quote(Path(value))}')
-    lines.extend(('  ProxyCommand none', '  ProxyJump none', '  PermitLocalCommand no', '  RemoteCommand none'))
+    lines.append('  ProxyCommand ' + ('none' if legacy else expected_proxy))
+    lines.extend(('  ProxyJump none', '  PermitLocalCommand no', '  RemoteCommand none'))
     return ('\n'.join(lines) + '\nHost *\n').encode()
 
 

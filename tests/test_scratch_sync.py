@@ -108,6 +108,18 @@ class ScratchTests(unittest.TestCase):
         self.assertFalse((self.state / m.SESSION).exists())
         self.assertFalse((self.state / 'scratch-retarget.json').exists())
 
+    def test_same_binding_retarget_keeps_the_existing_forward_and_worker(self):
+        m = self.module
+        project = m.discover_project(self.root)
+        candidate = dict(version=1, identity=project.identity, root=str(self.root),
+                         codespace='fixture', remote_root='/workspaces/existing')
+        m._write(self.state / m.CONFIG, candidate)
+        before = (self.state / m.CONFIG).read_bytes()
+        with patch.object(m, 'stop') as stop:
+            self.assertEqual(m.retarget(self.root, self.state, 'fixture', '/workspaces/existing'), candidate)
+        stop.assert_not_called()
+        self.assertEqual((self.state / m.CONFIG).read_bytes(), before)
+
     def test_advanced_start_cannot_bypass_pending_retarget(self):
         self.module._write(self.state / 'scratch-retarget.json', {'pending': True})
         with patch.object(self.module, 'install_mutagen') as install:
@@ -212,13 +224,36 @@ class ScratchTests(unittest.TestCase):
             self.assertFalse(marker.exists(), 'Supervisor executed ambient Python startup code')
             self.assertEqual(list(package.rglob('__pycache__')), [])
             self.assertTrue(self.module.status(self.state)['running'])
-            self.assertEqual(self.module.start(self.root, self.state)['pid'], started['pid'])
+            # Identical bytes from a different runtime generate a different
+            # proxy bootstrap. Move ownership to that origin once, then reuse it.
+            with patch.dict(os.environ, env, clear=True):
+                relocated = self.module.start(self.root, self.state)
+                self.assertNotEqual(relocated['nonce'], started['nonce'])
+                self.assertEqual(self.module.start(self.root, self.state)['pid'], relocated['pid'])
+            copied_again = subprocess.run([os.sys.executable, '-I', '-B', '-c', code], env=env,
+                                          capture_output=True, text=True, timeout=15)
+            self.assertEqual(copied_again.returncode, 0, copied_again.stderr)
+            baseline = json.loads(copied_again.stdout)
+            self.assertNotEqual(baseline['nonce'], relocated['nonce'])
+            # Updating installed helpers must replace an already-loaded producer,
+            # otherwise its next reconnect can rewrite a newer SSH alias backwards.
+            with (package / 'ssh_hosts.py').open('a') as changed:
+                changed.write('\n# Simulated installed helper upgrade\n')
+            upgraded = subprocess.run([os.sys.executable, '-I', '-B', '-c', code], env=env,
+                                      capture_output=True, text=True, timeout=15)
+            self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+            replacement = json.loads(upgraded.stdout)
+            self.assertNotEqual(replacement['nonce'], baseline['nonce'])
+            reused = subprocess.run([os.sys.executable, '-I', '-B', '-c', code], env=env,
+                                   capture_output=True, text=True, timeout=15)
+            self.assertEqual(reused.returncode, 0, reused.stderr)
+            self.assertEqual(json.loads(reused.stdout)['pid'], replacement['pid'])
             self.assertFalse(self.module.stop(self.state)['running'])
             self.assertFalse(self.module.stop(self.state)['running'])
             # Restart from another shell creates a distinct nonce and process.
             again = subprocess.run([os.sys.executable, '-I', '-B', '-c', code], env=env, capture_output=True, text=True, timeout=15)
             self.assertEqual(again.returncode, 0, again.stderr)
-            self.assertNotEqual(json.loads(again.stdout)['nonce'], started['nonce'])
+            self.assertNotEqual(json.loads(again.stdout)['nonce'], replacement['nonce'])
             deadline = time.monotonic() + 5
             while self.module.status(self.state)['phase'] != 'waiting' and time.monotonic() < deadline:
                 time.sleep(.05)

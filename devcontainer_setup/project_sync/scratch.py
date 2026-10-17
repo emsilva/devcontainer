@@ -19,13 +19,26 @@ import time
 
 from .state import atomic_write, discover_project, locked, read_json
 from . import state as project_state
-from .tools import install_mutagen, mutagen_env
+from .tools import MANIFEST, install_mutagen, mutagen_env
 from .transport import CodespaceConnection
 
 CONFIG = 'scratch.json'
 RUNTIME = 'scratch-runtime.json'
 SESSION = 'scratch-session.json'
 _CHILDREN = {}
+
+
+def _runtime_id():
+    digest = hashlib.sha256()
+    # The alias bootstrap embeds these inputs, so identical source bytes from
+    # another checkout/interpreter are not the same running producer.
+    for value in (str(Path(__file__).parent.resolve()), __package__, sys.executable):
+        digest.update(value.encode() + b'\0')
+    for path in sorted(Path(__file__).parent.glob('*.py')):
+        digest.update(path.name.encode() + b'\0')
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    digest.update(hashlib.sha256(MANIFEST.read_bytes()).digest())
+    return digest.hexdigest()
 
 
 def _private_location(root, state):
@@ -179,13 +192,16 @@ def start(root: Path, state: Path) -> dict:
     _config(root, state)
     _private_location(root, state)
     _scratch(root)
+    runtime_id = _runtime_id()
     current = status(state)
-    if current.get('running') and current.get('checkpoint_version') != 1:
+    if current.get('running') and (current.get('checkpoint_version') != 1 or current.get('runtime_id') != runtime_id):
         stop(state)
     with locked(state / 'scratch-control.lock', blocking=True):
         current = status(state)
-        if current['running'] and current.get('checkpoint_version') == 1:
-            return current
+        if current['running']:
+            if current.get('checkpoint_version') == 1 and current.get('runtime_id') == runtime_id:
+                return current
+            raise ValueError('Another worker started during the helper upgrade; retry task work:cs.')
         if current.get('phase') != 'stopped' and current.get('session'):
             _recover_session(state, current)
         # Installation failures happen synchronously and clearly to the caller.
@@ -375,6 +391,13 @@ def retarget(root, state, codespace, remote_root):
     candidate = dict(version=1, identity=project.identity, root=str(project.root),
                      codespace=codespace, remote_root=remote_root)
     intent_path = state / 'scratch-retarget.json'
+    with locked(state / 'scratch-control.lock', blocking=True):
+        if not intent_path.exists():
+            try:
+                if read_json(state / CONFIG) == candidate:
+                    return candidate  # Reopening work must not tear down live SSH clients.
+            except FileNotFoundError:
+                pass
     if not intent_path.exists() or status(state).get('running'):
         stop(state)
     with locked(state / 'scratch-control.lock', blocking=True):
@@ -455,7 +478,7 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
         receipt = _saved_session(state, config)
         runtime = {'pid': os.getpid(), 'nonce': nonce, 'process_identity': _process_identity(os.getpid()),
                    'phase': 'starting', 'session': receipt['name'] if receipt else None,
-                   'checkpoint_version': 1}
+                   'checkpoint_version': 1, 'runtime_id': _runtime_id()}
         def update(phase, **values):
             runtime.update(phase=phase, **values)
             _write(state / RUNTIME, runtime)

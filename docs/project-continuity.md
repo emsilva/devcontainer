@@ -86,10 +86,13 @@ It reconnects to an already running space. Run `task work:cs` after a Mac reboot
 Connections wait up to 45 seconds for a successful SSH handshake after the local
 forward opens. Only this harmless probe is retried; project operations run once.
 
-An owned SSH alias in `~/.ssh/config` points Herdr at the worker’s dedicated live
-forward. Its host key and private include stay in project state. Existing SSH
-settings and Herdr configuration are preserved; nested remote attach uses only a
-child-specific Herdr configuration.
+An owned SSH alias in `~/.ssh/config` connects Herdr through GitHub's native SSH
+proxy. Real Herdr traffic reports activity to Codespaces; silent connections
+retain the configured idle timeout. This proxy also has a GET-only capability:
+Herdr reconnect cannot restart a stopped Codespace. Background sync continues to
+use a plain port forward, without activity heartbeats. The dedicated host key and
+private include stay in project state. Existing SSH settings and Herdr configuration
+are preserved; nested attach uses only a child-specific Herdr configuration.
 
 Scratch synchronization remains two-way safe. Deletions propagate; simultaneous
 conflicting changes remain for explicit resolution. The owned session’s identity
