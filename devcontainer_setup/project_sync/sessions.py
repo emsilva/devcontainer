@@ -180,7 +180,7 @@ def _validate_retained(data, agent, sid, roots, *, child=False):
 
 
 def _version(agent, version):
-    if not isinstance(version, str) or not re.fullmatch(r'0\.(163|164)\.\d+' if agent == 'codex' else r'2\.1\.\d+', version):
+    if not isinstance(version, str) or not re.fullmatch(r'(?:0\.(163|164)\.\d+|0\.164\.0-alpha\.1)' if agent == 'codex' else r'2\.1\.\d+', version):
         raise ValueError(f'Unsupported {agent} native version: {version!r}')
 
 

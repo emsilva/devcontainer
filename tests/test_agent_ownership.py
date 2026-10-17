@@ -152,6 +152,34 @@ for line in sys.stdin:
         self.assertEqual(resume['cwd'], str(self.root))
         self.assertFalse(resume['config']['memories.use_memories'])
 
+    def test_native_process_disables_global_memory_feature_before_initialization(self):
+        executable, env = self.fake_server()
+        path = Path(executable[1])
+        path.write_text(path.read_text().replace("sid = os.environ['FIXTURE_ID']", "pathlib.Path(os.environ['FIXTURE_LOG'] + '.argv').write_text(json.dumps(sys.argv))\nsid = os.environ['FIXTURE_ID']"))
+        self.api.native_history(self.project, self.sid, env=env, executable=executable)
+        arguments = json.loads(Path(env['FIXTURE_LOG'] + '.argv').read_text())
+        self.assertIn('features.memories=false', arguments)
+        requests = [json.loads(line) for line in Path(env['FIXTURE_LOG']).read_text().splitlines()]
+        resume = next(row['params'] for row in requests if row['method'] == 'thread/resume')
+        self.assertFalse(resume['config']['features.memories'])
+
+    def test_managed_codex_cli_disables_global_memory_feature(self):
+        from unittest.mock import patch
+        from devcontainer_setup.project_sync.ownership import managed_lease
+        home = self.root / 'codex'
+        directory = home / 'sessions'
+        directory.mkdir(parents=True)
+        metadata = dict(id=self.sid, cwd=str(self.root), cli_version='0.163.0', source='cli')
+        (directory / ('rollout-' + self.sid + '.jsonl')).write_text(json.dumps(dict(type='session_meta', payload=metadata)) + '\n')
+        with managed_lease(self.state, 'codex', self.sid, 'a', new=True):
+            pass
+        child = self.root / 'native.py'
+        child.write_text("import json,sys,pathlib; pathlib.Path('native-args.json').write_text(json.dumps(sys.argv[1:]))")
+        with patch.object(self.api, 'inject_project_context'):
+            result = self.api._launch_owned(self.project, 'codex', self.sid, state=self.state, host='a', env=dict(os.environ, CODEX_HOME=str(home)), executable=(sys.executable, str(child)))
+        self.assertEqual(result, 0)
+        self.assertIn('features.memories=false', json.loads((self.root / 'native-args.json').read_text()))
+
     def test_native_history_rebuilds_ancestor_indexes_before_fork(self):
         executable, env = self.fake_server()
         parent = str(uuid.uuid4())

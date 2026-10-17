@@ -290,6 +290,17 @@ class SessionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Unsupported'):
             self.bundle()
 
+    def test_proven_exact_codex_alpha_supported_but_other_prereleases_refused(self):
+        path = self.rollout()
+        original = path.read_bytes()
+        path.write_bytes(original.replace(b'0.164.0', b'0.164.0-alpha.1'))
+        self.assertEqual(self.bundle()['agent_version'], '0.164.0-alpha.1')
+        for version in (b'0.164.0-alpha.2', b'0.165.0-alpha.1', b'0.164.1-beta.1'):
+            with self.subTest(version=version):
+                path.write_bytes(original.replace(b'0.164.0', version))
+                with self.assertRaisesRegex(ValueError, 'version'):
+                    self.bundle()
+
     def test_version_gap_refused(self):
         path = self.rollout()
         path.write_bytes(path.read_bytes().replace(b'0.164.0', b'9.0.0'))

@@ -13,7 +13,7 @@ import time
 from .ownership import managed_lease, run_native_child
 from .sessions import _codex_index, _metadata, _parent, _read, assert_quiescent, claude_namespace, native_home, session_uuid
 
-MEMORY_CONFIG = {'memories.use_memories': False, 'memories.generate_memories': False}
+MEMORY_CONFIG = {'features.memories': False, 'memories.use_memories': False, 'memories.generate_memories': False}
 
 
 def project_context(project):
@@ -48,7 +48,7 @@ class CodexClient:
         self.messages = queue.Queue()
         self.notifications = []
         self.errors = []
-        command = [*executable, '-c', 'memories.use_memories=false', '-c', 'memories.generate_memories=false', 'app-server', '--listen', 'stdio://']
+        command = [*executable, '-c', 'features.memories=false', '-c', 'memories.use_memories=false', '-c', 'memories.generate_memories=false', 'app-server', '--listen', 'stdio://']
         self.process = subprocess.Popen(command, cwd=project.root, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
         def read(stream, sink):
             try:
@@ -258,7 +258,7 @@ def _launch_owned(project, agent, session_id, *, state, host, home=None, new=Fal
     context = project_context(project)
     command = list(executable or (agent,))
     if agent == 'codex':
-        command += ['resume', '--cd', str(project.root), '-c', 'memories.use_memories=false', '-c', 'memories.generate_memories=false', session_id]
+        command += ['resume', '--cd', str(project.root), '-c', 'features.memories=false', '-c', 'memories.use_memories=false', '-c', 'memories.generate_memories=false', session_id]
     elif agent == 'claude':
         command += ['--session-id' if new else '--resume', session_id, '--system-prompt-snapshot', 'off', '--append-system-prompt', context]
         values['CLAUDE_CODE_DISABLE_AUTO_MEMORY'] = '1'
