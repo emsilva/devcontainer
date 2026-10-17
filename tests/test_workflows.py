@@ -147,6 +147,29 @@ def sessions_module():
 class CodespaceAPITests(unittest.TestCase):
     setUp = WorkflowTests.setUp
     service = WorkflowTests.service
+    def test_start_waits_through_initial_shutdown_without_repeating_post(self):
+        service = self.service()
+        states = iter(('Shutdown', 'Shutdown', 'Starting', 'Available'))
+        calls = []
+        def api(method, route, env, **kwargs):
+            calls.append(method)
+            return {} if method == 'POST' else {'state': next(states)}
+        with patch.object(service, '_api_env', return_value={}), \
+                patch.object(service, '_api', side_effect=api), \
+                patch('devcontainer_setup.project_sync.workflows.time.sleep'):
+            service.start_codespace('example')
+        self.assertEqual(calls, ['POST', 'GET', 'GET', 'GET', 'GET'])
+
+    def test_start_remaining_shutdown_times_out_with_last_state(self):
+        service = self.service()
+        with patch.object(service, '_api_env', return_value={}), \
+                patch.object(service, '_api', return_value={'state': 'Shutdown'}) as api, \
+                patch('devcontainer_setup.project_sync.workflows.time.monotonic', side_effect=[0, 1, 2, 301]), \
+                patch('devcontainer_setup.project_sync.workflows.time.sleep'):
+            with self.assertRaisesRegex(ValueError, 'timed out.*Shutdown'):
+                service.start_codespace('example')
+        self.assertEqual([call.args[0] for call in api.call_args_list], ['POST', 'GET'])
+
     def test_corrupt_preferences_are_actionable_and_preserved(self):
         service = self.service()
         service.state.mkdir()

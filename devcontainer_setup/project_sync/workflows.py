@@ -173,14 +173,16 @@ print(json.dumps(roots))
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ValueError(
-                    'Codespace start timed out; inspect its status in GitHub '
+                    f'Codespace start timed out (last state: {last_state or "unknown"}); inspect its status in GitHub '
                     'and retry when Available'
                 )
             row = self._api('GET', 'user/codespaces/' + name, env, timeout=min(30, remaining))
             state = row.get('state')
             if state == 'Available':
                 return
-            if state in ('Failed', 'Unavailable', 'Deleted', 'Archived', 'Shutdown'):
+            # A successful start request can precede its visible state change.
+            # Shutdown remains a waiting state until the bounded deadline.
+            if state in ('Failed', 'Unavailable', 'Deleted', 'Archived'):
                 raise ValueError(
                     f'Codespace start ended in {state}; '
                     'inspect its logs in GitHub before retrying'
