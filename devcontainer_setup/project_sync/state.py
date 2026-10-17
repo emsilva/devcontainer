@@ -92,21 +92,58 @@ def state_dir(project: Project, env: Mapping | None = None) -> Path:
 
 
 @contextmanager
-def _parent(path: Path, create: bool = False):
+def _parent(path: Path, create: bool = False, private: bool = False):
     """Walk using directory descriptors so symlink swaps cannot redirect writes."""
     path = Path(path)
     if not path.is_absolute() or '..' in path.parts or path.name in ('', '.', '..'):
         raise ValueError('State path must be absolute without traversal')
+    # Match the state layout, not an arbitrary project directory with the same
+    # basename. Native transcript destinations and notes readers remain mixed
+    # ownership; they must never chmod unrelated user directories.
+    boundary = None
+    if private:
+        for index, piece in enumerate(path.parts[:-1]):
+            if piece != 'devcontainer-setup':
+                continue
+            rest = path.parts[index + 1:]
+            if ((len(rest) >= 3 and rest[0] == 'projects' and re.fullmatch(r'[0-9a-f]{24}', rest[1]))
+                    or rest in (('host.json',), ('host.lock',))):
+                boundary = index
+                break
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     fd = os.open(path.anchor, flags)
     try:
-        for piece in path.parts[1:-1]:
+        for index, piece in enumerate(path.parts[1:-1], 1):
             if create:
                 try:
                     os.mkdir(piece, 0o700, dir_fd=fd)
                 except FileExistsError:
                     pass
             next_fd = os.open(piece, flags, dir_fd=fd)
+            try:
+                if boundary is not None:
+                    info = os.fstat(next_fd)
+                    mode = stat.S_IMODE(info.st_mode)
+                    if index < boundary:
+                        # An unsafe ancestor could rename the private namespace.
+                        # Shared root/current-user sticky directories (/tmp) are
+                        # safe parents; never change unmanaged ancestors.
+                        if (info.st_uid not in (0, os.geteuid())
+                                or (mode & 0o022 and not mode & stat.S_ISVTX)):
+                            raise PermissionError('Unsafe state namespace ancestor')
+                    else:
+                        if info.st_uid != os.geteuid():
+                            raise PermissionError('State namespace is owned by another user')
+                        if mode != 0o700:
+                            if not create:
+                                raise PermissionError('State namespace is not private')
+                            os.fchmod(next_fd, 0o700)
+                    current = os.stat(piece, dir_fd=fd, follow_symlinks=False)
+                    if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+                        raise PermissionError('State directory changed during validation')
+            except BaseException:
+                os.close(next_fd)
+                raise
             os.close(fd)
             fd = next_fd
         yield fd, path.name
@@ -122,7 +159,7 @@ def _regular(fd: int) -> None:
 
 def atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
     """Replace a regular file atomically; create private parent directories."""
-    with _parent(path, create=True) as (parent, name):
+    with _parent(path, create=True, private=True) as (parent, name):
         try:
             info = os.stat(name, dir_fd=parent, follow_symlinks=False)
         except FileNotFoundError:
@@ -148,7 +185,7 @@ def atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
 
 
 def read_json(path: Path) -> dict:
-    with _parent(path) as (parent, name):
+    with _parent(path, private=True) as (parent, name):
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
         with os.fdopen(fd, 'rb') as source:
             _regular(source.fileno())
@@ -161,7 +198,7 @@ def read_json(path: Path) -> dict:
 @contextmanager
 def locked(path: Path, blocking: bool = False):
     """Hold an advisory process lock; never unlink the shared lock inode."""
-    with _parent(path, create=True) as (parent, name):
+    with _parent(path, create=True, private=True) as (parent, name):
         fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent)
         try:
             _regular(fd)
