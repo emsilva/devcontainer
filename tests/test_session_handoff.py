@@ -175,6 +175,52 @@ class SessionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'diverg|task'):
             self.api.import_snapshot(self.dest, 'claude', self.sid, self.target, conflict, state=self.state)
 
+    def claude_request_fixture(self):
+        digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+        shape = dict(system=[dict(type='text', text='Synthetic instructions')], tools=[])
+        message = dict(role='user', content=[dict(type='text', text='Synthetic request')])
+        rows = [
+            dict(type='user', sessionId=self.sid, cwd=str(self.project.root), message=message),
+            dict(type='attachment', sessionId=self.sid, cwd=str(self.project.root), attachment=dict(type='environment', snapshot=dict(workingDirectory=str(self.project.root), additionalWorkingDirectories=[]))),
+            dict(type='atis-latch', sessionId=self.sid, atis='synthetic'),
+            dict(type='api-request-shape', sessionId=self.sid, shapeHash=digest(shape), shape=shape),
+            dict(type='api-request-blob', sessionId=self.sid, hash=digest(message), message=message),
+            dict(type='api-request', sessionId=self.sid, id=str(uuid.uuid4()), shapeHash=digest(shape), keep=0, tail=[digest(message)], params={}, requestDigest='a' * 64),
+            dict(type='api-request', sessionId=self.sid, id=str(uuid.uuid4()), shapeHash=digest(shape), keep=1, tail=[digest(message)], params={}, requestDigest='b' * 64),
+            dict(type='cost-state', sessionId=self.sid, totalCostUSD=0.01, modelUsage={}),
+        ]
+        path = self.home / 'projects' / self.api.claude_namespace(self.project.root) / (self.sid + '.jsonl')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path, rows
+
+    def write_claude_fixture(self, path, rows):
+        path.write_bytes(b''.join(json.dumps(row).encode() + b'\n' for row in rows))
+
+    def claude_bundle(self):
+        return self.api.export_snapshot(self.project, 'claude', self.sid, self.home, source_host='source', generation=1, agent_version='2.1.302')
+
+    def test_claude_native_request_records_preserve_complete_dependency_bytes(self):
+        path, rows = self.claude_request_fixture()
+        self.write_claude_fixture(path, rows)
+        bundle = self.claude_bundle()
+        self.api.import_snapshot(self.dest, 'claude', self.sid, self.target, bundle, state=self.state)
+        mapped = self.target / 'projects' / self.api.claude_namespace(self.dest.root) / path.name
+        self.assertEqual(mapped.read_bytes(), path.read_bytes())
+
+    def test_claude_native_request_dependencies_and_environment_scope_refused(self):
+        path, rows = self.claude_request_fixture()
+        for defect in ('missing_shape', 'missing_blob', 'bad_hash', 'bad_keep', 'foreign_scope'):
+            broken = copy.deepcopy(rows)
+            if defect == 'missing_shape': broken.pop(3)
+            elif defect == 'missing_blob': broken.pop(4)
+            elif defect == 'bad_hash': broken[4]['message']['content'][0]['text'] = 'different'
+            elif defect == 'bad_keep': broken[5]['keep'] = 1
+            elif defect == 'foreign_scope': broken[1]['attachment']['snapshot']['workingDirectory'] = str(self.root / 'unrelated')
+            with self.subTest(defect=defect):
+                self.write_claude_fixture(path, broken)
+                with self.assertRaisesRegex(ValueError, 'dependency|digest|project'):
+                    self.claude_bundle()
+
     def test_imported_history_can_return_without_rewriting_original_cwd(self):
         path = self.rollout()
         self.apply(self.bundle())

@@ -21,7 +21,7 @@ from .state import atomic_write, locked, read_json
 SCHEMA = 1
 MAX_BYTES = 256 * 1024 * 1024
 CODEX_RECORDS = {'session_meta', 'response_item', 'event_msg', 'turn_context', 'compacted', 'world_state', 'token_usage_record'}
-CLAUDE_RECORDS = {'user', 'assistant', 'system', 'summary', 'progress', 'queue-operation', 'file-history-snapshot', 'custom-title', 'agent-name', 'agent-color', 'pr-link', 'last-prompt', 'saved_hook_context', 'bridge-pointer'}
+CLAUDE_RECORDS = {'user', 'assistant', 'system', 'summary', 'progress', 'queue-operation', 'file-history-snapshot', 'custom-title', 'agent-name', 'agent-color', 'pr-link', 'last-prompt', 'saved_hook_context', 'bridge-pointer', 'attachment', 'atis-latch', 'api-request-shape', 'api-request-blob', 'api-request', 'cost-state'}
 MEMORY_MARKERS = (b'<memory_summary>', b'<memory_context>', b'<memory_citation>', b'<oai-mem-citation>', b'========= MEMORY_SUMMARY BEGINS', b'/.codex/memories/', b'\\.codex\\memories\\')
 
 
@@ -156,6 +156,47 @@ def _validate_codex_scope(rows, roots):
             structural(payload.get('thread_settings', {}))
 
 
+def _validate_claude(rows, sid, roots, *, child=False):
+    """Validate inline native request dependencies and structural checkout scope."""
+    shapes, blobs, previous = set(), set(), []
+    scoped = False
+    for row in rows:
+        if 'sessionId' in row and row['sessionId'] != sid:
+            raise ValueError('Wrong Claude session ID')
+        if 'cwd' in row:
+            _scoped_roots(row['cwd'], roots, child=child)
+            scoped = True
+        kind = row['type']
+        if kind == 'attachment':
+            attachment = row.get('attachment')
+            supported = {'environment', 'model', 'total_tokens_reminder', 'session_context', 'date', 'credential_org', 'advisor_tool'}
+            if not isinstance(attachment, dict) or attachment.get('type') not in supported:
+                raise ValueError('Unsupported Claude attachment dependency')
+            if attachment['type'] == 'environment':
+                snapshot = attachment.get('snapshot')
+                if not isinstance(snapshot, dict) or not isinstance(snapshot.get('additionalWorkingDirectories', []), list):
+                    raise ValueError('Unsupported Claude environment project scope')
+                _scoped_roots(snapshot.get('workingDirectory'), roots, child=child)
+                for directory in snapshot.get('additionalWorkingDirectories', []):
+                    _scoped_roots(directory, roots, child=True)
+        elif kind in ('api-request-shape', 'api-request-blob'):
+            key, value, known = ('shapeHash', row.get('shape'), shapes) if kind == 'api-request-shape' else ('hash', row.get('message'), blobs)
+            if not isinstance(value, dict):
+                raise ValueError('Invalid Claude request dependency')
+            digest = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+            if row.get(key) != digest:
+                raise ValueError('Invalid Claude request dependency digest')
+            known.add(digest)
+        elif kind == 'api-request':
+            keep, tail = row.get('keep'), row.get('tail')
+            if (row.get('shapeHash') not in shapes or type(keep) is not int or not 0 <= keep <= len(previous)
+                    or not isinstance(tail, list) or any(not isinstance(digest, str) or digest not in blobs for digest in tail)):
+                raise ValueError('Missing or invalid Claude request dependency')
+            previous = previous[:keep] + tail
+    if not scoped:
+        raise ValueError('Cannot establish Claude project scope')
+
+
 def _validate_retained(data, agent, sid, roots, *, child=False):
     rows = _records(data, agent)
     if agent == 'codex':
@@ -167,15 +208,7 @@ def _validate_retained(data, agent, sid, roots, *, child=False):
         _validate_codex_dependencies(rows, meta, sid)
         _validate_codex_scope(rows, roots)
     else:
-        scoped = False
-        for row in rows:
-            if 'sessionId' in row and row['sessionId'] != sid:
-                raise ValueError('Wrong retained Claude session ID')
-            if 'cwd' in row:
-                _scoped_roots(row['cwd'], roots, child=child)
-                scoped = True
-        if not scoped:
-            raise ValueError('Cannot establish retained Claude project scope')
+        _validate_claude(rows, sid, roots, child=child)
     return rows
 
 
@@ -268,9 +301,7 @@ def list_sessions(project, agent, home, *, state=None):
                 data = _read(path)
                 rows = _records(data, agent)
                 scopes = _imported_scopes(project, state, path, home, data)
-                for row in rows:
-                    if 'cwd' in row:
-                        _scoped_roots(row['cwd'], scopes)
+                _validate_claude(rows, sid, scopes)
             except ValueError:
                 continue
             result.append(dict(session_id=sid, agent=agent, cwd=str(project.root), path=str(path)))
@@ -396,15 +427,7 @@ def export_snapshot(project, agent, session_id, home, *, source_host, generation
             kind = 'task' if path.parent == tasks else 'transcript'
             if kind == 'transcript':
                 rows = _records(data, agent)
-                scoped = False
-                for row in rows:
-                    if 'sessionId' in row and row['sessionId'] != session_id:
-                        raise ValueError('Wrong Claude session ID')
-                    if 'cwd' in row:
-                        _scoped_roots(row['cwd'], scopes, child=path != parent)
-                        scoped = True
-                if not scoped:
-                    raise ValueError('Cannot establish Claude project scope')
+                _validate_claude(rows, session_id, scopes, child=path != parent)
             else:
                 task = json.loads(data)
                 if not isinstance(task, dict) or str(task.get('id')) != path.stem:
@@ -473,11 +496,7 @@ def _preflight(project, agent, session_id, home, bundle):
                 if entry['kind'] != 'transcript' or sid != session_id:
                     raise ValueError('Wrong Claude transcript binding')
                 rows = _records(data, agent)
-                for row in rows:
-                    if 'cwd' in row:
-                        _scoped_roots(row['cwd'], entry['scope_roots'], child=len(rel.parts) == 5)
-                    if 'sessionId' in row and row['sessionId'] != sid:
-                        raise ValueError('Wrong Claude session ID')
+                _validate_claude(rows, sid, entry['scope_roots'], child=len(rel.parts) == 5)
                 target_rel = PurePosixPath('projects', claude_namespace(project.root), *rel.parts[2:])
                 if len(rel.parts) == 3:
                     ids.add(sid)
