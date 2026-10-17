@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 from pathlib import Path
 import stat
@@ -276,14 +277,15 @@ class DefaultStateHomeTests(unittest.TestCase):
         self.assertFalse(self.fallback.exists())
         self.assertEqual(stat.S_IMODE((self.home / '.local').stat().st_mode), 0o775)
 
-    def test_default_symlink_ancestor_chooses_fallback_without_following_it(self):
+    def test_default_symlink_ancestor_refuses_unknown_state_without_following_it(self):
         (self.home / '.local/state').rmdir()
         (self.home / '.local').rmdir()
         outside = self.home / 'outside'
         outside.mkdir()
         (self.home / '.local').symlink_to(outside, target_is_directory=True)
-        self.assertEqual(state_dir(self.project, self.env), self.fallback / 'devcontainer-setup/projects' / self.project.project_id)
-        host_id(self.env)
+        with self.assertRaisesRegex((PermissionError, ValueError), 'symlink|selection|migration'):
+            state_dir(self.project, self.env)
+        self.assertFalse(self.fallback.exists())
         self.assertEqual(list(outside.iterdir()), [])
 
     def test_symlink_fallback_refuses_without_writing_outside(self):
@@ -299,3 +301,38 @@ class DefaultStateHomeTests(unittest.TestCase):
         (self.home / '.local/state').chmod(0o700)
         self.assertEqual(state_dir(self.project, self.env), self.home / '.local/state/devcontainer-setup/projects' / self.project.project_id)
         self.assertFalse(self.fallback.exists())
+
+    def test_initialized_default_refuses_fallback_after_permissions_regress(self):
+        (self.home / '.local').chmod(0o700)
+        (self.home / '.local/state').chmod(0o700)
+        first = host_id(self.env)
+        project_state = state_dir(self.project, self.env)
+        pairing = project_state / 'scratch.json'
+        atomic_write(pairing, b'{"codespace":"existing-pair","phase":"running"}')
+        original_host = (self.home / '.local/state/devcontainer-setup/host.json').read_bytes()
+        for path in (self.home / '.local', self.home / '.local/state'):
+            path.chmod(0o775)
+        for operation in (lambda: state_dir(self.project, self.env), lambda: host_id(self.env)):
+            with self.assertRaisesRegex((PermissionError, ValueError), 'existing|Existing|migration'):
+                operation()
+        self.assertFalse(self.fallback.exists(), 'A permission regression must not create a new identity namespace')
+        self.assertEqual(pairing.read_bytes(), b'{"codespace":"existing-pair","phase":"running"}')
+        self.assertEqual((self.home / '.local/state/devcontainer-setup/host.json').read_bytes(), original_host)
+        for path in (self.home / '.local', self.home / '.local/state'):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o775)
+            path.chmod(0o700)
+        self.assertEqual(host_id(self.env), first)
+        self.assertEqual(state_dir(self.project, self.env), project_state)
+        self.assertEqual(read_json(pairing)['codespace'], 'existing-pair')
+
+    def test_both_default_and_fallback_namespaces_refuse_ambiguous_identity(self):
+        (self.home / '.local').chmod(0o700)
+        (self.home / '.local/state').chmod(0o700)
+        first = host_id(self.env)
+        self.fallback.mkdir(mode=0o700)
+        for operation in (lambda: state_dir(self.project, self.env), lambda: host_id(self.env)):
+            with self.assertRaisesRegex((PermissionError, ValueError), 'ambig|both|Both'):
+                operation()
+        self.assertFalse((self.fallback / 'devcontainer-setup').exists())
+        old = json.loads((self.home / '.local/state/devcontainer-setup/host.json').read_bytes())
+        self.assertEqual(old['host_id'], first)

@@ -82,26 +82,49 @@ def _state_home(env: Mapping | None) -> Path:
     if not home.is_absolute() or '..' in home.parts:
         raise ValueError('Home directory must be absolute without traversal')
     fallback = home / '.devcontainer-state'
-    # A chosen fallback is sticky across later permission repairs, so native
-    # ownership UUIDs and project registries never move back implicitly.
-    try:
-        fallback.lstat()
-    except FileNotFoundError:
-        pass
-    else:
-        return fallback
-    # Codespaces commonly supplies group-writable .local/state parents. Leave
-    # those user directories alone and choose a private default instead. Explicit
-    # XDG overrides above remain authoritative and fail normal mutation guards.
-    for candidate in (home / '.local', home / '.local/state'):
+    default = home / '.local/state'
+    # Inspect without following .local symlinks: a hidden initialized namespace
+    # cannot safely be distinguished from a fresh default through such a link.
+    unsafe = False
+    can_have_state = True
+    for candidate in (home / '.local', default):
         try:
             info = candidate.lstat()
         except FileNotFoundError:
+            can_have_state = False
             break
-        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
-                or stat.S_IMODE(info.st_mode) & 0o022):
-            return fallback
-    return home / '.local/state'
+        if stat.S_ISLNK(info.st_mode):
+            raise PermissionError('Cannot establish default state selection through a symlink; explicit repair or migration required')
+        if not stat.S_ISDIR(info.st_mode):
+            unsafe = True
+            can_have_state = False
+            break
+        unsafe = unsafe or info.st_uid != os.geteuid() or bool(stat.S_IMODE(info.st_mode) & 0o022)
+    existing_default = False
+    if can_have_state:
+        try:
+            (default / 'devcontainer-setup').lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            existing_default = True
+    try:
+        fallback.lstat()
+    except FileNotFoundError:
+        existing_fallback = False
+    else:
+        existing_fallback = True
+    if existing_default and existing_fallback:
+        raise ValueError('Both default and fallback continuity state exist; ambiguous identity requires explicit migration')
+    if existing_default:
+        if unsafe:
+            raise PermissionError('Existing default continuity state has unsafe ancestors; explicit permission repair or migration required')
+        return default
+    # Once selected, a fallback remains canonical after a default permission
+    # repair. Never silently fork an initialized default host/registry identity.
+    if existing_fallback or unsafe:
+        return fallback
+    return default
 
 
 def state_dir(project: Project, env: Mapping | None = None) -> Path:
