@@ -336,3 +336,68 @@ class DefaultStateHomeTests(unittest.TestCase):
         self.assertFalse((self.fallback / 'devcontainer-setup').exists())
         old = json.loads((self.home / '.local/state/devcontainer-setup/host.json').read_bytes())
         self.assertEqual(old['host_id'], first)
+
+
+class AtomicReadTests(unittest.TestCase):
+    def test_reader_keeps_complete_opened_snapshot_after_atomic_replacement(self):
+        import threading
+        from devcontainer_setup.project_sync import state as module
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory).resolve() / 'runtime.json'
+            old = {'generation': 1, 'payload': ['old snapshot'] * 100}
+            new = {'generation': 2, 'payload': ['new snapshot'] * 100}
+            atomic_write(path, json.dumps(old).encode())
+            opened, replaced = threading.Event(), threading.Event()
+            actual_regular = module._regular
+            outcome, links = [], []
+            def validate_after_replace(fd, *args, **kwargs):
+                opened.set()
+                if not replaced.wait(timeout=5):
+                    raise AssertionError('Atomic replacement barrier did not complete')
+                links.append(os.fstat(fd).st_nlink)
+                return actual_regular(fd, *args, **kwargs)
+            def read():
+                try:
+                    outcome.append(read_json(path))
+                except BaseException as error:
+                    outcome.append(error)
+            with mock.patch.object(module, '_regular', side_effect=validate_after_replace):
+                thread = threading.Thread(target=read)
+                thread.start()
+                try:
+                    self.assertTrue(opened.wait(timeout=5), 'Reader did not open its snapshot')
+                    atomic_write(path, json.dumps(new).encode())
+                finally:
+                    replaced.set()
+                    thread.join(timeout=5)
+                self.assertFalse(thread.is_alive(), 'Reader did not finish after replacement')
+            self.assertEqual(links, [0], 'Proof must exercise the unlinked original inode')
+            self.assertEqual(outcome, [old])
+            self.assertEqual(read_json(path), new)
+
+    def test_unlinked_open_lock_inode_remains_refused(self):
+        from devcontainer_setup.project_sync import state as module
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory).resolve() / 'lease.lock'
+            actual_regular = module._regular
+            links = []
+            def unlink_before_validation(fd, *args, **kwargs):
+                path.unlink()
+                links.append(os.fstat(fd).st_nlink)
+                return actual_regular(fd, *args, **kwargs)
+            with mock.patch.object(module, '_regular', side_effect=unlink_before_validation):
+                with self.assertRaises(ValueError):
+                    with locked(path):
+                        self.fail('An unlinked lock inode cannot grant ownership')
+            self.assertEqual(links, [0])
+
+    def test_json_reads_and_locks_still_refuse_multiple_hardlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory).resolve() / 'record.json'
+            path.write_bytes(b'{}')
+            os.link(path, path.with_name('other-link.json'))
+            with self.assertRaises(ValueError):
+                read_json(path)
+            with self.assertRaises(ValueError):
+                with locked(path):
+                    self.fail('A hardlinked lock inode cannot grant ownership')

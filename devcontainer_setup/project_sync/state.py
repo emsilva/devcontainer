@@ -194,9 +194,10 @@ def _parent(path: Path, create: bool = False, private: bool = False):
         os.close(fd)
 
 
-def _regular(fd: int) -> None:
+def _regular(fd: int, allow_unlinked: bool = False) -> None:
+    """Only opened read snapshots may outlive their atomically replaced name."""
     info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+    if not stat.S_ISREG(info.st_mode) or (info.st_nlink != 1 and not (allow_unlinked and info.st_nlink == 0)):
         raise ValueError('State must be a regular file without hard links')
 
 
@@ -231,7 +232,7 @@ def read_json(path: Path) -> dict:
     with _parent(path, private=True) as (parent, name):
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
         with os.fdopen(fd, 'rb') as source:
-            _regular(source.fileno())
+            _regular(source.fileno(), allow_unlinked=True)
             result = json.load(source)
     if not isinstance(result, dict):
         raise ValueError('State JSON must contain an object')
