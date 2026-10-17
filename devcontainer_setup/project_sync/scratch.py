@@ -175,9 +175,12 @@ def start(root: Path, state: Path) -> dict:
     _config(root, state)
     _private_location(root, state)
     _scratch(root)
+    current = status(state)
+    if current.get('running') and current.get('checkpoint_version') != 1:
+        stop(state)
     with locked(state / 'scratch-control.lock', blocking=True):
         current = status(state)
-        if current['running']:
+        if current['running'] and current.get('checkpoint_version') == 1:
             return current
         if current.get('phase') != 'stopped' and current.get('session'):
             _recover_session(state, current)
@@ -368,6 +371,41 @@ class _Shutdown(BaseException):
     pass
 
 
+def retarget(root, state, codespace, remote_root):
+    """Explicitly replace a verified owned scratch binding, retaining its receipts."""
+    state = Path(state)
+    project = discover_project(Path(root))
+    _scratch(project.root)
+    if (not Path(remote_root).is_absolute() or '..' in Path(remote_root).parts
+            or any(c in remote_root for c in '\r\n\0')):
+        raise ValueError('Invalid remote checkout path')
+    candidate = dict(version=1, identity=project.identity, root=str(project.root),
+                     codespace=codespace, remote_root=remote_root)
+    stop(state)
+    with locked(state / 'scratch-control.lock', blocking=True):
+        path = state / CONFIG
+        if not path.exists():
+            _write(path, candidate)
+            return candidate
+        previous = read_json(path)
+        if previous == candidate:
+            return candidate
+        if previous.get('identity') != project.identity:
+            raise ValueError('Cannot retarget another project identity')
+        receipt = _saved_session(state, previous)
+        archive = state / 'retired-bindings' / (str(time.time_ns()) + '-' + secrets.token_hex(4))
+        _write(archive / CONFIG, previous)
+        if receipt:
+            binary = install_mutagen(state)
+            info = _session_info(binary, state, receipt)
+            if info is not None:
+                _mutagen(binary, state, 'sync', 'terminate', info['identifier'])
+            _write(archive / SESSION, receipt)
+            (state / SESSION).unlink()
+        _write(path, candidate)
+    return candidate
+
+
 def supervise(root: Path, state: Path, nonce=None) -> None:
     root, state = Path(root).resolve(), Path(state).absolute()
     nonce = nonce or secrets.token_hex(24)
@@ -390,7 +428,8 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
         logger.addHandler(handler)
         receipt = _saved_session(state, config)
         runtime = {'pid': os.getpid(), 'nonce': nonce, 'process_identity': _process_identity(os.getpid()),
-                   'phase': 'starting', 'session': receipt['name'] if receipt else None}
+                   'phase': 'starting', 'session': receipt['name'] if receipt else None,
+                   'checkpoint_version': 1}
         def update(phase, **values):
             runtime.update(phase=phase, **values)
             _write(state / RUNTIME, runtime)
@@ -412,6 +451,8 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                         if remote.get('identity') != config['identity'] or remote.get('root') != config['remote_root']:
                             raise ValueError('Remote repository identity changed; refusing synchronization.')
                         connection.ssh_config(state / 'ssh-config')
+                        from .ssh_hosts import refresh_ssh
+                        refresh_ssh(state)
                         if receipt is None:
                             session = 'scratch-' + nonce
                             receipt = {'name': session, 'nonce': nonce, 'binding': config, 'established': False}
@@ -441,6 +482,16 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                         update('syncing')
                         backoff = 2
                         logger.info('Scratch connection established.')
+                        def checkpoint():
+                            from .replication import checkpoint_remote
+                            try:
+                                saved = checkpoint_remote(connection, discover_project(root), state, config['remote_root'])
+                                update('syncing', checkpoint=saved, checkpoint_error=None)
+                            except Exception:
+                                # Leave the last acknowledged checkpoint intact;
+                                # scratch reconciliation does not imply code protection.
+                                update('syncing', checkpoint_error='Checkpoint incomplete; previous recovery data preserved')
+                        checkpoint()
                         while not exiting.wait(5):
                             if connection.child.poll() is not None:
                                 raise ValueError('Codespace forward disconnected; waiting to reconnect.')
@@ -450,6 +501,7 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                                 raise ValueError('Remote repository identity changed; synchronization paused.')
                             summary = _mutagen(binary, state, 'sync', 'list', session)
                             update('syncing', detail=summary)
+                            checkpoint()
                 except Exception as error:
                     if receipt:
                         try:

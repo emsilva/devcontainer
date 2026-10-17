@@ -117,25 +117,8 @@ def integrate_continuity(project: Path, files: dict[str, bytes], enabled: bool) 
     if (project / name).is_symlink():
         raise ValueError('Project Taskfile is a symlink; review continuity integration manually')
     text = candidates[name].decode() if name in candidates else (project / name).read_text()
-    tasks = re.search(r'^tasks:[ \t]*(?:#.*)?$', text, re.M)
-    if tasks is None:
-        raise ValueError('Expand the root Taskfile tasks mapping before adding continuity aliases')
-    boundary = re.search(r'^\S', text[tasks.end() + 1:], re.M)
-    end = tasks.end() + 1 + boundary.start() if boundary else len(text)
-    body = text[tasks.end():end]
-    aliases = ['work'] + [f'scratch:{verb}' for verb in ('configure', 'start', 'stop', 'status', 'logs', 'backup')]
-    aliases += [f'work:{agent}{suffix}' for agent in ('codex', 'claude') for suffix in ('', ':cs')]
-    aliases += [f'agent:{verb}' for verb in ('codex', 'claude', 'sessions', 'handoff', 'recover')]
-    additions = ''
-    for alias in aliases:
-        key = re.escape(alias)
-        if re.search(rf'''^  (?:{key}:(?=\s|$)|'{key}':|"{key}":)''', body, re.M):
-            continue
-        additions += (f'  {alias}:\n' + ('    interactive: true\n' if alias == 'work' or alias.startswith('work:') else '') + '    cmds:\n'
-                      f'      - task: devcontainer:{alias}\n'
-                      '        vars: {CLI_ARGS: "{{.CLI_ARGS}}"}\n')
-    candidates[name] = (text[:tasks.end()] + ('\n' + additions.rstrip('\n') if additions else '')
-                        + text[tasks.end():]).encode()
+    from .root_tasks import integrate
+    candidates[name] = integrate(text).encode()
     files.update(candidates)
 
 
@@ -151,6 +134,8 @@ def check_candidate(files: dict[str, bytes], project: Path | None = None) -> Non
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(source.read_bytes())
         for name, data in files.items():
+            if data is None:
+                continue
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
@@ -374,15 +359,15 @@ def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume
 def setup_continuity(project: Path, ui, codespace: str | None) -> None:
     """Finish the approved setup using its selected Codespace; Git is durable."""
     if not codespace:
-        print('Run task work on your Mac to connect a Codespace and start working.', flush=True)
+        print('Run task work:cs on your Mac to open Codespace Herdr with local recovery.', flush=True)
         return
     from .project_sync.state import discover_project, state_dir
-    from .project_sync.workflows import Workflows
+    from .project_sync.codespaces import Codespaces as ProjectCodespaces
     try:
         discovered = discover_project(project)
-        service = Workflows(discovered, state_dir(discovered))
-        if service.is_remote:
-            print('Run task work on your Mac to connect scratch sync with this Codespace.', flush=True)
+        service = ProjectCodespaces(discovered, state_dir(discovered))
+        if os.environ.get('CODESPACES') == 'true':
+            print('Run task work:cs on your Mac to connect recovery for this Codespace.', flush=True)
             return
         binding = service.binding()
         if binding and binding['codespace'] == codespace:
@@ -393,13 +378,12 @@ def setup_continuity(project: Path, ui, codespace: str | None) -> None:
                 raise ValueError('No matching project checkout was found in the selected Codespace.')
             root = roots[0] if len(roots) == 1 else ui.choose('Which remote project checkout?', roots)
         service.pair(codespace, root)
-        service.ensure_sync()
-        print('Scratch sync started. Run task work to continue a conversation.', flush=True)
+        print('Codespace paired. Run task work:cs to open Herdr and start Mac recovery.', flush=True)
     except Cancelled:
-        print('Setup is preserved. Run task work on your Mac to finish connecting scratch sync.', file=sys.stderr)
+        print('Setup is preserved. Run task work:cs on your Mac to finish connecting.', file=sys.stderr)
     except (ValueError, OSError, subprocess.TimeoutExpired) as error:
         print(f'Setup is preserved. Scratch sync needs attention: {error}\n'
-              'Run task work on your Mac to finish connecting.', file=sys.stderr)
+              'Run task work:cs on your Mac to finish connecting.', file=sys.stderr)
 
 
 def interactive(project: Path, found: dict, metadata: dict, ref: str, resume: str | None) -> int:
