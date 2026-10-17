@@ -62,6 +62,66 @@ class WorkflowTests(unittest.TestCase):
         inventory=dict(host='local',git={},sessions=[dict(agent='codex',session_id=SID,ownership={'status':'idle','host':'local'})])
         with patch.object(s,'inventory',return_value=inventory), patch.object(handoff,'handoff') as transfer, patch('devcontainer_setup.project_sync.workflows.agents.launch',return_value=0):
             self.assertEqual(s.continue_session('codex',SID,'mac'),0); transfer.assert_not_called()
+
+    def test_new_remote_session_checks_git_sync_and_remembers_unique_new_id(self):
+        service = self.service()
+        service.is_remote = False
+        git = dict(branch='main', head='1', status='')
+        local = dict(host='local', git=git, sessions=[])
+        remote = dict(host='remote', git=git, sessions=[])
+        row = dict(agent='claude', session_id=SID, ownership=dict(status='idle', host='remote'))
+        with patch.object(service, 'inventory', side_effect=[local, remote]), \
+                patch.object(service, 'sync_ready') as ready, \
+                patch.object(service, '_launch_result', return_value=row), \
+                patch.object(service, '_launch_remote', return_value=0) as launch:
+            self.assertEqual(service.new_session('claude', destination='codespace'), (0, SID))
+        ready.assert_called_once()
+        self.assertEqual(launch.call_args.args, ('claude', None))
+        self.assertEqual(str(__import__('uuid').UUID(launch.call_args.kwargs['request_id'])), launch.call_args.kwargs['request_id'])
+        self.assertEqual(service.preferences(), dict(agent='claude', session_id=SID, location='codespace'))
+
+    def test_new_remote_refuses_git_mismatch_and_conflicts_before_launch(self):
+        service = self.service()
+        service.is_remote = False
+        local = dict(host='local', git=dict(branch='main', head='1', status=''), sessions=[])
+        remote = dict(local, host='remote', git=dict(local['git'], status=' M file'))
+        with patch.object(service, 'inventory', side_effect=[local, remote]), \
+                patch.object(service, '_launch_remote') as launch:
+            with self.assertRaisesRegex(ValueError, 'Git'):
+                service.new_session('codex', destination='codespace')
+            launch.assert_not_called()
+        with patch.object(service, 'inventory', side_effect=[local, local]), \
+                patch.object(service, 'sync_ready', side_effect=ValueError('Scratch conflicts: notes.md')), \
+                patch.object(service, '_launch_remote') as launch:
+            with self.assertRaisesRegex(ValueError, 'conflicts'):
+                service.new_session('codex', destination='codespace')
+            launch.assert_not_called()
+
+    def test_remote_new_result_failure_never_guesses_or_relaunches(self):
+        service = self.service()
+        service.is_remote = False
+        inventory = dict(host='remote', git=dict(branch='main', head='1', status=''), sessions=[])
+        for after in (ValueError('private upstream diagnostic'), dict(agent='claude', session_id=SID), {}):
+            with self.subTest(after=type(after).__name__), \
+                    patch.object(service, 'inventory', side_effect=[inventory, inventory]), \
+                    patch.object(service, '_launch_result', side_effect=after if isinstance(after, Exception) else None, return_value=after), \
+                    patch.object(service, 'sync_ready'), \
+                    patch.object(service, 'remember') as remember, \
+                    patch.object(service, '_launch_remote', return_value=0) as launch:
+                self.assertEqual(service.new_session('codex', destination='codespace'), (0, None))
+                launch.assert_called_once()
+                remember.assert_not_called()
+
+    def test_remote_new_uses_managed_new_flag_in_real_ssh_command(self):
+        service = self.service()
+        with patch.object(service, 'binding', return_value=dict(codespace='example', remote_root='/workspaces/project')), \
+                patch('devcontainer_setup.project_sync.workflows.CodespaceConnection'), \
+                patch('devcontainer_setup.project_sync.workflows.subprocess.call', return_value=0) as call:
+            service._launch_remote('claude', None, request_id=SID)
+        command = call.call_args.args[0][-1]
+        self.assertIn('agent claude --new', command)
+        self.assertIn('--launch-request ' + SID, command)
+        self.assertNotIn('--session', command)
     def test_active_writer_rejected(self):
         s=self.service(); s.is_remote=False
         inventory=dict(host='local',git={},sessions=[dict(agent='codex',session_id=SID,ownership={'status':'active','host':'local'})])

@@ -20,7 +20,7 @@ from .state import atomic_write, discover_project, host_id, locked, read_json, s
 from .transport import CodespaceConnection
 
 MAX_RPC_BYTES = 384 * 1024 * 1024
-_OPERATIONS = {'inventory', 'describe', 'status', 'backup', 'inspect', 'source_prepare', 'target_prepare', 'import', 'verify', 'accept', 'complete', 'activate'}
+_OPERATIONS = {'inventory', 'describe', 'status', 'backup', 'inspect', 'source_prepare', 'target_prepare', 'import', 'verify', 'accept', 'complete', 'activate', 'launch_result'}
 _MODULES = ('__init__', 'state', 'sessions', 'ownership', 'agents', 'tools', 'transport', 'scratch', 'handoff')
 
 _REASONS = {
@@ -153,6 +153,12 @@ class LocalEndpoint:
             raise ValueError('Unsupported handoff operation')
         if operation == 'describe':
             return dict(host=host_id(self.env), root=str(self.project.root), identity=self.project.identity, project_id=self.project.project_id)
+        if operation == 'launch_result':
+            request = sessions.session_uuid(values['request_id'])
+            result = read_json(self.state / 'work-launches' / (request + '.json'))
+            if not isinstance(result, dict) or result.get('agent') not in ('codex', 'claude'):
+                raise ValueError('Invalid managed launch receipt')
+            return dict(agent=result['agent'], session_id=sessions.session_uuid(result.get('session_id')))
         if operation == 'inventory':
             rows = []
             for agent in ('codex', 'claude'):

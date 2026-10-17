@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import json
 import re
 from pathlib import Path
@@ -10,14 +11,17 @@ import sys
 import uuid
 
 from . import agents, ownership, scratch, sessions
-from .state import discover_project, host_id, state_dir
+from .state import atomic_write, discover_project, host_id, locked, read_json, state_dir
 
 
 def parser():
     result = argparse.ArgumentParser(description='Synchronize project scratch files and hand off native agent sessions.')
     result.add_argument('--project', type=Path, default=Path.cwd())
     groups = result.add_subparsers(dest='group', required=True)
-    groups.add_parser('work', help='Continue a project conversation here or in its Codespace')
+    work = groups.add_parser('work', help='Continue a project conversation here or in its Codespace')
+    work.add_argument('--agent', choices=('codex', 'claude'), help='Start a new conversation with this agent')
+    work.add_argument('--to', choices=('mac', 'codespace'), help='Choose the destination host')
+    work.add_argument('--resume', action='store_true', help='Choose an existing project conversation for this agent')
     sync = groups.add_parser('scratch').add_subparsers(dest='action', required=True)
     configure = sync.add_parser('configure', help='Pair this checkout with an already running Codespace')
     configure.add_argument('--codespace')
@@ -32,6 +36,7 @@ def parser():
         choose = launch.add_mutually_exclusive_group()
         choose.add_argument('--session', type=sessions.session_uuid)
         choose.add_argument('--new', action='store_true')
+        launch.add_argument('--launch-request', type=sessions.session_uuid, help=argparse.SUPPRESS)
     listing = agent.add_parser('sessions')
     listing.add_argument('--agent', choices=('codex', 'claude'), required=True)
     transfer = agent.add_parser('handoff')
@@ -77,10 +82,16 @@ def _select_session(project, agent, state):
 
 def run(args, extra=()):
     if args.group == 'work':
+        if (args.to or args.resume) and not args.agent:
+            raise ValueError('Use --agent codex or --agent claude with --to or --resume')
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise ValueError('task work requires a terminal. For scripts, use scratch status or agent sessions.')
-        from .work import run as work
         project = discover_project(args.project.resolve())
+        if args.agent:
+            from .work import shortcut
+            return shortcut(project, state_dir(project), agent=args.agent,
+                            destination=args.to, resume=args.resume)
+        from .work import run as work
         return work(project, state_dir(project))
     project = discover_project(args.project.resolve())
     state = state_dir(project)
@@ -134,14 +145,29 @@ def run(args, extra=()):
         return 0
 
     agent = args.action
+    request = args.launch_request
+    if request and not args.new:
+        raise ValueError('A launch request requires --new')
     session_id = args.session or (None if args.new else _select_session(project, agent, state))
     new = session_id is None
-    if new:
-        if agent == 'codex':
-            session_id = agents.create_codex_session(project, state=state, host=host)
-            new = False  # Native bootstrap already created the ownership receipt.
-        else:
-            session_id = str(uuid.uuid4())
+    with ExitStack() as stack:
+        if request:
+            receipt = state / 'work-launches' / (request + '.json')
+            stack.enter_context(locked(receipt.with_suffix('.lock')))
+            try:
+                read_json(receipt)
+            except FileNotFoundError:
+                pass
+            else:
+                raise ValueError('Launch request already exists; use --resume to select the saved conversation')
+        if new:
+            if agent == 'codex':
+                session_id = agents.create_codex_session(project, state=state, host=host)
+                new = False  # Native bootstrap already created the ownership receipt.
+            else:
+                session_id = str(uuid.uuid4())
+        if request:
+            atomic_write(receipt, json.dumps(dict(agent=agent, session_id=session_id)).encode() + b'\n')
     print(f'{agent} session: {session_id}', file=sys.stderr)
     return agents.launch(project, agent, session_id, state=state, host=host,
                          new=new, extra_args=extra)

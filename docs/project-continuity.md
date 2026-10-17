@@ -11,6 +11,23 @@ and offers continuation on this Mac or in the paired Codespace. It uses titles
 or prompt previews and last activity, so UUIDs are only needed for advanced commands.
 Use `task devcontainer:work` when the project already has its own `work` target.
 
+Direct shortcuts start a **new** conversation and return to the shell on exit:
+
+```sh
+task work:codex
+task work:claude
+task work:codex:cs
+task work:claude:cs
+```
+
+Add `-- --resume` to open that agent's project-only resume picker, newest first.
+For example, `task work:codex:cs -- --resume` continues the selected conversation
+in Codespace, while `task work:codex -- --resume` brings it to this host. Press
+Enter to choose the newest entry. Existing conversations still require adoption
+and idle writer custody. A normal shortcut starts fresh even when a conversation
+was remembered. All four shortcuts also have `devcontainer:` namespaced versions
+if your project already defines these task names.
+
 Setup pairs its selected Codespace and starts scratch sync. Commit-only setup
 defers pairing to the menu. Matching Codespaces and checkout paths are discovered;
 multiple matches require a selection. A stopped Codespace needs the explicit

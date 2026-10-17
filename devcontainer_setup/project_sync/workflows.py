@@ -289,24 +289,54 @@ print(json.dumps(roots))
             return agents.launch(self.project, agent, session_id, state=self.state, host=local['host'])
         return self._launch_remote(agent, session_id)
 
-    def _launch_remote(self, agent, session_id):
+    def _launch_remote(self, agent, session_id, *, request_id=None):
         config = self.binding()
+        arguments = (' --session ' + shlex.quote(session_id)) if session_id else ' --new'
+        if request_id:
+            arguments += ' --launch-request ' + shlex.quote(sessions.session_uuid(request_id))
         # The generated helper is self-contained inside the selected checkout.
         command = (
             'cd ' + shlex.quote(config['remote_root'])
             + " && { test -f .devcontainer/scripts/project-sync.sh || { printf "
             + "'Update project devcontainer helpers before continuing; custody is retained.\\n'; "
             + "exit 1; }; } && exec bash .devcontainer/scripts/project-sync.sh agent "
-            + shlex.quote(agent) + ' --session ' + shlex.quote(session_id)
+            + shlex.quote(agent) + arguments
         )
         with CodespaceConnection(config['codespace'], state=self.state) as connection:
             path = self.state / 'ssh-interactive-config'
             connection.ssh_config(path)
             return subprocess.call(['ssh', '-F', str(path), '-tt', 'project-sync', command], env=clean_env())
 
-    def new_session(self, agent):
+    def _launch_result(self, request_id):
+        config = self.binding()
+        with CodespaceConnection(config['codespace'], state=self.state) as connection:
+            return handoff.RemoteEndpoint(connection, config['remote_root'], self.project.identity).call(
+                'launch_result', request_id=request_id)
+
+    def new_session(self, agent, *, destination=None):
         if agent not in ('codex', 'claude'):
             raise ValueError('Unsupported agent')
+        here = 'codespace' if self.is_remote else 'mac'
+        destination = destination or here
+        if destination not in ('mac', 'codespace') or (self.is_remote and destination == 'mac'):
+            raise ValueError('Use task work on your Mac to launch on that host')
+        if destination != here:
+            local, remote = self.inventory(), self.inventory(remote=True)
+            self._check_git(local['git'], remote['git'])
+            self.sync_ready()
+            request_id = str(uuid.uuid4())
+            code = self._launch_remote(agent, None, request_id=request_id)
+            try:
+                result = self._launch_result(request_id)
+                if not isinstance(result, dict) or result.get('agent') != agent:
+                    raise ValueError('Unexpected managed launch receipt')
+                sid = sessions.session_uuid(result.get('session_id'))
+                self.remember(agent, sid, destination)
+            except (ValueError, OSError, RuntimeError):
+                print('Could not refresh the saved selection. Any created conversation remains in the Codespace; '
+                      f'use task work:{agent}:cs -- --resume to find it. The launch was not repeated.', file=sys.stderr)
+                sid = None
+            return code, sid
         host = host_id()
         new = agent == 'claude'
         sid = (

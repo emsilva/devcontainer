@@ -42,6 +42,8 @@ small helpers, and a Taskfile include. Personal preferences live in
 | Command | Action |
 |---|---|
 | `task work` | Continue a conversation here or in its Codespace |
+| `task work:codex` / `task work:claude` | Start a new conversation here |
+| `task work:codex:cs` / `task work:claude:cs` | Start a new conversation in Codespace |
 | `task devcontainer:setup` | Review or change the setup |
 | `task devcontainer:setup -- --scan` | Show runtime and tool recommendations |
 | `task devcontainer:setup -- --dry-run` | Preview the recommended file changes |
@@ -83,6 +85,16 @@ Choose **Continue on this Mac**, **Continue in Codespace**, or start a new Codex
 or Claude conversation. The menu remembers your selection and shows conversations
 by title and last activity. Moving to the Codespace opens an interactive remote
 terminal; exit the agent to return to the menu. Use the Mac menu to bring it back.
+
+For direct launches, use `task work:codex` or `task work:claude`. Add `:cs` to
+start in Codespace instead. These commands always start fresh and return to your
+shell when the agent exits. Add `-- --resume` to choose a saved conversation for
+that agent in this project, newest first; press Enter to resume the first entry:
+
+```sh
+task work:codex -- --resume
+task work:claude:cs -- --resume
+```
 
 Setup connects scratch sync to the Codespace you selected. With commit-only
 setup, the menu helps you connect one later. It discovers matching checkouts and

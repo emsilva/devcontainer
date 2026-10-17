@@ -63,6 +63,67 @@ class WorkIntegrationTests(unittest.TestCase):
         self.assertNotIn('Traceback', result.stderr)
         self.assertFalse((self.root.parent / 'state').exists())
 
+    def test_four_shortcuts_dispatch_resume_flags_from_generated_tasks(self):
+        self.install()
+        for agent in ('codex', 'claude'):
+            for suffix in ('', ':cs'):
+                target = 'work:' + agent + suffix
+                for prefix in ('', 'devcontainer:'):
+                    with self.subTest(target=prefix+target):
+                        result = subprocess.run(['task', '--dry', prefix+target, '--', '--resume'],
+                                                cwd=self.root, capture_output=True, text=True)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        command = result.stdout + result.stderr
+                        self.assertIn('work --agent ' + agent, command)
+                        self.assertIn('--resume', command)
+                        self.assertEqual('--to codespace' in command, suffix == ':cs')
+                result = subprocess.run(['task', target], cwd=self.root, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('terminal', result.stderr.lower())
+                self.assertNotIn('unrecognized', result.stderr)
+
+    def test_existing_shortcuts_are_preserved_while_namespaced_version_exists(self):
+        self.install("version: '3'\ntasks:\n  work:codex:\n    cmds: ['echo owner-codex']\n")
+        result = subprocess.run(['task', 'work:codex'], cwd=self.root, capture_output=True, text=True, check=True)
+        self.assertIn('owner-codex', result.stdout)
+        result = subprocess.run(['task', '--dry', 'devcontainer:work:codex'], cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('work --agent codex', result.stderr + result.stdout)
+
+    def test_cli_dispatches_shortcut_and_requires_agent_for_resume_or_destination(self):
+        from devcontainer_setup.project_sync.__main__ import parser, run
+        with patch('sys.stdin.isatty', return_value=True), patch('sys.stdout.isatty', return_value=True), \
+                patch('devcontainer_setup.project_sync.work.shortcut', return_value=0) as shortcut:
+            args = parser().parse_args(['--project', str(self.root), 'work', '--agent', 'codex', '--to', 'codespace', '--resume'])
+            self.assertEqual(run(args), 0)
+        self.assertEqual(shortcut.call_args.kwargs, dict(agent='codex', destination='codespace', resume=True))
+        for flags in (['--resume'], ['--to', 'codespace']):
+            with self.subTest(flags=flags), self.assertRaisesRegex(ValueError, 'agent'):
+                run(parser().parse_args(['--project', str(self.root), 'work', *flags]))
+
+    def test_remote_new_launch_receipt_records_exact_id_and_refuses_repeated_request(self):
+        from devcontainer_setup.project_sync.__main__ import parser, run
+        from devcontainer_setup.project_sync.handoff import LocalEndpoint
+        from devcontainer_setup.project_sync.state import discover_project
+        request = '12345678-1234-4234-8234-123456789abc'
+        sid = '22345678-1234-4234-8234-123456789abc'
+        state = self.root.parent / 'private'
+        args = parser().parse_args(['--project', str(self.root), 'agent', 'codex', '--new', '--launch-request', request])
+        with patch('devcontainer_setup.project_sync.__main__.state_dir', return_value=state), \
+                patch('devcontainer_setup.project_sync.__main__.host_id', return_value='host'), \
+                patch('devcontainer_setup.project_sync.agents.create_codex_session', return_value=sid) as create, \
+                patch('devcontainer_setup.project_sync.agents.launch', return_value=0) as launch:
+            self.assertEqual(run(args), 0)
+            self.assertEqual(LocalEndpoint(discover_project(self.root), state).call('launch_result', request_id=request),
+                             dict(agent='codex', session_id=sid))
+            with self.assertRaisesRegex(ValueError, 'already exists'):
+                run(args)
+        create.assert_called_once()
+        launch.assert_called_once()
+        self.assertEqual((state / 'work-launches' / (request + '.json')).stat().st_mode & 0o777, 0o600)
+        with self.assertRaisesRegex(ValueError, 'UUID'):
+            LocalEndpoint(discover_project(self.root), state).call('launch_result', request_id='../bad')
+
     def test_existing_work_and_other_root_tasks_are_preserved(self):
         self.install("version: '3'\ntasks:\n  work:\n    cmds: ['echo original-work']\n"
                      "  up:\n    cmds: ['echo original-up']\n")

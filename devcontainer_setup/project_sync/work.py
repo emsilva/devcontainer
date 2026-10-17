@@ -74,6 +74,72 @@ def _continue(service, ui, row, destination, source):
     code = service.continue_session(row['agent'], row['session_id'], destination)
     if code:
         raise ValueError(f'Agent exited with status {code}. Your selection is saved; retry when ready.')
+    return code
+
+
+def shortcut(project, state, *, agent, destination=None, resume=False, ui=None, service=None):
+    """One explicit new/resume action, then return to the launching shell."""
+    if service is None:
+        from .workflows import Workflows
+        service = Workflows(project, state)
+    here = 'codespace' if service.is_remote else 'mac'
+    destination = destination or here
+    if agent not in ('codex', 'claude') or destination not in ('mac', 'codespace'):
+        raise ValueError('Choose a supported agent and machine')
+    if service.is_remote and destination == 'mac':
+        raise ValueError('Run this shortcut on your Mac to return a conversation there')
+    try:
+        if not service.is_remote and service.binding():
+            try:
+                service.ensure_sync()
+            except (ValueError, OSError, RuntimeError) as exc:
+                _say('Scratch sync unavailable: ' + str(exc))
+        if destination != here:
+            ui = ui or Gum()
+            if not _remote_ready(service, ui):
+                return 0
+            service.ensure_sync()
+
+        def start_new():
+            if destination == here:
+                return service.new_session(agent)[0]
+            return service.new_session(agent, destination=destination)[0]
+
+        if not resume:
+            return start_new()
+        rows = [dict(row, location=here) for row in service.inventory()['sessions'] if row['agent'] == agent]
+        if not service.is_remote and service.binding():
+            try:
+                space = service.space()
+                if space and str(space.get('state', '')).lower() in ('available', 'running'):
+                    rows.extend(dict(row, location='codespace') for row in service.inventory(remote=True)['sessions']
+                                if row['agent'] == agent)
+            except (ValueError, OSError, RuntimeError) as exc:
+                if destination != here:
+                    raise
+                _say('Codespace unavailable: ' + str(exc))
+        # Keep the current owner rather than showing a stale physical copy of
+        # the same transcript as a second conversation.
+        by_id = {}
+        stale = ('unknown', 'transferred')
+        for row in rows:
+            old = by_id.get(row['session_id'])
+            if old is None or ((old.get('ownership') or {}).get('status', 'unknown') in stale
+                               and (row.get('ownership') or {}).get('status', 'unknown') not in stale):
+                by_id[row['session_id']] = row
+        rows = sorted(by_id.values(), key=lambda row: float(row.get('updated_at') or 0), reverse=True)
+        labels = [f'{_label(row)} · {row["location"]} ({index+1})' for index, row in enumerate(rows)]
+        options = [*labels, 'New conversation', 'Back']
+        ui = ui or Gum()
+        choice = ui.choose(f'Resume {agent} project conversation', options, selected=options[0])
+        if choice == 'Back':
+            return 0
+        if choice == 'New conversation':
+            return start_new()
+        row = rows[labels.index(choice)]
+        return _continue(service, ui, row, destination, row['location']) or 0
+    except (Cancelled, KeyboardInterrupt):
+        return 0
 
 
 def _show_status(status):

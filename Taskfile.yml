@@ -6,6 +6,26 @@ tasks:
     interactive: true
     cmds:
       - bash scripts/project-sync.sh work {{.CLI_ARGS}}
+  work:codex:
+    desc: Start a new Codex conversation here (add -- --resume to choose one)
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh work --agent codex {{.CLI_ARGS}}
+  work:claude:
+    desc: Start a new Claude conversation here (add -- --resume to choose one)
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh work --agent claude {{.CLI_ARGS}}
+  work:codex:cs:
+    desc: Start a new Codex conversation in Codespace (add -- --resume to choose one)
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh work --agent codex --to codespace {{.CLI_ARGS}}
+  work:claude:cs:
+    desc: Start a new Claude conversation in Codespace (add -- --resume to choose one)
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh work --agent claude --to codespace {{.CLI_ARGS}}
   setup:
     desc: Configure a project with the interactive wizard (task setup -- --project PATH)
     interactive: true

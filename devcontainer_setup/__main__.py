@@ -124,12 +124,13 @@ def integrate_continuity(project: Path, files: dict[str, bytes], enabled: bool) 
     end = tasks.end() + 1 + boundary.start() if boundary else len(text)
     body = text[tasks.end():end]
     aliases = ['work'] + [f'scratch:{verb}' for verb in ('configure', 'start', 'stop', 'status', 'logs', 'backup')]
+    aliases += [f'work:{agent}{suffix}' for agent in ('codex', 'claude') for suffix in ('', ':cs')]
     aliases += [f'agent:{verb}' for verb in ('codex', 'claude', 'sessions', 'handoff', 'recover')]
     additions = ''
     for alias in aliases:
         if re.search(r'^  [\'\"]?' + re.escape(alias) + r'[\'\"]?:', body, re.M):
             continue
-        additions += (f'  {alias}:\n' + ('    interactive: true\n' if alias == 'work' else '') + '    cmds:\n'
+        additions += (f'  {alias}:\n' + ('    interactive: true\n' if alias == 'work' or alias.startswith('work:') else '') + '    cmds:\n'
                       f'      - task: devcontainer:{alias}\n'
                       '        vars: {CLI_ARGS: "{{.CLI_ARGS}}"}\n')
     candidates[name] = (text[:tasks.end()] + ('\n' + additions.rstrip('\n') if additions else '')
