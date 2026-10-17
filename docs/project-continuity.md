@@ -10,6 +10,7 @@ available on their respective hosts; setup installs the container tools.
 | Command | Result |
 | --- | --- |
 | `task work:cs` | Explicitly start/connect Codespace, back it up to Mac, attach Herdr |
+| `task work:disconnect` | Disconnect this project's saved Codespace machine from local Herdr |
 | `task work` | Open local Herdr; recover remote work when switching back |
 | `task work:codex` / `task work:claude` | Fresh native conversation on the current host |
 | `task work:codex -- --resume` | Choose a scoped conversation, including recoverable checkpoints |
@@ -19,6 +20,13 @@ available on their respective hosts; setup installs the container tools.
 
 If a project already has a custom `work` task, use `task devcontainer:work` and the
 other `devcontainer:work:*` tasks. Setup preserves custom root tasks.
+
+Run `task work:disconnect` on the Mac to disable only this project's saved Herdr
+machine. The Codespace group disconnects in local Herdr; remote workspaces and
+agents remain running, and Mac backups continue. This operation needs no SSH or
+GitHub connection. Repeating it is safe. `task work:cs` re-enables the saved
+machine and reuses the existing workspace. Use `task work:stop` separately to
+pause this project's backup and scratch worker.
 
 ## What gets protected
 

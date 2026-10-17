@@ -12,6 +12,10 @@
     desc: Show the last checkpoint received on this Mac
     cmds:
       - bash .devcontainer/scripts/project-sync.sh work --status {{.CLI_ARGS}}
+  work:disconnect:
+    desc: Disconnect this project's saved Codespace machine from Herdr
+    cmds:
+      - bash .devcontainer/scripts/project-sync.sh work --disconnect {{.CLI_ARGS}}
   work:stop:
     desc: Stop this project backup and scratch worker
     cmds:

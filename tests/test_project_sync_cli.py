@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -48,6 +49,57 @@ class ProjectSyncCLITests(unittest.TestCase):
         result = self.run_cli('work', '--status')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIsNone(json.loads(result.stdout)['last_mac_checkpoint'])
+        self.assertFalse(self.state.exists())
+
+    def test_disconnect_is_project_scoped_idempotent_and_needs_no_terminal_or_pairing(self):
+        from devcontainer_setup.project_sync.state import discover_project
+        project = discover_project(self.root)
+        alias, session = 'devcontainer-' + project.project_id, 'project-' + project.project_id
+        catalog = self.root.parent / 'machines.json'
+        calls = self.root.parent / 'calls.jsonl'
+        rows = [
+            dict(id='other-project', target='other-alias', session=session, enabled=True),
+            dict(id='other-session', target=alias, session='default', enabled=True),
+            dict(id='project-one', target=alias, session=session, enabled=True),
+            dict(id='project-two', target=alias, session=session, enabled=True),
+        ]
+        catalog.write_text(json.dumps(rows))
+        binary = self.root.parent / 'bin'
+        binary.mkdir()
+        (binary / 'herdr').write_text('#!' + sys.executable + '\n' + '''import json,os,pathlib,sys
+catalog=pathlib.Path(os.environ['TEST_CATALOG'])
+rows=json.loads(catalog.read_text())
+args=sys.argv[1:]
+with open(os.environ['TEST_CALLS'],'a') as stream:stream.write(json.dumps(args)+'\\n')
+if args==['machine','list','--json']:print(json.dumps(rows))
+elif len(args)==3 and args[:2]==['machine','disable']:
+ for row in rows:
+  if row['id']==args[2]:row['enabled']=False
+ catalog.write_text(json.dumps(rows))
+ print('Disabled machine')
+else:sys.exit(12)
+''')
+        (binary / 'herdr').chmod(0o700)
+        self.env.update(PATH=str(binary) + os.pathsep + os.environ['PATH'],
+                        TEST_CATALOG=str(catalog), TEST_CALLS=str(calls))
+        for _ in range(2):
+            result = self.run_cli('work', '--disconnect')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('task work:cs', result.stdout)
+        actual = json.loads(catalog.read_text())
+        self.assertEqual([row['id'] for row in actual if row['enabled']], ['other-project', 'other-session'])
+        commands = [json.loads(line) for line in calls.read_text().splitlines()]
+        self.assertEqual(commands.count(['machine', 'disable', 'project-one']), 1)
+        self.assertEqual(commands.count(['machine', 'disable', 'project-two']), 1)
+        self.assertTrue(all(command[:2] in (['machine', 'list'], ['machine', 'disable']) for command in commands))
+        self.assertFalse(self.state.exists())
+
+    def test_disconnect_refuses_to_run_in_the_codespace(self):
+        self.env['CODESPACES'] = 'true'
+        result = self.run_cli('work', '--disconnect')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Mac', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
         self.assertFalse(self.state.exists())
 
     def test_help_and_invalid_project_never_touch_normal_profiles(self):

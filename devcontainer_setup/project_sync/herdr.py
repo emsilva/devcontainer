@@ -167,6 +167,32 @@ def open_local(project, state: Path) -> int:
     return subprocess.call(['herdr', *prefix], cwd=project.root)
 
 
+def _matching_machines(alias, session):
+    rows = _json(['machine', 'list', '--json'])
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ValueError('Herdr returned an invalid machine catalog')
+    matches = [row for row in rows if row.get('target') == alias and row.get('session') == session]
+    for row in matches:
+        machine_id = row.get('id')
+        if not isinstance(machine_id, str) or not machine_id or machine_id.startswith('-'):
+            raise ValueError('Herdr returned an invalid machine ID')
+    return matches
+
+
+def disconnect_remote(project) -> int:
+    """Disable only this project's saved machine, preserving its remote session."""
+    if os.environ.get('CODESPACES') == 'true':
+        raise ValueError('Run task work:disconnect on your Mac to disconnect its Herdr connection')
+    matches = _matching_machines('devcontainer-' + project.project_id, _session(project))
+    for machine in matches:
+        if machine.get('enabled'):
+            result = subprocess.call(['herdr', 'machine', 'disable', machine['id']])
+            if result:
+                return result
+    print('Codespace disconnected from Herdr. Reconnect with task work:cs.')
+    return 0
+
+
 def open_remote(project, state: Path, remote_root: str) -> int:
     """Register/reuse the project's remote machine and attach its persistent UI."""
     state = Path(state)
@@ -176,24 +202,17 @@ def open_remote(project, state: Path, remote_root: str) -> int:
         receipt = read_json(receipt_path)
     except FileNotFoundError:
         receipt = {}
-    rows = _json(['machine', 'list', '--json'])
-    def matching(rows):
-        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
-            raise ValueError('Herdr returned an invalid machine catalog')
-        return [row for row in rows if row.get('target') == alias and row.get('session') == session]
-    matches = matching(rows)
+    matches = _matching_machines(alias, session)
     if not matches:
         result = subprocess.call(['herdr', 'machine', 'add', alias, '--label', project.root.name + ' (Codespace)',
                                   '--remote-session', session])
         if result:
             return result
-        matches = matching(_json(['machine', 'list', '--json']))
+        matches = _matching_machines(alias, session)
         if not matches:
             raise ValueError('Herdr setup did not save the expected project machine')
     machine = next((row for row in matches if row.get('id') == receipt.get('machine_id')), matches[0])
     machine_id = machine.get('id')
-    if not isinstance(machine_id, str) or not machine_id or machine_id.startswith('-'):
-        raise ValueError('Herdr returned an invalid machine ID')
     if not machine.get('enabled'):
         result = subprocess.call(['herdr', 'machine', 'enable', machine_id])
         if result:

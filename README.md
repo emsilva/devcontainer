@@ -44,6 +44,7 @@ small helpers, and a Taskfile include. Personal preferences live in
 | `task work` | Open local project work in Herdr |
 | `task work:codex` / `task work:claude` | Start a new conversation here |
 | `task work:cs` | Open Codespace Herdr and back up work to this Mac |
+| `task work:disconnect` | Disconnect this project's Codespace from the local Herdr UI |
 | `task work:status` / `task work:stop` | Check protection / stop this project’s worker |
 | `task devcontainer:setup` | Review or change the setup |
 | `task devcontainer:setup -- --scan` | Show runtime and tool recommendations |
@@ -113,7 +114,10 @@ Only scratch markers are tracked by Git.
 Keep the Mac awake and connected while working remotely. `task work:status`
 reports the actual last received checkpoint and any unsupported conversations;
 scratch synchronization alone does not certify code or conversation protection.
-Use `task work:stop` to stop this project’s worker. See
+Use `task work:disconnect` on your Mac to disconnect this project's saved Codespace
+machine from Herdr. Your local Herdr, remote sessions, and Mac backups keep running.
+Run `task work:cs` to reconnect and reuse the workspace.
+Use `task work:stop` to stop this project’s backup and scratch worker. See
 [recovery details and limitations](docs/project-continuity.md).
 
 ## Resume a Codespace setup

@@ -2,7 +2,7 @@
 import hashlib
 import re
 
-ALIASES = ('work', 'work:cs', 'work:status', 'work:stop', 'work:codex', 'work:claude',
+ALIASES = ('work', 'work:cs', 'work:disconnect', 'work:status', 'work:stop', 'work:codex', 'work:claude',
            'scratch:configure', 'scratch:start', 'scratch:stop', 'scratch:status', 'scratch:logs', 'scratch:backup')
 LEGACY = ('work', 'work:codex', 'work:claude', 'work:codex:cs', 'work:claude:cs',
           'agent:codex', 'agent:claude', 'agent:sessions', 'agent:handoff', 'agent:recover',
