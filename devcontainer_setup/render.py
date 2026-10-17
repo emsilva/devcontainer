@@ -103,7 +103,11 @@ def _selections(values):
                 'ports': sorted(set(values.get('ports', []))),
                 'package_managers': dict(values.get('package_managers', {})),
                 'package_manager_versions': dict(values.get('package_manager_versions', {})),
-                'polyglot': bool(values.get('polyglot', False))}
+                'polyglot': bool(values.get('polyglot', False)),
+                'continuity': values.get('continuity', False)}
+    if type(selected['continuity']) is not bool:
+        raise ValueError('Project continuity must be true or false')
+    selected['ssh'] = selected['ssh'] or selected['continuity']
     for runtime, version in selected['runtimes'].items():
         if runtime not in RUNTIMES or not isinstance(version, str) or not re.fullmatch(r'[A-Za-z0-9_.+-]+', version):
             raise ValueError(f'Choose a concrete supported runtime version: {runtime}={version}')
@@ -346,7 +350,15 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
             content = content.replace(old, new)
         files['.devcontainer/scripts/' + name] = content.encode()
     files['.devcontainer/scripts/install-agents.sh'] = (source / '.devcontainer/scripts/install-agents.sh').read_bytes()
-    files['.devcontainer/Taskfile.yml'] = (templates / 'Taskfile.yml').read_bytes()
+    taskfile = (templates / 'Taskfile.yml').read_text()
+    continuity_tasks = (templates / 'continuity-tasks.yml').read_text() if selected['continuity'] else ''
+    files['.devcontainer/Taskfile.yml'] = taskfile.replace('# __CONTINUITY_TASKS__', continuity_tasks).encode()
+    if selected['continuity']:
+        files['.devcontainer/scripts/project-sync.sh'] = (templates / 'scripts/project-sync.sh').read_bytes()
+        runtime = source / 'devcontainer_setup/project_sync'
+        for module in sorted(runtime.glob('*.py')):
+            files['.devcontainer/scripts/project_sync/' + module.name] = module.read_bytes()
+        files['.devcontainer/scripts/project_sync/sync-tools.json'] = (templates / 'sync-tools.json').read_bytes()
     artifacts = _read(templates / 'artifacts.json')
     installs = []
     if selected['dotfiles']:

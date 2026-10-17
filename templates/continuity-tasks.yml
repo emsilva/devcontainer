@@ -1,0 +1,49 @@
+  scratch:configure:
+    desc: Pair this project's scratch directory with an existing Codespace
+    interactive: true
+    cmds:
+      - bash .devcontainer/scripts/project-sync.sh scratch configure {{.CLI_ARGS}}
+  scratch:start:
+    desc: Start automatic two-way scratch synchronization on this Mac
+    cmds:
+      - bash .devcontainer/scripts/project-sync.sh scratch start {{.CLI_ARGS}}
+  scratch:stop:
+    desc: Stop this project's scratch worker
+    cmds:
+      - bash .devcontainer/scripts/project-sync.sh scratch stop {{.CLI_ARGS}}
+  scratch:status:
+    desc: Show scratch pairing, connection, and conflicts
+    cmds:
+      - bash .devcontainer/scripts/project-sync.sh scratch status {{.CLI_ARGS}}
+  scratch:logs:
+    desc: Read this project's scratch worker log
+    cmds:
+      - bash .devcontainer/scripts/project-sync.sh scratch logs {{.CLI_ARGS}}
+  scratch:backup:
+    desc: Save a private recovery snapshot of scratch contents
+    cmds:
+      - bash .devcontainer/scripts/project-sync.sh scratch backup {{.CLI_ARGS}}
+  agent:codex:
+    desc: Start or resume a project Codex conversation with writer ownership
+    interactive: true
+    cmds:
+      - bash .devcontainer/scripts/project-sync.sh agent codex {{.CLI_ARGS}}
+  agent:claude:
+    desc: Start or resume a project Claude conversation with writer ownership
+    interactive: true
+    cmds:
+      - bash .devcontainer/scripts/project-sync.sh agent claude {{.CLI_ARGS}}
+  agent:sessions:
+    desc: List this project's native conversations
+    cmds:
+      - bash .devcontainer/scripts/project-sync.sh agent sessions {{.CLI_ARGS}}
+  agent:handoff:
+    desc: Move a stopped conversation between this Mac and its Codespace
+    interactive: true
+    cmds:
+      - bash .devcontainer/scripts/project-sync.sh agent handoff {{.CLI_ARGS}}
+  agent:recover:
+    desc: Inspect or recover an interrupted conversation handoff
+    interactive: true
+    cmds:
+      - bash .devcontainer/scripts/project-sync.sh agent recover {{.CLI_ARGS}}
