@@ -342,7 +342,14 @@ def _catalog_metadata(data, agent, path):
         if not prompt and message.get('role') == 'user':
             content = message.get('content', '')
             if isinstance(content, list):
-                content = ' '.join(item.get('text', '') for item in content if isinstance(item, dict) and isinstance(item.get('text', ''), str))
+                texts = [item.get('text', '') for item in content
+                         if isinstance(item, dict) and isinstance(item.get('text', ''), str)]
+                if agent == 'codex':
+                    # Native Codex serializes its instruction/environment envelope
+                    # as a user message before the developer's actual question.
+                    texts = [text for text in texts if not text.lstrip().startswith(
+                        ('# AGENTS.md instructions for ', '<environment_context>'))]
+                content = ' '.join(texts)
             prompt = display_text(content)
         if agent == 'codex' and not prompt and payload.get('type') == 'user_message':
             prompt = display_text(payload.get('message'))

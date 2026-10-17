@@ -9,6 +9,22 @@ from devcontainer_setup.project_sync.sessions import list_sessions, claude_names
 
 
 class CatalogTests(unittest.TestCase):
+    def test_codex_prompt_skips_native_instruction_and_environment_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve()
+            project = SimpleNamespace(root=home / 'repo')
+            sid = str(uuid.uuid4())
+            path = home / 'sessions' / (sid + '.jsonl')
+            path.parent.mkdir()
+            rows = [dict(type='session_meta', payload=dict(id=sid, cwd=str(project.root), cli_version='0.163.0')),
+                    dict(type='response_item', payload=dict(type='message', role='user', content=[
+                        dict(type='input_text', text='# AGENTS.md instructions for /project\n<INSTRUCTIONS>Guidance</INSTRUCTIONS>'),
+                        dict(type='input_text', text='<environment_context>Local runtime</environment_context>')])),
+                    dict(type='response_item', payload=dict(type='message', role='user', content=[
+                        dict(type='input_text', text='Repair conversation handoff')]))]
+            path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+            self.assertEqual(list_sessions(project, 'codex', home)[0]['title'], 'Repair conversation handoff')
+
     def test_titles_recency_scope_and_malformed(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp).resolve()
