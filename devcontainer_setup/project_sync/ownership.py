@@ -6,6 +6,8 @@ source release, activate target. Network uncertainty never grants ownership.
 from contextlib import contextmanager
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 import uuid
 
@@ -38,8 +40,8 @@ def owner_status(state, agent, session_id):
 def _lease(state, agent, session_id):
     _, lock = _paths(state, agent, session_id)
     try:
-        with locked(lock):
-            yield
+        with locked(lock) as descriptor:
+            yield descriptor
     except BlockingIOError as exc:
         raise ValueError('Session lease is active; stop the managed writer first') from exc
 
@@ -52,9 +54,9 @@ def _owned(receipt, host):
 
 
 @contextmanager
-def managed_lease(state, agent, session_id, host, *, new=False):
+def managed_lease(state, agent, session_id, host, *, new=False, _with_fd=False):
     path, _ = _paths(state, agent, session_id)
-    with _lease(state, agent, session_id):
+    with _lease(state, agent, session_id) as descriptor:
         receipt = owner_status(state, agent, session_id)
         if new:
             if receipt['status'] != 'unknown':
@@ -64,13 +66,50 @@ def managed_lease(state, agent, session_id, host, *, new=False):
         receipt = dict(receipt, status='running', pid=os.getpid())
         _write(path, receipt)
         try:
-            yield receipt
+            yield (receipt, descriptor) if _with_fd else receipt
         except BaseException:
             # Uncertain child state must not become an automatic relaunch.
             _write(path, dict(receipt, status='uncertain'))
             raise
         else:
-            _write(path, dict(receipt, status='idle', pid=None))
+            _write(path, dict(receipt, status='idle', pid=None, native_pid=None))
+
+
+def run_native_child(state, agent, session_id, command, *, cwd, env, receipt, lease_fd):
+    """Gate native exec until the durable receipt names its PID.
+
+    The dedicated guardian owns the process lease and survives launcher death.
+    The child inherits the lease as a second defense. Even a native runtime that
+    closes inherited FDs remains protected by its live PID in the receipt.
+    """
+    path, _ = _paths(state, agent, session_id)
+    gate_read, gate_write = os.pipe()
+    child = None
+    try:
+        gate = 'import os,sys; fd=int(sys.argv[1]); token=os.read(fd,1); os.close(fd); token==b"1" or sys.exit(125); os.execvpe(sys.argv[2],sys.argv[2:],os.environ)'
+        child = subprocess.Popen([sys.executable, '-c', gate, str(gate_read), *command], cwd=cwd, env=env, pass_fds=(gate_read, lease_fd))
+        os.close(gate_read)
+        gate_read = -1
+        receipt['native_pid'] = child.pid
+        _write(path, receipt)
+        os.write(gate_write, b'1')
+        os.close(gate_write)
+        gate_write = -1
+        while True:
+            try:
+                return child.wait()
+            except KeyboardInterrupt:
+                # Terminal SIGINT also reaches the native foreground child. Keep
+                # custody until that child actually exits.
+                continue
+    finally:
+        for descriptor in (gate_read, gate_write):
+            if descriptor >= 0:
+                os.close(descriptor)
+        if child is not None and child.poll() is None:
+            # On an exception before gate release the shim exits at EOF. After
+            # release, retain the live PID in the uncertain receipt.
+            receipt['native_pid'] = child.pid
 
 
 def adopt_local(state, agent, session_id, host, *, native_paths):
@@ -92,8 +131,7 @@ def recover_local(state, agent, session_id, host, *, native_paths):
         receipt = owner_status(state, agent, session_id)
         if receipt.get('host') != host or receipt['status'] not in ('running', 'uncertain'):
             raise ValueError('Only a crashed local writer can be recovered; transfers need peer receipts')
-        pid = receipt.get('pid')
-        if pid:
+        for pid in {receipt.get('pid'), receipt.get('native_pid')} - {None}:
             try:
                 os.kill(pid, 0)
             except ProcessLookupError:
@@ -101,7 +139,7 @@ def recover_local(state, agent, session_id, host, *, native_paths):
             except PermissionError as exc:
                 raise ValueError('Cannot establish whether previous writer is alive') from exc
             else:
-                raise ValueError('Previous writer process is alive; refusing recovery')
+                raise ValueError('Previous writer or native child process is alive; refusing recovery')
         assert_quiescent(native_paths)
         _write(path.with_name(path.stem + '.recovery-' + uuid.uuid4().hex + '.json'), receipt)
         return _write(path, dict(receipt, status='idle', pid=None))

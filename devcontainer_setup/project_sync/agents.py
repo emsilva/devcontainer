@@ -7,9 +7,10 @@ from pathlib import Path
 import queue
 import subprocess
 import threading
+import sys
 import time
 
-from .ownership import managed_lease
+from .ownership import managed_lease, run_native_child
 from .sessions import _codex_index, _metadata, _parent, _read, assert_quiescent, claude_namespace, native_home, session_uuid
 
 MEMORY_CONFIG = {'memories.use_memories': False, 'memories.generate_memories': False}
@@ -245,7 +246,7 @@ def native_paths(project, agent, session_id, home, *, state=None):
     raise ValueError('Unsupported agent')
 
 
-def launch(project, agent, session_id, *, state, host, home=None, new=False, extra_args=(), env=None, executable=None):
+def _launch_owned(project, agent, session_id, *, state, host, home=None, new=False, extra_args=(), env=None, executable=None):
     """Run the ordinary interactive CLI under a durable process-held lease."""
     session_uuid(session_id)
     values = dict(os.environ if env is None else env)
@@ -259,15 +260,16 @@ def launch(project, agent, session_id, *, state, host, home=None, new=False, ext
     if agent == 'codex':
         command += ['resume', '--cd', str(project.root), '-c', 'memories.use_memories=false', '-c', 'memories.generate_memories=false', session_id]
     elif agent == 'claude':
-        command += ['--session-id' if new else '--resume', session_id, '--append-system-prompt', context]
+        command += ['--session-id' if new else '--resume', session_id, '--system-prompt-snapshot', 'off', '--append-system-prompt', context]
+        values['CLAUDE_CODE_DISABLE_AUTO_MEMORY'] = '1'
     else:
         raise ValueError('Unsupported agent')
     # Native session selectors, cwd switches and background launch break custody.
-    forbidden = {'--resume', '--session-id', '--fork-session', '--continue', '--last', '--remote', '--bg', '--background', '--cd', '-C'}
+    forbidden = {'--resume', '--session-id', '--fork-session', '--continue', '--last', '--remote', '--bg', '--background', '--cd', '-C', '--system-prompt-snapshot'}
     if any(arg.split('=', 1)[0] in forbidden for arg in extra_args):
         raise ValueError('Extra arguments may not override managed session identity, cwd or process lifetime')
     command.extend(extra_args)
-    with managed_lease(state, agent, session_id, host, new=new):
+    with managed_lease(state, agent, session_id, host, new=new, _with_fd=True) as (receipt, lease_fd):
         if not new:
             assert_quiescent(native_paths(project, agent, session_id, resolved_home, state=state))
             if agent == 'codex':
@@ -276,5 +278,45 @@ def launch(project, agent, session_id, *, state, host, home=None, new=False, ext
             candidate = resolved_home / 'projects' / claude_namespace(project.root) / (session_id + '.jsonl')
             if candidate.exists():
                 raise ValueError('New Claude session UUID already exists')
-        result = subprocess.run(command, cwd=project.root, env=values)
-        return result.returncode
+        return run_native_child(state, agent, session_id, command, cwd=project.root, env=values, receipt=receipt, lease_fd=lease_fd)
+
+
+def _guardian_main(descriptor):
+    from .state import Project
+    with os.fdopen(descriptor, 'rb') as source:
+        payload = json.load(source)
+    project_data = payload.pop('project')
+    project_data['root'] = Path(project_data['root'])
+    payload['state'] = Path(payload['state'])
+    return _launch_owned(Project(**project_data), env=dict(os.environ), **payload)
+
+
+def launch(project, agent, session_id, *, state, host, home=None, new=False, extra_args=(), env=None, executable=None):
+    """Launch a foreground guardian which owns custody for the native lifetime.
+
+    The calling wrapper never owns the native lease. Killing that wrapper cannot
+    release it. Stdin/stdout/stderr and the terminal process group are inherited.
+    """
+    session_uuid(session_id)
+    payload = dict(project=dict(root=str(project.root), remote=project.remote, identity=project.identity, project_id=project.project_id), agent=agent, session_id=session_id, state=str(state), host=host, home=str(home) if home is not None else None, new=new, extra_args=list(extra_args), executable=list(executable) if executable else None)
+    read_fd, write_fd = os.pipe()
+    module_root = Path(__file__).resolve().parents[len(__package__.split('.'))]
+    code = 'import sys; sys.path.insert(0, ' + repr(str(module_root)) + '); from ' + __package__ + '.agents import _guardian_main; sys.exit(_guardian_main(int(sys.argv[1])))'
+    try:
+        guardian = subprocess.Popen([sys.executable, '-c', code, str(read_fd)], env=env, pass_fds=(read_fd,))
+        os.close(read_fd)
+        read_fd = -1
+        with os.fdopen(write_fd, 'wb') as output:
+            write_fd = -1
+            output.write(json.dumps(payload).encode())
+        while True:
+            try:
+                return guardian.wait()
+            except KeyboardInterrupt:
+                # The foreground native process receives terminal SIGINT too;
+                # its independent guardian retains custody until it exits.
+                continue
+    finally:
+        for descriptor in (read_fd, write_fd):
+            if descriptor >= 0:
+                os.close(descriptor)

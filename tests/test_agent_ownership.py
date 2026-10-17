@@ -1,6 +1,9 @@
 import importlib
 import json
 import os
+import select
+import pty
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -198,7 +201,7 @@ blocked=False
 try:
     with managed_lease(pathlib.Path(os.environ['FIXTURE_STATE']), 'claude', os.environ['FIXTURE_ID'], 'a'): pass
 except ValueError: blocked=True
-pathlib.Path(os.environ['FIXTURE_OUTPUT']).write_text(json.dumps({'args':sys.argv[1:],'cwd':os.getcwd(),'profile':os.environ['CLAUDE_CONFIG_DIR'],'blocked':blocked}))
+pathlib.Path(os.environ['FIXTURE_OUTPUT']).write_text(json.dumps({'args':sys.argv[1:],'cwd':os.getcwd(),'profile':os.environ['CLAUDE_CONFIG_DIR'],'blocked':blocked,'memory':os.environ.get('CLAUDE_CODE_DISABLE_AUTO_MEMORY')}))
 ''')
         env = dict(os.environ, PYTHONPATH=str(Path.cwd()), FIXTURE_STATE=str(self.state), FIXTURE_ID=self.sid, FIXTURE_OUTPUT=str(self.root / 'result.json'), CLAUDE_CONFIG_DIR=str(self.root / 'normal-claude'))
         code = self.api.launch(self.project, 'claude', self.sid, state=self.state, host='a', new=True, env=env, executable=(sys.executable, str(child)))
@@ -210,3 +213,79 @@ pathlib.Path(os.environ['FIXTURE_OUTPUT']).write_text(json.dumps({'args':sys.arg
         self.assertIn('--session-id', result['args'])
         self.assertIn(self.sid, result['args'])
         self.assertIn('Project scoped launch marker', ' '.join(result['args']))
+        self.assertEqual(result['memory'], '1')
+        self.assertEqual(result['args'][result['args'].index('--system-prompt-snapshot') + 1], 'off')
+
+    def test_native_writer_survives_wrapper_and_guardian_crash_without_takeover(self):
+        child = self.root / 'idle_native.py'
+        child.write_text("import os,sys\nfor fd in range(3,256):\n try: os.close(fd)\n except OSError: pass\nprint(str(os.getpid())+' '+str(os.getppid()),flush=True)\nsys.stdin.readline()\n")
+        launcher = self.root / 'launcher.py'
+        launcher.write_text("from pathlib import Path\nfrom devcontainer_setup.project_sync.agents import launch\nfrom devcontainer_setup.project_sync.state import Project\nimport os,sys\np=Path(sys.argv[1]); launch(Project(p,'https://github.com/test/project','github.com/test/project','a'*24),'claude',sys.argv[2],state=p/'state',host='a',new=True,executable=(sys.executable,str(p/'idle_native.py')))\n")
+        wrapper = subprocess.Popen([sys.executable, str(launcher), str(self.root), self.sid], env=dict(os.environ, PYTHONPATH=str(Path.cwd()), CLAUDE_CONFIG_DIR=str(self.root / 'native-home')), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        child_pid = guardian_pid = None
+        try:
+            ready, _, _ = select.select([wrapper.stdout], [], [], 10)
+            self.assertTrue(ready, 'Native process did not reach readiness barrier')
+            line = wrapper.stdout.readline()
+            self.assertTrue(line, 'Native launch exited before readiness')
+            child_pid, guardian_pid = map(int, line.split())
+            wrapper.kill(); wrapper.wait(timeout=5)
+            from devcontainer_setup.project_sync.ownership import recover_local, managed_lease
+            with self.assertRaises(ValueError):
+                recover_local(self.state, 'claude', self.sid, 'a', native_paths=[])
+            with self.assertRaises(ValueError):
+                with managed_lease(self.state, 'claude', self.sid, 'a'):
+                    pass
+            self.assertNotEqual(guardian_pid, wrapper.pid)
+            os.kill(guardian_pid, signal.SIGKILL)
+            with self.assertRaises(ValueError):
+                recover_local(self.state, 'claude', self.sid, 'a', native_paths=[])
+            os.kill(child_pid, 0)
+        finally:
+            if wrapper.poll() is None:
+                wrapper.kill(); wrapper.wait(timeout=5)
+            for pid in (child_pid, guardian_pid):
+                if pid and pid != wrapper.pid:
+                    try: os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError: pass
+            wrapper.stdin.close(); wrapper.stdout.close(); wrapper.stderr.close()
+
+    def test_native_launch_failure_releases_guardian_and_records_idle(self):
+        runner = 'from pathlib import Path; from devcontainer_setup.project_sync.agents import launch; from devcontainer_setup.project_sync.state import Project; import sys; p=Path(sys.argv[1]); sys.exit(launch(Project(p,"https://github.com/test/project","github.com/test/project","a"*24),"claude",sys.argv[2],state=p/"state",host="a",new=True,executable=("/nonexistent/native-agent-fixture",)))'
+        failed = subprocess.run([sys.executable, '-c', runner, str(self.root), self.sid], capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=str(Path.cwd()), CLAUDE_CONFIG_DIR=str(self.root / 'native')))
+        self.assertNotEqual(failed.returncode, 0)
+        from devcontainer_setup.project_sync.ownership import owner_status, managed_lease
+        receipt = owner_status(self.state, 'claude', self.sid)
+        self.assertEqual(receipt['status'], 'idle')
+        self.assertIsNone(receipt['native_pid'])
+        with managed_lease(self.state, 'claude', self.sid, 'a'):
+            pass
+
+    def test_guardian_keeps_native_process_on_foreground_terminal(self):
+        child = self.root / 'terminal.py'
+        child.write_text('import json,os,sys\nline=sys.stdin.readline().strip()\nprint("TERMINAL_RESULT "+json.dumps(dict(tty=os.isatty(0) and os.isatty(1), foreground=os.tcgetpgrp(0)==os.getpgrp(), line=line)),flush=True)\n')
+        pid, master = pty.fork()
+        if pid == 0:
+            try:
+                code = self.api.launch(self.project, 'claude', self.sid, state=self.state, host='a', new=True, env=dict(os.environ, PYTHONPATH=str(Path.cwd()), CLAUDE_CONFIG_DIR=str(self.root / 'native')), executable=(sys.executable, str(child)))
+            except BaseException:
+                os._exit(99)
+            os._exit(code)
+        try:
+            os.write(master, b'foreground-input-marker\n')
+            output = b''
+            while b'TERMINAL_RESULT ' not in output or b'foreground-input-marker"}' not in output:
+                ready, _, _ = select.select([master], [], [], 10)
+                self.assertTrue(ready, 'Native terminal did not respond')
+                output += os.read(master, 65536)
+            _, status = os.waitpid(pid, 0)
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+            row = next(line for line in output.decode().splitlines() if line.startswith('TERMINAL_RESULT '))
+            result = json.loads(row.removeprefix('TERMINAL_RESULT '))
+            self.assertTrue(result['tty'])
+            self.assertTrue(result['foreground'])
+            self.assertEqual(result['line'], 'foreground-input-marker')
+        finally:
+            os.close(master)
+            try: os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError: pass

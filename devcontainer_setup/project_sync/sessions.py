@@ -113,7 +113,69 @@ def _records(data, agent):
             raise ValueError('Unsupported native record type')
         if agent == 'codex' and not isinstance(row.get('payload'), dict):
             raise ValueError('Unsupported native record payload')
+        if agent == 'codex' and row['type'] == 'response_item':
+            supported = {'message', 'reasoning', 'function_call', 'function_call_output', 'custom_tool_call', 'custom_tool_call_output', 'local_shell_call', 'web_search_call', 'image_generation_call', 'compaction', 'computer_call', 'computer_call_output', 'tool_search_call', 'tool_search_output'}
+            if row['payload'].get('type') not in supported:
+                raise ValueError('Unsupported native response_item variant')
         rows.append(row)
+    return rows
+
+
+def _validate_codex_scope(rows, roots):
+    """Check structural runtime scopes, never paths mentioned in historical text."""
+    def structural(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == 'cwd':
+                    _scoped_roots(child, roots, child=True)
+                elif key in ('runtime_workspace_roots', 'runtimeWorkspaceRoots', 'workspace_roots'):
+                    if not isinstance(child, list):
+                        raise ValueError('Unsupported native workspace scope')
+                    for root in child:
+                        _scoped_roots(root, roots, child=True)
+                elif key == 'filesystem' and isinstance(child, str) and '<workspace_roots>' in child:
+                    import xml.etree.ElementTree as ET
+                    try:
+                        document = ET.fromstring(child)
+                    except ET.ParseError as exc:
+                        raise ValueError('Unsupported native filesystem scope') from exc
+                    for root in document.findall('.//workspace_roots/root'):
+                        _scoped_roots(root.text, roots, child=True)
+                elif isinstance(child, (dict, list)):
+                    structural(child)
+        elif isinstance(value, list):
+            for child in value:
+                structural(child)
+    for row in rows:
+        kind, payload = row['type'], row['payload']
+        if kind in ('session_meta', 'turn_context'):
+            structural({key: payload[key] for key in ('cwd', 'runtime_workspace_roots', 'runtimeWorkspaceRoots') if key in payload})
+        elif kind == 'world_state':
+            structural(payload.get('state', {}))
+        elif kind == 'event_msg' and payload.get('type') == 'thread_settings_applied':
+            structural(payload.get('thread_settings', {}))
+
+
+def _validate_retained(data, agent, sid, roots, *, child=False):
+    rows = _records(data, agent)
+    if agent == 'codex':
+        if rows[0]['type'] != 'session_meta' or sum(row['type'] == 'session_meta' for row in rows) != 1:
+            raise ValueError('Unsupported retained native metadata')
+        meta = rows[0]['payload']
+        session_uuid(meta.get('id'))
+        _version(agent, meta.get('cli_version'))
+        _validate_codex_dependencies(rows, meta, sid)
+        _validate_codex_scope(rows, roots)
+    else:
+        scoped = False
+        for row in rows:
+            if 'sessionId' in row and row['sessionId'] != sid:
+                raise ValueError('Wrong retained Claude session ID')
+            if 'cwd' in row:
+                _scoped_roots(row['cwd'], roots, child=child)
+                scoped = True
+        if not scoped:
+            raise ValueError('Cannot establish retained Claude project scope')
     return rows
 
 
@@ -258,6 +320,8 @@ def _imported_scopes(project, state, path, home, data):
 
 
 def _scoped_roots(cwd, roots, child=False):
+    if not isinstance(cwd, str) or not Path(cwd).is_absolute() or '..' in Path(cwd).parts:
+        raise ValueError('Invalid native project scope path')
     if not isinstance(roots, list) or not roots or any(not isinstance(root, str) or not Path(root).is_absolute() or '..' in Path(root).parts for root in roots):
         raise ValueError('Invalid historical project scopes')
     for root in roots:
@@ -291,6 +355,7 @@ def export_snapshot(project, agent, session_id, home, *, source_host, generation
             # Native subagent closure cannot be reconstructed safely from opaque
             # tool responses. Fail explicitly until a native tree fixture proves it.
             _validate_codex_dependencies(_records(data, agent), meta, sid)
+            _validate_codex_scope(_records(data, agent), scopes)
             parent = _parent(meta)
             if parent:
                 visit(parent)
@@ -396,6 +461,7 @@ def _preflight(project, agent, session_id, home, bundle):
             session_uuid(meta.get('id'))
             _version(agent, meta.get('cli_version'))
             _scope(meta.get('cwd'), entry['origin_root'])
+            _validate_codex_scope(rows, entry['scope_roots'])
             parent = _parent(meta)
             if parent:
                 ancestry[sid] = parent
@@ -424,6 +490,8 @@ def _preflight(project, agent, session_id, home, bundle):
                 raise ValueError('Unsupported Claude native path')
         destination = _safe(home / target_rel)
         old = _read(destination) if destination.exists() else None
+        if old is not None and entry['kind'] == 'transcript':
+            _validate_retained(old, agent, sid, sorted(set(entry['scope_roots']) | {str(project.root)}), child=agent == 'claude' and len(target_rel.parts) == 5)
         if old is None:
             action = 'create'
         elif old == data:

@@ -257,6 +257,39 @@ class SessionTests(unittest.TestCase):
         again = self.api.export_snapshot(self.project, 'claude', self.sid, self.home, source_host='a', generation=3, agent_version='2.1.302', state=self.root / 'return')
         self.api.import_snapshot(self.dest, 'claude', self.sid, self.target, again, state=self.state)
 
+    def test_later_codex_scope_records_cannot_cross_project(self):
+        variants = [
+            dict(type='turn_context', payload=dict(cwd='/another-project')),
+            dict(type='turn_context', payload=dict(cwd=str(self.project.root / '..' / 'another-project'))),
+            dict(type='event_msg', payload=dict(type='thread_settings_applied', thread_settings=dict(cwd='/another-project'))),
+            dict(type='world_state', payload=dict(full=True, state=dict(environments=dict(environments=dict(local=dict(cwd='/another-project')))))),
+            dict(type='turn_context', payload=dict(cwd=str(self.project.root), runtime_workspace_roots=['/another-project'])),
+        ]
+        for row in variants:
+            with self.subTest(kind=row['type']):
+                self.rollout(extra=[row])
+                with self.assertRaisesRegex(ValueError, 'project|scope'):
+                    self.bundle()
+
+    def test_import_validates_complete_retained_local_ahead_history(self):
+        path = self.rollout()
+        bundle = self.bundle()
+        self.apply(bundle)
+        target = self.target / path.relative_to(self.home)
+        original = target.read_bytes()
+        invalid_suffixes = [b'{"type":', b'{"type":"turn_context","payload":{"cwd":"/another-project"}}\n', b'{"type":"response_item","payload":{"type":"function_call","name":"spawn_agent"}}\n']
+        for suffix in invalid_suffixes:
+            with self.subTest(suffix=suffix):
+                target.write_bytes(original + suffix)
+                with self.assertRaises(ValueError):
+                    self.apply(bundle)
+                self.assertEqual(target.read_bytes(), original + suffix)
+
+    def test_unknown_response_item_variant_is_explicitly_unsupported(self):
+        self.rollout(extra=[dict(type='response_item', payload=dict(type='future_agent_tree', child_id=str(uuid.uuid4())))])
+        with self.assertRaisesRegex(ValueError, 'Unsupported'):
+            self.bundle()
+
     def test_version_gap_refused(self):
         path = self.rollout()
         path.write_bytes(path.read_bytes().replace(b'0.164.0', b'9.0.0'))
