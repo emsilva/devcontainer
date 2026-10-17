@@ -189,6 +189,12 @@ class SessionTests(unittest.TestCase):
             dict(type='api-request', sessionId=self.sid, id=str(uuid.uuid4()), shapeHash=digest(shape), keep=1, tail=[digest(message)], params={}, requestDigest='b' * 64),
             dict(type='cost-state', sessionId=self.sid, totalCostUSD=0.01, modelUsage={}),
         ]
+        for index, count in ((5, 1), (6, 2)):
+            rows[index]['cacheControl'] = [dict(path=['system', 0], value=dict(type='ephemeral'))]
+            request = dict(shape, messages=[message] * count)
+            request = copy.deepcopy(request)
+            request['system'][0]['cache_control'] = dict(type='ephemeral')
+            rows[index]['requestDigest'] = digest(request)
         path = self.home / 'projects' / self.api.claude_namespace(self.project.root) / (self.sid + '.jsonl')
         path.parent.mkdir(parents=True, exist_ok=True)
         return path, rows
@@ -209,13 +215,15 @@ class SessionTests(unittest.TestCase):
 
     def test_claude_native_request_dependencies_and_environment_scope_refused(self):
         path, rows = self.claude_request_fixture()
-        for defect in ('missing_shape', 'missing_blob', 'bad_hash', 'bad_keep', 'foreign_scope'):
+        for defect in ('missing_shape', 'missing_blob', 'bad_hash', 'bad_keep', 'foreign_scope', 'bad_request_digest', 'bad_cache_path'):
             broken = copy.deepcopy(rows)
             if defect == 'missing_shape': broken.pop(3)
             elif defect == 'missing_blob': broken.pop(4)
             elif defect == 'bad_hash': broken[4]['message']['content'][0]['text'] = 'different'
             elif defect == 'bad_keep': broken[5]['keep'] = 1
             elif defect == 'foreign_scope': broken[1]['attachment']['snapshot']['workingDirectory'] = str(self.root / 'unrelated')
+            elif defect == 'bad_request_digest': broken[5]['requestDigest'] = '0' * 64
+            elif defect == 'bad_cache_path': broken[5]['cacheControl'][0]['path'] = ['system', 99]
             with self.subTest(defect=defect):
                 self.write_claude_fixture(path, broken)
                 with self.assertRaisesRegex(ValueError, 'dependency|digest|project'):

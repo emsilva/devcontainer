@@ -6,6 +6,7 @@ credentials, settings and global memory are deliberately outside this format.
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -158,7 +159,7 @@ def _validate_codex_scope(rows, roots):
 
 def _validate_claude(rows, sid, roots, *, child=False):
     """Validate inline native request dependencies and structural checkout scope."""
-    shapes, blobs, previous = set(), set(), []
+    shapes, blobs, previous = {}, {}, []
     scoped = False
     for row in rows:
         if 'sessionId' in row and row['sessionId'] != sid:
@@ -186,13 +187,35 @@ def _validate_claude(rows, sid, roots, *, child=False):
             digest = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
             if row.get(key) != digest:
                 raise ValueError('Invalid Claude request dependency digest')
-            known.add(digest)
+            known[digest] = value
         elif kind == 'api-request':
             keep, tail = row.get('keep'), row.get('tail')
-            if (row.get('shapeHash') not in shapes or type(keep) is not int or not 0 <= keep <= len(previous)
+            if (not isinstance(row.get('shapeHash'), str) or row['shapeHash'] not in shapes or type(keep) is not int or not 0 <= keep <= len(previous)
                     or not isinstance(tail, list) or any(not isinstance(digest, str) or digest not in blobs for digest in tail)):
                 raise ValueError('Missing or invalid Claude request dependency')
             previous = previous[:keep] + tail
+            params, controls = row.get('params'), row.get('cacheControl', [])
+            if not isinstance(params, dict) or not isinstance(controls, list):
+                raise ValueError('Invalid Claude request dependency parameters')
+            request = copy.deepcopy(dict(params, **shapes[row['shapeHash']], messages=[blobs[digest] for digest in previous]))
+            try:
+                for control in controls:
+                    path, value = control['path'], control['value']
+                    if not isinstance(path, list) or not path or not isinstance(value, dict):
+                        raise ValueError('Invalid Claude request dependency cache control')
+                    target = request
+                    for part in path:
+                        if not isinstance(part, str) and (type(part) is not int or part < 0):
+                            raise ValueError('Invalid Claude request dependency cache path')
+                        target = target[part]
+                    if not isinstance(target, dict):
+                        raise ValueError('Invalid Claude request dependency cache target')
+                    target['cache_control'] = value
+            except (KeyError, IndexError, TypeError) as exc:
+                raise ValueError('Unresolved Claude request dependency cache path') from exc
+            digest = hashlib.sha256(json.dumps(request, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+            if row.get('requestDigest') != digest:
+                raise ValueError('Invalid Claude request digest')
     if not scoped:
         raise ValueError('Cannot establish Claude project scope')
 
