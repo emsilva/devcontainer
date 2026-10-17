@@ -206,3 +206,25 @@ class WorkTests(unittest.TestCase):
         work.run(None, None, ui=UI('Continue on this Mac', 'Exit'), service=service)
         self.assertEqual(service.calls[-1], ('continue', 'codex', 'private-id', 'mac'))
         self.assertFalse(any(c[0] == 'adopt' for c in service.calls))
+
+    def test_actual_token_resolver_timeout_preserves_local_new_settings_menu(self):
+        import subprocess
+        from pathlib import Path
+        from unittest.mock import patch
+        from devcontainer_setup.project_sync import transport, workflows
+        service = Service([row()])
+        service.prefs = dict(agent='codex', session_id='private-id', location='mac')
+        resolver = workflows.Workflows(SimpleNamespace(identity='github.com/owner/repo'), Path('/unused-fixture-state'))
+        resolver.binding = service.binding
+        service.space = resolver.space
+        ui = UI('Continue on this Mac', 'New conversation', 'Codex', 'Settings', 'Show status', 'Back', 'Exit')
+        output = io.StringIO()
+        with patch.dict(transport.os.environ, {}, clear=True), patch.object(transport.subprocess, 'run', side_effect=subprocess.TimeoutExpired(['gh', 'private-command'], 20)) as run, redirect_stdout(output):
+            self.assertEqual(work.run(None, None, ui=ui, service=service), 0)
+        self.assertIn(('continue', 'codex', 'private-id', 'mac'), service.calls)
+        self.assertIn(('new', 'codex'), service.calls)
+        self.assertTrue(any('Settings' in title for title, _, _ in ui.menus))
+        self.assertIn('GitHub authentication timed out', output.getvalue())
+        self.assertNotIn('private-command', output.getvalue())
+        self.assertGreater(run.call_count, 0)
+        self.assertTrue(all(call.args[0][:3] == ['gh', 'auth', 'token'] for call in run.call_args_list))

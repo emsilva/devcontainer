@@ -415,3 +415,13 @@ class ScratchTests(unittest.TestCase):
         with patch.object(self.module, '_mutagen', side_effect=ValueError('fixture daemon unavailable')):
             with self.assertRaisesRegex(ValueError, 'daemon unavailable'):
                 self.module._session_info(Path('/fake/tool'), self.state, receipt)
+
+    def test_mutagen_timeout_is_actionable_private_and_never_repeated(self):
+        for operation in ('create', 'list', 'flush'):
+            with self.subTest(operation=operation):
+                timeout = subprocess.TimeoutExpired(['mutagen', 'private-detail'], 30, stderr='private-stderr')
+                with patch.object(self.module.subprocess, 'run', side_effect=timeout) as run:
+                    with self.assertRaisesRegex(ValueError, 'Mutagen command timed out; inspect session status before retrying') as caught:
+                        self.module._mutagen('/fake/tool', self.state, 'sync', operation)
+                self.assertNotIn('private-', str(caught.exception))
+                self.assertEqual(run.call_count, 1)

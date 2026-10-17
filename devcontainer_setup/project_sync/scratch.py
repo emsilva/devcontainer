@@ -344,8 +344,11 @@ def stop(state: Path) -> dict:
 
 
 def _mutagen(binary, state, *args, timeout=30):
-    result = subprocess.run([str(binary), *args], env=mutagen_env(state),
-                            capture_output=True, text=True, timeout=timeout)
+    try:
+        result = subprocess.run([str(binary), *args], env=mutagen_env(state),
+                                capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise ValueError('Mutagen command timed out; inspect session status before retrying.') from None
     if result.returncode:
         raise ValueError('Mutagen command failed (' + args[0] + '); inspect session status.')
     return result.stdout[-32768:]
