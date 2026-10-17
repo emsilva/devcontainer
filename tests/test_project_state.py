@@ -230,3 +230,72 @@ class LockDescriptorTests(unittest.TestCase):
                 self.assertTrue(stat.S_ISREG(os.fstat(descriptor).st_mode))
             with self.assertRaises(OSError):
                 os.fstat(descriptor)
+
+
+class DefaultStateHomeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name).resolve()
+        self.home.chmod(0o755)
+        (self.home / '.local/state').mkdir(parents=True)
+        (self.home / '.local').chmod(0o775)
+        (self.home / '.local/state').chmod(0o775)
+        self.project = Project(self.home / 'project', 'git@github.com:a/b', 'github.com/a/b', 'a' * 24)
+        self.env = {'HOME': str(self.home)}
+        self.fallback = self.home / '.devcontainer-state'
+
+    def test_standard_codespace_default_uses_private_fallback_without_chmod(self):
+        expected = self.fallback / 'devcontainer-setup/projects' / self.project.project_id
+        before = list(self.home.rglob('*'))
+        self.assertEqual(state_dir(self.project, self.env), expected)
+        self.assertEqual(list(self.home.rglob('*')), before)
+        identity = host_id(self.env)
+        self.assertEqual(str(uuid.UUID(identity)), identity)
+        self.assertEqual(host_id(self.env), identity)
+        self.assertTrue((self.fallback / 'devcontainer-setup/host.json').is_file())
+        for path in (self.home / '.local', self.home / '.local/state'):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o775)
+        self.assertEqual(stat.S_IMODE(self.home.stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE(self.fallback.stat().st_mode), 0o700)
+
+    def test_existing_fallback_preserves_identity_after_default_permissions_repaired(self):
+        first = host_id(self.env)
+        (self.home / '.local').chmod(0o700)
+        (self.home / '.local/state').chmod(0o700)
+        self.assertEqual(state_dir(self.project, self.env), self.fallback / 'devcontainer-setup/projects' / self.project.project_id)
+        self.assertEqual(host_id(self.env), first)
+        self.assertFalse((self.home / '.local/state/devcontainer-setup').exists())
+
+    def test_explicit_unsafe_xdg_remains_authoritative_and_refuses(self):
+        env = dict(self.env, XDG_STATE_HOME=str(self.home / '.local/state'))
+        expected = self.home / '.local/state/devcontainer-setup/projects' / self.project.project_id
+        self.assertEqual(state_dir(self.project, env), expected)
+        with self.assertRaises(PermissionError):
+            host_id(env)
+        self.assertFalse(self.fallback.exists())
+        self.assertEqual(stat.S_IMODE((self.home / '.local').stat().st_mode), 0o775)
+
+    def test_default_symlink_ancestor_chooses_fallback_without_following_it(self):
+        (self.home / '.local/state').rmdir()
+        (self.home / '.local').rmdir()
+        outside = self.home / 'outside'
+        outside.mkdir()
+        (self.home / '.local').symlink_to(outside, target_is_directory=True)
+        self.assertEqual(state_dir(self.project, self.env), self.fallback / 'devcontainer-setup/projects' / self.project.project_id)
+        host_id(self.env)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_symlink_fallback_refuses_without_writing_outside(self):
+        outside = self.home / 'outside'
+        outside.mkdir()
+        self.fallback.symlink_to(outside, target_is_directory=True)
+        with self.assertRaises((ValueError, OSError)):
+            host_id(self.env)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_safe_default_keeps_existing_xdg_fallback_contract(self):
+        (self.home / '.local').chmod(0o700)
+        (self.home / '.local/state').chmod(0o700)
+        self.assertEqual(state_dir(self.project, self.env), self.home / '.local/state/devcontainer-setup/projects' / self.project.project_id)
+        self.assertFalse(self.fallback.exists())

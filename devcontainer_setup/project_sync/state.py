@@ -81,6 +81,26 @@ def _state_home(env: Mapping | None) -> Path:
     home = Path(values.get('HOME') or Path.home())
     if not home.is_absolute() or '..' in home.parts:
         raise ValueError('Home directory must be absolute without traversal')
+    fallback = home / '.devcontainer-state'
+    # A chosen fallback is sticky across later permission repairs, so native
+    # ownership UUIDs and project registries never move back implicitly.
+    try:
+        fallback.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        return fallback
+    # Codespaces commonly supplies group-writable .local/state parents. Leave
+    # those user directories alone and choose a private default instead. Explicit
+    # XDG overrides above remain authoritative and fail normal mutation guards.
+    for candidate in (home / '.local', home / '.local/state'):
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            break
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) & 0o022):
+            return fallback
     return home / '.local/state'
 
 
