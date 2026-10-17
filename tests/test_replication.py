@@ -158,10 +158,10 @@ class CanonicalRPCRecoveryTests(unittest.TestCase):
         self.assertEqual(self.remote_store.load(snapshot), source.load(snapshot))
         operations = [call['request']['operation'] for call in self.connection.calls]
         self.assertLess(operations.index('save'), operations.index('acknowledge'))
-        count = operations.count('put_blob')
+        count = operations.count('put_blobs')
         self.assertGreater(count, 0)
         replication.transfer(source, remote, snapshot, source='desktop', identity=self.project.identity)
-        self.assertEqual(sum(call['request']['operation'] == 'put_blob' for call in self.connection.calls), count)
+        self.assertEqual(sum(call['request']['operation'] == 'put_blobs' for call in self.connection.calls), count)
 
     def test_interrupted_real_remote_transfer_preserves_previous_latest(self):
         from devcontainer_setup.project_sync.checkpoint_store import Store
@@ -170,20 +170,23 @@ class CanonicalRPCRecoveryTests(unittest.TestCase):
         remote = replication.RemoteStore(self.endpoint)
         old_receipt = replication.transfer(source, remote, first, source='desktop', identity=self.project.identity)
         (self.root / 'code.txt').write_bytes(b'new not yet acknowledged data')
-        (self.root / 'new-file').write_bytes(b'new body')
+        (self.root / 'new-file').write_bytes(b'a' * 700)
+        (self.root / 'another-file').write_bytes(b'b' * 700)
         second = self.capture_local(source)
         actual_call = self.endpoint.call
         uploads = []
         def disconnected(operation, **values):
-            if operation == 'put_blob':
+            if operation == 'put_blobs':
                 uploads.append(values)
                 if len(uploads) == 2:
                     raise OSError('connection severed between blob writes')
             return actual_call(operation, **values)
-        with patch.object(self.endpoint, 'call', side_effect=disconnected):
+        with patch.object(replication, 'BATCH_BYTES', 768, create=True), patch.object(self.endpoint, 'call', side_effect=disconnected):
             with self.assertRaises(OSError):
                 replication.transfer(source, remote, second, source='desktop', identity=self.project.identity)
-        self.assertEqual(len(uploads), 2, 'Proof must interrupt after at least one durable blob write')
+        self.assertEqual(len(uploads), 2, 'Proof must interrupt after at least one durable batch write')
+        first_uploaded = next(iter(uploads[0]['blobs']))
+        self.assertEqual(self.remote_store.read(first_uploaded), source.read(first_uploaded))
         self.assertEqual(self.remote_store.latest('desktop'), old_receipt)
         self.assertEqual(self.remote_store.load(first), source.load(first))
         with self.assertRaises(FileNotFoundError):
@@ -257,22 +260,155 @@ class CanonicalRPCRecoveryTests(unittest.TestCase):
         previous = replication.transfer(remote, self.mac_store, first, source='codespace',
                                         identity=self.project.identity)
         (self.root / 'code.txt').write_bytes(b'not fully pulled current file')
-        (self.root / 'second-new-file').write_bytes(b'not fully pulled untracked file')
+        (self.root / 'second-new-file').write_bytes(b'a' * 700)
+        (self.root / 'third-new-file').write_bytes(b'b' * 700)
         second = self.endpoint.call('capture')['snapshot_id']
         real = self.endpoint.call
         reads = []
         def disconnect(operation, **values):
-            if operation == 'blob':
-                reads.append(values['digest'])
+            if operation == 'get_blobs':
+                reads.append(values['digests'])
                 if len(reads) == 2:
                     raise OSError('Codespace disappeared mid-pull')
             return real(operation, **values)
-        with patch.object(self.endpoint, 'call', side_effect=disconnect):
+        with patch.object(replication, 'BATCH_BYTES', 768, create=True), patch.object(self.endpoint, 'call', side_effect=disconnect):
             with self.assertRaises(OSError):
                 replication.transfer(remote, self.mac_store, second, source='codespace',
                                      identity=self.project.identity)
         self.assertEqual(len(reads), 2)
+        self.assertEqual(self.mac_store.read(reads[0][0]), self.remote_store.read(reads[0][0]))
         self.assertEqual(self.mac_store.latest('codespace'), previous)
         self.assertEqual(self.mac_store.load(first)['project']['identity'], self.project.identity)
         with self.assertRaises(FileNotFoundError):
             self.mac_store.load(second)
+
+    def test_batch_transfer_100_files_uses_few_canonical_rpc_calls(self):
+        from devcontainer_setup.project_sync.checkpoint_store import Store
+        source = Store(self.base / 'desktop-state')
+        for number in range(100):
+            (self.root / f'file-{number:03}').write_text(f'unique content {number}\n')
+        snapshot = self.capture_local(source)
+        real = self.connection.python
+        def bounded_calls(*args, **kwargs):
+            self.assertLess(len(self.connection.calls), 5, '100-file transfer must use at most five RPCs')
+            return real(*args, **kwargs)
+        remote = replication.RemoteStore(self.endpoint)
+        with patch.object(self.connection, 'python', side_effect=bounded_calls):
+            replication.transfer(source, remote, snapshot, source='desktop', identity=self.project.identity)
+        push = [call['request']['operation'] for call in self.connection.calls]
+        self.assertIn('put_blobs', push)
+        self.assertNotIn('put_blob', push)
+        self.connection.calls.clear()
+        with patch.object(self.connection, 'python', side_effect=bounded_calls):
+            replication.transfer(remote, self.mac_store, snapshot, source='codespace', identity=self.project.identity)
+        pull = [call['request']['operation'] for call in self.connection.calls]
+        self.assertIn('get_blobs', pull)
+        self.assertNotIn('blob', pull)
+        self.assertEqual(self.mac_store.load(snapshot), source.load(snapshot))
+        self.connection.calls.clear()
+        replication.transfer(source, remote, snapshot, source='desktop', identity=self.project.identity)
+        self.assertLessEqual(len(self.connection.calls), 3)
+        self.assertNotIn('put_blobs', [call['request']['operation'] for call in self.connection.calls])
+
+    def test_batch_rpc_rejects_invalid_digest_corruption_and_oversized_batches(self):
+        import base64
+        import hashlib
+        from devcontainer_setup.project_sync import rpc
+        endpoint = rpc.LocalEndpoint(self.project, self.remote_state)
+        body = b'valid body'
+        digest = hashlib.sha256(body).hexdigest()
+        with self.assertRaisesRegex(ValueError, 'digest'):
+            endpoint.call('put_blobs', blobs={digest: base64.b64encode(b'wrong body').decode()})
+        with self.assertRaises(FileNotFoundError):
+            self.remote_store.read(digest)
+        for operation in ('has_blobs', 'get_blobs'):
+            with self.subTest(operation=operation), self.assertRaises(ValueError):
+                endpoint.call(operation, digests=['../escape'])
+        with patch.object(rpc, 'BATCH_BYTES', 4, create=True):
+            with self.assertRaisesRegex(ValueError, 'batch|bound|size'):
+                endpoint.call('put_blobs', blobs={digest: base64.b64encode(body).decode()})
+        self.remote_store.put(body)
+        with patch.object(rpc, 'BATCH_BYTES', 4, create=True):
+            with self.assertRaisesRegex(ValueError, 'batch|bound|size'):
+                endpoint.call('get_blobs', digests=[digest])
+        obj = self.remote_state / 'checkpoints/objects' / digest
+        obj.chmod(0o600)
+        obj.write_bytes(b'corrupt')
+        with self.assertRaisesRegex(ValueError, 'hash|digest|corrupt'):
+            endpoint.call('has_blobs', digests=[digest])
+        self.assertIsNone(self.remote_store.latest('desktop'))
+
+    def test_transfer_rejects_tampered_batch_body_before_acknowledgement(self):
+        import base64
+        from devcontainer_setup.project_sync.checkpoint_store import Store
+        source = Store(self.base / 'desktop-state')
+        snapshot = self.capture_local(source)
+        remote = replication.RemoteStore(self.endpoint)
+        replication.transfer(source, remote, snapshot, source='desktop', identity=self.project.identity)
+        real = self.endpoint.call
+        def tampered(operation, **values):
+            result = real(operation, **values)
+            if operation == 'get_blobs':
+                digest = next(iter(result['blobs']))
+                result['blobs'][digest] = base64.b64encode(b'changed in transit').decode()
+            return result
+        with patch.object(self.endpoint, 'call', side_effect=tampered):
+            with self.assertRaisesRegex(ValueError, 'digest'):
+                replication.transfer(remote, self.mac_store, snapshot, source='codespace', identity=self.project.identity)
+        self.assertIsNone(self.mac_store.latest('codespace'))
+
+    def test_large_single_object_uses_compatible_bounded_rpc(self):
+        from devcontainer_setup.project_sync.checkpoint_store import Store
+        source = Store(self.base / 'desktop-state')
+        (self.root / 'large-for-batch').write_bytes(b'x' * 2048)
+        snapshot = self.capture_local(source)
+        remote = replication.RemoteStore(self.endpoint)
+        with patch.object(replication, 'BATCH_BYTES', 1024, create=True):
+            replication.transfer(source, remote, snapshot, source='desktop', identity=self.project.identity)
+            replication.transfer(remote, self.mac_store, snapshot, source='codespace', identity=self.project.identity)
+        operations = [call['request']['operation'] for call in self.connection.calls]
+        self.assertIn('put_blob', operations)
+        self.assertIn('blob', operations)
+        self.assertEqual(self.mac_store.load(snapshot), source.load(snapshot))
+
+    def test_bad_batch_receipt_refuses_new_acknowledgement_after_durable_upload(self):
+        from devcontainer_setup.project_sync.checkpoint_store import Store
+        source = Store(self.base / 'desktop-state')
+        first = self.capture_local(source)
+        remote = replication.RemoteStore(self.endpoint)
+        previous = replication.transfer(source, remote, first, source='desktop', identity=self.project.identity)
+        (self.root / 'code.txt').write_bytes(b'next generation')
+        second = self.capture_local(source)
+        actual = self.endpoint.call
+        uploaded = []
+        def wrong_receipt(operation, **values):
+            result = actual(operation, **values)
+            if operation == 'put_blobs':
+                uploaded.extend(values['blobs'])
+                return {'digests': ['f' * 64]}
+            return result
+        with patch.object(self.endpoint, 'call', side_effect=wrong_receipt):
+            with self.assertRaisesRegex(ValueError, 'digest'):
+                replication.transfer(source, remote, second, source='desktop', identity=self.project.identity)
+        self.assertTrue(uploaded)
+        self.assertEqual(self.remote_store.read(uploaded[0]), source.read(uploaded[0]))
+        self.assertEqual(self.remote_store.latest('desktop'), previous)
+
+    def test_batch_validation_precedes_any_write_and_caps_reference_count(self):
+        import base64
+        import hashlib
+        from devcontainer_setup.project_sync import rpc
+        endpoint = rpc.LocalEndpoint(self.project, self.remote_state)
+        body = b'valid first object'
+        digest = hashlib.sha256(body).hexdigest()
+        with self.assertRaisesRegex(ValueError, 'digest'):
+            endpoint.call('put_blobs', blobs={digest: base64.b64encode(body).decode(),
+                                             'f' * 64: base64.b64encode(b'invalid second object').decode()})
+        with self.assertRaises(FileNotFoundError):
+            self.remote_store.read(digest)
+        for operation in ('has_blobs', 'get_blobs'):
+            with self.subTest(operation=operation), self.assertRaisesRegex(ValueError, 'bound'):
+                endpoint.call(operation, digests=[digest] * (rpc.BATCH_ITEMS + 1))
+        with patch.object(rpc, 'SINGLE_BYTES', 4):
+            with self.assertRaisesRegex(ValueError, 'bound'):
+                endpoint.call('put_blob', data=base64.b64encode(body).decode())
