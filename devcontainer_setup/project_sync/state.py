@@ -205,7 +205,7 @@ def locked(path: Path, blocking: bool = False):
             os.fchmod(fd, 0o600)
             fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
             try:
-                yield
+                yield fd
             finally:
                 fcntl.flock(fd, fcntl.LOCK_UN)
         finally:

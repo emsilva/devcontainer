@@ -220,3 +220,13 @@ sys.exit(0)
         with self.assertRaises(PermissionError):
             read_json(self.directory / 'record.json')
         self.assertEqual(stat.S_IMODE(self.namespace.stat().st_mode), 0o777)
+
+
+class LockDescriptorTests(unittest.TestCase):
+    def test_lock_exposes_the_live_descriptor_until_context_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with locked(Path(directory).resolve() / 'guardian.lock') as descriptor:
+                self.assertIsInstance(descriptor, int)
+                self.assertTrue(stat.S_ISREG(os.fstat(descriptor).st_mode))
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
