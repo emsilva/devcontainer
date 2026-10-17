@@ -205,10 +205,10 @@ def list_sessions(project, agent, home, *, state=None):
                 sid = session_uuid(path.stem)
                 data = _read(path)
                 rows = _records(data, agent)
-                origin = _imported_origin(project, state, path, home, data)
+                scopes = _imported_scopes(project, state, path, home, data)
                 for row in rows:
                     if 'cwd' in row:
-                        _scope(row['cwd'], origin)
+                        _scoped_roots(row['cwd'], scopes)
             except ValueError:
                 continue
             result.append(dict(session_id=sid, agent=agent, cwd=str(project.root), path=str(path)))
@@ -240,6 +240,32 @@ def _imported_origin(project, state, path, home, data):
     return str(project.root)
 
 
+def _imported_scopes(project, state, path, home, data):
+    roots = {str(project.root)}
+    if state is not None:
+        for receipt_path in (Path(state) / 'imports').glob('*/receipt.json'):
+            receipt = read_json(receipt_path)
+            if receipt.get('status') != 'complete' or receipt.get('project_id') != project.project_id:
+                continue
+            manifest = read_json(receipt_path.parent / 'manifest.json')
+            for entry in manifest['files']:
+                relative = PurePosixPath(entry['path'])
+                if manifest['agent'] == 'claude' and relative.parts[0] == 'projects':
+                    relative = PurePosixPath('projects', claude_namespace(project.root), *relative.parts[2:])
+                if home / relative == path and data.startswith(base64.b64decode(entry['data'])):
+                    roots.update(entry['scope_roots'])
+    return sorted(roots)
+
+
+def _scoped_roots(cwd, roots, child=False):
+    if not isinstance(roots, list) or not roots or any(not isinstance(root, str) or not Path(root).is_absolute() or '..' in Path(root).parts for root in roots):
+        raise ValueError('Invalid historical project scopes')
+    for root in roots:
+        if isinstance(cwd, str) and (cwd == root or (child and Path(cwd).is_relative_to(root))):
+            return
+    raise ValueError('Native transcript belongs to another project checkout')
+
+
 def export_snapshot(project, agent, session_id, home, *, source_host, generation, agent_version=None, state=None):
     session_uuid(session_id)
     home = Path(home)
@@ -260,6 +286,7 @@ def export_snapshot(project, agent, session_id, home, *, source_host, generation
             path = index[sid]
             data, meta = _metadata(path)
             origin_root = _imported_origin(project, state, path, home, data)
+            scopes = _imported_scopes(project, state, path, home, data)
             _scope(meta.get('cwd'), origin_root)
             # Native subagent closure cannot be reconstructed safely from opaque
             # tool responses. Fail explicitly until a native tree fixture proves it.
@@ -274,7 +301,7 @@ def export_snapshot(project, agent, session_id, home, *, source_host, generation
                 ancestry[sid] = parent
             if sid == session_id:
                 version = meta['cli_version']
-            files.append(dict(path=path.relative_to(home).as_posix(), kind='transcript', session_id=sid, origin_root=origin_root, data=base64.b64encode(data).decode(), sha256=hashlib.sha256(data).hexdigest(), size=len(data)))
+            files.append(dict(path=path.relative_to(home).as_posix(), kind='transcript', session_id=sid, origin_root=origin_root, scope_roots=scopes, data=base64.b64encode(data).decode(), sha256=hashlib.sha256(data).hexdigest(), size=len(data)))
             paths.append(path)
             visiting.remove(sid)
             visited.add(sid)
@@ -300,6 +327,7 @@ def export_snapshot(project, agent, session_id, home, *, source_host, generation
         for path in paths:
             data = _read(path)
             origin_root = _imported_origin(project, state, path, home, data)
+            scopes = _imported_scopes(project, state, path, home, data)
             kind = 'task' if path.parent == tasks else 'transcript'
             if kind == 'transcript':
                 rows = _records(data, agent)
@@ -308,7 +336,7 @@ def export_snapshot(project, agent, session_id, home, *, source_host, generation
                     if 'sessionId' in row and row['sessionId'] != session_id:
                         raise ValueError('Wrong Claude session ID')
                     if 'cwd' in row:
-                        _scope(row['cwd'], project.root if Path(row['cwd']) == project.root else origin_root, child=path != parent)
+                        _scoped_roots(row['cwd'], scopes, child=path != parent)
                         scoped = True
                 if not scoped:
                     raise ValueError('Cannot establish Claude project scope')
@@ -316,7 +344,7 @@ def export_snapshot(project, agent, session_id, home, *, source_host, generation
                 task = json.loads(data)
                 if not isinstance(task, dict) or str(task.get('id')) != path.stem:
                     raise ValueError('Invalid Claude task binding')
-            files.append(dict(path=path.relative_to(home).as_posix(), kind=kind, session_id=session_id, origin_root=origin_root, data=base64.b64encode(data).decode(), sha256=hashlib.sha256(data).hexdigest(), size=len(data)))
+            files.append(dict(path=path.relative_to(home).as_posix(), kind=kind, session_id=session_id, origin_root=origin_root, scope_roots=scopes, data=base64.b64encode(data).decode(), sha256=hashlib.sha256(data).hexdigest(), size=len(data)))
     else:
         raise ValueError('Unsupported agent')
     assert_quiescent(paths)
@@ -343,7 +371,7 @@ def _preflight(project, agent, session_id, home, bundle):
         raise ValueError('Empty snapshot')
     seen, ids, ancestry, result = set(), set(), {}, []
     for entry in bundle['files']:
-        if not isinstance(entry, dict) or set(entry) != {'path', 'kind', 'session_id', 'origin_root', 'data', 'sha256', 'size'}:
+        if not isinstance(entry, dict) or set(entry) != {'path', 'kind', 'session_id', 'origin_root', 'scope_roots', 'data', 'sha256', 'size'}:
             raise ValueError('Invalid native inventory entry')
         rel = PurePosixPath(entry['path'])
         if rel.is_absolute() or '..' in rel.parts or str(rel) != entry['path'] or entry['path'] in seen:
@@ -356,6 +384,7 @@ def _preflight(project, agent, session_id, home, bundle):
         if len(data) != entry['size'] or hashlib.sha256(data).hexdigest() != entry['sha256']:
             raise ValueError('Snapshot digest/size mismatch')
         sid = session_uuid(entry['session_id'])
+        _scoped_roots(entry['origin_root'], entry['scope_roots'])
         if agent == 'codex':
             if entry['kind'] != 'transcript' or len(rel.parts) < 2 or rel.parts[0] not in ('sessions', 'archived_sessions') or not rel.name.endswith(sid + '.jsonl') or sid in ids:
                 raise ValueError('Invalid or duplicate Codex native path/ID')
@@ -380,7 +409,7 @@ def _preflight(project, agent, session_id, home, bundle):
                 rows = _records(data, agent)
                 for row in rows:
                     if 'cwd' in row:
-                        _scope(row['cwd'], source['root'] if row['cwd'] == source['root'] else entry['origin_root'], child=len(rel.parts) == 5)
+                        _scoped_roots(row['cwd'], entry['scope_roots'], child=len(rel.parts) == 5)
                     if 'sessionId' in row and row['sessionId'] != sid:
                         raise ValueError('Wrong Claude session ID')
                 target_rel = PurePosixPath('projects', claude_namespace(project.root), *rel.parts[2:])

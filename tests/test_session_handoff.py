@@ -238,6 +238,25 @@ class SessionTests(unittest.TestCase):
             self.apply(forged)
         self.assertFalse(self.target.exists())
 
+    def test_claude_roundtrip_keeps_old_cwd_and_lists_new_destination_turns(self):
+        directory = self.home / 'projects' / self.api.claude_namespace(self.project.root)
+        directory.mkdir(parents=True)
+        path = directory / (self.sid + '.jsonl')
+        row = dict(type='user', sessionId=self.sid, cwd=str(self.project.root), message=dict(role='user', content='source'))
+        path.write_text(json.dumps(row) + '\n')
+        bundle = self.api.export_snapshot(self.project, 'claude', self.sid, self.home, source_host='a', generation=1, agent_version='2.1.302')
+        self.api.import_snapshot(self.dest, 'claude', self.sid, self.target, bundle, state=self.state)
+        target = self.target / 'projects' / self.api.claude_namespace(self.dest.root) / path.name
+        row.update(cwd=str(self.dest.root), message=dict(role='user', content='destination'))
+        target.write_bytes(target.read_bytes() + json.dumps(row).encode() + b'\n')
+        listed = self.api.list_sessions(self.dest, 'claude', self.target, state=self.state)
+        self.assertEqual([item['session_id'] for item in listed], [self.sid])
+        back = self.api.export_snapshot(self.dest, 'claude', self.sid, self.target, source_host='b', generation=2, agent_version='2.1.302', state=self.state)
+        self.api.import_snapshot(self.project, 'claude', self.sid, self.home, back, state=self.root / 'return')
+        self.assertEqual(path.read_bytes(), target.read_bytes())
+        again = self.api.export_snapshot(self.project, 'claude', self.sid, self.home, source_host='a', generation=3, agent_version='2.1.302', state=self.root / 'return')
+        self.api.import_snapshot(self.dest, 'claude', self.sid, self.target, again, state=self.state)
+
     def test_version_gap_refused(self):
         path = self.rollout()
         path.write_bytes(path.read_bytes().replace(b'0.164.0', b'9.0.0'))
