@@ -95,7 +95,10 @@ The disposable `/tmp` checkout was cleared by Codespaces during idle shutdown;
 its fixture Git metadata was recreated. Real paired checkouts belong under
 `/workspaces`. Native transcripts and private custody receipts survived restart. Tunnel
 loss, stopped-state waiting, explicit restart, and private state recovery were
-tested. Native Codex subagent trees, compressed histories, and unrecognized
+tested. A shortened continuous-sync idle experiment was inconclusive: the API
+kept the existing 30-minute setting after a requested update to five minutes,
+so that experiment does not prove an idle deadline with the worker connected.
+Native Codex subagent trees, compressed histories, and unrecognized
 native records/sidecars are explicit refusals. Managed locks are advisory: a
 plain native CLI can bypass the managed workflow. No claim is made that future
 daily CLI releases preserve the tested formats or option semantics.
