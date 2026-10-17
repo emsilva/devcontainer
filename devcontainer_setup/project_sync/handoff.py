@@ -23,6 +23,47 @@ MAX_RPC_BYTES = 384 * 1024 * 1024
 _OPERATIONS = {'describe', 'status', 'backup', 'inspect', 'source_prepare', 'target_prepare', 'import', 'verify', 'accept', 'complete', 'activate'}
 _MODULES = ('__init__', 'state', 'sessions', 'ownership', 'agents', 'tools', 'transport', 'scratch', 'handoff')
 
+_REASONS = {
+    'unsupported-native-format': 'Use a supported native CLI version and a complete uncompressed transcript with supported ancestor/task records; run agent:sessions to check the exact UUID.',
+    'project-scope': 'Check the configured checkout/origin and exact session UUID; global or unrelated project context cannot be transferred. Original histories were preserved.',
+    'writer-custody': 'Stop managed and native writers, then inspect both ownership receipts. Retry the same request only after resolving the recorded custody conflict; do not force takeover.',
+    'history-mismatch': 'Source and destination histories differ or diverge. Existing bytes were preserved; inspect private import/handoff receipts and recovery snapshots before retrying.',
+    'missing-prerequisite': 'Verify the supported native CLI, lsof, selected session files and existing .scratch directory are available in the configured checkout.',
+    'unsafe-state': 'Check ownership and private permissions of the host-local state namespace and remove unsafe symlink paths; user directories were not permission-normalized.',
+    'native-api-refused': 'The native history API refused reconciliation. Check the supported CLI version and exact UUID with agent:sessions before retrying; inspect private handoff receipts if present.',
+    'invalid-request': 'Check the exact canonical UUID, supported agent, direction and configured project pairing before retrying.',
+    'validation-refused': 'Remote validation refused the operation. Check the selected native session and project pairing; inspect private handoff receipts if present.',
+}
+
+
+def _reason(error):
+    """Map controlled validation families to static public diagnostics only.
+
+    Error text is inspected locally for classification, never serialized. In
+    particular native stderr/RPC bodies, paths, and transcript values stay local.
+    Unknown failures retain a conservative generic refusal.
+    """
+    if isinstance(error, FileNotFoundError):
+        return 'missing-prerequisite'
+    if isinstance(error, PermissionError):
+        return 'unsafe-state'
+    text = str(error)[:1024].lower()
+    if 'lsof is required' in text or text.startswith(('exact native session uuid does not exist', 'missing selected session')):
+        return 'missing-prerequisite'
+    if text.startswith(('native histories differ', 'claude history bytes differ', 'native history/task diverges', 'destination changed after preflight')):
+        return 'history-mismatch'
+    if any(term in text for term in ('project scope', 'project identity', 'another project', 'global memory', 'workspace scope', 'filesystem scope', 'historical project scopes', 'binding changed')):
+        return 'project-scope'
+    if any(term in text for term in ('ownership', 'custody', 'session lease', 'active writer', 'writer quiescence', 'source owner', 'transfer acknowledgment', 'source release receipt')):
+        return 'writer-custody'
+    if text.startswith(('unsupported ', 'malformed native ', 'invalid native ', 'expected one leading native', 'native transcript must end', 'a supported native claude')):
+        return 'unsupported-native-format'
+    if text.startswith(('native codex ', 'native history pagination', 'native resume ', 'native ancestor reconciliation')):
+        return 'native-api-refused'
+    if isinstance(error, (KeyError, TypeError)) or text.startswith(('an exact canonical', 'unknown operation', 'unsupported handoff')):
+        return 'invalid-request'
+    return 'validation-refused'
+
 
 def _json(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':')).encode() + b'\n'
@@ -199,8 +240,12 @@ class RemoteEndpoint:
                 raise ValueError('Malformed remote response')
         except (OSError, ValueError, subprocess.SubprocessError):
             raise ValueError(f'Remote {operation} failed; check Codespace availability and retry using the saved handoff receipt') from None
-        if not result.get('ok'):
-            raise ValueError(f'Remote {operation} refused; inspect private handoff receipts and resolve project scope, writer or history conflicts before retrying')
+        if not result['ok']:
+            error = result.get('error')
+            code = error.get('code') if isinstance(error, dict) else None
+            if code not in _REASONS:
+                raise ValueError(f'Remote {operation} returned an invalid refusal envelope; inspect private handoff receipts and check helper compatibility')
+            raise ValueError(f'Remote {operation} refused [{code}]: {_REASONS[code]}')
         return result['result']
 
 
@@ -214,9 +259,10 @@ def _rpc_dispatch(request):
             raise ValueError('Remote binding changed')
         endpoint = LocalEndpoint(project, state_dir(project))
         return dict(ok=True, result=endpoint.call(operation, **request.get('values', {})))
-    except Exception:
-        # Never serialize native stderr, transcript fragments or credentials.
-        return dict(ok=False, error='Remote operation refused; inspect private handoff receipts')
+    except Exception as error:
+        # Only allowlisted codes/static guidance cross this boundary.
+        code = _reason(error)
+        return dict(ok=False, error=dict(code=code, message=_REASONS[code]))
 
 
 def _validate(project, agent, session_id, direction):

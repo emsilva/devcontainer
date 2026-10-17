@@ -313,3 +313,40 @@ class EndpointTests(unittest.TestCase):
         for home in (Path(local_env['HOME']), Path(remote_env['HOME'])):
             self.assertFalse((home / '.claude/settings.json').exists())
             self.assertFalse((home / '.codex').exists())
+
+    def test_remote_validation_categories_are_actionable_without_echoing_sensitive_errors(self):
+        cases = (
+            (ValueError('Unsupported codex native version: SECRET_TOKEN'), 'unsupported-native-format'),
+            (ValueError('Unsupported compressed native transcript; SECRET_TOKEN'), 'unsupported-native-format'),
+            (ValueError('Native transcript belongs to another project checkout SECRET_TOKEN'), 'project-scope'),
+            (ValueError('Native global memory context prevents strict project-only export SECRET_TOKEN'), 'project-scope'),
+            (ValueError('Session lease is active; SECRET_TOKEN'), 'writer-custody'),
+            (ValueError('Native session has an open file / possible active writer: SECRET_TOKEN'), 'writer-custody'),
+            (ValueError('Matching reserved destination custody is required SECRET_TOKEN'), 'writer-custody'),
+            (ValueError('Native histories differ; SECRET_TOKEN'), 'history-mismatch'),
+            (FileNotFoundError('SECRET_TOKEN missing executable'), 'missing-prerequisite'),
+            (ValueError('Cannot establish writer quiescence: lsof is required SECRET_TOKEN'), 'missing-prerequisite'),
+        )
+        request = dict(root=str(self.project.root), identity=self.project.identity, operation='source_prepare', values={})
+        for error, code in cases:
+            with self.subTest(code=code), mock.patch.object(module.LocalEndpoint, 'call', side_effect=error):
+                response = module._rpc_dispatch(request)
+                self.assertFalse(response['ok'])
+                self.assertEqual(response['error']['code'], code)
+                self.assertNotIn('SECRET_TOKEN', json.dumps(response))
+                connection = mock.Mock()
+                connection.python.return_value = json.dumps(response).encode()
+                endpoint = module.RemoteEndpoint(connection, self.project.root, self.project.identity)
+                with self.assertRaises(ValueError) as caught:
+                    endpoint.call('source_prepare')
+                self.assertIn(code, str(caught.exception))
+                self.assertNotIn('SECRET_TOKEN', str(caught.exception))
+
+    def test_remote_error_envelope_unknown_code_or_arbitrary_message_fails_closed(self):
+        connection = mock.Mock()
+        endpoint = module.RemoteEndpoint(connection, self.project.root, self.project.identity)
+        for error in ({'code': 'unknown', 'message': 'SECRET_TOKEN'}, {'code': 'history-mismatch', 'message': 'SECRET_TOKEN'}):
+            connection.python.return_value = json.dumps({'ok': False, 'error': error}).encode()
+            with self.assertRaises(ValueError) as caught:
+                endpoint.call('import')
+            self.assertNotIn('SECRET_TOKEN', str(caught.exception))
