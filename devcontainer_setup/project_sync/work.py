@@ -168,7 +168,9 @@ def run(project, state, *, ui=None, service=None) -> int:
                     options += [('Continue in Codespace · ' if service.is_remote else 'Continue on this Mac · ') + _label(remembered)]
                     if not service.is_remote:
                         options += ['Continue in Codespace · ' + _label(remembered)]
-                options += ['Other conversation', 'New conversation', 'Settings and troubleshooting', 'Exit']
+                if rows:
+                    options.append('Other conversation')
+                options += ['New conversation', 'Settings and troubleshooting', 'Exit']
                 root = getattr(getattr(service, 'project', project), 'root', None)
                 project_name = display_text(getattr(root, 'name', 'Project'))
                 host = 'Codespace' if service.is_remote else 'this Mac'

@@ -45,6 +45,12 @@ def row(status='idle'):
 
 
 class WorkTests(unittest.TestCase):
+    def test_first_run_defaults_to_new_conversation(self):
+        ui = UI('Exit')
+        work.run(None, None, ui=ui, service=Service())
+        self.assertEqual(ui.menus[0][2], 'New conversation')
+        self.assertNotIn('Other conversation', ui.menus[0][1])
+
     def test_offline_discovery_and_sync_allow_local_menu(self):
         service = Service([row()])
         service.prefs = dict(agent='codex', session_id='private-id', location='mac')
