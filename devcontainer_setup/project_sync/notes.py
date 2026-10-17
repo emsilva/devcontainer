@@ -77,52 +77,58 @@ def _parse(data: bytes) -> dict:
         raise ValueError('Project Codex config is not valid UTF-8 TOML; review required') from exc
 
 
-def _policy(data: bytes) -> bytes:
-    owned = _owned(data, 'project-memory', toml=True)
+def _table_policy(data: bytes, table: str, keys: tuple[str, ...], kind: str) -> bytes:
+    owned = _owned(data, kind, toml=True)
     parsed = _parse(data)
-    memories = parsed.get('memories', {})
-    if not isinstance(memories, dict):
-        raise ValueError('Existing Codex memories policy is not a table; review required')
-    keys = ('generate_memories', 'use_memories')
-    if any(key in memories and memories[key] is not False for key in keys):
-        raise ValueError('Existing Codex memory policy conflicts with project-only memory; review required')
+    options = parsed.get(table, {})
+    if not isinstance(options, dict):
+        raise ValueError(f'Existing Codex {table} policy is not a table; review required')
+    if any(key in options and options[key] is not False for key in keys):
+        raise ValueError(f'Existing Codex [{table}] memory policy conflicts with project-only memory; review required')
     if owned:
-        if not all(memories.get(key) is False for key in keys):
-            raise ValueError('Managed Codex policy no longer applies to [memories]; review required')
+        if not all(options.get(key) is False for key in keys):
+            raise ValueError(f'Managed Codex policy no longer applies to [{table}]; review required')
         return data
-    missing = [key for key in keys if key not in memories]
+    missing = [key for key in keys if key not in options]
     if not missing:
         return data
-    expected = {**parsed, 'memories': {**memories, **{key: False for key in keys}}}
+    expected = {**parsed, table: {**options, **{key: False for key in keys}}}
     body = b''.join(f'{key} = false\n'.encode() for key in missing)
-    if 'memories' not in parsed:
-        candidate = _append(data, _block('project-memory', b'[memories]\n' + body, toml=True))
+    if table not in parsed:
+        candidate = _append(data, _block(kind, f'[{table}]\n'.encode() + body, toml=True))
         if _parse(candidate) != expected:
-            raise ValueError('Cannot safely select Codex [memories] policy')
+            raise ValueError(f'Cannot safely select Codex [{table}] policy')
         return candidate
-    # Retain an existing table header and every user option byte-for-byte. Test
+    # Retain the existing table header and every user option byte-for-byte. Test
     # the full parsed candidate to exclude header-like lines in multiline strings.
+    label = re.escape(table.encode())
+    header = rb'\s*\[\s*(?:' + label + rb'|"' + label + rb'"|\'' + label + rb'\')\s*\]\s*(?:#[^\n]*)?\s*'
     offset = 0
     for line in data.splitlines(keepends=True):
         offset += len(line)
-        if re.fullmatch(rb'\s*\[\s*(?:memories|"memories"|\'memories\')\s*\]\s*(?:#[^\n]*)?\s*', line):
-            block = _block('project-memory', body, toml=True)
+        if re.fullmatch(header, line):
+            block = _block(kind, body, toml=True)
             candidate = data[:offset] + (b'' if line.endswith(b'\n') else b'\n') + block + data[offset:]
             try:
                 if _parse(candidate) == expected:
                     return candidate
             except ValueError:
                 continue
-    # Root dotted-key syntax can also own a memories table. Add only missing
-    # dotted keys at root scope; parser validation prevents scope changes.
-    dotted = b''.join(f'memories.{key} = false\n'.encode() for key in missing)
-    candidate = _block('project-memory', dotted, toml=True) + data
+    # Root dotted-key syntax can also own the table. Add only missing dotted
+    # keys at root scope; parser validation prevents scope changes.
+    dotted = b''.join(f'{table}.{key} = false\n'.encode() for key in missing)
+    candidate = _block(kind, dotted, toml=True) + data
     try:
         if _parse(candidate) == expected:
             return candidate
     except ValueError:
         pass
-    raise ValueError('Cannot safely extend existing Codex [memories] policy; review required')
+    raise ValueError(f'Cannot safely extend existing Codex [{table}] policy; review required')
+
+
+def _policy(data: bytes) -> bytes:
+    data = _table_policy(data, 'memories', ('generate_memories', 'use_memories'), 'project-memory')
+    return _table_policy(data, 'features', ('memories',), 'memory-feature')
 
 
 def integrate_notes(project: Path, files: dict[str, bytes], enabled: bool) -> None:

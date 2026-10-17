@@ -92,6 +92,7 @@ class NotesTests(unittest.TestCase):
                 parsed = tomllib.loads(proposed.decode())
                 old = tomllib.loads(original.decode())
                 expected = {**old, 'memories': {**old.get('memories', {}), 'generate_memories': False, 'use_memories': False}}
+                expected['features'] = {**old.get('features', {}), 'memories': False}
                 self.assertEqual(parsed, expected)
                 for line in original.splitlines(keepends=True):
                     self.assertIn(line, proposed)
@@ -136,3 +137,36 @@ class NotesTests(unittest.TestCase):
         candidates = {'other': b'bytes'}
         integrate_notes(self.root, candidates, False)
         self.assertEqual(candidates, {'other': b'bytes'})
+
+
+    def test_memory_feature_is_disabled_in_its_own_table_and_preserves_other_features(self):
+        for original in (b'', b'[features]\nfoo=true\n', b'[features]\nmemories=false\nfoo=true\n', b'features.foo=true\n'):
+            with self.subTest(original=original):
+                self.put('.codex/config.toml', original)
+                proposed = self.generate()['.codex/config.toml']
+                parsed = tomllib.loads(proposed.decode())
+                self.assertIs(parsed['features']['memories'], False)
+                if b'foo' in original:
+                    self.assertIs(parsed['features']['foo'], True)
+                self.put('.codex/config.toml', proposed)
+                self.assertEqual(self.generate()['.codex/config.toml'], proposed)
+                for line in original.splitlines(keepends=True):
+                    self.assertIn(line, proposed)
+
+    def test_existing_true_or_invalid_memory_feature_refuses_without_partial_candidates(self):
+        for original in (b'[features]\nmemories=true\n', b'[features]\nmemories="false"\n', b'features=false\n'):
+            self.put('.codex/config.toml', original)
+            candidates = {'owner.txt': b'owner'}
+            with self.subTest(original=original), self.assertRaises(ValueError):
+                integrate_notes(self.root, candidates, True)
+            self.assertEqual(candidates, {'owner.txt': b'owner'})
+            self.assertEqual((self.root / '.codex/config.toml').read_bytes(), original)
+
+    def test_existing_memory_block_is_preserved_and_feature_block_has_separate_ownership(self):
+        original = self.generate()['.codex/config.toml']
+        self.assertIn(b'devcontainer-setup:memory-feature begin', original)
+        self.assertIn(b'devcontainer-setup:project-memory begin', original)
+        for mutation in (original.replace(b'memories = false', b'memories = true'), original + original[original.index(b'# devcontainer-setup:memory-feature begin'):]):
+            self.put('.codex/config.toml', mutation)
+            with self.assertRaises(ValueError):
+                self.generate()
