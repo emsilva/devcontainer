@@ -7,10 +7,14 @@ tasks:
     cmds:
       - bash scripts/project-sync.sh work {{.CLI_ARGS}}
   work:cs:
-    desc: Open Codespace Herdr with continuous recovery on this Mac
+    desc: Connect Codespace to local Herdr with continuous recovery on this Mac
     interactive: true
     cmds:
       - bash scripts/project-sync.sh work --codespace {{.CLI_ARGS}}
+  work:disconnect:
+    desc: Disconnect this project's saved Codespace machine from Herdr
+    cmds:
+      - bash scripts/project-sync.sh work --disconnect {{.CLI_ARGS}}
   work:status:
     desc: Show the last checkpoint received on this Mac
     cmds:

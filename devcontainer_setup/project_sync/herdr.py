@@ -1,15 +1,12 @@
 """Project Herdr workspaces, using public CLI IDs and native SSH setup."""
 from __future__ import annotations
 
-from datetime import date, datetime, time
 import json
-import math
 import os
 from pathlib import Path
 import re
 import subprocess
 import time as clock
-import tomllib
 
 from .ssh_hosts import configure_ssh
 from .state import _parent, _regular, atomic_write, read_json
@@ -88,51 +85,6 @@ def _workspace(project, root: str, prefix: list[str]):
     _json([*prefix, 'workspace', 'focus', workspace_id])
 
 
-def _toml(value) -> str:
-    # Serialize a private semantic copy, preserving every parsed user setting.
-    if isinstance(value, str):
-        return json.dumps(value, ensure_ascii=False)
-    if isinstance(value, bool):
-        return str(value).lower()
-    if isinstance(value, (datetime, date, time)):
-        return value.isoformat()
-    if isinstance(value, (int, float)):
-        return str(value).lower() if not isinstance(value, float) or math.isfinite(value) else ('nan' if math.isnan(value) else 'inf' if value > 0 else '-inf')
-    if isinstance(value, list):
-        return '[' + ', '.join(_toml(item) for item in value) + ']'
-    if isinstance(value, dict):
-        return '{ ' + ', '.join(json.dumps(key) + ' = ' + _toml(item) for key, item in value.items()) + ' }'
-    raise ValueError('Unsupported setting in Herdr configuration')
-
-
-def _attach_env(state: Path) -> dict:
-    env = dict(os.environ)
-    if env.get('HERDR_ENV') != '1':
-        return env
-    home = Path(env.get('HOME') or Path.home())
-    source = Path(env.get('HERDR_CONFIG_PATH') or Path(env.get('XDG_CONFIG_HOME') or home / '.config') / 'herdr/config.toml').absolute()
-    try:
-        settings = tomllib.loads(source.read_text())
-    except FileNotFoundError:
-        settings = {}
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
-        raise ValueError('Cannot read the effective Herdr configuration') from None
-    settings.setdefault('experimental', {})['allow_nested'] = True
-    sound = settings.get('ui', {}).get('sound', {})
-    for name in ('path', 'done_path', 'request_path'):
-        value = sound.get(name)
-        if isinstance(value, str) and value and not Path(value).is_absolute():
-            sound[name] = str(source.parent / value)
-    target = state / 'herdr-nested.toml'
-    encoded = ('\n'.join(json.dumps(key) + ' = ' + _toml(value) for key, value in settings.items()) + '\n').encode()
-    # Refuse serialization drift before giving the private config to Herdr.
-    if tomllib.loads(encoded.decode()) != settings:
-        raise ValueError('Cannot preserve the effective Herdr configuration')
-    atomic_write(target, encoded)
-    env['HERDR_CONFIG_PATH'] = str(target)
-    return env
-
-
 def open_local(project, state: Path) -> int:
     """Focus this checkout in the current Herdr, or attach a named local session."""
     if os.environ.get('HERDR_ENV') == '1':
@@ -167,8 +119,34 @@ def open_local(project, state: Path) -> int:
     return subprocess.call(['herdr', *prefix], cwd=project.root)
 
 
+def _matching_machines(alias, session):
+    rows = _json(['machine', 'list', '--json'])
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ValueError('Herdr returned an invalid machine catalog')
+    matches = [row for row in rows if row.get('target') == alias and row.get('session') == session]
+    for row in matches:
+        machine_id = row.get('id')
+        if not isinstance(machine_id, str) or not machine_id or machine_id.startswith('-'):
+            raise ValueError('Herdr returned an invalid machine ID')
+    return matches
+
+
+def disconnect_remote(project) -> int:
+    """Disable only this project's saved machine, preserving its remote session."""
+    if os.environ.get('CODESPACES') == 'true':
+        raise ValueError('Run task work:disconnect on your Mac to disconnect its Herdr connection')
+    matches = _matching_machines('devcontainer-' + project.project_id, _session(project))
+    for machine in matches:
+        if machine.get('enabled'):
+            result = subprocess.call(['herdr', 'machine', 'disable', machine['id']])
+            if result:
+                return result
+    print('Codespace disconnected from Herdr. Reconnect with task work:cs.')
+    return 0
+
+
 def open_remote(project, state: Path, remote_root: str) -> int:
-    """Register/reuse the project's remote machine and attach its persistent UI."""
+    """Connect the project's saved machine and open local Herdr when needed."""
     state = Path(state)
     alias, session = configure_ssh(project, state), _session(project)
     receipt_path = state / 'herdr-machine.json'
@@ -176,28 +154,24 @@ def open_remote(project, state: Path, remote_root: str) -> int:
         receipt = read_json(receipt_path)
     except FileNotFoundError:
         receipt = {}
-    rows = _json(['machine', 'list', '--json'])
-    def matching(rows):
-        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
-            raise ValueError('Herdr returned an invalid machine catalog')
-        return [row for row in rows if row.get('target') == alias and row.get('session') == session]
-    matches = matching(rows)
+    matches = _matching_machines(alias, session)
     if not matches:
         result = subprocess.call(['herdr', 'machine', 'add', alias, '--label', project.root.name + ' (Codespace)',
                                   '--remote-session', session])
         if result:
             return result
-        matches = matching(_json(['machine', 'list', '--json']))
+        matches = _matching_machines(alias, session)
         if not matches:
             raise ValueError('Herdr setup did not save the expected project machine')
     machine = next((row for row in matches if row.get('id') == receipt.get('machine_id')), matches[0])
     machine_id = machine.get('id')
-    if not isinstance(machine_id, str) or not machine_id or machine_id.startswith('-'):
-        raise ValueError('Herdr returned an invalid machine ID')
     if not machine.get('enabled'):
         result = subprocess.call(['herdr', 'machine', 'enable', machine_id])
         if result:
             return result
     atomic_write(receipt_path, json.dumps({'machine_id': machine_id, 'alias': alias, 'session': session}).encode() + b'\n')
     _workspace(project, remote_root, ['--machine', machine_id])
-    return subprocess.call(['herdr', '--remote', alias, '--session', session], env=_attach_env(state), cwd=project.root)
+    print('Codespace connected. Select its Codespace group in Herdr.')
+    if os.environ.get('HERDR_ENV') == '1':
+        return 0
+    return subprocess.call(['herdr'], cwd=project.root)

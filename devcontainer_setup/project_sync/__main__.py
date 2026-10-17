@@ -20,6 +20,7 @@ def parser():
     work.add_argument('--resume', action='store_true', help='Choose a project conversation to continue')
     action = work.add_mutually_exclusive_group()
     action.add_argument('--codespace', action='store_true')
+    action.add_argument('--disconnect', action='store_true', help='Disconnect this project’s saved Codespace machine from Herdr')
     action.add_argument('--status', action='store_true')
     action.add_argument('--stop', action='store_true')
     sync = groups.add_parser('scratch', help='Advanced scratch synchronization controls').add_subparsers(dest='action', required=True)
@@ -44,7 +45,7 @@ def run(args):
         from . import workspace
         if args.resume and not args.agent:
             raise ValueError('Use task work:codex -- --resume or task work:claude -- --resume')
-        if args.agent and (args.codespace or args.status or args.stop):
+        if args.agent and (args.codespace or args.disconnect or args.status or args.stop):
             raise ValueError('Open task work:cs first, then launch the agent in its Herdr workspace')
         if args.status:
             _print(workspace.status(project, state))
@@ -52,6 +53,9 @@ def run(args):
         if args.stop:
             _print(scratch.stop(state))
             return 0
+        if args.disconnect:
+            from .herdr import disconnect_remote
+            return disconnect_remote(project)
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise ValueError('Work entrypoints require a terminal; use task work:status for scripts')
         if args.codespace:

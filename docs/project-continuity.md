@@ -9,7 +9,8 @@ available on their respective hosts; setup installs the container tools.
 
 | Command | Result |
 | --- | --- |
-| `task work:cs` | Explicitly start/connect Codespace, back it up to Mac, attach Herdr |
+| `task work:cs` | Explicitly start/connect Codespace, back it up to Mac, connect its local Herdr group |
+| `task work:disconnect` | Disconnect this project's saved Codespace machine from local Herdr |
 | `task work` | Open local Herdr; recover remote work when switching back |
 | `task work:codex` / `task work:claude` | Fresh native conversation on the current host |
 | `task work:codex -- --resume` | Choose a scoped conversation, including recoverable checkpoints |
@@ -19,6 +20,18 @@ available on their respective hosts; setup installs the container tools.
 
 If a project already has a custom `work` task, use `task devcontainer:work` and the
 other `devcontainer:work:*` tasks. Setup preserves custom root tasks.
+
+Run `task work:disconnect` on the Mac to disable only this project's saved Herdr
+machine. The Codespace group disconnects in local Herdr; remote workspaces and
+agents remain running, and Mac backups continue. This operation needs no SSH or
+GitHub connection. Repeating it is safe. `task work:cs` re-enables the saved
+machine and reuses the existing workspace. Use `task work:stop` separately to
+pause this project's backup and scratch worker.
+
+Inside Herdr, `task work:cs` returns after connecting the saved machine. Select
+the project's Codespace group to work in its remote panes. From another terminal,
+it opens the local Herdr UI with that group available. Both paths use the saved
+machine connection that `task work:disconnect` controls.
 
 ## What gets protected
 
@@ -92,7 +105,7 @@ retain the configured idle timeout. This proxy also has a GET-only capability:
 Herdr reconnect cannot restart a stopped Codespace. Background sync continues to
 use a plain port forward, without activity heartbeats. The dedicated host key and
 private include stay in project state. Existing SSH settings and Herdr configuration
-are preserved; nested attach uses only a child-specific Herdr configuration.
+are preserved. Connecting uses the saved machine in the local Herdr UI.
 
 Scratch synchronization remains two-way safe. Deletions propagate; simultaneous
 conflicting changes remain for explicit resolution. The owned session’s identity
