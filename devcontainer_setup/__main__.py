@@ -51,7 +51,8 @@ def _metadata(project: Path) -> dict:
 def defaults(found: dict, preferences: dict, metadata: dict) -> dict:
     previous = metadata.get('selections')
     if previous:
-        return dict(json.loads(json.dumps(previous)), agents=True)
+        return dict(json.loads(json.dumps(previous)), agents=True,
+                    continuity=previous.get('continuity', True))
     managers = {family: entry['selected'] for family, entry in found['package_managers'].items()
                 if entry.get('selected')}
     return {'runtimes': {name: entry['version'] or RUNTIME_DEFAULTS[name]
@@ -62,7 +63,7 @@ def defaults(found: dict, preferences: dict, metadata: dict) -> dict:
             'package_manager_versions': {family: entry.get('version') or '' for family, entry in found['package_managers'].items()
                                          if entry.get('selected') and (entry.get('version') or
                                              entry.get('versions', {}).get(entry['selected'], {}).get('conflicts'))},
-            'polyglot': False, 'continuity': False}
+            'polyglot': False, 'continuity': True}
 
 
 def integrate_taskfile(project: Path, files: dict[str, bytes]) -> None:
@@ -122,13 +123,13 @@ def integrate_continuity(project: Path, files: dict[str, bytes], enabled: bool) 
     boundary = re.search(r'^\S', text[tasks.end() + 1:], re.M)
     end = tasks.end() + 1 + boundary.start() if boundary else len(text)
     body = text[tasks.end():end]
-    aliases = [f'scratch:{verb}' for verb in ('configure', 'start', 'stop', 'status', 'logs', 'backup')]
+    aliases = ['work'] + [f'scratch:{verb}' for verb in ('configure', 'start', 'stop', 'status', 'logs', 'backup')]
     aliases += [f'agent:{verb}' for verb in ('codex', 'claude', 'sessions', 'handoff', 'recover')]
     additions = ''
     for alias in aliases:
         if re.search(r'^  [\'\"]?' + re.escape(alias) + r'[\'\"]?:', body, re.M):
             continue
-        additions += (f'  {alias}:\n    cmds:\n'
+        additions += (f'  {alias}:\n' + ('    interactive: true\n' if alias == 'work' else '') + '    cmds:\n'
                       f'      - task: devcontainer:{alias}\n'
                       '        vars: {CLI_ARGS: "{{.CLI_ARGS}}"}\n')
     candidates[name] = (text[:tasks.end()] + ('\n' + additions.rstrip('\n') if additions else '')
@@ -264,8 +265,8 @@ def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
     reverse = {label: name for name, label in TOOL_LABELS.items()}
     chosen['tools'] = [reverse[label] for label in ui.multi('Project tools', labels,
                       [TOOL_LABELS[name] for name in chosen['tools'] if name in TOOL_LABELS])]
-    chosen['continuity'] = ui.confirm('Enable project scratch sync and conversation handoff?',
-                                      chosen.get('continuity', False))
+    chosen['continuity'] = ui.confirm('Sync scratch files and project notes with your Mac?',
+                                      chosen.get('continuity', True))
     chosen['package_managers'] = {family: manager for family, manager in chosen.get('package_managers', {}).items()
                                   if family in runtimes}
     chosen['package_manager_versions'] = {family: version for family, version in chosen.get('package_manager_versions', {}).items()
@@ -368,6 +369,37 @@ def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume
     return options
 
 
+def setup_continuity(project: Path, ui, codespace: str | None) -> None:
+    """Finish the approved setup using its selected Codespace; Git is durable."""
+    if not codespace:
+        print('Run task work on your Mac to connect a Codespace and start working.', flush=True)
+        return
+    from .project_sync.state import discover_project, state_dir
+    from .project_sync.workflows import Workflows
+    try:
+        discovered = discover_project(project)
+        service = Workflows(discovered, state_dir(discovered))
+        if service.is_remote:
+            print('Run task work on your Mac to connect scratch sync with this Codespace.', flush=True)
+            return
+        binding = service.binding()
+        if binding and binding['codespace'] == codespace:
+            root = binding['remote_root']
+        else:
+            roots = service.roots(codespace)
+            if not roots:
+                raise ValueError('No matching project checkout was found in the selected Codespace.')
+            root = roots[0] if len(roots) == 1 else ui.choose('Which remote project checkout?', roots)
+        service.pair(codespace, root)
+        service.ensure_sync()
+        print('Scratch sync started. Run task work to continue a conversation.', flush=True)
+    except Cancelled:
+        print('Setup is preserved. Run task work on your Mac to finish connecting scratch sync.', file=sys.stderr)
+    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+        print(f'Setup is preserved. Scratch sync needs attention: {error}\n'
+              'Run task work on your Mac to finish connecting.', file=sys.stderr)
+
+
 def interactive(project: Path, found: dict, metadata: dict, ref: str, resume: str | None) -> int:
     ui, api = Gum(), Codespaces()
     preferences = load_preferences()
@@ -433,8 +465,12 @@ def interactive(project: Path, found: dict, metadata: dict, ref: str, resume: st
             state = Path(state_home) if state_home and Path(state_home).is_absolute() else Path.home() / '.local/state'
             receipt = state / 'devcontainer-setup' / (hashlib.sha256(f'{repo}:{plan.branch}'.encode()).hexdigest()[:16] + '.json')
             config = json.loads(files['.devcontainer/devcontainer.json'])
-            api.launch(plan, repo, dotfiles_repo=preferences['dotfiles_repo'] if chosen['dotfiles'] else None,
-                       receipt=receipt, workspace=config.get('workspaceFolder'), **launch)
+            name = api.launch(plan, repo, dotfiles_repo=preferences['dotfiles_repo'] if chosen['dotfiles'] else None,
+                              receipt=receipt, workspace=config.get('workspaceFolder'), **launch)
+        else:
+            name = None
+        if chosen.get('continuity'):
+            setup_continuity(project, ui, name)
         return 0
 
 
