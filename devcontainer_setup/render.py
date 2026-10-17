@@ -354,7 +354,7 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
     files['.devcontainer/scripts/install-agents.sh'] = (source / '.devcontainer/scripts/install-agents.sh').read_bytes()
     taskfile = (templates / 'Taskfile.yml').read_text()
     continuity_tasks = (templates / 'continuity-tasks.yml').read_text() if selected['continuity'] else ''
-    files['.devcontainer/Taskfile.yml'] = taskfile.replace('# __CONTINUITY_TASKS__', continuity_tasks).encode()
+    files['.devcontainer/Taskfile.yml'] = (taskfile.replace('# __CONTINUITY_TASKS__', continuity_tasks).rstrip() + '\n').encode()
     if selected['continuity']:
         files['.devcontainer/scripts/project-sync.sh'] = (templates / 'scripts/project-sync.sh').read_bytes()
         runtime = source / 'devcontainer_setup/project_sync'

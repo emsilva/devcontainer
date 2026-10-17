@@ -11,6 +11,7 @@ import secrets
 import shlex
 import socket
 import subprocess
+import sys
 import threading
 import time
 from urllib.error import HTTPError
@@ -162,6 +163,22 @@ def _ssh_quote(value):
     return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
+def _ssh_problem(stderr):
+    """Return fixed diagnostics, never arbitrary remote or credential text."""
+    text = stderr.decode(errors='replace').lower()
+    if any(part in text for part in ('host key verification failed', 'host identification has changed',
+                                     'host key is known', 'offending ', 'host key has changed')):
+        return ('SSH host key verification failed; verify the Codespace identity and its dedicated known_hosts file.', False)
+    if 'permission denied' in text or 'authentication failed' in text:
+        return ('SSH authentication failed; check authorization for ~/.ssh/codespaces.auto in this Codespace.', False)
+    if any(part in text for part in ('connection refused', 'connection reset', 'connection closed',
+                                     'closed by remote host', 'kex_exchange_identification',
+                                     'ssh_exchange_identification', 'banner exchange', 'broken pipe',
+                                     'operation timed out', 'connection timed out', 'connection aborted')):
+        return ('SSH connection failed; the Codespace SSH service or forwarding tunnel may still be starting.', True)
+    return ('SSH connection failed; inspect Codespace connectivity and the dedicated SSH configuration.', False)
+
+
 class CodespaceConnection:
     def __init__(self, codespace: str, *, state: Path, env=None):
         self.codespace = _name(codespace)
@@ -171,6 +188,7 @@ class CodespaceConnection:
         self.api = None
         self.port = None
         self.accept_new = False
+        self._ready = False
 
     def __enter__(self):
         from .state import atomic_write
@@ -241,9 +259,43 @@ class CodespaceConnection:
 '''
         atomic_write(path, config.encode())
 
+    def _wait_for_ssh(self, path):
+        # The local forwarding socket can accept connections before the tunnel
+        # or sshd is ready. Retry only this harmless probe, never an RPC payload.
+        deadline = time.monotonic() + 45
+        waiting = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError('Codespace SSH was not ready within 45 seconds; retry task work:cs and inspect Codespace status if it persists.')
+            if self.child is not None and self.child.poll() is not None:
+                raise ValueError('Codespace port forward stopped before SSH became ready; retry task work:cs.')
+            try:
+                result = subprocess.run(
+                    ['ssh', '-F', str(path), '-T', 'project-sync', 'true'],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env=clean_env(self.env), timeout=min(15, remaining))
+            except subprocess.TimeoutExpired:
+                pass
+            else:
+                if result.returncode == 0:
+                    self._ready = True
+                    return
+                if result.returncode != 255:
+                    raise ValueError(f'Remote SSH readiness command failed (exit {result.returncode}); inspect the remote shell.')
+                message, transient = _ssh_problem(result.stderr)
+                if not transient:
+                    raise ValueError(message)
+            if not waiting:
+                print('Waiting for Codespace SSH to become ready…', file=sys.stderr)
+                waiting = True
+            time.sleep(min(.5, max(0, deadline - time.monotonic())))
+
     def python(self, code: str, payload: bytes = b'', timeout: int = 60) -> bytes:
         path = self.state / 'ssh-probe-config'
         self.ssh_config(path)
+        if not self._ready:
+            self._wait_for_ssh(path)
         try:
             result = subprocess.run(
                 ['ssh', '-F', str(path), '-T', 'project-sync', 'python3 -I -B -c ' + shlex.quote(code)],
@@ -253,10 +305,13 @@ class CodespaceConnection:
             raise ValueError('Remote Python/SSH timed out; inspect Codespace connectivity and status before retrying.') from None
         if result.returncode:
             # Do not relay arbitrary upstream/credential-bearing stderr to logs.
-            raise ValueError('Remote Python/SSH failed; verify pre-existing sshd on port 2222 and the dedicated host key.')
+            if result.returncode == 255:
+                raise ValueError(_ssh_problem(result.stderr)[0])
+            raise ValueError(f'Remote Python command failed (exit {result.returncode}); inspect the remote checkout and Python environment.')
         return result.stdout
 
     def __exit__(self, *exc):
+        self._ready = False
         _terminate(self.child)
         if self.api:
             self.api.__exit__(*exc)

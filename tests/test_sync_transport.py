@@ -155,6 +155,7 @@ class TransportTests(unittest.TestCase):
             with patch.object(transport, 'ReadOnlyAPI', return_value=api), patch.object(transport.subprocess, 'Popen', return_value=child), patch.object(transport.socket, 'create_connection'), patch.object(transport.subprocess, 'run', side_effect=[version, timeout]) as run:
                 with self.assertRaisesRegex(ValueError, 'Remote Python/SSH timed out') as caught:
                     with connection:
+                        connection._ready = True  # This gate isolates the post-readiness RPC timeout.
                         connection.python('private-python-code')
             self.assertNotIn('private-', str(caught.exception))
             self.assertEqual(run.call_count, 2)
@@ -177,3 +178,83 @@ class TransportTests(unittest.TestCase):
                     connection.__enter__()
             api.__exit__.assert_called_once()
             self.assertIsNone(connection.api)
+
+
+class SSHReadinessTests(unittest.TestCase):
+    def setUp(self):
+        from devcontainer_setup.project_sync import transport
+        self.transport = transport
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.connection = transport.CodespaceConnection('bound-name', state=Path(temporary.name).resolve())
+        self.connection.port = 12345
+        self.connection.key = self.connection.state / 'key'
+
+    @staticmethod
+    def result(code=0, stdout=b'', stderr=b''):
+        return subprocess.CompletedProcess(['ssh'], code, stdout, stderr)
+
+    def test_open_forward_waits_for_ssh_then_sends_each_payload_once(self):
+        from unittest.mock import patch
+        responses = [self.result(255, stderr=b'Connection reset by peer'),
+                     self.result(255, stderr=b'connect to host: Connection refused'),
+                     self.result(), self.result(stdout=b'first'), self.result(stdout=b'second')]
+        with patch.object(self.transport.subprocess, 'run', side_effect=responses) as run, \
+                patch.object(self.transport.time, 'sleep'):
+            self.assertEqual(self.connection.python('write_first()', b'first payload'), b'first')
+            self.assertEqual(self.connection.python('write_second()', b'second payload'), b'second')
+        calls = run.call_args_list
+        self.assertEqual([c.args[0][-1] for c in calls[:3]], ['true'] * 3)
+        self.assertEqual([c.kwargs['input'] for c in calls[3:]], [b'first payload', b'second payload'])
+        self.assertEqual(len(calls), 5)
+
+    def test_authentication_and_host_key_errors_are_immediate_and_private(self):
+        from unittest.mock import patch
+        cases = [(b'Permission denied (publickey). private-detail', 'authentication failed'),
+                 (b'Host key verification failed. private-detail', 'host key verification failed'),
+                 (b'REMOTE HOST IDENTIFICATION HAS CHANGED private-detail', 'host key verification failed')]
+        for stderr, message in cases:
+            with self.subTest(message=message), \
+                    patch.object(self.transport.subprocess, 'run', return_value=self.result(255, stderr=stderr)) as run, \
+                    patch.object(self.transport.time, 'sleep') as sleep:
+                with self.assertRaisesRegex(ValueError, message) as caught:
+                    self.connection.python('private_operation()', b'private payload')
+                self.assertNotIn('private', str(caught.exception))
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(run.call_args.args[0][-1], 'true')
+                sleep.assert_not_called()
+
+    def test_ssh_readiness_timeout_is_bounded_without_running_operation(self):
+        from unittest.mock import patch
+        now = [0]
+        def timeout(*args, **kwargs):
+            now[0] = 46
+            raise subprocess.TimeoutExpired('private command', kwargs['timeout'], stderr=b'private stderr')
+        with patch.object(self.transport.subprocess, 'run', side_effect=timeout) as run, \
+                patch.object(self.transport.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(self.transport.time, 'sleep'):
+            with self.assertRaisesRegex(ValueError, 'SSH.*ready.*45') as caught:
+                self.connection.python('private_operation()', b'private payload')
+        self.assertNotIn('private', str(caught.exception))
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][-1], 'true')
+        self.assertLessEqual(run.call_args.kwargs['timeout'], 45)
+
+    def test_connection_drop_after_remote_operation_is_never_retried(self):
+        from unittest.mock import patch
+        with patch.object(self.transport.subprocess, 'run', side_effect=[
+                self.result(), self.result(255, stderr=b'Connection reset by peer')]) as run:
+            with self.assertRaisesRegex(ValueError, 'SSH connection'):
+                self.connection.python('write_data()', b'unique payload')
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args.kwargs['input'], b'unique payload')
+
+    def test_remote_python_exit_reports_command_failure_without_ssh_advice(self):
+        from unittest.mock import patch
+        with patch.object(self.transport.subprocess, 'run', side_effect=[
+                self.result(), self.result(1, stderr=b'private traceback')]) as run:
+            with self.assertRaisesRegex(ValueError, 'Remote Python command failed.*1') as caught:
+                self.connection.python('raise ValueError("private")')
+        self.assertNotIn('private', str(caught.exception))
+        self.assertNotIn('sshd', str(caught.exception))
+        self.assertEqual(run.call_count, 2)
