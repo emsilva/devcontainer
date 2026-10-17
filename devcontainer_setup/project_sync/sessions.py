@@ -22,7 +22,7 @@ from .state import atomic_write, locked, read_json
 SCHEMA = 1
 MAX_BYTES = 256 * 1024 * 1024
 CODEX_RECORDS = {'session_meta', 'response_item', 'event_msg', 'turn_context', 'compacted', 'world_state', 'token_usage_record'}
-CLAUDE_RECORDS = {'user', 'assistant', 'system', 'summary', 'progress', 'queue-operation', 'file-history-snapshot', 'custom-title', 'agent-name', 'agent-color', 'pr-link', 'last-prompt', 'saved_hook_context', 'bridge-pointer', 'attachment', 'atis-latch', 'api-request-shape', 'api-request-blob', 'api-request', 'cost-state'}
+CLAUDE_RECORDS = {'user', 'assistant', 'system', 'summary', 'progress', 'queue-operation', 'file-history-snapshot', 'custom-title', 'agent-name', 'agent-color', 'pr-link', 'last-prompt', 'saved_hook_context', 'bridge-pointer', 'attachment', 'atis-latch', 'api-request-shape', 'api-request-blob', 'api-request', 'cost-state', 'mode'}
 MEMORY_MARKERS = (b'<memory_summary>', b'<memory_context>', b'<memory_citation>', b'<oai-mem-citation>', b'========= MEMORY_SUMMARY BEGINS', b'/.codex/memories/', b'\\.codex\\memories\\')
 
 
@@ -168,7 +168,17 @@ def _validate_claude(rows, sid, roots, *, child=False):
             _scoped_roots(row['cwd'], roots, child=child)
             scoped = True
         kind = row['type']
-        if kind == 'attachment':
+        if kind in ('user', 'assistant'):
+            message = row.get('message')
+            if isinstance(message, dict) and message.get('role') == kind:
+                content = message.get('content')
+                if isinstance(content, str):
+                    content = [dict(type='text', text=content)]
+                if isinstance(content, list):
+                    normalized = dict(role=kind, content=content)
+                    digest = hashlib.sha256(json.dumps(normalized, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+                    blobs[digest] = normalized
+        elif kind == 'attachment':
             attachment = row.get('attachment')
             supported = {'environment', 'model', 'total_tokens_reminder', 'session_context', 'date', 'credential_org', 'advisor_tool'}
             if not isinstance(attachment, dict) or attachment.get('type') not in supported:

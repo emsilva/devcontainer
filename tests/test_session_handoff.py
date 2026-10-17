@@ -180,7 +180,7 @@ class SessionTests(unittest.TestCase):
         shape = dict(system=[dict(type='text', text='Synthetic instructions')], tools=[])
         message = dict(role='user', content=[dict(type='text', text='Synthetic request')])
         rows = [
-            dict(type='user', sessionId=self.sid, cwd=str(self.project.root), message=message),
+            dict(type='user', sessionId=self.sid, cwd=str(self.project.root), message=dict(role='user', content='Original transcript prompt')),
             dict(type='attachment', sessionId=self.sid, cwd=str(self.project.root), attachment=dict(type='environment', snapshot=dict(workingDirectory=str(self.project.root), additionalWorkingDirectories=[]))),
             dict(type='atis-latch', sessionId=self.sid, atis='synthetic'),
             dict(type='api-request-shape', sessionId=self.sid, shapeHash=digest(shape), shape=shape),
@@ -212,6 +212,27 @@ class SessionTests(unittest.TestCase):
         self.api.import_snapshot(self.dest, 'claude', self.sid, self.target, bundle, state=self.state)
         mapped = self.target / 'projects' / self.api.claude_namespace(self.dest.root) / path.name
         self.assertEqual(mapped.read_bytes(), path.read_bytes())
+
+    def test_claude_resumed_request_resolves_prior_native_messages_without_blob_rows(self):
+        path, original = self.claude_request_fixture()
+        digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+        assistant = dict(role='assistant', content=[dict(type='text', text='Earlier native reply')])
+        user = dict(role='user', content=[dict(type='text', text='Resume this native session')])
+        for include_mode in (False, True):
+            with self.subTest(include_mode=include_mode):
+                rows = copy.deepcopy(original[:6])
+                rows.extend([
+                    dict(type='assistant', sessionId=self.sid, cwd=str(self.project.root), message=dict(assistant, id='native-message', model='native-model', usage=dict(input_tokens=1))),
+                    dict(type='user', sessionId=self.sid, cwd=str(self.project.root), message=dict(role='user', content='Resume this native session')),
+                ])
+                if include_mode:
+                    rows.append(dict(type='mode', sessionId=self.sid, mode='default'))
+                messages = [original[4]['message'], assistant, user]
+                request = dict(original[3]['shape'], messages=messages)
+                rows.append(dict(type='api-request', sessionId=self.sid, id=str(uuid.uuid4()), shapeHash=original[3]['shapeHash'], keep=0, tail=[digest(message) for message in messages], params={}, cacheControl=[], requestDigest=digest(request)))
+                self.write_claude_fixture(path, rows)
+                bundle = self.claude_bundle()
+                self.assertEqual(base64.b64decode(bundle['files'][0]['data']), path.read_bytes())
 
     def test_claude_native_request_dependencies_and_environment_scope_refused(self):
         path, rows = self.claude_request_fixture()
