@@ -83,6 +83,8 @@ last receipt; a green scratch connection alone is insufficient.
 The foreground command can start a stopped Codespace. The background worker has
 an enforced GET-only GitHub API capability and cannot start it or spend credits.
 It reconnects to an already running space. Run `task work:cs` after a Mac reboot.
+Connections wait up to 45 seconds for a successful SSH handshake after the local
+forward opens. Only this harmless probe is retried; project operations run once.
 
 An owned SSH alias in `~/.ssh/config` points Herdr at the worker’s dedicated live
 forward. Its host key and private include stay in project state. Existing SSH
