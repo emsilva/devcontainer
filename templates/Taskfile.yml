@@ -39,3 +39,5 @@ tasks:
     desc: Show this workspace's container and port bindings
     cmds:
       - docker ps --filter "label=devcontainer.local_folder=$PWD" --format 'table {{"{{"}}.Names{{"}}"}}\t{{"{{"}}.Status{{"}}"}}\t{{"{{"}}.Ports{{"}}"}}'
+
+# __CONTINUITY_TASKS__

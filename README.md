@@ -22,10 +22,11 @@ The wizard asks you to:
    workflows, and ignore rules. Ignore rules are supporting hints.
 2. Apply dotfiles, enabled by default. Enter a repo such as `emsilva/dotfiles`;
    the wizard remembers it for your next project.
-3. Choose commit-only setup or a Codespace. For a new Codespace, select its machine
+3. Optionally enable project scratch sync and conversation handoff.
+4. Choose commit-only setup or a Codespace. For a new Codespace, select its machine
    size and idle timeout, then open it in a browser or VS Code. Reuse shows the
    existing Codespace's actual settings.
-4. Review the file diff and approve the commit, plus the push and launch if selected.
+5. Review the file diff and approve the commit, plus the push and launch if selected.
 
 Every environment includes Python, uv, Codex, Claude Code, and OpenCode. The three
 coding tools use their official native installers as `vscode`; Node is selected
@@ -62,6 +63,42 @@ task devcontainer:upgrade:agents
 
 Fresh containers install the current vendor releases. Normal setup keeps valid
 installations; the update command refreshes them explicitly.
+
+## Keep project work across Mac and Codespace
+
+Enable **project scratch sync and conversation handoff** in setup. Put temporary
+project files in `.scratch/` and shared working notes in `.scratch/memory/`.
+Only the folder's README and ignore rules are committed. Setup adds instructions
+to `AGENTS.md` and `CLAUDE.md` while preserving your existing guidance.
+
+Pair the checkouts once, from your Mac, while the Codespace is running:
+
+```sh
+task scratch:configure -- --codespace NAME --remote-root /workspaces/PROJECT
+task scratch:start
+task scratch:status
+```
+
+Sync runs in the background and waits when the Codespace stops. Use
+`task scratch:stop` to pause it. Deletions sync too; conflicts preserve both
+versions for you to resolve. Private backups and control state stay outside Git.
+
+Use `task agent:codex` or `task agent:claude` for conversations you plan to move.
+After exiting the conversation, hand off its exact UUID from your Mac:
+
+```sh
+task agent:handoff -- --agent codex --session UUID --to codespace
+# In the Codespace:
+task agent:codex -- --session UUID
+# After exiting there, run on the Mac:
+task agent:handoff -- --agent codex --session UUID --to mac
+task agent:codex -- --session UUID
+```
+
+Claude uses the same commands with `claude`. The managed commands preserve native
+profiles and authentication and enforce one writer at a time. Existing
+conversations require explicit adoption. See [configuration, recovery, and
+supported histories](docs/project-continuity.md) before moving an existing chat.
 
 ## Resume a Codespace setup
 

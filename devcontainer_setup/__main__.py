@@ -61,7 +61,8 @@ def defaults(found: dict, preferences: dict, metadata: dict) -> dict:
             'ssh': False, 'ports': found['ports'], 'package_managers': managers,
             'package_manager_versions': {family: entry.get('version') or '' for family, entry in found['package_managers'].items()
                                          if entry.get('selected') and (entry.get('version') or
-                                             entry.get('versions', {}).get(entry['selected'], {}).get('conflicts'))}, 'polyglot': False}
+                                             entry.get('versions', {}).get(entry['selected'], {}).get('conflicts'))},
+            'polyglot': False, 'continuity': False}
 
 
 def integrate_taskfile(project: Path, files: dict[str, bytes]) -> None:
@@ -96,6 +97,43 @@ def integrate_taskfile(project: Path, files: dict[str, bytes]) -> None:
     line = '/.devcontainer/devcontainer.env'
     if line not in ignored.splitlines() and '.devcontainer/devcontainer.env' not in ignored.splitlines():
         files['.gitignore'] = (ignored.rstrip() + '\n\n# Personal devcontainer settings\n' + line + '\n').lstrip('\n').encode()
+
+
+def integrate_continuity(project: Path, files: dict[str, bytes], enabled: bool) -> None:
+    """Review project guidance and optional root aliases in the same GitPlan."""
+    if not enabled:
+        return
+    from .project_sync.notes import integrate_notes
+    candidates = dict(files)
+    integrate_notes(project, candidates, True)
+    names = ('Taskfile.yml', 'Taskfile.yaml', 'taskfile.yml', 'taskfile.yaml',
+             'Taskfile.dist.yml', 'Taskfile.dist.yaml', 'taskfile.dist.yml', 'taskfile.dist.yaml')
+    present = {path.name for path in project.iterdir()}
+    existing = [name for name in names if name in candidates or name in present]
+    if len(existing) != 1:
+        raise ValueError('Project continuity needs one active root Taskfile')
+    name = existing[0]
+    if (project / name).is_symlink():
+        raise ValueError('Project Taskfile is a symlink; review continuity integration manually')
+    text = candidates[name].decode() if name in candidates else (project / name).read_text()
+    tasks = re.search(r'^tasks:[ \t]*(?:#.*)?$', text, re.M)
+    if tasks is None:
+        raise ValueError('Expand the root Taskfile tasks mapping before adding continuity aliases')
+    boundary = re.search(r'^\S', text[tasks.end() + 1:], re.M)
+    end = tasks.end() + 1 + boundary.start() if boundary else len(text)
+    body = text[tasks.end():end]
+    aliases = [f'scratch:{verb}' for verb in ('configure', 'start', 'stop', 'status', 'logs', 'backup')]
+    aliases += [f'agent:{verb}' for verb in ('codex', 'claude', 'sessions', 'handoff', 'recover')]
+    additions = ''
+    for alias in aliases:
+        if re.search(r'^  [\'\"]?' + re.escape(alias) + r'[\'\"]?:', body, re.M):
+            continue
+        additions += (f'  {alias}:\n    cmds:\n'
+                      f'      - task: devcontainer:{alias}\n'
+                      '        vars: {CLI_ARGS: "{{.CLI_ARGS}}"}\n')
+    candidates[name] = (text[:tasks.end()] + ('\n' + additions.rstrip('\n') if additions else '')
+                        + text[tasks.end():]).encode()
+    files.update(candidates)
 
 
 def check_candidate(files: dict[str, bytes], project: Path | None = None) -> None:
@@ -226,6 +264,8 @@ def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
     reverse = {label: name for name, label in TOOL_LABELS.items()}
     chosen['tools'] = [reverse[label] for label in ui.multi('Project tools', labels,
                       [TOOL_LABELS[name] for name in chosen['tools'] if name in TOOL_LABELS])]
+    chosen['continuity'] = ui.confirm('Enable project scratch sync and conversation handoff?',
+                                      chosen.get('continuity', False))
     chosen['package_managers'] = {family: manager for family, manager in chosen.get('package_managers', {}).items()
                                   if family in runtimes}
     chosen['package_manager_versions'] = {family: version for family, version in chosen.get('package_manager_versions', {}).items()
@@ -339,6 +379,7 @@ def interactive(project: Path, found: dict, metadata: dict, ref: str, resume: st
         chosen['ssh'] = bool(launch)
         files = render(project, SOURCE, chosen, ref)
         integrate_taskfile(project, files)
+        integrate_continuity(project, files, chosen.get('continuity', False))
         check_candidate(files, project)
         plan = GitPlan(project, files, branch=branch)
         if not plan.changed:
@@ -429,6 +470,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError('Resolve these recommendations interactively:\n' + '\n'.join(conflicts))
             files = render(project, SOURCE, chosen, ref)
             integrate_taskfile(project, files)
+            integrate_continuity(project, files, chosen.get('continuity', False))
             check_candidate(files, project)
             print(GitPlan(project, files).diff())
             return 0

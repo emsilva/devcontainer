@@ -23,6 +23,72 @@ tasks:
     desc: Run discovery, rendering, preferences, Git and launch tests
     cmds:
       - python3 -m unittest discover -s tests -v
+  scratch:configure:
+    desc: Project continuity scratch configure
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh scratch configure {{.CLI_ARGS}}
+
+  scratch:start:
+    desc: Project continuity scratch start
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh scratch start {{.CLI_ARGS}}
+
+  scratch:stop:
+    desc: Project continuity scratch stop
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh scratch stop {{.CLI_ARGS}}
+
+  scratch:status:
+    desc: Project continuity scratch status
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh scratch status {{.CLI_ARGS}}
+
+  scratch:logs:
+    desc: Project continuity scratch logs
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh scratch logs {{.CLI_ARGS}}
+
+  scratch:backup:
+    desc: Project continuity scratch backup
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh scratch backup {{.CLI_ARGS}}
+
+  agent:codex:
+    desc: Project continuity agent codex
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh agent codex {{.CLI_ARGS}}
+
+  agent:claude:
+    desc: Project continuity agent claude
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh agent claude {{.CLI_ARGS}}
+
+  agent:sessions:
+    desc: Project continuity agent sessions
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh agent sessions {{.CLI_ARGS}}
+
+  agent:handoff:
+    desc: Project continuity agent handoff
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh agent handoff {{.CLI_ARGS}}
+
+  agent:recover:
+    desc: Project continuity agent recover
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh agent recover {{.CLI_ARGS}}
+
   check:
     desc: Validate Python syntax, shell scripts and whitespace
     cmds:
