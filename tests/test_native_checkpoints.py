@@ -181,6 +181,12 @@ class NativeCheckpointTests(NativeFixture):
         self.assertEqual(result['entries'], [])
         self.assertIn('subagent', result['issues'][0]['reason'])
 
+    def test_claude_agent_tool_refuses_unproven_child_even_without_sidecars(self):
+        self.claude(rows=[dict(type='assistant', message=dict(role='assistant', content=[dict(type='tool_use', name='Agent', id='tool-fixture', input={})], stop_reason='tool_use'), uuid=str(uuid.uuid4())), dict(type='assistant', message=dict(role='assistant', content=[dict(type='text', text='Finished parent')], stop_reason='end_turn'), uuid=str(uuid.uuid4()))])
+        result = self.capture()
+        self.assertEqual(result['entries'], [])
+        self.assertIn('dependency', result['issues'][0]['reason'])
+
     def test_capture_never_calls_native_writer_or_quiescence(self):
         self.codex(); self.claude()
         with patch('devcontainer_setup.project_sync.agents.CodexClient', side_effect=AssertionError('writer')), patch('devcontainer_setup.project_sync.sessions.assert_quiescent', side_effect=AssertionError('custody')):

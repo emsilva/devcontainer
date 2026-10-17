@@ -215,13 +215,15 @@ def _claude_entry(project, store, sid, path, *, state, scopes):
     valid = sessions._records(kept, 'claude')
     approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, kept)))
     sessions._validate_claude(valid, sid, approved)
-    versions = {row['version'] for row in valid if 'version' in row}
+    versions = [row['version'] for row in valid if 'version' in row]
     if not versions:
         raise ValueError('Cannot establish Claude native version')
     for version in versions:
         sessions._version('claude', version)
     if _stable_prefix(path, len(kept)) != kept:
         raise ValueError('Claude prefix changed during checkpoint')
+    if any(path.with_suffix('').rglob('*')) or any((home / 'tasks' / sid).glob('*')):
+        raise ValueError('Claude live dependency closure changed during checkpoint')
     origin = next(row['cwd'] for row in reversed(valid) if 'cwd' in row)
     return dict(schema=SCHEMA, agent='claude', session_id=sid, project_id=project.project_id, identity=project.identity, source_root=origin, scope_roots=approved, cutoff=dict(turn_id=cutoff, bytes=len(kept)), files=[dict(session_id=sid, path=path.name, size=len(kept), sha256=hashlib.sha256(kept).hexdigest(), blob=store.put(kept), scope_roots=approved, origin_root=origin)], title=sessions._catalog_metadata(kept, 'claude', path)['title'], updated_at=path.stat().st_mtime)
 

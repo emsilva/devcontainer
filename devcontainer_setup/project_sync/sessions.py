@@ -182,6 +182,10 @@ def _validate_claude(rows, sid, roots, *, child=False):
                 if isinstance(content, str):
                     content = [dict(type='text', text=content)]
                 if isinstance(content, list):
+                    if any(isinstance(part, dict) and part.get('type') == 'tool_use'
+                           and part.get('name') in {'Agent', 'Task', 'TaskCreate', 'TaskUpdate', 'TaskGet', 'TaskList', 'TodoWrite'}
+                           for part in content):
+                        raise ValueError('Claude agent/task dependency closure is not proven for live checkpoints')
                     normalized = dict(role=kind, content=content)
                     digest = hashlib.sha256(json.dumps(normalized, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
                     blobs[digest] = normalized
