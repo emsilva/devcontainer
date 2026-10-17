@@ -329,11 +329,11 @@ class DefaultStateHomeTests(unittest.TestCase):
         (self.home / '.local').chmod(0o700)
         (self.home / '.local/state').chmod(0o700)
         first = host_id(self.env)
-        self.fallback.mkdir(mode=0o700)
+        (self.fallback / 'devcontainer-setup/projects').mkdir(parents=True, mode=0o700)
         for operation in (lambda: state_dir(self.project, self.env), lambda: host_id(self.env)):
             with self.assertRaisesRegex((PermissionError, ValueError), 'ambig|both|Both'):
                 operation()
-        self.assertFalse((self.fallback / 'devcontainer-setup').exists())
+        self.assertFalse((self.fallback / 'devcontainer-setup/host.json').exists())
         old = json.loads((self.home / '.local/state/devcontainer-setup/host.json').read_bytes())
         self.assertEqual(old['host_id'], first)
 
@@ -401,3 +401,96 @@ class AtomicReadTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 with locked(path):
                     self.fail('A hardlinked lock inode cannot grant ownership')
+
+
+class SharedStateProducerTests(unittest.TestCase):
+    setUp = DefaultStateHomeTests.setUp
+
+    def marker(self):
+        namespace = self.home / '.local/state/devcontainer-setup'
+        namespace.mkdir(mode=0o755)
+        namespace.chmod(0o755)
+        marker = namespace / 'dotfiles-4326-fixture'
+        marker.write_bytes(b'Existing apply-dotfiles producer marker\n')
+        marker.chmod(0o644)
+        return marker
+
+    def assert_marker(self, marker):
+        self.assertEqual(marker.read_bytes(), b'Existing apply-dotfiles producer marker\n')
+        self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o644)
+
+    def test_standard_codespace_dotfiles_marker_keeps_known_fallback_identity(self):
+        first = host_id(self.env)
+        marker = self.marker()
+        before = stat.S_IMODE(marker.parent.stat().st_mode)
+        self.assertEqual(state_dir(self.project, self.env), self.fallback / 'devcontainer-setup/projects' / self.project.project_id)
+        self.assertEqual(host_id(self.env), first)
+        self.assert_marker(marker)
+        self.assertEqual(stat.S_IMODE(marker.parent.stat().st_mode), before)
+        for path in (self.home / '.local', self.home / '.local/state'):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o775)
+
+    def test_fresh_standard_codespace_with_only_dotfiles_marker_initializes_fallback(self):
+        marker = self.marker()
+        self.assertFalse(self.fallback.exists())
+        identity = host_id(self.env)
+        self.assertEqual(str(uuid.UUID(identity)), identity)
+        self.assertTrue((self.fallback / 'devcontainer-setup/host.json').is_file())
+        self.assertFalse((marker.parent / 'host.json').exists())
+        self.assert_marker(marker)
+        self.assertEqual(stat.S_IMODE(marker.parent.stat().st_mode), 0o755)
+
+    def test_safe_default_with_only_dotfiles_marker_initializes_default(self):
+        for path in (self.home / '.local', self.home / '.local/state'):
+            path.chmod(0o700)
+        marker = self.marker()
+        identity = host_id(self.env)
+        self.assertEqual(host_id(self.env), identity)
+        self.assertTrue((marker.parent / 'host.json').is_file())
+        self.assertFalse(self.fallback.exists())
+        self.assert_marker(marker)
+
+    def test_empty_fallback_does_not_hide_initialized_default_continuity(self):
+        for path in (self.home / '.local', self.home / '.local/state'):
+            path.chmod(0o700)
+        identity = host_id(self.env)
+        self.fallback.mkdir(mode=0o700)
+        self.assertEqual(host_id(self.env), identity)
+        self.assertEqual(state_dir(self.project, self.env), self.home / '.local/state/devcontainer-setup/projects' / self.project.project_id)
+        self.assertFalse((self.fallback / 'devcontainer-setup').exists())
+
+    def test_real_continuity_entries_still_make_default_and_fallback_ambiguous(self):
+        identity = host_id(self.env)
+        namespace = self.home / '.local/state/devcontainer-setup'
+        namespace.mkdir(mode=0o700)
+        for name in ('host.json', 'host.lock', 'projects'):
+            path = namespace / name
+            if name == 'projects':
+                path.mkdir()
+            else:
+                path.write_bytes(b'{}')
+            with self.subTest(entry=name), self.assertRaisesRegex(ValueError, 'ambig'):
+                state_dir(self.project, self.env)
+            if path.is_dir():
+                path.rmdir()
+            else:
+                path.unlink()
+        self.assertEqual(host_id(self.env), identity)
+
+    def test_projects_only_unsafe_default_is_not_silently_bypassed(self):
+        (self.home / '.local/state/devcontainer-setup/projects').mkdir(parents=True)
+        with self.assertRaisesRegex(PermissionError, 'Existing|migration'):
+            state_dir(self.project, self.env)
+        self.assertFalse(self.fallback.exists())
+
+    def test_shared_namespace_symlink_never_hides_an_unknown_registry(self):
+        for path in (self.home / '.local', self.home / '.local/state'):
+            path.chmod(0o700)
+        outside = self.home / 'outside'
+        outside.mkdir()
+        (outside / 'host.json').write_bytes(b'{}')
+        (self.home / '.local/state/devcontainer-setup').symlink_to(outside, target_is_directory=True)
+        with self.assertRaises((PermissionError, OSError, ValueError)):
+            state_dir(self.project, self.env)
+        self.assertFalse(self.fallback.exists())
+        self.assertEqual((outside / 'host.json').read_bytes(), b'{}')

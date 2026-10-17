@@ -100,20 +100,34 @@ def _state_home(env: Mapping | None) -> Path:
             can_have_state = False
             break
         unsafe = unsafe or info.st_uid != os.geteuid() or bool(stat.S_IMODE(info.st_mode) & 0o022)
-    existing_default = False
-    if can_have_state:
+    def continuity_registry(namespace):
+        # apply-dotfiles shares devcontainer-setup, so the directory itself is
+        # not evidence of continuity ownership. Inspect only our entry names,
+        # through no-follow directory descriptors and without changing anything.
         try:
-            (default / 'devcontainer-setup').lstat()
+            with _parent(namespace / 'host.json') as (parent, _):
+                found = False
+                for name in ('host.json', 'host.lock', 'projects'):
+                    try:
+                        info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    if stat.S_ISLNK(info.st_mode):
+                        raise PermissionError('Continuity registry contains a symlink; explicit repair or migration required')
+                    found = True
+                return found
         except FileNotFoundError:
-            pass
-        else:
-            existing_default = True
+            return False
+        except OSError as error:
+            raise PermissionError('Cannot safely inspect continuity registry; explicit repair or migration required') from error
+    existing_default = can_have_state and continuity_registry(default / 'devcontainer-setup')
+    existing_fallback = continuity_registry(fallback / 'devcontainer-setup')
     try:
         fallback.lstat()
     except FileNotFoundError:
-        existing_fallback = False
+        fallback_selected = False
     else:
-        existing_fallback = True
+        fallback_selected = True
     if existing_default and existing_fallback:
         raise ValueError('Both default and fallback continuity state exist; ambiguous identity requires explicit migration')
     if existing_default:
@@ -122,7 +136,7 @@ def _state_home(env: Mapping | None) -> Path:
         return default
     # Once selected, a fallback remains canonical after a default permission
     # repair. Never silently fork an initialized default host/registry identity.
-    if existing_fallback or unsafe:
+    if existing_fallback or fallback_selected or unsafe:
         return fallback
     return default
 
