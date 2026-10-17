@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -142,7 +143,7 @@ class SSHHostsTests(unittest.TestCase):
         self.forward(32000)
         with self.fail_write(receipt_path), self.assertRaisesRegex(OSError, 'injected'):
             ssh_hosts.refresh_ssh(self.state)
-        interrupted_digest = __import__('hashlib').sha256((self.state / 'herdr-ssh-config').read_bytes()).hexdigest()
+        interrupted_digest = hashlib.sha256((self.state / 'herdr-ssh-config').read_bytes()).hexdigest()
         self.forward(34000)
         real_write = ssh_hosts.atomic_write
         written_receipts = []
@@ -179,6 +180,34 @@ class SSHHostsTests(unittest.TestCase):
                     ssh_hosts.configure_ssh(self.project, self.state)
                 self.assertEqual({path: path.read_bytes() if path.exists() else None for path in paths}, before)
                 self.assertTrue((self.state / 'herdr-ssh.pending.json').exists())
+
+    def test_replay_after_successful_replace_handles_initially_absent_global_config(self):
+        self.config.unlink()
+        real_write = ssh_hosts.atomic_write
+        def failed_after_replace(path, data, mode=0o600):
+            real_write(path, data, mode=mode)
+            if Path(path) == self.config:
+                raise OSError('interrupted after replacement')
+        with mock.patch.object(ssh_hosts, 'atomic_write', side_effect=failed_after_replace), self.assertRaises(OSError):
+            ssh_hosts.configure_ssh(self.project, self.state)
+        installed = self.config.read_bytes()
+        # Foreground's pending intent permits completion on reconnect, even
+        # when the final ownership receipt had not been written yet.
+        ssh_hosts.refresh_ssh(self.state)
+        self.assertEqual(self.config.read_bytes(), installed)
+        self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o600)
+        self.assertTrue((self.state / 'herdr-ssh.json').exists())
+        self.assertFalse((self.state / 'herdr-ssh.pending.json').exists())
+
+    def test_pending_replay_refuses_owner_permission_change(self):
+        with self.fail_write(self.config), self.assertRaises(OSError):
+            ssh_hosts.configure_ssh(self.project, self.state)
+        self.config.chmod(0o600)
+        before = self.config.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'modified.*pending transaction'):
+            ssh_hosts.configure_ssh(self.project, self.state)
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o600)
 
 
 if __name__ == '__main__':
