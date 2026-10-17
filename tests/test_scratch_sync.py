@@ -39,6 +39,42 @@ class ScratchTests(unittest.TestCase):
         with tarfile.open(first) as archive:
             self.assertEqual(archive.extractfile('.scratch/ignored.bin').read(), payload)
 
+    def test_retarget_replays_owned_termination_after_interrupted_archive(self):
+        m = self.module
+        project = m.discover_project(self.root)
+        previous = dict(version=1, identity=project.identity, root=str(self.root),
+                        codespace='fixture', remote_root='/workspaces/original')
+        receipt = dict(name='scratch-' + 'a'*48, nonce='a'*48, binding=previous,
+                       established=True, identifier='sync_owned')
+        m._write(self.state / m.CONFIG, previous)
+        m._write(self.state / m.SESSION, receipt)
+        write = m._write
+        failed = []
+        def interrupted(path, value):
+            if Path(path).name == m.SESSION and Path(path).parent != self.state and not failed:
+                failed.append(True)
+                raise OSError('interrupted after owned termination')
+            return write(path, value)
+        with patch.object(m, 'stop'), patch.object(m, 'install_mutagen', return_value=Path('/fixture/mutagen')), \
+                patch.object(m, '_session_info', side_effect=[{'identifier':'sync_owned'}, None]), \
+                patch.object(m, '_mutagen') as command, patch.object(m, '_write', side_effect=interrupted):
+            with self.assertRaises(OSError):
+                m.retarget(self.root, self.state, 'fixture', '/workspaces/recovered')
+            self.assertTrue((self.state / 'scratch-retarget.json').exists())
+            m.complete_retarget(self.state)
+        self.assertEqual(command.call_count, 1)
+        self.assertEqual(command.call_args.args[2:], ('sync', 'terminate', 'sync_owned'))
+        self.assertEqual(m.read_json(self.state / m.CONFIG)['remote_root'], '/workspaces/recovered')
+        self.assertFalse((self.state / m.SESSION).exists())
+        self.assertFalse((self.state / 'scratch-retarget.json').exists())
+
+    def test_advanced_start_cannot_bypass_pending_retarget(self):
+        self.module._write(self.state / 'scratch-retarget.json', {'pending': True})
+        with patch.object(self.module, 'install_mutagen') as install:
+            with self.assertRaisesRegex(ValueError, 'retarget.*pending'):
+                self.module.start(self.root, self.state)
+        install.assert_not_called()
+
     def test_symlink_scratch_and_payload_refused(self):
         (self.scratch / 'link').symlink_to(self.root / 'outside')
         with self.assertRaisesRegex(ValueError, 'symlink'):

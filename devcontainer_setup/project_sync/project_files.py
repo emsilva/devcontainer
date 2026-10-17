@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import fnmatch
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -19,6 +20,31 @@ _SCRATCH_EXCLUDES = {'.git', '__pycache__', '.venv', 'node_modules', '.cache',
                      '.project-sync', '.handoff', '.mutagen', '.DS_Store'}
 _MODES = {'100644', '100755', '120000'}
 _OID = re.compile(r'[0-9a-f]{40}|[0-9a-f]{64}')
+_NATIVE_PRIVATE = ('.codex/auth.json', '.codex/history.jsonl', '.codex/state_*.sqlite*',
+                   '.codex/threads_*.sqlite*', '.codex/sessions', '.codex/sessions/**',
+                   '.codex/archived_sessions', '.codex/archived_sessions/**',
+                   '.codex/memories', '.codex/memories/**', '.codex/log', '.codex/log/**',
+                   '.claude/.credentials.json', '.claude/projects', '.claude/projects/**',
+                   '.claude/tasks', '.claude/tasks/**', '.claude/todos', '.claude/todos/**')
+
+
+def _native_homes(root):
+    from .sessions import native_home
+    homes = []
+    for agent in ('codex', 'claude'):
+        home = native_home(agent).resolve()
+        if home.is_relative_to(root):
+            homes.append(home)
+    return homes
+
+
+def _private_paths(root, names):
+    """Fail before reading native credentials/profile bytes into any object."""
+    homes = _native_homes(root)
+    for name in names:
+        if (any(fnmatch.fnmatchcase(name, pattern) for pattern in _NATIVE_PRIVATE)
+                or any((root / name).is_relative_to(home) for home in homes)):
+            raise ValueError('Native private profile/auth/database in project; move it outside the checkout before checkpointing')
 
 
 def _git(root: Path, *args, data=None) -> bytes:
@@ -173,6 +199,7 @@ def _index(root: Path, store: Store) -> list[dict]:
             continue
         header, name = record.split(b'\t', 1)
         mode, oid, stage = header.decode('ascii').split(' ')
+        _private_paths(root, [os.fsdecode(name)])
         if mode == '160000':
             raise ValueError('Unsupported submodules prevent complete recovery')
         if mode not in _MODES:
@@ -211,10 +238,18 @@ def capture_files(project: Project, store: Store) -> dict:
     original_index = _regular_bytes(index_path)
     entries = _index(root, store)
     head_paths = _names(_git(root, 'ls-tree', '-rz', '--name-only', 'HEAD'))
+    _private_paths(root, head_paths)
     # Refuse submodules even after a staged removal; the HEAD history is retained.
     if any(record.startswith(b'160000 ') for record in _git(root, 'ls-tree', '-rz', 'HEAD').split(b'\0')):
         raise ValueError('Unsupported submodules prevent complete recovery')
     names = _inventory(root, entries, head_paths)
+    _private_paths(root, names)
+    # A bundle includes reachable historical blobs too. Never hide a private
+    # runtime from the tree while exporting its earlier committed bytes.
+    pathspecs = [':(glob)' + pattern for pattern in _NATIVE_PRIVATE]
+    pathspecs += [':(literal)' + home.relative_to(root).as_posix() for home in _native_homes(root)]
+    if _git(root, 'rev-list', '--full-history', '--max-count=1', 'HEAD', '--', *pathspecs).strip():
+        raise ValueError('Git history contains a native private profile; checkpoint refused')
     files, deleted = [], []
     for name in sorted(names):
         try:

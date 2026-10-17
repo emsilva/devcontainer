@@ -26,3 +26,8 @@ class RootTasksTests(unittest.TestCase):
         result = integrate(text)
         self.assertIn('  "work":\n    cmds: [echo mine]', result)
         self.assertNotIn('  work:\n', result)
+
+    def test_extended_legacy_delegate_is_owner_content(self):
+        custom = ('  agent:handoff:\n    cmds:\n      - task: devcontainer:agent:handoff\n'
+                  '        vars: {CLI_ARGS: "{{.CLI_ARGS}}"}\n    env: {OWNER: yes}\n')
+        self.assertIn(custom, integrate('tasks:\n' + custom))

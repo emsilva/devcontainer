@@ -32,7 +32,8 @@ def integrate(text):
             stanza = (f'  {alias}:\n' + interactive + '    cmds:\n'
                       f'      - task: devcontainer:{alias}\n'
                       '        vars: {CLI_ARGS: "{{.CLI_ARGS}}"}\n')
-            body = body.replace('\n' + stanza, '\n')
+            exact = re.escape('\n' + stanza) + r'(?=(?:\n)*(?:  [^ \t#\n]|\Z))'
+            body = re.sub(exact, '\n', body)
     additions = ''
     for alias in ALIASES:
         key = re.escape(alias)

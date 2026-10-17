@@ -32,7 +32,7 @@ Checkpoints live in private host-local state, normally
 `~/.local/state/devcontainer-setup/projects/<project-id>/checkpoints/`. They are
 immutable, deduplicated by content, and currently retained without automatic
 pruning. Large repositories and long conversations consume local disk and take
-longer to checkpoint. Do not treat the five-second polling delay as a guaranteed
+longer to checkpoint. Individual objects above 256 MiB refuse transfer. Do not treat the five-second polling delay as a guaranteed
 recovery-point interval: collection and transfer take additional time.
 
 Ignored build outputs outside `.scratch/` are excluded. Unborn repositories,
@@ -57,6 +57,10 @@ Shared project memory belongs in `.scratch/memory/`. Managed launch reads those
 notes, and generated project Codex policy disables global memory for this workflow.
 A historical conversation containing global-memory or unrelated-project context
 may be refused rather than silently stripped or exported.
+Codex child-agent histories and Claude Agent/Task sidecars currently refuse
+continuation until their full dependency closure is supported. Conversations
+started from nested subdirectories are not currently discovered; launch the
+managed commands from the checkout root. These limits do not block code backups.
 
 ## Recovery preserves working copies
 

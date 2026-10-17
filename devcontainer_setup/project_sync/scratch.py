@@ -172,6 +172,8 @@ def status(state: Path) -> dict:
 def start(root: Path, state: Path) -> dict:
     state = Path(state).absolute()
     root = Path(root).resolve()
+    if (state / 'scratch-retarget.json').exists():
+        raise ValueError('An interrupted scratch retarget is pending; run task work to finish its owned transition first')
     _config(root, state)
     _private_location(root, state)
     _scratch(root)
@@ -283,28 +285,6 @@ def inspect_sync(root, state):
     return _reconciliation(info) if info else dict(phase='connecting', conflicts=[])
 
 
-def flush(root, state):
-    config = _config(root, state)
-    runtime = status(Path(state))
-    if not runtime.get('running') or runtime.get('phase') != 'syncing':
-        raise ValueError('Scratch sync is not connected; start sync and wait before switching')
-    receipt = _saved_session(state, config)
-    if receipt is None:
-        raise ValueError('Scratch session is not ready; wait and retry')
-    binary = install_mutagen(state)
-    info = _session_info(binary, state, receipt)
-    if info is None:
-        raise ValueError('Scratch session is not ready; wait and retry')
-    current = _reconciliation(info)
-    if current['phase'] == 'conflicts':
-        raise ValueError('Scratch conflicts: ' + ', '.join(current['conflicts']))
-    _mutagen(binary, state, 'sync', 'flush', info['identifier'], timeout=120)
-    current = _reconciliation(_session_info(binary, state, receipt) or {})
-    if current['phase'] != 'synchronized':
-        raise ValueError('Scratch reconciliation is not verified; inspect conflicts and wait before switching')
-    return current
-
-
 def _pause_saved_session(binary, state, receipt):
     info = _session_info(binary, state, receipt)
     if info is not None:
@@ -371,6 +351,17 @@ class _Shutdown(BaseException):
     pass
 
 
+def complete_retarget(state):
+    """Finish a prior explicit owned transition before choosing another one."""
+    state = Path(state)
+    try:
+        intent = read_json(state / 'scratch-retarget.json')
+    except FileNotFoundError:
+        return
+    candidate = intent['candidate']
+    return retarget(Path(candidate['root']), state, candidate['codespace'], candidate['remote_root'])
+
+
 def retarget(root, state, codespace, remote_root):
     """Explicitly replace a verified owned scratch binding, retaining its receipts."""
     state = Path(state)
@@ -381,9 +372,39 @@ def retarget(root, state, codespace, remote_root):
         raise ValueError('Invalid remote checkout path')
     candidate = dict(version=1, identity=project.identity, root=str(project.root),
                      codespace=codespace, remote_root=remote_root)
-    stop(state)
+    intent_path = state / 'scratch-retarget.json'
+    if not intent_path.exists() or status(state).get('running'):
+        stop(state)
     with locked(state / 'scratch-control.lock', blocking=True):
         path = state / CONFIG
+        if intent_path.exists():
+            intent = read_json(intent_path)
+            if intent.get('schema') != 1 or intent.get('candidate') != candidate:
+                raise ValueError('An interrupted scratch retarget needs its original destination; previous data preserved')
+            previous = intent['previous']
+            actual = read_json(path)
+            if actual not in (previous, candidate):
+                raise ValueError('Scratch binding changed during interrupted retarget')
+            receipt = intent.get('receipt')
+            archive = Path(intent['archive'])
+            if archive.parent != state / 'retired-bindings':
+                raise ValueError('Invalid scratch retarget archive')
+            saved = _saved_session(state)
+            if saved is not None and saved != receipt:
+                raise ValueError('Scratch receipt changed during interrupted retarget')
+            if receipt:
+                binary = install_mutagen(state)
+                # The durable intent was written only after verifying the owned
+                # baseline. Its exact receipt permits absence after termination.
+                info = _session_info(binary, state, {**receipt, 'established': False})
+                if info is not None:
+                    _mutagen(binary, state, 'sync', 'terminate', info['identifier'])
+                _write(archive / SESSION, receipt)
+                (state / SESSION).unlink(missing_ok=True)
+            _write(archive / CONFIG, previous)
+            _write(path, candidate)
+            intent_path.unlink()
+            return candidate
         if not path.exists():
             _write(path, candidate)
             return candidate
@@ -398,11 +419,14 @@ def retarget(root, state, codespace, remote_root):
         if receipt:
             binary = install_mutagen(state)
             info = _session_info(binary, state, receipt)
+            _write(intent_path, dict(schema=1, previous=previous, candidate=candidate,
+                                    receipt=receipt, archive=str(archive)))
             if info is not None:
                 _mutagen(binary, state, 'sync', 'terminate', info['identifier'])
             _write(archive / SESSION, receipt)
             (state / SESSION).unlink()
         _write(path, candidate)
+        intent_path.unlink(missing_ok=True)
     return candidate
 
 

@@ -67,6 +67,7 @@ def local_project(project, state):
     state = Path(state)
     with locked(state / 'workspace-control.lock', blocking=True):
         value = registry(project, state)
+        scratch.complete_retarget(state)
         if value.get('active_host') == 'codespace':
             # Deliberately no Codespaces API, SSH, source-release or network gate.
             scratch.stop(state)
@@ -148,13 +149,17 @@ def remote(project, state):
     state = Path(state)
     with locked(state / 'workspace-control.lock', blocking=True):
         value = registry(project, state)
+        scratch.complete_retarget(state)
+        print('Connecting Codespace…', flush=True)
         name, original_remote = _choose_pairing(project, state, value)
         active_local = _project(value['local_active_root'], project.identity)
         with CodespaceConnection(name, state=state) as connection:
             # Preserve remote work before making a new desktop-seeded checkout.
             prior_root = value.get('remote_active_root') or original_remote
+            print('Saving the Codespace’s current work on this Mac…', flush=True)
             checkpoint_remote(connection, project, state, prior_root)
             if value.get('active_host') != 'codespace' or not value.get('remote_active_root'):
+                print('Preparing a Codespace working copy from this desktop…', flush=True)
                 store = Store(state)
                 snapshot_id = capture(active_local, store)
                 store.acknowledge(snapshot_id, source='local')
@@ -165,12 +170,17 @@ def remote(project, state):
             else:
                 active_remote = value['remote_active_root']
         scratch.retarget(active_local.root, state, name, active_remote)
+        print('Starting Mac backups and scratch sync…', flush=True)
         scratch.start(active_local.root, state)
         _ready(active_local, state)
         configure_ssh(project, state)
         value.update(codespace=name, remote_root=original_remote, remote_active_root=active_remote, active_host='codespace')
         _write(state, value)
-    print('Mac checkpoint protection is running. Keep this Mac awake and connected.')
+    latest = Store(state).latest('codespace')
+    conversations = Store(state).load(latest['snapshot_id']).get('conversations', {})
+    print(f"Mac checkpoint received: {latest['received_at']}. Keep this Mac awake and connected.")
+    print(f"Conversations: {len(conversations.get('entries', []))} protected; "
+          f"{len(conversations.get('issues', []))} need attention. Details: task work:status")
     return open_remote(project, state, active_remote)
 
 

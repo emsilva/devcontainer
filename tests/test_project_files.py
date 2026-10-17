@@ -41,6 +41,66 @@ class ProjectFileTests(unittest.TestCase):
         self.store = Store(self.base / 'state')
         self.destination = self.base / 'restored'
 
+    def test_native_credentials_and_databases_refused_before_blob_capture(self):
+        for name in ('.codex/auth.json', '.codex/state_5.sqlite', '.claude/.credentials.json'):
+            path = self.root / name
+            path.parent.mkdir(exist_ok=True)
+            secret = b'FAKE_FIXTURE_AUTH_BYTES_' + name.encode()
+            path.write_bytes(secret)
+            with self.assertRaisesRegex(ValueError, 'private profile'):
+                project_files.capture_files(self.project, self.store)
+            digest = hashlib.sha256(secret).hexdigest()
+            self.assertFalse((self.store.root / 'objects' / digest).exists())
+            path.unlink()
+
+    def test_custom_in_project_native_home_refused(self):
+        path = self.root / 'native-home'
+        path.mkdir()
+        (path / 'config.toml').write_text('private native profile')
+        with mock.patch.dict(os.environ, {'CODEX_HOME': str(path)}):
+            with self.assertRaisesRegex(ValueError, 'private profile'):
+                project_files.capture_files(self.project, self.store)
+
+    def test_historical_native_credentials_refuse_git_bundle(self):
+        path = self.root / '.codex/auth.json'
+        path.parent.mkdir()
+        path.write_text('FAKE_OLD_AUTH')
+        git(self.root, 'add', '.')
+        git(self.root, 'commit', '-qm', 'Accidental historical fixture auth')
+        git(self.root, 'rm', '.codex/auth.json')
+        git(self.root, 'commit', '-qm', 'Remove fixture auth')
+        with self.assertRaisesRegex(ValueError, 'history.*private profile'):
+            project_files.capture_files(self.project, self.store)
+
+    def test_historical_custom_native_home_refuses_git_bundle(self):
+        home = self.root / 'native-home'
+        home.mkdir()
+        (home / 'auth.json').write_text('FAKE_HISTORICAL_NATIVE_AUTH')
+        git(self.root, 'add', '.')
+        git(self.root, 'commit', '-qm', 'Historical custom native fixture')
+        git(self.root, 'rm', 'native-home/auth.json')
+        git(self.root, 'commit', '-qm', 'Remove fixture')
+        with mock.patch.dict(os.environ, {'CODEX_HOME': str(home)}):
+            with self.assertRaisesRegex(ValueError, 'history.*private profile'):
+                project_files.capture_files(self.project, self.store)
+
+    def test_removed_native_auth_on_merged_side_branch_refuses_bundle(self):
+        git(self.root, 'switch', '-c', 'side')
+        path = self.root / '.codex/auth.json'
+        path.parent.mkdir()
+        path.write_text('FAKE_MERGED_SIDE_AUTH')
+        git(self.root, 'add', '.')
+        git(self.root, 'commit', '-qm', 'Side native fixture')
+        git(self.root, 'rm', '.codex/auth.json')
+        git(self.root, 'commit', '-qm', 'Remove side fixture')
+        git(self.root, 'switch', 'topic')
+        (self.root / 'main-only').write_text('independent main change')
+        git(self.root, 'add', '.')
+        git(self.root, 'commit', '-qm', 'Main fixture')
+        git(self.root, 'merge', '--no-ff', '-qm', 'Merge fixture', 'side')
+        with self.assertRaisesRegex(ValueError, 'history.*private profile'):
+            project_files.capture_files(self.project, self.store)
+
     def setup_edits(self):
         (self.root / 'edited').write_bytes(b'\x00staged\xff')
         (self.root / 'new-binary').write_bytes(b'\x00new\xff')
