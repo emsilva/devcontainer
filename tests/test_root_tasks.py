@@ -1,3 +1,4 @@
+import hashlib
 import unittest
 from devcontainer_setup.root_tasks import integrate
 
@@ -19,7 +20,26 @@ class RootTasksTests(unittest.TestCase):
     def test_edited_owned_block_refused(self):
         text = integrate("version: '3'\ntasks:\n")
         with self.assertRaisesRegex(ValueError, 'Edited'):
-            integrate(text.replace('devcontainer:work\n', 'devcontainer:other\n'))
+            integrate(text.replace('devcontainer:work:cs\n', 'devcontainer:other\n'))
+
+    def test_native_agent_tasks_retired_from_owned_block_only(self):
+        old = ''.join('  ' + alias + ':\n    interactive: true\n    cmds:\n'
+                      '      - task: devcontainer:' + alias + '\n'
+                      '        vars: {CLI_ARGS: "{{.CLI_ARGS}}"}\n'
+                      for alias in ('work', 'work:codex', 'work:claude', 'work:cs'))
+        owned = ('  # devcontainer-setup:work-tasks begin sha256='
+                 + hashlib.sha256(old.encode()).hexdigest() + '\n' + old
+                 + '  # devcontainer-setup:work-tasks end\n')
+        custom = '  "work:codex":\n    cmds: [echo owner-agent]\n'
+        original = 'version: "3"\ntasks:\n' + owned + custom
+        changed = integrate(original)
+        self.assertIn(custom, changed)
+        self.assertNotIn('task: devcontainer:work\n', changed)
+        self.assertNotIn('task: devcontainer:work:codex\n', changed)
+        self.assertNotIn('task: devcontainer:work:claude\n', changed)
+        self.assertIn('task: devcontainer:work:cs\n', changed)
+        self.assertIn('task: devcontainer:work:disconnect\n', changed)
+        self.assertEqual(integrate(changed), changed)
 
     def test_quoted_custom_work_preserved(self):
         text = 'tasks:\n  "work":\n    cmds: [echo mine]\n'

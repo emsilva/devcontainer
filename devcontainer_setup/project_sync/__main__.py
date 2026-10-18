@@ -12,13 +12,11 @@ from .state import discover_project, state_dir
 
 
 def parser():
-    result = argparse.ArgumentParser(description='Open project work in Herdr with Mac recovery checkpoints.')
+    result = argparse.ArgumentParser(description='Connect Codespace Herdr and sync project scratch and conversations.')
     result.add_argument('--project', type=Path, default=Path.cwd())
     groups = result.add_subparsers(dest='group', required=True)
-    work = groups.add_parser('work', help='Open local Herdr work, or --codespace with Mac protection')
-    work.add_argument('--agent', choices=('codex', 'claude'), help='Launch a new native conversation on this host')
-    work.add_argument('--resume', action='store_true', help='Choose a project conversation to continue')
-    action = work.add_mutually_exclusive_group()
+    work = groups.add_parser('work', help='Manage the Codespace connection; run codex or claude directly')
+    action = work.add_mutually_exclusive_group(required=True)
     action.add_argument('--codespace', action='store_true')
     action.add_argument('--disconnect', action='store_true', help='Disconnect this project’s saved Codespace machine from Herdr')
     action.add_argument('--status', action='store_true')
@@ -43,10 +41,6 @@ def run(args):
     state = state_dir(project)
     if args.group == 'work':
         from . import workspace
-        if args.resume and not args.agent:
-            raise ValueError('Use task work:codex -- --resume or task work:claude -- --resume')
-        if args.agent and (args.codespace or args.disconnect or args.status or args.stop):
-            raise ValueError('Open task work:cs first, then launch the agent in its Herdr workspace')
         if args.status:
             _print(workspace.status(project, state))
             return 0
@@ -60,10 +54,6 @@ def run(args):
             raise ValueError('Work entrypoints require a terminal; use task work:status for scripts')
         if args.codespace:
             return workspace.remote(project, state)
-        if args.agent:
-            from .conversations import launch
-            return launch(workspace.local_project(project, state), state, args.agent, resume=args.resume)
-        return workspace.local(project, state)
     if args.action == 'configure':
         _print(scratch.configure(project.root, state, args.codespace, args.remote_root))
     elif args.action == 'start':

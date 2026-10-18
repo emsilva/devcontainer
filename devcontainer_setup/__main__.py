@@ -359,7 +359,7 @@ def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume
 def setup_continuity(project: Path, ui, codespace: str | None) -> None:
     """Finish the approved setup using its selected Codespace; Git is durable."""
     if not codespace:
-        print('Run task work:cs on your Mac to open Codespace Herdr with local recovery.', flush=True)
+        print('Run task work:cs on your Mac to open Codespace Herdr and start project sync.', flush=True)
         return
     from .project_sync.state import discover_project, state_dir
     from .project_sync.codespaces import Codespaces as ProjectCodespaces
@@ -367,7 +367,7 @@ def setup_continuity(project: Path, ui, codespace: str | None) -> None:
         discovered = discover_project(project)
         service = ProjectCodespaces(discovered, state_dir(discovered))
         if os.environ.get('CODESPACES') == 'true':
-            print('Run task work:cs on your Mac to connect recovery for this Codespace.', flush=True)
+            print('Run task work:cs on your Mac to connect scratch and conversation sync for this Codespace.', flush=True)
             return
         binding = service.binding()
         if binding and binding['codespace'] == codespace:
@@ -378,7 +378,7 @@ def setup_continuity(project: Path, ui, codespace: str | None) -> None:
                 raise ValueError('No matching project checkout was found in the selected Codespace.')
             root = roots[0] if len(roots) == 1 else ui.choose('Which remote project checkout?', roots)
         service.pair(codespace, root)
-        print('Codespace paired. Run task work:cs to open Herdr and start Mac recovery.', flush=True)
+        print('Codespace paired. Run task work:cs to open Herdr and start project sync.', flush=True)
     except Cancelled:
         print('Setup is preserved. Run task work:cs on your Mac to finish connecting.', file=sys.stderr)
     except (ValueError, OSError, subprocess.TimeoutExpired) as error:

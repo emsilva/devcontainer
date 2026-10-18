@@ -21,7 +21,7 @@ CONFIG = '.devcontainer/devcontainer.json'
 LOCK = '.devcontainer/devcontainer-lock.json'
 NAMESPACE = 'devcontainerSetup'
 RETIRED_HELPERS = {'.devcontainer/scripts/project_sync/' + name + '.py'
-                   for name in ('work', 'workflows', 'handoff', 'ownership')}
+                   for name in ('work', 'workflows', 'handoff', 'ownership', 'project_files')}
 PINNED_OPTIONS = {
     FEATURE + 'aws-cli:1': {'version': '2.38.1'},
     FEATURE + 'azure-cli:1': {'version': '2.91.0'},
