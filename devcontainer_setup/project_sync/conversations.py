@@ -577,6 +577,38 @@ def _publish(intent, *, check_only=False):
         return True
 
 
+def _reconcile_owned_publication(intent, target, data):
+    """Bind a retry to its checkpoint, repair owned links, then apply _safe."""
+    if (intent.get('created') is not True or intent.get('destination') != str(target)
+            or intent.get('size') != len(data) or intent.get('sha256') != hashlib.sha256(data).hexdigest()):
+        raise ValueError('Native publication intent differs from retained history')
+    if not _publish(intent):
+        raise ValueError('Journaled native publication stage disappeared')
+    return sessions._safe(target)
+
+
+def _codex_metadata_only(rows):
+    return all(row.get('type') in ('world_state', 'turn_context')
+               or (row.get('type') == 'event_msg' and isinstance(row.get('payload'), dict)
+                   and row['payload'].get('type') == 'thread_settings_applied') for row in rows)
+
+
+def _codex_projection_ready(target, intent, roots):
+    """Defer loaded or user-continued leaves before starting another writer."""
+    sessions.assert_quiescent([target])
+    with _parent(target) as (parent, name):
+        _owned_content(parent, name, intent, growing=True)
+    data = _stable_prefix(target)
+    if target.stat().st_size != len(data):
+        raise ValueError('Native import has an unfinished local suffix; projection deferred')
+    suffix = data[intent['size']:]
+    if suffix:
+        rows = sessions._records(suffix, 'codex')
+        sessions._validate_codex_scope(rows, roots)
+        if not _codex_metadata_only(rows):
+            raise ValueError('Native import has local user activity; projection deferred')
+
+
 def _create(path, data, mode=0o600, *, journal):
     """Stage, fsync, journal ownership, then publish without replacement."""
     with _parent(path, create=True) as (parent, name):
@@ -715,6 +747,9 @@ def _publish_codex(project, store, entry, by_id, order, home, prior, receipt, re
         if saved.get('staged_path'):
             if not _publish(saved, check_only=True):
                 raise ValueError('Journaled native stage disappeared')
+    if prior_fork:
+        fork_target = _reconcile_owned_publication(prior_fork, fork_target, fork_data)
+        _codex_projection_ready(fork_target, prior_fork, sorted(set(entry['scope_roots']) | {str(project.root)}))
     targets = []
     inherited = None
     baselines = []
@@ -771,8 +806,6 @@ def _publish_codex(project, store, entry, by_id, order, home, prior, receipt, re
     target, data = fork_target, fork_data
     if prior_fork:
         receipt['files'].append(prior_fork)
-        if not _publish(prior_fork):
-            raise ValueError('Journaled native fork stage disappeared')
     else:
         def journal(intent):
             receipt['files'].append(dict(intent, created=True, native_fork=True, session_id=new,
@@ -783,6 +816,8 @@ def _publish_codex(project, store, entry, by_id, order, home, prior, receipt, re
     receipt['result'] = dict(session_id=new, provenance=provenance)
     receipt['baselines'] = baselines + [dict(agent='codex', session_id=new, turn_id=entry['cutoff']['turn_id'])]
     persist()
+    if prior_fork:
+        _codex_projection_ready(target, prior_fork, sorted(set(entry['scope_roots']) | {str(project.root)}))
     with agents.CodexClient(project, env=env) as client:
         # Only this new, journal-owned identity is loaded once for native history
         # projection. Completed publications never resume on later cycles.
@@ -884,19 +919,17 @@ def _preflight_proxy(receipt, store, entry):
 def _publish_claude(project, store, entry, by_id, home, prior, receipt, receipt_path, provenance):
     previous = prior.get('files', [])
     sid = previous[0]['physical_alias'] if previous else str(uuid.uuid4())
-    target = sessions._safe(home / 'projects' / sessions.claude_namespace(project.root) / (sid + '.jsonl'))
+    target = home / 'projects' / sessions.claude_namespace(project.root) / (sid + '.jsonl')
     data = _claude_materialized(by_id[entry['session_id']][1], sid, project.root)
     sessions._validate_claude(sessions._records(data, 'claude'), sid, sorted(set(entry['scope_roots']) | {str(project.root)}))
     receipt['source_checkpoint'] = entry
     receipt['baselines'] = [dict(agent='claude', session_id=sid, turn_id=entry['cutoff']['turn_id'])]
     if previous:
         intent = previous[0]
-        if intent.get('sha256') != hashlib.sha256(data).hexdigest() or intent.get('destination') != str(target):
-            raise ValueError('Claude publication intent differs from source checkpoint')
+        target = _reconcile_owned_publication(intent, target, data)
         receipt['files'] = previous
-        if not _publish(intent):
-            raise ValueError('Claude publication lost its journaled native transcript')
     else:
+        target = sessions._safe(target)
         def journal(intent):
             receipt['files'] = [dict(intent, created=True, physical_alias=sid, source_session_id=entry['session_id'])]
             atomic_write(receipt_path, json.dumps(receipt, sort_keys=True).encode() + b'\n')
@@ -1087,8 +1120,7 @@ def _supersede_imports(project, store, state, entry, current_key, *, env):
                 continue
             if agent == 'claude' and suffix:
                 continue
-            if agent == 'codex' and suffix and any(row['type'] not in ('world_state', 'turn_context')
-                    and not (row['type'] == 'event_msg' and row['payload'].get('type') == 'thread_settings_applied') for row in _rows(suffix)):
+            if agent == 'codex' and suffix and not _codex_metadata_only(_rows(suffix)):
                 continue
             if agent == 'claude':
                 archive = path.with_name('archived.jsonl')

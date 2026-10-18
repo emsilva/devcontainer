@@ -320,6 +320,167 @@ class PublicationTests(NativeFixture):
         self.assertEqual(old.stat().st_ino, inode)
         self.assertEqual(old.read_bytes(), before)
 
+    def test_initial_claude_publication_recovers_link_before_unlink(self):
+        source = self.claude(); entry = self.capture()['entries'][0]
+        original, source_inode = source.read_bytes(), source.stat().st_ino
+        link = os.link
+        def interrupt(*args, **kwargs):
+            link(*args, **kwargs)
+            raise OSError('fixture initial Claude linked')
+        with patch.object(self.api.os, 'link', side_effect=interrupt):
+            self.assertIn('initial Claude linked', self.publish(entry)['issues'][0]['reason'])
+        receipt_path = next((self.root / 'publication-state').glob('conversation-imports/*/receipt.json'))
+        item = json.loads(receipt_path.read_bytes())['files'][0]
+        target, stage = Path(item['destination']), Path(item['staged_path'])
+        child, inode, before = target.stem, target.stat().st_ino, target.read_bytes()
+        self.assertEqual(target.stat().st_nlink, 2)
+        retried = self.publish(entry)
+        self.assertEqual(retried['issues'], [])
+        self.assertEqual(retried['imported'][0]['session_id'], child)
+        self.assertEqual(target.stat().st_ino, inode)
+        self.assertEqual(target.stat().st_nlink, 1)
+        self.assertFalse(stage.exists())
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(len(self.publish(entry)['unchanged']), 1)
+        self.assertEqual(len(list(source.parent.glob('*.jsonl'))), 2)
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(source.stat().st_ino, source_inode)
+
+    def test_initial_claude_retry_refuses_foreign_second_link(self):
+        source = self.claude(); entry = self.capture()['entries'][0]
+        original = source.read_bytes()
+        write = self.api.atomic_write
+        def interrupt(path, data, *args, **kwargs):
+            if path.name == 'receipt.json' and json.loads(data).get('status') == 'complete':
+                raise OSError('fixture complete receipt failed')
+            return write(path, data, *args, **kwargs)
+        with patch.object(self.api, 'atomic_write', side_effect=interrupt):
+            self.assertTrue(self.publish(entry)['issues'])
+        receipt_path = next((self.root / 'publication-state').glob('conversation-imports/*/receipt.json'))
+        item = json.loads(receipt_path.read_bytes())['files'][0]
+        target = Path(item['destination'])
+        foreign = self.root / 'foreign-Claude-link'
+        os.link(target, foreign)
+        before, inode = target.read_bytes(), target.stat().st_ino
+        self.assertTrue(self.publish(entry)['issues'])
+        self.assertTrue(foreign.exists())
+        self.assertEqual(target.stat().st_nlink, 2)
+        self.assertEqual(target.stat().st_ino, inode)
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(source.read_bytes(), original)
+
+    def codex_interrupted_leaf_fixture(self):
+        source, leaf, entry, env, _, resumes = self.codex_ancestor_fixture()
+        originals = {p: p.read_bytes() for p in Path(self.env['CODEX_HOME']).rglob('*.jsonl')}
+        with patch.object(self.api.agents, '_history', side_effect=ValueError('fixture projection interrupted')):
+            self.assertIn('projection interrupted', self.publish(entry, env=env)['issues'][0]['reason'])
+        receipt_path = next((self.root / 'publication-state').glob('conversation-imports/*/receipt.json'))
+        receipt = json.loads(receipt_path.read_bytes())
+        return entry, env, Path(receipt['fork_path']), resumes, originals
+
+    def test_codex_retry_defers_open_selected_leaf_then_succeeds_after_close(self):
+        entry, env, target, resumes, originals = self.codex_interrupted_leaf_fixture()
+        before, inode, child = target.read_bytes(), target.stat().st_ino, resumes[-1]
+        with target.open('ab'):
+            with self.assertRaisesRegex(ValueError, 'open file'):
+                self.api.sessions.assert_quiescent([target])
+            with patch.object(self.api.agents, 'CodexClient', wraps=self.api.agents.CodexClient) as native:
+                result = self.publish(entry, env=env)
+            self.assertTrue(result['issues'])
+            native.assert_not_called()
+            self.assertEqual(resumes, [child])
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(target.stat().st_ino, inode)
+        retried = self.publish(entry, env=env)
+        self.assertEqual(retried['issues'], [])
+        self.assertEqual(retried['imported'][0]['session_id'], child)
+        self.assertEqual(len(self.publish(entry, env=env)['unchanged']), 1)
+        self.assertEqual(resumes, [child, child])
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(target.stat().st_ino, inode)
+        for path, original in originals.items(): self.assertEqual(path.read_bytes(), original)
+
+    def check_codex_continued_leaf_retry(self, *, completed=False, partial=False):
+        entry, env, target, resumes, originals = self.codex_interrupted_leaf_fixture()
+        prefix, inode, child = target.read_bytes(), target.stat().st_ino, resumes[-1]
+        turn = str(uuid.uuid4())
+        rows = [dict(type='event_msg', payload=dict(type='task_started', turn_id=turn)),
+                dict(type='response_item', payload=dict(type='message', role='user', content=[dict(type='input_text', text='User continuation')]))]
+        if completed: rows.append(dict(type='event_msg', payload=dict(type='task_complete', turn_id=turn)))
+        with target.open('ab') as out:
+            out.write(b'{"type":' if partial else lines(rows))
+        before = target.read_bytes()
+        with patch.object(self.api.agents, 'CodexClient', wraps=self.api.agents.CodexClient) as native:
+            result = self.publish(entry, env=env)
+        self.assertTrue(result['issues'])
+        native.assert_not_called()
+        self.assertEqual(resumes, [child])
+        self.assertEqual(target.stat().st_ino, inode)
+        self.assertEqual(target.read_bytes(), before)
+        self.assertTrue(target.read_bytes().startswith(prefix))
+        self.assertEqual(len(list(Path(env['CODEX_HOME']).rglob('*.jsonl'))), 2)
+        for path, original in originals.items(): self.assertEqual(path.read_bytes(), original)
+
+    def test_codex_retry_preserves_completed_user_leaf_without_native_writer(self):
+        self.check_codex_continued_leaf_retry(completed=True)
+
+    def test_codex_retry_preserves_unfinished_user_leaf_without_native_writer(self):
+        self.check_codex_continued_leaf_retry()
+
+    def test_codex_retry_preserves_partial_user_leaf_without_native_writer(self):
+        self.check_codex_continued_leaf_retry(partial=True)
+
+    def test_codex_retry_allows_quiescent_metadata_only_projection_suffix(self):
+        entry, env, target, resumes, _ = self.codex_interrupted_leaf_fixture()
+        child = resumes[-1]
+        with target.open('ab') as out:
+            out.write(lines([dict(type='event_msg', payload=dict(type='thread_settings_applied', thread_settings=dict(cwd=str(self.project.root))))]))
+        before, inode = target.read_bytes(), target.stat().st_ino
+        retried = self.publish(entry, env=env)
+        self.assertEqual(retried['issues'], [])
+        self.assertEqual(retried['imported'][0]['session_id'], child)
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(target.stat().st_ino, inode)
+        self.assertEqual(resumes, [child, child])
+
+    def test_selected_codex_publication_recovers_link_before_unlink(self):
+        _, _, entry, env, _, resumes = self.codex_ancestor_fixture()
+        link = os.link
+        def interrupt(source, target, **kwargs):
+            result = link(source, target, **kwargs)
+            if not target.endswith(self.sid + '.jsonl'):
+                raise OSError('fixture selected Codex linked')
+            return result
+        with patch.object(self.api.os, 'link', side_effect=interrupt):
+            self.assertIn('selected Codex linked', self.publish(entry, env=env)['issues'][0]['reason'])
+        receipt_path = next((self.root / 'publication-state').glob('conversation-imports/*/receipt.json'))
+        item = next(item for item in json.loads(receipt_path.read_bytes())['files'] if item.get('native_fork'))
+        target, stage = Path(item['destination']), Path(item['staged_path'])
+        before, inode, child = target.read_bytes(), target.stat().st_ino, item['session_id']
+        self.assertEqual(target.stat().st_nlink, 2)
+        self.assertEqual(self.publish(entry, env=env)['issues'], [])
+        self.assertEqual(resumes, [child])
+        self.assertEqual(target.stat().st_ino, inode)
+        self.assertEqual(target.stat().st_nlink, 1)
+        self.assertFalse(stage.exists())
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(len(self.publish(entry, env=env)['unchanged']), 1)
+
+    def test_selected_codex_retry_refuses_foreign_second_link(self):
+        entry, env, target, resumes, _ = self.codex_interrupted_leaf_fixture()
+        foreign = self.root / 'foreign-selected-Codex-link'
+        os.link(target, foreign)
+        before, inode, child = target.read_bytes(), target.stat().st_ino, resumes[-1]
+        with patch.object(self.api.agents, 'CodexClient', wraps=self.api.agents.CodexClient) as native:
+            result = self.publish(entry, env=env)
+        self.assertTrue(result['issues'])
+        native.assert_not_called()
+        self.assertTrue(foreign.exists())
+        self.assertEqual(target.stat().st_nlink, 2)
+        self.assertEqual(target.stat().st_ino, inode)
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(resumes, [child])
+
     def test_claude_picker_ready_standalone_and_semantic_idempotence(self):
         original = self.claude()
         entry = self.capture()['entries'][0]
