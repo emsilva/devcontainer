@@ -109,6 +109,85 @@ class NativeFormatTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'digest'):
             sessions._validate_claude(corrupted + inline, self.sid, [self.root])
 
+    def thinking_drop(self):
+        return dict(type='thinking_drop', model='fixture-model', querySource='fixture-query', requestId='fixture-request',
+                    thinkingBlocksSent=2, thinkingTurnsSent=1,
+                    newlyDropped=dict(blockCount=2, turnCount=1, reason='prefix_mismatch', first=dict(messageIndex=100, blockIndex=2), last=dict(messageIndex=100, blockIndex=4), reasonCounts=dict(prefix_mismatch=1, other=1)),
+                    blockHashes=['0abc123', 'zz9'], firstReportForThreadInProcess=True,
+                    clientChange=dict(kinds='none', firstChangedMessageIndex=-1, baseline='none', callNumber=1))
+
+    def test_thinking_drop_preserves_telemetry_and_original_thinking_without_lookup(self):
+        variants = [self.thinking_drop() for _ in range(4)]
+        variants[1].pop('requestId'); variants[1]['clientChange'].pop('callNumber')
+        variants[2]['requestedBehavior'] = 'fixture-behavior'
+        variants[3].update(thinkingBlocksSent=0, thinkingTurnsSent=0)
+        for attachment in variants:
+            with self.subTest(optional_fields=sorted(attachment)):
+                attachment['futureField'] = dict(historicalPath='/unrelated/provenance', value='preserved')
+                rows = self.requests() + [dict(type='attachment', attachment=attachment),
+                        dict(type='assistant', message=dict(role='assistant', content=[dict(type='thinking', thinking='synthetic thinking', signature='synthetic-signature'), dict(type='redacted_thinking', data='synthetic-redacted'), dict(type='text', text='Answer')]))]
+                original = copy.deepcopy(rows)
+                data = b''.join(json.dumps(row).encode() + b'\n' for row in rows)
+                with patch.object(Path, 'read_bytes', side_effect=AssertionError('telemetry requires no blob/file lookup')), patch.object(sessions.subprocess, 'run', side_effect=AssertionError('telemetry is not executable')):
+                    parsed = sessions._records(data, 'claude')
+                    try:
+                        sessions._validate_claude(parsed, self.sid, [self.root])
+                    except ValueError as error:
+                        self.fail(str(error))
+                self.assertEqual(parsed, original)
+                self.assertEqual(rows, original)
+
+    def test_thinking_drop_rejects_malformed_nested_shapes_counters_hashes(self):
+        defects = []
+        for key, value in self.thinking_drop().items():
+            if key == 'type': continue
+            if key != 'requestId':
+                bad = self.thinking_drop(); bad.pop(key); defects.append(bad)
+            bad = self.thinking_drop(); bad[key] = None; defects.append(bad)
+        for key in ('thinkingBlocksSent', 'thinkingTurnsSent'):
+            for value in (-1, True, 1.5):
+                bad = self.thinking_drop(); bad[key] = value; defects.append(bad)
+        for key in ('blockCount', 'turnCount'):
+            for value in (0, -1, True, 1.5):
+                bad = self.thinking_drop(); bad['newlyDropped'][key] = value; defects.append(bad)
+        for key in ('first', 'last'):
+            for index in ('messageIndex', 'blockIndex'):
+                for value in (-1, True, 1.5, None):
+                    bad = self.thinking_drop(); bad['newlyDropped'][key][index] = value; defects.append(bad)
+            bad = self.thinking_drop(); bad['newlyDropped'][key] = []; defects.append(bad)
+        for counts in ({'future_reason': 2}, {'prefix_mismatch': True, 'other': 1}, {'other': -2}, {'other': 1}, {'other': 3}, []):
+            bad = self.thinking_drop(); bad['newlyDropped']['reasonCounts'] = counts; defects.append(bad)
+        for hashes in (None, [], ['0abc123'], ['0abc123', 'zz9', 'third'], ['UPPER', 'zz9'], ['abcdefghijklmn', 'zz9'], ['bad/hash', 'zz9'], ['', 'zz9'], [123, 'zz9']):
+            bad = self.thinking_drop(); bad['blockHashes'] = hashes; defects.append(bad)
+        for key in ('kinds', 'firstChangedMessageIndex', 'baseline', 'callNumber'):
+            bad = self.thinking_drop(); bad['clientChange'][key] = True; defects.append(bad)
+        bad = self.thinking_drop(); bad['clientChange']['callNumber'] = -1; defects.append(bad)
+        bad = self.thinking_drop(); bad['newlyDropped']['turnCount'] = 3; defects.append(bad)
+        bad = self.thinking_drop(); bad['newlyDropped']['first']['messageIndex'] = 101; defects.append(bad)
+        bad = self.thinking_drop(); bad['newlyDropped']['first']['blockIndex'] = 5; defects.append(bad)
+        bad = self.thinking_drop(); bad['newlyDropped']['reason'] = 'future_reason'; defects.append(bad)
+        bad = self.thinking_drop(); bad['requestedBehavior'] = []; defects.append(bad)
+        bad = self.thinking_drop(); bad['firstReportForThreadInProcess'] = 1; defects.append(bad)
+        for number, attachment in enumerate(defects):
+            with self.subTest(defect=number), self.assertRaises(ValueError):
+                sessions._validate_claude(self.requests() + [dict(type='attachment', attachment=attachment)], self.sid, [self.root])
+
+    def test_thinking_drop_keeps_privacy_scope_request_and_external_dependency_refusals(self):
+        attachment = self.thinking_drop()
+        attachment['futureField'] = '<oai-mem-citation>private</oai-mem-citation>'
+        data = (json.dumps(dict(type='attachment', attachment=attachment)) + '\n').encode().replace(b'<', b'\\u003c')
+        with self.assertRaisesRegex(ValueError, 'memory'):
+            sessions._records(data, 'claude')
+        rows = self.requests() + [dict(type='attachment', attachment=self.thinking_drop())]
+        for extra, reason in ((dict(type='attachment', attachment=dict(type='future-thinking-report')), 'attachment dependency'),
+                              (dict(type='assistant', message=dict(role='assistant', content=[dict(type='tool_use', name='Agent', input={})])), 'agent/task'),
+                              (dict(type='user', cwd='/unrelated'), 'scope|project')):
+            with self.subTest(reason=reason), self.assertRaisesRegex(ValueError, reason):
+                sessions._validate_claude(rows + [extra], self.sid, [self.root])
+        rows[5]['requestDigest'] = '0'*64
+        with self.assertRaisesRegex(ValueError, 'digest'):
+            sessions._validate_claude(rows, self.sid, [self.root])
+
     def test_claude_request_shape_blob_delta_and_cache_control_are_validated(self):
         rows = self.requests()
         sessions._validate_claude(rows, self.sid, [self.root])

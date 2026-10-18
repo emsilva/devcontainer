@@ -173,7 +173,45 @@ CLAUDE_INLINE_FIELDS = {
     'mcp_instructions_delta': ((), ('addedBlocks', 'addedNames', 'removedNames')),
     'instructions': ((), ()),
     'prompt_snapshot': (('contextRendering',), ('systemPrompt',)),
+    'thinking_drop': (('model', 'querySource'), ('blockHashes',)),
 }
+
+
+def _validate_claude_thinking_drop(attachment):
+    """Validate inline provider-transformation telemetry, not reasoning custody."""
+    def integer(value, minimum=0):
+        return type(value) is int and value >= minimum
+    valid = (integer(attachment.get('thinkingBlocksSent'))
+             and integer(attachment.get('thinkingTurnsSent'))
+             and type(attachment.get('firstReportForThreadInProcess')) is bool
+             and all(isinstance(attachment[key], str) for key in ('requestId', 'requestedBehavior') if key in attachment))
+    change, dropped = attachment.get('clientChange'), attachment.get('newlyDropped')
+    valid = (valid and isinstance(change, dict)
+             and all(isinstance(change.get(key), str) for key in ('kinds', 'baseline'))
+             and type(change.get('firstChangedMessageIndex')) is int
+             and ('callNumber' not in change or integer(change['callNumber'])))
+    reasons = {'prefix_mismatch', 'model_mismatch', 'other'}
+    valid = (valid and isinstance(dropped, dict)
+             and integer(dropped.get('blockCount'), 1) and integer(dropped.get('turnCount'), 1)
+             and dropped['turnCount'] <= dropped['blockCount']
+             and isinstance(dropped.get('reason'), str) and dropped['reason'] in reasons)
+    if valid:
+        positions = [dropped.get(key) for key in ('first', 'last')]
+        counts = dropped.get('reasonCounts')
+        hashes = attachment.get('blockHashes')
+        valid = (all(isinstance(position, dict) and all(integer(position.get(key)) for key in ('messageIndex', 'blockIndex')) for position in positions)
+                 and isinstance(counts, dict)
+                 and all(key in reasons and integer(value) for key, value in counts.items())
+                 and sum(counts.values()) == dropped['blockCount']
+                 and isinstance(hashes, list) and all(isinstance(value, str) and re.fullmatch(r'[0-9a-z]{1,13}', value) for value in hashes)
+                 # Native c2r adds one hash per counted drop after resolving its
+                 # request block identity; these are not checkpoint blob hashes.
+                 and len(hashes) == dropped['blockCount'])
+        if valid:
+            first, last = positions
+            valid = (first['messageIndex'], first['blockIndex']) <= (last['messageIndex'], last['blockIndex'])
+    if not valid:
+        raise ValueError('Invalid Claude thinking-drop telemetry')
 
 
 def _validate_claude_inline(attachment):
@@ -183,7 +221,9 @@ def _validate_claude_inline(attachment):
     valid = (all(isinstance(attachment.get(key), str) for key in strings)
              and all(isinstance(attachment.get(key), list)
                      and all(isinstance(value, str) for value in attachment[key]) for key in lists))
-    if kind == 'hook_success':
+    if kind == 'thinking_drop':
+        _validate_claude_thinking_drop(attachment)
+    elif kind == 'hook_success':
         duration = attachment.get('durationMs')
         valid = (valid and type(duration) in (int, float) and 0 <= duration < float('inf')
                  and type(attachment.get('exitCode')) is int)
