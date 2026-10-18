@@ -1,3 +1,5 @@
+> Historical full-checkout recovery design/evidence. Superseded by the scratch-only continuity design in [project continuity](../../project-continuity.md).
+
 # Herdr workspaces and continuous recovery
 
 Approved intent: `task work:cs` connects to a project Herdr workspace in Codespaces;

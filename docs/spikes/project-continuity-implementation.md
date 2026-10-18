@@ -1,3 +1,5 @@
+> Historical full-checkout recovery design/evidence. Superseded by the scratch-only continuity design in [project continuity](../project-continuity.md).
+
 # Project continuity implementation evidence
 
 Measured on 2026-10-17 with disposable repositories and selected test UUIDs.

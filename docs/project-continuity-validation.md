@@ -1,3 +1,5 @@
+> Historical full-checkout recovery design/evidence. Superseded by the scratch-only continuity design in [project continuity](project-continuity.md).
+
 # Continuity validation
 
 The acceptance case is continuing project work on a Mac after its Codespace is

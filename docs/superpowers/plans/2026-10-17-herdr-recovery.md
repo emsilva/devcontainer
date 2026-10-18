@@ -1,3 +1,5 @@
+> Historical full-checkout recovery design/evidence. Superseded by the scratch-only continuity design in [project continuity](../../project-continuity.md).
+
 # Herdr recovery implementation plan
 
 **Goal:** Make a Mac-local recovery copy sufficient to continue project work when
