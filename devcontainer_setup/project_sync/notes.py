@@ -9,7 +9,7 @@ import re
 import subprocess
 import tomllib
 
-from .state import _parent, _regular, atomic_write
+from .state import _parent, _regular, atomic_write, locked, read_json, state_dir
 
 _NOTES = b'''## Project memory
 
@@ -156,8 +156,115 @@ def integrate_notes(project: Path, files: dict[str, bytes], enabled: bool) -> No
     files.update(additions)
 
 
-def configure_memory(project) -> None:
-    """Route native Claude auto-memory through this checkout's scratch tree."""
+def _memory_source(project, env):
+    from .sessions import claude_namespace, native_home
+    values = os.environ if env is None else env
+    if values.get('CLAUDE_CODE_PROJECT_DIR_NAME'):
+        raise ValueError('Shared Claude project directory override requires explicit memory migration; settings preserved')
+    root = Path(project.root)
+    common = subprocess.run(['git', '-C', str(root), 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                            capture_output=True, text=True, timeout=15)
+    if common.returncode == 0:
+        directory = Path(common.stdout.strip())
+        if directory.name != '.git':
+            raise ValueError('Cannot establish Claude canonical repository memory directory; settings preserved')
+        root = directory.parent
+    return native_home('claude', env) / 'projects' / claude_namespace(root) / 'memory'
+
+
+def _memory_bytes(path):
+    from .sessions import _read as native_read
+    try:
+        return native_read(path)
+    except FileNotFoundError:
+        return None
+
+
+def _memory_tree(source):
+    if any(path.is_symlink() for path in [source, *source.parents]):
+        raise ValueError('Linked Claude memory directories cannot be migrated; settings preserved')
+    if not source.exists():
+        return {}
+    if not source.is_dir():
+        raise ValueError('Claude memory source must be a directory; settings preserved')
+    files, total = {}, 0
+    for path in source.rglob('*'):
+        if path.is_symlink():
+            raise ValueError('Linked Claude memory notes cannot be migrated; settings preserved')
+        if path.is_dir():
+            continue
+        data = _memory_bytes(path)
+        if data is None:
+            raise ValueError('Claude memory changed during migration; settings preserved')
+        total += len(data)
+        files[path.relative_to(source).as_posix()] = data
+        if len(files) > 4096 or total > 64 * 1024 * 1024:
+            raise ValueError('Claude project memory exceeds migration limits; settings preserved')
+    return files
+
+
+def _copy_memory(path, data):
+    """Create missing notes exclusively; a failed copy never changes settings."""
+    with _parent(path, create=True) as (parent, name):
+        try:
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        except FileExistsError:
+            if _memory_bytes(path) != data:
+                raise ValueError('Claude memory destination conflict; settings and existing notes preserved') from None
+            return
+        created = os.fstat(fd)
+        try:
+            with os.fdopen(fd, 'wb') as output:
+                output.write(data)
+                output.flush()
+                os.fsync(output.fileno())
+            os.fsync(parent)
+        except BaseException:
+            try:
+                current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
+                    os.unlink(name, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+            raise
+
+
+def _seed_memory(project, source, destination, previous, env):
+    """A local receipt prevents future sync cycles from replaying legacy notes."""
+    if any(path.is_symlink() for path in [destination, *destination.parents]):
+        raise ValueError('Linked Claude memory destinations cannot be migrated; settings preserved')
+    state = state_dir(project, env)
+    key = hashlib.sha256(json.dumps([str(source), str(destination)]).encode()).hexdigest()
+    receipt = state / 'claude-memory-migrations' / (key + '.json')
+    binding = dict(schema=1, project_id=project.project_id, root=str(project.root),
+                   source=str(source), destination=str(destination))
+    with locked(state / 'claude-memory-migration.lock', blocking=True):
+        try:
+            saved = read_json(receipt)
+        except FileNotFoundError:
+            saved = None
+        if saved is not None:
+            if saved.get('binding') != binding or not isinstance(saved.get('files'), dict):
+                raise ValueError('Claude memory migration receipt differs; settings preserved')
+            if previous == str(destination):
+                return
+        files = _memory_tree(source)
+        # Validate every existing note before publishing any missing note.
+        for name, data in files.items():
+            current = _memory_bytes(destination / name)
+            if current is not None and current != data:
+                raise ValueError('Claude memory destination conflict; settings and existing notes preserved')
+        # The startup index becomes visible only after its referenced notes.
+        for name in sorted(files, key=lambda value: (value == 'MEMORY.md', value)):
+            _copy_memory(destination / name, files[name])
+        if _memory_tree(source) != files or any(_memory_bytes(destination / name) != data for name, data in files.items()):
+            raise ValueError('Claude memory changed during migration; settings preserved')
+        atomic_write(receipt, (json.dumps(dict(binding=binding, files={name: hashlib.sha256(data).hexdigest()
+                                                                     for name, data in files.items()}), sort_keys=True) + '\n').encode())
+
+
+def configure_memory(project, *, env=None) -> None:
+    """Copy native project memory before routing Claude to the scratch tree."""
     root = Path(project.root)
     name = '.claude/settings.local.json'
     raw = _read(root, name, {})
@@ -169,10 +276,21 @@ def configure_memory(project) -> None:
         raise ValueError('Project Claude local settings must be an object; existing settings preserved')
     directory = str(root / '.scratch/memory/claude')
     previous = settings.get('autoMemoryDirectory')
-    if previous is not None and previous != directory:
+    source = _memory_source(project, env)
+    if previous is not None and previous not in (directory, str(source)):
         raise ValueError('Existing project Claude memory directory differs; existing settings preserved')
-    if previous == directory:
-        return
+    if previous is None:
+        from .sessions import native_home
+        for base, filename in ((root, '.claude/settings.json'), (native_home('claude', env), 'settings.json')):
+            layer = _read(base, filename, {})
+            options = json.loads(layer) if layer else {}
+            if not isinstance(options, dict):
+                raise ValueError('Claude settings must be an object; existing settings preserved')
+            selected = options.get('autoMemoryDirectory')
+            if selected is not None:
+                if selected not in (directory, str(source)):
+                    raise ValueError('Existing Claude memory directory differs; existing settings preserved')
+                break
     if (root / '.git').exists():
         tracked = subprocess.run(['git', '-C', str(root), 'ls-files', '--error-unmatch', '--', name],
                                  capture_output=True, timeout=15)
@@ -180,5 +298,12 @@ def configure_memory(project) -> None:
             raise ValueError('Project Claude local settings are tracked; existing file preserved')
         if tracked.returncode != 1:
             raise ValueError('Cannot verify project Claude local settings ownership; existing file preserved')
+    # Backfill the previous empty-target bug as well as first-time installations.
+    if source.exists() or source.is_symlink():
+        _seed_memory(project, source, Path(directory), previous, env)
+    if previous == directory:
+        return
+    if _read(root, name, {}) != raw:
+        raise ValueError('Project Claude settings changed during memory migration; existing settings preserved')
     settings['autoMemoryDirectory'] = directory
     atomic_write(root / name, (json.dumps(settings, indent=2, sort_keys=True) + '\n').encode(), mode=0o600)

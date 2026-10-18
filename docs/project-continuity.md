@@ -50,6 +50,16 @@ this workflow. Claude's project-local settings route auto-memory to
 auto-memory enable/disable choice. A conflicting custom memory directory is
 reported and preserved. No global profile or memory settings are changed.
 
+Before changing Claude's memory path, setup copies and verifies this repository's
+existing native memory index and topic files. The originals remain intact.
+Already redirected empty scratch directories are backfilled too. Conflicting
+notes or custom memory locations stop migration without replacing either copy;
+inspect `task work:status` before retrying. A completed migration is recorded
+locally, so later edits and deletions in scratch are preserved. A process killed
+during a note copy can leave an incomplete destination file: resolve that reported
+conflict using the retained original before retrying. Restart Claude after the
+first migration so the next session loads the copied index.
+
 ## Conversations
 
 The Mac worker captures verified stable prefixes ending at supported completed
