@@ -220,21 +220,13 @@ def _copy_memory(path, data):
             if _memory_bytes(path) != data:
                 raise ValueError('Claude memory destination conflict; settings and existing notes preserved') from None
             return
-        created = os.fstat(fd)
-        try:
-            with os.fdopen(fd, 'wb') as output:
-                output.write(data)
-                output.flush()
-                os.fsync(output.fileno())
-            os.fsync(parent)
-        except BaseException:
-            try:
-                current = os.stat(name, dir_fd=parent, follow_symlinks=False)
-                if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
-                    os.unlink(name, dir_fd=parent)
-            except FileNotFoundError:
-                pass
-            raise
+        # Once visible, a note can receive owner edits. Even cancellation must
+        # retain that path; a partial copy is an explicit conflict on retry.
+        with os.fdopen(fd, 'wb') as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+        os.fsync(parent)
 
 
 def _seed_memory(project, source, destination, previous, env):

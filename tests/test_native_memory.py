@@ -197,6 +197,19 @@ class NativeMemoryTests(unittest.TestCase):
         self.assertFalse((self.destination / 'MEMORY.md').exists())
         self.assertEqual((self.destination / 'topics/decision.md').read_text(), 'Concurrent scratch edit\n')
 
+    def test_interrupted_copy_preserves_concurrent_in_place_owner_edit(self):
+        self.legacy()
+        destination = self.destination / 'topics/decision.md'
+        def interrupted(_):
+            destination.write_text('Concurrent owner scratch edit\n')
+            raise KeyboardInterrupt('fixture cancellation')
+        with patch.object(notes.os, 'fsync', side_effect=interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                notes.configure_memory(self.project)
+        self.assertTrue(destination.exists(), 'Interrupted copy deleted the owner edit')
+        self.assertEqual(destination.read_text(), 'Concurrent owner scratch edit\n')
+        self.assertFalse(self.path.exists())
+
     def test_symlinked_source_or_destination_does_not_change_setting(self):
         for side in ('source', 'destination'):
             with self.subTest(side=side):
