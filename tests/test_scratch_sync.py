@@ -158,6 +158,43 @@ class ScratchTests(unittest.TestCase):
         self.assertFalse((self.state / 'scratch-retarget.json').exists())
         self.assertEqual(m.read_json(self.state / m.CONFIG)['remote_root'], '/workspaces/ordinary')
 
+    def test_pending_generated_live_config_retries_crash_after_candidate_journal_write(self):
+        m = self.module; project = m.discover_project(self.root)
+        previous = dict(version=1, identity=project.identity, root=str(self.root), codespace='space', remote_root='/workspaces/original')
+        obsolete = dict(previous, remote_root='/workspaces/.devcontainer-work/project/snapshot')
+        receipt = dict(name='scratch-'+'b'*48, nonce='b'*48, binding=previous, established=True, identifier='sync_kept')
+        archive = self.state / 'retired-bindings/interrupted'
+        original = dict(schema=1, previous=previous, candidate=obsolete, receipt=receipt, archive=str(archive))
+        intent_path = self.state / 'scratch-retarget.json'
+        m._write(self.state / m.CONFIG, obsolete); m._write(self.state / m.SESSION, receipt)
+        m._write(intent_path, original)
+        write = m._write; failed = []
+        def interrupted(path, value):
+            write(path, value)
+            if Path(path) == intent_path and value['candidate']['remote_root'] == '/workspaces/ordinary' and not failed:
+                failed.append(True); raise OSError('crash immediately after candidate journal write')
+        with patch.object(m, '_verify_destination'), patch.object(m, 'stop'), patch.object(m, 'install_mutagen', return_value=Path('/fixture/tool')), patch.object(m, '_session_info', return_value={'identifier':'sync_kept'}), patch.object(m, '_mutagen') as command, patch.object(m, '_write', side_effect=interrupted):
+            with self.assertRaises(OSError): m.retarget(self.root, self.state, 'space', '/workspaces/ordinary')
+            self.assertEqual(m.read_json(self.state / m.CONFIG), obsolete)
+            self.assertEqual(m.read_json(intent_path)['candidate']['remote_root'], '/workspaces/ordinary')
+            self.assertEqual(m.read_json(intent_path)['observed_binding'], obsolete)
+            command.assert_not_called()
+            m._write(self.state / m.CONFIG, dict(previous, remote_root='/workspaces/unrecorded'))
+            with self.assertRaisesRegex(ValueError, 'binding changed'):
+                m.retarget(self.root, self.state, 'space', '/workspaces/ordinary')
+            command.assert_not_called()
+            m._write(self.state / m.CONFIG, obsolete)
+            m.retarget(self.root, self.state, 'space', '/workspaces/ordinary')
+        self.assertEqual(m.read_json(archive / 'retarget-intent.json'), original)
+        self.assertEqual(m.read_json(self.state / m.CONFIG)['remote_root'], '/workspaces/ordinary')
+        self.assertFalse(intent_path.exists())
+        self.assertEqual(command.call_args.args[2:], ('sync', 'pause', 'sync_kept'))
+
+    def test_pending_start_error_names_existing_work_cs_task(self):
+        self.module._write(self.state / 'scratch-retarget.json', {'pending': True})
+        with self.assertRaisesRegex(ValueError, 'run task work:cs '):
+            self.module.start(self.root, self.state)
+
     def test_same_binding_retarget_keeps_the_existing_forward_and_worker(self):
         m = self.module
         project = m.discover_project(self.root)

@@ -204,16 +204,12 @@ def sync_project_data(connection, project, state, remote_root, *, env=None, hist
     remote_store = RemoteStore(endpoint)
     transfer(store, remote_store, snapshot_id, source='desktop', identity=project.identity)
     remote_publication = endpoint.call('publish', snapshot_id=snapshot_id)
-    local_publication = dict(imported=[], unchanged=[], issues=[])
-    # Historical roots are explicitly supplied from verified migration records.
-    # Each endpoint repeats canonical Git identity verification before capture.
-    for root in dict.fromkeys([remote_root, *historical_roots]):
-        source = endpoint if root == remote_root else RemoteEndpoint(connection, root, project.identity)
-        captured = source.call('capture')['snapshot_id']
-        receipt = transfer(RemoteStore(source), store, captured, source='codespace', identity=project.identity)
-        publication = publish_conversations(project, store, captured, state=state, env=env)
-        for key in local_publication:
-            local_publication[key].extend(publication[key])
+    # One capture validates every historical root and authorizes their combined
+    # structural scope/ancestor closure. Its single receipt covers the complete
+    # remote inventory rather than only the final historical checkout.
+    captured = endpoint.call('capture', historical_roots=list(historical_roots))['snapshot_id']
+    receipt = transfer(remote_store, store, captured, source='codespace', identity=project.identity)
+    local_publication = publish_conversations(project, store, captured, state=state, env=env)
     issues.extend(remote_publication.get('issues', []))
     issues.extend(local_publication['issues'])
     return dict(schema=2, receipt=receipt, local_publication=local_publication,

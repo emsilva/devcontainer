@@ -188,7 +188,7 @@ def start(root: Path, state: Path) -> dict:
     state = Path(state).absolute()
     root = Path(root).resolve()
     if (state / 'scratch-retarget.json').exists():
-        raise ValueError('An interrupted scratch retarget is pending; run task work to finish its owned transition first')
+        raise ValueError('An interrupted scratch retarget is pending; run task work:cs to finish its owned transition first')
     _config(root, state)
     _private_location(root, state)
     _scratch(root)
@@ -422,22 +422,32 @@ def retarget(root, state, codespace, remote_root):
                     or previous.get('identity') != project.identity
                     or intent.get('candidate', {}).get('identity') != project.identity):
                 raise ValueError('Invalid interrupted scratch retarget; existing state preserved')
-            if read_json(path) not in (previous, intent['candidate']):
-                raise ValueError('Scratch binding changed during interrupted retarget')
             receipt = intent.get('receipt')
             archive = Path(intent['archive'])
             if archive.parent != state / 'retired-bindings':
                 raise ValueError('Invalid scratch retarget archive')
+            original_intent = archive / 'retarget-intent.json'
+            allowed = [previous, intent['candidate']]
+            observed = intent.get('observed_binding')
+            if observed is not None:
+                # The retained original intent anchors the extra crash state;
+                # an arbitrary changed live config never becomes authorized.
+                original = read_json(original_intent)
+                if observed not in (previous, original.get('candidate')):
+                    raise ValueError('Invalid observed scratch binding in retarget journal')
+                allowed.append(observed)
+            actual = read_json(path)
+            if actual not in allowed:
+                raise ValueError('Scratch binding changed during interrupted retarget')
             legacy_intent = intent['schema'] == 1
             # Preserve the old intent, including its generated candidate, as
             # evidence; never replay a generated endpoint into the live binding.
-            original_intent = archive / 'retarget-intent.json'
             if not original_intent.exists():
                 _write(original_intent, intent)
             # Journal the authenticated normal destination before changing any
             # receipt/config so a crash after config publication can replay.
             if intent['candidate'] != candidate:
-                intent = dict(intent, candidate=candidate)
+                intent = dict(intent, candidate=candidate, observed_binding=intent.get('observed_binding', actual))
                 _write(intent_path, intent)
         else:
             previous = read_json(path)

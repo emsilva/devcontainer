@@ -134,6 +134,74 @@ class ReplicationTests(unittest.TestCase):
         self.assertFalse(any(c['request']['operation'] == 'restore' for c in self.connection.calls))
         self.assertTrue(all('project_files' not in c['modules'] for c in self.connection.calls))
 
+    def historical_checkout(self):
+        legacy = self.base / 'legacy'
+        subprocess.run(['git', 'clone', '-q', str(self.root), str(legacy)], check=True)
+        subprocess.run(['git', '-C', str(legacy), 'remote', 'set-url', 'origin', self.project.remote], check=True)
+        return legacy
+
+    def checkout_receipt(self, root):
+        def git(*args):
+            return subprocess.check_output(['git', '--no-optional-locks', '-C', str(root), *args])
+        return (git('rev-parse', 'HEAD'), (root / '.git/index').read_bytes(),
+                git('diff', '--binary'), git('diff', '--cached', '--binary'), (root / 'source').read_bytes())
+
+    def test_real_cycle_publishes_mixed_historical_and_current_claude_scope_without_echo(self):
+        legacy = self.historical_checkout()
+        remote_sid, remote_path = self.conversation(self.connection.env, text='MIXED', root=legacy)
+        rows = [json.loads(row) for row in remote_path.read_bytes().splitlines()]
+        rows[-1]['cwd'] = str(self.root)
+        remote_path.write_bytes(b''.join(json.dumps(row).encode()+b'\n' for row in rows))
+        local_sid, local_path = self.conversation(self.local_env, text='LOCAL')
+        (self.root / 'source').write_text('staged'); self.git('add', 'source')
+        (self.root / 'source').write_text('unstaged')
+        before = self.receipt(), self.checkout_receipt(legacy)
+        originals = local_path.read_bytes(), remote_path.read_bytes()
+        result = replication.sync_project_data(self.connection, self.project, self.store.state, str(self.root),
+                                               env=self.local_env, historical_roots=[str(legacy)])
+        self.assertEqual(result['issues'], [])
+        self.assertEqual([item['source_session_id'] for item in result['local_publication']['imported']], [remote_sid])
+        self.assertEqual([item['source_session_id'] for item in result['remote_publication']['imported']], [local_sid])
+        captures = [call['request'] for call in self.connection.calls if call['request']['operation']=='capture']
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0]['root'], str(self.root))
+        self.assertEqual(captures[0]['values']['historical_roots'], [str(legacy)])
+        again = replication.sync_project_data(self.connection, self.project, self.store.state, str(self.root),
+                                              env=self.local_env, historical_roots=[str(legacy)])
+        self.assertEqual(again['issues'], [])
+        self.assertEqual(again['local_publication']['imported'], [])
+        self.assertEqual(again['remote_publication']['imported'], [])
+        self.assertEqual(before, (self.receipt(), self.checkout_receipt(legacy)))
+        self.assertEqual(originals, (local_path.read_bytes(), remote_path.read_bytes()))
+
+    def test_real_cycle_aggregate_receipt_status_counts_current_conversation_with_empty_history(self):
+        from devcontainer_setup.project_sync import workspace
+        legacy = self.historical_checkout()
+        remote_sid, _ = self.conversation(self.connection.env)
+        before = self.receipt(), self.checkout_receipt(legacy)
+        result = replication.sync_project_data(self.connection, self.project, self.store.state, str(self.root),
+                                               env=self.local_env, historical_roots=[str(legacy)])
+        self.assertEqual(result['issues'], [])
+        self.assertEqual([item['source_session_id'] for item in result['local_publication']['imported']], [remote_sid])
+        with patch.object(workspace.scratch, 'status', return_value=dict(running=True, phase='syncing', conversations=result)), patch.object(workspace.scratch, 'inspect_sync', return_value={}):
+            status = workspace.status(self.project, self.store.state)
+        self.assertEqual(status['conversations']['protected'], 1)
+        self.assertTrue(status['conversations']['healthy'])
+        self.assertEqual(self.store.load(result['receipt']['snapshot_id'])['project']['root'], str(self.root))
+        self.assertEqual(len(self.store.load(result['receipt']['snapshot_id'])['conversations']['entries']), 1)
+        self.assertEqual(before, (self.receipt(), self.checkout_receipt(legacy)))
+
+    def test_real_cycle_rejects_foreign_historical_root_and_preserves_previous_local_receipt(self):
+        self.conversation(self.connection.env)
+        result = replication.sync_project_data(self.connection, self.project, self.store.state, str(self.root), env=self.local_env)
+        legacy = self.historical_checkout()
+        subprocess.run(['git', '-C', str(legacy), 'remote', 'set-url', 'origin', 'https://github.com/foreign/repo'], check=True)
+        before = self.receipt(), self.checkout_receipt(legacy)
+        with self.assertRaises(ValueError):
+            replication.sync_project_data(self.connection, self.project, self.store.state, str(self.root), env=self.local_env, historical_roots=[str(legacy)])
+        self.assertEqual(self.store.latest('codespace'), result['receipt'])
+        self.assertEqual(before, (self.receipt(), self.checkout_receipt(legacy)))
+
     def test_memory_setting_conflict_is_issue_but_does_not_stop_conversation_cycle(self):
         (self.root / '.claude').mkdir(); settings = self.root / '.claude/settings.local.json'
         settings.write_text('{"autoMemoryDirectory":"/owner/memory"}')
