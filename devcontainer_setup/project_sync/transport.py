@@ -238,6 +238,9 @@ class CodespaceConnection:
         self.port = None
         self.accept_new = False
         self._ready = False
+        # A reconnect or background worker may share this project state while
+        # owning a different forward. Never rewrite another connection's port.
+        self._probe_config = self.state / ('ssh-probe-config-' + secrets.token_hex(16))
 
     def __enter__(self):
         from .state import atomic_write
@@ -334,7 +337,7 @@ class CodespaceConnection:
             time.sleep(min(.5, max(0, deadline - time.monotonic())))
 
     def python(self, code: str, payload: bytes = b'', timeout: int = 60) -> bytes:
-        path = self.state / 'ssh-probe-config'
+        path = self._probe_config
         self.ssh_config(path)
         if not self._ready:
             self._wait_for_ssh(path)
@@ -354,7 +357,10 @@ class CodespaceConnection:
 
     def __exit__(self, *exc):
         self._ready = False
-        _terminate(self.child)
-        if self.api:
-            self.api.__exit__(*exc)
-            self.api = None
+        try:
+            _terminate(self.child)
+            if self.api:
+                self.api.__exit__(*exc)
+                self.api = None
+        finally:
+            self._probe_config.unlink(missing_ok=True)

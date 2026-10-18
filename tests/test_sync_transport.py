@@ -94,10 +94,10 @@ class TransportTests(unittest.TestCase):
             connection = module.CodespaceConnection('bound-name', state=state)
             connection.port = 12345
             connection.key = state / 'key'
-            with patch.object(module.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=b'{}')):
+            with patch.object(module.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=b'{}')) as run:
                 connection.python('print("{}")')
             self.assertEqual(stable.read_bytes(), b'existing validated binding')
-            self.assertTrue((state / 'ssh-probe-config').is_file())
+            self.assertTrue(Path(run.call_args.args[0][2]).is_file())
 
     def test_remote_python_ignores_checkout_and_python_environment_before_bootstrap(self):
         from unittest.mock import patch
@@ -178,6 +178,107 @@ class TransportTests(unittest.TestCase):
                     connection.__enter__()
             api.__exit__.assert_called_once()
             self.assertIsNone(connection.api)
+
+
+class ConnectionProbeOwnershipTests(unittest.TestCase):
+    def setUp(self):
+        from devcontainer_setup.project_sync import transport
+        self.transport = transport
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.state = Path(temporary.name).resolve()
+        self.first = self.connection(11111)
+        self.second = self.connection(22222)
+
+    def connection(self, port):
+        connection = self.transport.CodespaceConnection('bound-name', state=self.state)
+        connection.port = port
+        connection.key = self.state / 'key'
+        connection._ready = True
+        self.addCleanup(connection.__exit__)
+        return connection
+
+    @staticmethod
+    def success():
+        return subprocess.CompletedProcess(['ssh'], 0, b'{}', b'')
+
+    def test_sequential_connections_preserve_each_others_probe_config(self):
+        from unittest.mock import patch
+        with patch.object(self.transport.subprocess, 'run', return_value=self.success()) as run:
+            self.first.python('first()')
+            first_path = Path(run.call_args.args[0][2])
+            first_config = first_path.read_bytes()
+            self.second.python('second()')
+            second_path = Path(run.call_args.args[0][2])
+        self.assertEqual(first_path.read_bytes(), first_config)
+        self.assertNotEqual(first_path, second_path)
+        self.assertIn('  Port 11111\n', first_path.read_text())
+        self.assertIn('  Port 22222\n', second_path.read_text())
+        self.assertEqual(first_path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(second_path.stat().st_mode & 0o777, 0o600)
+
+    def test_nested_connection_cannot_retarget_in_flight_python(self):
+        from unittest.mock import patch
+        observed = []
+        def run(args, **kwargs):
+            path = Path(args[2])
+            if not observed:
+                observed.append(path)
+                self.second.python('second()')
+                self.assertIn('  Port 11111\n', path.read_text())
+            else:
+                observed.append(path)
+                self.assertIn('  Port 22222\n', path.read_text())
+            return self.success()
+        with patch.object(self.transport.subprocess, 'run', side_effect=run):
+            self.first.python('first()')
+        self.assertEqual(len(observed), 2)
+        self.assertNotEqual(*observed)
+
+    def test_exit_removes_only_owned_probe_and_preserves_other_state(self):
+        from unittest.mock import patch
+        known_hosts = self.state / 'known_hosts'
+        stable = self.state / 'ssh-config'
+        known_hosts.write_bytes(b'known-host fixture')
+        stable.write_bytes(b'validated binding fixture')
+        with patch.object(self.transport.subprocess, 'run', return_value=self.success()) as run:
+            self.first.python('first()')
+            first_path = Path(run.call_args.args[0][2])
+            self.second.python('second()')
+            second_path = Path(run.call_args.args[0][2])
+            self.first.__exit__()
+            self.first.__exit__()  # Closing an already closed owner is safe.
+            self.assertFalse(first_path.exists())
+            self.assertTrue(second_path.is_file())
+            self.second.python('still_connected()')
+            self.assertIn('  Port 22222\n', second_path.read_text())
+        self.assertEqual(known_hosts.read_bytes(), b'known-host fixture')
+        self.assertEqual(stable.read_bytes(), b'validated binding fixture')
+        self.second.__exit__()
+        self.assertFalse(second_path.exists())
+
+    def test_failed_reentry_removes_owned_probe_without_deleting_live_peer(self):
+        from unittest.mock import MagicMock, Mock, patch
+        home = self.state / 'home'
+        (home / '.ssh').mkdir(parents=True)
+        (home / '.ssh/codespaces.auto').touch()
+        self.first.env.update(HOME=str(home), GH_TOKEN='fixture')
+        with patch.object(self.transport.subprocess, 'run', return_value=self.success()) as run:
+            self.first.python('first()')
+            first_path = Path(run.call_args.args[0][2])
+            self.second.python('second()')
+            second_path = Path(run.call_args.args[0][2])
+        api = MagicMock()
+        version = Mock(stdout='gh version ' + self.transport.SUPPORTED_GH + ' (fixture)')
+        with patch.object(self.transport, 'ReadOnlyAPI', return_value=api), \
+                patch.object(self.transport.subprocess, 'run', return_value=version), \
+                patch.object(self.transport.subprocess, 'Popen', side_effect=OSError('fixture forward unavailable')):
+            with self.assertRaises(OSError):
+                self.first.__enter__()
+        self.assertFalse(first_path.exists())
+        self.assertTrue(second_path.is_file())
+        self.assertIn('  Port 22222\n', second_path.read_text())
+        api.__exit__.assert_called_once()
 
 
 class SSHReadinessTests(unittest.TestCase):
