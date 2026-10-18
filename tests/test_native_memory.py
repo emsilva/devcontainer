@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import tempfile
+import subprocess
 from types import SimpleNamespace
 import unittest
 
@@ -55,3 +56,15 @@ class NativeMemoryTests(unittest.TestCase):
         files = {}
         notes.integrate_notes(self.root, files, True)
         self.assertIn(b'/.claude/settings.local.json', files['.gitignore'])
+
+    def test_tracked_local_settings_are_not_changed_by_runtime_sync(self):
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+        self.path.parent.mkdir()
+        self.path.write_text('{"permissions":{"allow":[]}}')
+        subprocess.run(['git', '-C', str(self.root), 'add', '-f', '.claude/settings.local.json'], check=True)
+        before = self.path.read_bytes()
+        index = (self.root / '.git/index').read_bytes()
+        with self.assertRaisesRegex(ValueError, 'tracked'):
+            notes.configure_memory(self.project)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual((self.root / '.git/index').read_bytes(), index)

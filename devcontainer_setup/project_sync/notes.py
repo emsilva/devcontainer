@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import tomllib
 
 from .state import _parent, _regular, atomic_write
@@ -172,5 +173,12 @@ def configure_memory(project) -> None:
         raise ValueError('Existing project Claude memory directory differs; existing settings preserved')
     if previous == directory:
         return
+    if (root / '.git').exists():
+        tracked = subprocess.run(['git', '-C', str(root), 'ls-files', '--error-unmatch', '--', name],
+                                 capture_output=True, timeout=15)
+        if tracked.returncode == 0:
+            raise ValueError('Project Claude local settings are tracked; existing file preserved')
+        if tracked.returncode != 1:
+            raise ValueError('Cannot verify project Claude local settings ownership; existing file preserved')
     settings['autoMemoryDirectory'] = directory
     atomic_write(root / name, (json.dumps(settings, indent=2, sort_keys=True) + '\n').encode(), mode=0o600)
