@@ -182,10 +182,10 @@ class RemoteStore:
         return self.endpoint.call('acknowledge', snapshot_id=snapshot_id, source=source)
 
 
-def _memory(project):
+def _memory(project, *, env=None):
     from .notes import configure_memory
     try:
-        configure_memory(project)
+        configure_memory(project, env=env)
     except (OSError, ValueError) as error:
         from .sessions import display_text
         return [dict(component='memory', reason=display_text(str(error), 400))]
@@ -199,7 +199,7 @@ def sync_project_data(connection, project, state, remote_root, *, env=None, hist
     state = Path(state)
     store = Store(state)
     endpoint = RemoteEndpoint(connection, remote_root, project.identity)
-    issues = _memory(project)
+    issues = _memory(project, env=env)
     snapshot_id = capture(project, store, env=env)
     remote_store = RemoteStore(endpoint)
     transfer(store, remote_store, snapshot_id, source='desktop', identity=project.identity)
