@@ -1,8 +1,8 @@
-"""Read-only native checkpoints and new-identity, project-scoped recovery.
+"""Read-only native checkpoints and new-ID project-scoped publication.
 
-Native writers may keep appending while we retain a checked immutable prefix.
-Recovery never resumes an existing source identity: only imported, absent copies
-are reconciled before the native tool forks a new conversation.
+Native writers may append while capture retains a validated completed prefix.
+Publication journals exclusively owned transcripts before metadata-only native
+projection; existing source identities are never resumed or overwritten.
 """
 from __future__ import annotations
 
@@ -524,12 +524,29 @@ def _owned_content(parent, name, intent, *, growing=False):
         os.close(fd)
 
 
-def _publish(intent):
+def _reconcile_links(source, duplicate, intent, *, check_only=False):
+    """Remove only the exact second link recorded by an owned publication."""
+    if intent.get('created') is not True:
+        raise ValueError('Borrowed native files cannot authorize link recovery')
+    with _parent(source) as (parent, name), _parent(duplicate) as (other_parent, other_name):
+        first = _owned_content(parent, name, intent, growing=True)
+        second = _owned_content(other_parent, other_name, intent, growing=True)
+        if (first.st_nlink != 2 or second.st_nlink != 2
+                or (first.st_dev, first.st_ino) != (second.st_dev, second.st_ino)
+                or source == duplicate):
+            raise ValueError('Native publication has an unowned hard link')
+        if not check_only:
+            os.unlink(other_name, dir_fd=other_parent)
+            os.fsync(other_parent)
+
+
+def _publish(intent, *, check_only=False):
     """Finish only a durably journaled inode; link never replaces a final path."""
     target, stage = Path(intent['destination']), Path(intent['staged_path'])
-    if (stage.parent != target.parent or not re.fullmatch(r'\.devcontainer-import-[0-9a-f]{32}\.tmp', stage.name)):
+    if (intent.get('created') is not True or stage.parent != target.parent
+            or not re.fullmatch(r'\.devcontainer-import-[0-9a-f]{32}\.tmp', stage.name)):
         raise ValueError('Invalid native publication staging path')
-    with _parent(target, create=True) as (parent, name):
+    with _parent(target, create=not check_only) as (parent, name):
         def present(filename):
             try:
                 return os.stat(filename, dir_fd=parent, follow_symlinks=False)
@@ -539,19 +556,19 @@ def _publish(intent):
         if final is not None:
             final = _owned_content(parent, name, intent, growing=True)
             if staged is not None:
-                _owned_content(parent, stage.name, intent)
-                os.unlink(stage.name, dir_fd=parent)
-                os.fsync(parent)
+                _reconcile_links(target, stage, intent, check_only=check_only)
             elif final.st_nlink != 1:
                 raise ValueError('Native publication has an unowned hard link')
             return True
         if staged is None:
             return False  # A failed prepublication journal may have no file.
-        _owned_content(parent, stage.name, intent)
-        os.link(stage.name, name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
-        os.fsync(parent)
-        os.unlink(stage.name, dir_fd=parent)
-        os.fsync(parent)
+        staged = _owned_content(parent, stage.name, intent)
+        if staged.st_nlink != 1:
+            raise ValueError('Native publication has an unowned hard link')
+        if not check_only:
+            os.link(stage.name, name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+            os.fsync(parent)
+            _reconcile_links(target, stage, intent)
         return True
 
 
@@ -579,7 +596,7 @@ def _create(path, data, mode=0o600, *, journal):
                           inode=[info.st_dev, info.st_ino], size=len(data), sha256=hashlib.sha256(data).hexdigest())
             journal(intent)
             recorded = True
-            if not _publish(intent):
+            if not _publish(dict(intent, created=True)):
                 raise ValueError('Journaled native stage disappeared before publication')
         finally:
             # Once journaled, retain the stage on interruption so retry can prove
@@ -650,6 +667,10 @@ def _publish_conversation(project, store, entry, *, state, env=None):
             if prior.get('status') == 'complete':
                 _check_published(prior, home, agent, project, receipt_path=receipt_path)
                 return prior['result']
+            _, old_sid, old_by_id, old_order = _preflight(project, store, prior['source_checkpoint'])
+            if (old_sid != sid or old_order != order
+                    or any(old_by_id[current][1] != by_id[current][1] for current in order)):
+                raise ValueError('Native publication journal differs from retained physical checkpoint')
         receipt = dict(publication=True, source_checkpoint=entry, schema=SCHEMA, status='importing',
                        project_id=project.project_id, identity=project.identity, agent=agent,
                        source_session_id=sid, destination_root=str(project.root), files=[])
@@ -664,6 +685,31 @@ def _publish_codex(project, store, entry, by_id, order, home, prior, receipt, re
     """Clone only the selected metadata envelope; ancestors remain byte exact."""
     index = sessions._codex_index(home)
     previous = {item.get('source_session_id'): item for item in prior.get('files', []) if not item.get('native_fork')}
+    prior_fork = next((item for item in prior.get('files', []) if item.get('native_fork')), None)
+    new = sessions.session_uuid(prior_fork['session_id']) if prior_fork else str(uuid.uuid4())
+    item, original, _ = by_id[entry['session_id']]
+    fork_target = _codex_target(home, item['path'].replace(entry['session_id'], new))
+    parts = original.splitlines(keepends=True)
+    head = json.loads(parts[0])
+    head['payload'].update(id=new, session_id=new, cwd=str(project.root), runtime_workspace_roots=[str(project.root)])
+    # Preserve every inherited record byte and all history_base offsets.
+    fork_data = json.dumps(head, ensure_ascii=False, separators=(',', ':')).encode() + b'\n' + b''.join(parts[1:])
+    # Bind every prior file/fork intent before any native repair or write.
+    for saved in prior.get('files', []):
+        if saved.get('native_fork'):
+            expected_target, expected_data = fork_target, fork_data
+        else:
+            current = saved.get('source_session_id')
+            if current not in order[:-1]:
+                raise ValueError('Native ancestor journal differs from retained history')
+            item, expected_data, _ = by_id[current]
+            expected_target = index.get(current, _codex_target(home, item['path']))
+        if (saved.get('destination') != str(expected_target) or saved.get('size') != len(expected_data)
+                or saved.get('sha256') != hashlib.sha256(expected_data).hexdigest()):
+            raise ValueError('Native publication intent differs from retained history')
+        if saved.get('staged_path'):
+            if not _publish(saved, check_only=True):
+                raise ValueError('Journaled native stage disappeared')
     targets = []
     inherited = None
     baselines = []
@@ -671,16 +717,22 @@ def _publish_codex(project, store, entry, by_id, order, home, prior, receipt, re
     for current in order[:-1]:
         item, data, rows = by_id[current]
         inherited, _ = _codex_turn(rows, inherited)
-        target = sessions._safe(index.get(current, _codex_target(home, item['path'])))
-        owned = previous.get(current) or _owned_staging(project, receipt_path.parents[2], target, current)
+        target = index.get(current, _codex_target(home, item['path']))
+        saved = previous.get(current)
+        owned = saved if saved and saved.get('created') is True else _owned_staging(project, receipt_path.parents[2], target, current)
+        if owned and owned.get('staged_path'):
+            _publish(owned)
+        target = sessions._safe(target)
         if target.exists():
-            existing = _stable_prefix(target)
+            appending = owned and owned.get('append_from') is not None
+            existing = _finish_append(owned, data, check_only=True) if appending else _stable_prefix(target)
             if len(existing) < len(data):
                 if not owned or not data.startswith(existing):
                     raise ValueError('Existing native ancestor is not an owned extendable prefix')
-                sessions.assert_quiescent([target])
-                with _parent(target) as (parent, name):
-                    _owned_content(parent, name, owned)
+                if not appending:
+                    sessions.assert_quiescent([target])
+                    with _parent(target) as (parent, name):
+                        _owned_content(parent, name, owned)
             elif existing[:len(data)] != data:
                 raise ValueError('Existing native ancestor identity diverges from checkpoint')
         targets.append((current, target, owned, inherited))
@@ -702,26 +754,13 @@ def _publish_codex(project, store, entry, by_id, order, home, prior, receipt, re
             persist()
             _finish_append(intent, data)
         else:
-            if owned and owned.get('staged_path'):
-                _publish(owned)
             info = target.stat(follow_symlinks=False)
             receipt['files'].append(dict(base, created=bool(owned), inode=[info.st_dev, info.st_ino]))
             persist()
         if receipt['files'][-1]['created']:
             baselines.append(dict(agent='codex', session_id=current, turn_id=cutoff))
-    prior_fork = next((item for item in prior.get('files', []) if item.get('native_fork')), None)
-    new = sessions.session_uuid(prior_fork['session_id']) if prior_fork else str(uuid.uuid4())
-    item, original, _ = by_id[entry['session_id']]
-    target = _codex_target(home, item['path'].replace(entry['session_id'], new))
-    parts = original.splitlines(keepends=True)
-    head = json.loads(parts[0])
-    head['payload'].update(id=new, session_id=new, cwd=str(project.root), runtime_workspace_roots=[str(project.root)])
-    # Never reserialize inherited records: history_base byte offsets still bind
-    # their original ancestors, and cache/tool/message fields stay exact.
-    data = json.dumps(head, ensure_ascii=False, separators=(',', ':')).encode() + b'\n' + b''.join(parts[1:])
+    target, data = fork_target, fork_data
     if prior_fork:
-        if prior_fork.get('destination') != str(target) or prior_fork.get('sha256') != hashlib.sha256(data).hexdigest():
-            raise ValueError('Native fork journal differs from retained history')
         receipt['files'].append(prior_fork)
         if not _publish(prior_fork):
             raise ValueError('Journaled native fork stage disappeared')
@@ -914,15 +953,17 @@ def _owned_staging(project, state, target, sid):
     candidates = []
     for receipt in _publication_receipts(project, state):
         for item in receipt.get('files', []):
-            if (item.get('created') and not item.get('native_fork')
+            if (item.get('created') is True and not item.get('native_fork')
                     and item.get('source_session_id') == sid and item.get('destination') == str(target)):
                 candidates.append(item)
     return max(candidates, key=lambda item: item['size']) if candidates else None
 
 
-def _finish_append(intent, data):
+def _finish_append(intent, data, *, check_only=False):
     """Append a journaled completed suffix only to an exclusively owned inode."""
     target = sessions._safe(Path(intent['destination']))
+    if intent.get('created') is not True:
+        raise ValueError('Borrowed native files cannot authorize append')
     if len(data) != intent['size'] or hashlib.sha256(data).hexdigest() != intent['sha256']:
         raise ValueError('Native append intent disagrees with immutable checkpoint')
     sessions.assert_quiescent([target])
@@ -936,8 +977,14 @@ def _finish_append(intent, data):
                     or not previous <= info.st_size <= len(data)):
                 raise ValueError('Native append inode ownership or size changed')
             actual = os.pread(fd, info.st_size, 0)
-            if (actual != data[:info.st_size] or hashlib.sha256(actual[:previous]).hexdigest() != intent['previous_sha256']):
+            if (actual != data[:info.st_size] or hashlib.sha256(actual[:previous]).hexdigest() != intent['previous_sha256']
+                    or os.pread(fd, info.st_size, 0) != actual):
                 raise ValueError('Native append source prefix changed')
+            named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino):
+                raise ValueError('Native append path changed')
+            if check_only:
+                return actual
             remaining = memoryview(data)[info.st_size:]
             while remaining:
                 count = os.write(fd, remaining)
@@ -979,7 +1026,7 @@ def _supersede_imports(project, store, state, entry, current_key, *, env):
             if marker.exists():
                 continue
             sid = sessions.session_uuid(old['result']['session_id'])
-            target = sessions._safe(Path(old['fork_path']))
+            target = Path(old['fork_path'])
             item = next((item for item in old['files'] if item.get('destination') == str(target)), None)
             if not item:
                 continue
@@ -987,21 +1034,16 @@ def _supersede_imports(project, store, state, entry, current_key, *, env):
                         if agent == 'claude' else _codex_target(home, old_source['path'].replace(old['source_session_id'], sid)))
             if target != expected:
                 raise ValueError('Owned predecessor path no longer matches its native profile')
+            archive = path.with_name('archived.jsonl')
+            if agent == 'claude' and target.exists() and archive.exists():
+                _reconcile_links(target, archive, item)
+            target = sessions._safe(target)
             if not target.exists():
                 continue
             try:
                 sessions.assert_quiescent([target])
             except ValueError:
                 continue
-            archive = path.with_name('archived.jsonl')
-            if agent == 'claude' and archive.exists():
-                # Repair an interruption between link and unlink. Remove only
-                # the proven duplicate link before checking native content.
-                with _parent(target) as (parent, name), _parent(archive) as (other_parent, other_name):
-                    _owned_content(parent, name, item, growing=True)
-                    _owned_content(other_parent, other_name, item, growing=True)
-                    os.unlink(other_name, dir_fd=other_parent)
-                    os.fsync(other_parent)
             with _parent(target) as (parent, name):
                 _owned_content(parent, name, item, growing=True)
             data = _stable_prefix(target)
@@ -1023,9 +1065,7 @@ def _supersede_imports(project, store, state, entry, current_key, *, env):
                     except FileExistsError:
                         _owned_content(destination_parent, destination_name, item, growing=True)
                     os.fsync(destination_parent)
-                    _owned_content(source_parent, source_name, item, growing=True)
-                    os.unlink(source_name, dir_fd=source_parent)
-                    os.fsync(source_parent)
+                    _reconcile_links(archive, target, item)
             else:
                 with agents.CodexClient(project, env=env) as client:
                     client.call('thread/archive', dict(threadId=sid))

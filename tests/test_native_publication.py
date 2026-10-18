@@ -15,6 +15,192 @@ class PublicationTests(NativeFixture):
         self.store.load = lambda sid: manifest
         return self.api.publish_conversations(self.project, self.store, 'checkpoint', state=self.root / 'publication-state', env=env or self.env)
 
+    def codex_ancestor_fixture(self):
+        source = self.codex()
+        leaf = str(uuid.uuid4())
+        self.codex(leaf, parent=(source, source.stat().st_size, len(source.read_bytes().splitlines())), rows=[])
+        entry = next(e for e in self.capture()['entries'] if e['session_id'] == leaf)
+        env = dict(self.env, CODEX_HOME=str(self.root / 'retry-destination'))
+        turns, resumes = [self.turn], []
+        class Client:
+            def __init__(inner, *args, **kwargs): pass
+            def __enter__(inner): return inner
+            def __exit__(inner, *args): pass
+            def call(inner, method, params):
+                if method == 'thread/resume':
+                    inner.sid = params['threadId']
+                    resumes.append(inner.sid)
+                    return dict(thread=dict(id=inner.sid))
+                if method == 'thread/list':
+                    return dict(data=[dict(id=inner.sid)], nextCursor=None)
+                return {}
+        for mocked in (patch.object(self.api.agents, 'CodexClient', Client),
+                       patch.object(self.api.agents, '_history', side_effect=lambda *args: dict(turns=[dict(id=t, status='completed') for t in turns], items=[]))):
+            mocked.start(); self.addCleanup(mocked.stop)
+        return source, leaf, entry, env, turns, resumes
+
+    def advance_ancestor(self, source, leaf, turns, *, metadata_only=False):
+        ordinal = len(source.read_bytes().splitlines())
+        if metadata_only:
+            rows = [dict(type='event_msg', payload=dict(type='thread_settings_applied', thread_settings=dict(cwd=str(self.project.root))))]
+        else:
+            turn = str(uuid.uuid4()); turns.append(turn)
+            rows = [dict(type='event_msg', payload=dict(type='task_started', turn_id=turn)),
+                    dict(type='event_msg', payload=dict(type='task_complete', turn_id=turn))]
+        with source.open('ab') as out:
+            out.write(lines([dict(row, ordinal=ordinal+i) for i, row in enumerate(rows)]))
+        self.codex(leaf, parent=(source, source.stat().st_size, len(source.read_bytes().splitlines())), rows=[])
+        return next(e for e in self.capture()['entries'] if e['session_id'] == leaf)
+
+    def test_retry_never_appends_borrowed_ancestor_after_metadata_only_advance(self):
+        source, leaf, entry, env, turns, _ = self.codex_ancestor_fixture()
+        target = self.api._codex_target(Path(env['CODEX_HOME']), source.name)
+        target.parent.mkdir(parents=True); target.write_bytes(source.read_bytes())
+        before, inode = target.read_bytes(), target.stat().st_ino
+        with patch.object(self.api.agents, '_history', side_effect=ValueError('fixture failed projection')):
+            self.assertIn('failed projection', self.publish(entry, env=env)['issues'][0]['reason'])
+        advanced = self.advance_ancestor(source, leaf, turns, metadata_only=True)
+        self.assertEqual(self.api._revision(entry, *self.api._preflight(self.project, self.store, entry)[2:]),
+                         self.api._revision(advanced, *self.api._preflight(self.project, self.store, advanced)[2:]))
+        with patch.object(self.api, '_finish_append', wraps=self.api._finish_append) as append:
+            retried = self.publish(advanced, env=env)
+        self.assertTrue(retried['issues'])
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(target.stat().st_ino, inode)
+        append.assert_not_called()
+
+    def check_owned_append_retry(self, *, partial):
+        source, leaf, entry, env, turns, resumes = self.codex_ancestor_fixture()
+        self.assertEqual(self.publish(entry, env=env)['issues'], [])
+        target = self.api._codex_target(Path(env['CODEX_HOME']), source.name)
+        before, inode = target.read_bytes(), target.stat().st_ino
+        advanced = self.advance_ancestor(source, leaf, turns)
+        if partial:
+            write = os.write
+            progress = []
+            def interrupt(fd, data):
+                if os.fstat(fd).st_ino == inode:
+                    if progress: raise OSError('fixture partial append')
+                    progress.append(True)
+                    return write(fd, data[:max(1, len(data)//2)])
+                return write(fd, data)
+            fault = patch.object(self.api.os, 'write', side_effect=interrupt)
+        else:
+            fault = patch.object(self.api, '_finish_append', side_effect=OSError('fixture append intent before write'))
+        with fault:
+            self.assertIn('fixture', self.publish(advanced, env=env)['issues'][0]['reason'])
+        self.assertTrue(target.read_bytes().startswith(before))
+        if partial:
+            self.assertGreater(target.stat().st_size, len(before))
+            self.assertLess(target.stat().st_size, source.stat().st_size)
+        else:
+            self.assertEqual(target.read_bytes(), before)
+        retried = self.publish(advanced, env=env)
+        self.assertEqual(retried['issues'], [])
+        self.assertEqual(target.stat().st_ino, inode)
+        self.assertEqual(target.read_bytes(), source.read_bytes())
+        count = len(list(Path(env['CODEX_HOME']).rglob('*.jsonl')))
+        self.assertEqual(count, 3)
+        self.assertEqual(len(resumes), 2)
+        self.assertEqual(len(self.publish(advanced, env=env)['unchanged']), 1)
+        self.assertEqual(len(list(Path(env['CODEX_HOME']).rglob('*.jsonl'))), count)
+
+    def test_owned_ancestor_append_retries_after_intent_before_write(self):
+        self.check_owned_append_retry(partial=False)
+
+    def test_owned_ancestor_append_retries_after_partial_suffix(self):
+        self.check_owned_append_retry(partial=True)
+
+    def test_codex_ancestor_publication_recovers_after_link_before_unlink(self):
+        source, _, entry, env, _, resumes = self.codex_ancestor_fixture()
+        original, source_inode = source.read_bytes(), source.stat().st_ino
+        target = self.api._codex_target(Path(env['CODEX_HOME']), source.name)
+        link = os.link
+        def interrupt(*args, **kwargs):
+            link(*args, **kwargs)
+            raise OSError('fixture linked ancestor')
+        with patch.object(self.api.os, 'link', side_effect=interrupt):
+            self.assertIn('linked ancestor', self.publish(entry, env=env)['issues'][0]['reason'])
+        inode = target.stat().st_ino
+        self.assertEqual(target.stat().st_nlink, 2)
+        retried = self.publish(entry, env=env)
+        self.assertEqual(retried['issues'], [])
+        self.assertEqual(target.stat().st_nlink, 1)
+        self.assertEqual(target.stat().st_ino, inode)
+        self.assertEqual(target.read_bytes(), original)
+        self.assertEqual(len(resumes), 1)
+        self.assertEqual(len(self.publish(entry, env=env)['unchanged']), 1)
+        self.assertEqual(len(list(Path(env['CODEX_HOME']).rglob('*.jsonl'))), 2)
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(source.stat().st_ino, source_inode)
+
+    def test_claude_superseding_recovers_after_link_before_unlink(self):
+        source = self.claude(); entry = self.capture()['entries'][0]
+        first = self.publish(entry)
+        old = source.with_name(first['imported'][0]['session_id'] + '.jsonl')
+        before, inode = old.read_bytes(), old.stat().st_ino
+        with source.open('ab') as out:
+            out.write(lines([dict(type='assistant', uuid=str(uuid.uuid4()), sessionId=self.sid, cwd=str(self.project.root), version='2.1.302', message=dict(role='assistant', content='Next answer', stop_reason='end_turn'))]))
+        original, source_inode = source.read_bytes(), source.stat().st_ino
+        advanced = next(e for e in self.capture()['entries'] if e['session_id'] == self.sid)
+        link = os.link
+        def interrupt(*args, **kwargs):
+            linked = link(*args, **kwargs)
+            if args[1] == 'archived.jsonl': raise OSError('fixture linked archive')
+            return linked
+        with patch.object(self.api.os, 'link', side_effect=interrupt):
+            self.assertIn('linked archive', self.publish(advanced)['issues'][0]['reason'])
+        self.assertEqual(old.stat().st_nlink, 2)
+        archive = next((self.root / 'publication-state').glob('conversation-imports/*/archived.jsonl'))
+        retried = self.publish(advanced)
+        self.assertEqual(retried['issues'], [])
+        self.assertEqual(len(retried['unchanged']), 1)
+        self.assertFalse(old.exists())
+        self.assertEqual(archive.stat().st_nlink, 1)
+        self.assertEqual(archive.stat().st_ino, inode)
+        self.assertEqual(archive.read_bytes(), before)
+        self.assertEqual(len(list(source.parent.glob('*.jsonl'))), 2)
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(source.stat().st_ino, source_inode)
+
+    def test_foreign_second_link_never_authorizes_native_recovery(self):
+        source, _, entry, env, _, _ = self.codex_ancestor_fixture()
+        with patch.object(self.api.agents, '_history', side_effect=ValueError('fixture failed projection')):
+            self.assertTrue(self.publish(entry, env=env)['issues'])
+        target = self.api._codex_target(Path(env['CODEX_HOME']), source.name)
+        foreign = self.root / 'foreign-hardlink'
+        os.link(target, foreign)
+        before, inode = target.read_bytes(), target.stat().st_ino
+        retried = self.publish(entry, env=env)
+        self.assertTrue(retried['issues'])
+        self.assertTrue(foreign.exists())
+        self.assertEqual(target.stat().st_nlink, 2)
+        self.assertEqual(target.stat().st_ino, inode)
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_foreign_archive_link_is_never_removed_during_claude_recovery(self):
+        source = self.claude(); entry = self.capture()['entries'][0]
+        first = self.publish(entry)
+        old = source.with_name(first['imported'][0]['session_id'] + '.jsonl')
+        before, inode = old.read_bytes(), old.stat().st_ino
+        receipt = next((self.root / 'publication-state').glob('conversation-imports/*/receipt.json'))
+        archive = receipt.with_name('archived.jsonl')
+        archive.write_bytes(before)  # Identical bytes do not establish inode ownership.
+        foreign = self.root / 'foreign-archive-link'
+        os.link(archive, foreign)
+        foreign_inode = archive.stat().st_ino
+        with source.open('ab') as out:
+            out.write(lines([dict(type='assistant', uuid=str(uuid.uuid4()), sessionId=self.sid, cwd=str(self.project.root), version='2.1.302', message=dict(role='assistant', content='Next', stop_reason='end_turn'))]))
+        advanced = next(e for e in self.capture()['entries'] if e['session_id'] == self.sid)
+        retried = self.publish(advanced)
+        self.assertTrue(retried['issues'])
+        self.assertEqual(archive.stat().st_ino, foreign_inode)
+        self.assertEqual(archive.stat().st_nlink, 2)
+        self.assertEqual(archive.read_bytes(), before)
+        self.assertTrue(foreign.exists())
+        self.assertEqual(old.stat().st_ino, inode)
+        self.assertEqual(old.read_bytes(), before)
+
     def test_claude_picker_ready_standalone_and_semantic_idempotence(self):
         original = self.claude()
         entry = self.capture()['entries'][0]

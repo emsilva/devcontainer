@@ -1,4 +1,4 @@
-"""Native stdio client and project-note context without replacing profiles."""
+"""Metadata-only native stdio client and paginated conversation history."""
 from __future__ import annotations
 
 import json
