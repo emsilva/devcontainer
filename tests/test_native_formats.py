@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
+from unittest.mock import patch
 import unittest
 import uuid
 
@@ -30,6 +31,83 @@ class NativeFormatTests(unittest.TestCase):
             request['system'][0]['cache_control'] = dict(type='ephemeral')
             rows.append(dict(type='api-request', sessionId=self.sid, id=str(uuid.uuid4()), shapeHash=digest(shape), keep=count - 1, tail=[digest(message)], params={}, cacheControl=[dict(path=['system', 0], value=dict(type='ephemeral'))], requestDigest=digest(request)))
         return rows
+
+    def inline_attachments(self):
+        return [
+            dict(type='hook_success', command='historical-command', content='inline result', stdout='ok', stderr='', hookName='fixture', hookEvent='SessionStart', toolUseID='fixture-tool', durationMs=1.5, exitCode=0),
+            dict(type='hook_additional_context', content=['inline context'], hookName='fixture', hookEvent='SessionStart', toolUseID='fixture-tool'),
+            dict(type='deferred_tools_delta', **{key: ['fixture'] for key in ('addedLines', 'addedNames', 'readdedNames', 'removedNames', 'wireHiddenNames', 'pendingMcpServers', 'failedMcpServers', 'needsAuthMcpServers')}, toolSearchAbsent=False),
+            dict(type='mcp_instructions_delta', addedBlocks=['inline instructions'], addedNames=['fixture'], removedNames=[]),
+            dict(type='instructions', files=[dict(path='/historical-outside-checkout/CLAUDE.md', content='inline user instructions', type='User'), dict(path=self.root + '/CLAUDE.md', content='inline project instructions', type='Project')]),
+            dict(type='prompt_snapshot', systemPrompt=['inline system prompt'], contextRendering='inline context', echoWireToolInputs=False, reminderFold=True, inlineTools=True, keptReminders=False, systemTurns=True, toolChangeHeader=False, cliPrefix='historical prefix', tools=[dict(name='fixture-tool', description='inline tool', schema=dict(type='object', properties={}))]),
+        ]
+
+    def test_six_inline_claude_attachments_preserve_fields_without_dereferencing(self):
+        for attachment in self.inline_attachments():
+            with self.subTest(kind=attachment['type']):
+                attachment['futureInlineField'] = dict(path='/unrelated/historical/path', body='preserved')
+                rows = [dict(type='user', sessionId=self.sid, cwd=self.root, message=dict(role='user', content='Project request')),
+                        dict(type='attachment', attachment=attachment)]
+                before = copy.deepcopy(rows)
+                encoded = b''.join(json.dumps(row).encode() + b'\n' for row in rows)
+                with patch.object(sessions.subprocess, 'run', side_effect=AssertionError('must not execute inline command')), patch.object(Path, 'read_bytes', side_effect=AssertionError('must not dereference provenance')):
+                    parsed = sessions._records(encoded, 'claude')
+                    try:
+                        sessions._validate_claude(parsed, self.sid, [self.root])
+                    except ValueError as error:
+                        self.fail(str(error))
+                self.assertEqual(parsed, before)
+                self.assertEqual(rows, before)
+                # Provenance does not authorize another structural runtime root.
+                parsed[0]['cwd'] = '/unrelated/historical/path'
+                with self.assertRaises(ValueError):
+                    sessions._validate_claude(parsed, self.sid, [self.root])
+
+    def test_inline_claude_attachments_reject_malformed_known_shapes(self):
+        broken = [dict(type=['hook_success']), dict(type={'name': 'prompt_snapshot'})]
+        for good in self.inline_attachments():
+            for key, value in good.items():
+                if key == 'type': continue
+                missing = copy.deepcopy(good); missing.pop(key)
+                # Snapshot rendering/tool fields are optional, but typed when present.
+                if good['type'] != 'prompt_snapshot' or key in ('systemPrompt', 'contextRendering'):
+                    broken.append(missing)
+                malformed = copy.deepcopy(good)
+                malformed[key] = 1 if isinstance(value, bool) else (False if isinstance(value, (int, float)) else None)
+                broken.append(malformed)
+        for kind, key in ((0, 'durationMs'), (0, 'exitCode')):
+            bad = self.inline_attachments()[kind]; bad[key] = True; broken.append(bad)
+        for duration in (-1, float('nan'), float('inf')):
+            bad = self.inline_attachments()[0]; bad['durationMs'] = duration; broken.append(bad)
+        for bad_file in (dict(path='historic', type='Project'), dict(path='historic', content='inline', type='Future'), dict(path=123, content='inline', type='User')):
+            bad = self.inline_attachments()[4]; bad['files'] = [bad_file]; broken.append(bad)
+        for bad_tool in (dict(name='tool', description='inline', schema=[]), dict(name='tool', schema={}), 'external-tool-reference'):
+            bad = self.inline_attachments()[5]; bad['tools'] = [bad_tool]; broken.append(bad)
+        for kind in (1, 2, 3, 5):
+            bad = self.inline_attachments()[kind]
+            key = {1: 'content', 2: 'addedNames', 3: 'addedBlocks', 5: 'systemPrompt'}[kind]
+            bad[key] = ['inline', {}]; broken.append(bad)
+        for attachment in broken:
+            with self.subTest(kind=attachment['type']), self.assertRaises(ValueError):
+                rows = [dict(type='user', sessionId=self.sid, cwd=self.root), dict(type='attachment', attachment=attachment)]
+                sessions._validate_claude(rows, self.sid, [self.root])
+
+    def test_inline_attachments_keep_memory_unknown_dependency_and_request_refusals(self):
+        for attachment in self.inline_attachments():
+            attachment['unknownPreservedField'] = '<oai-mem-citation>private</oai-mem-citation>'
+            data = (json.dumps(dict(type='attachment', attachment=attachment)) + '\n').encode().replace(b'<', b'\\u003c')
+            with self.subTest(kind=attachment['type']), self.assertRaisesRegex(ValueError, 'memory'):
+                sessions._records(data, 'claude')
+        rows = self.requests()
+        inline = [dict(type='attachment', attachment=value) for value in self.inline_attachments()]
+        for bad in (dict(type='attachment', attachment=dict(type='future-inline-variant', content='inline')),
+                    dict(type='assistant', message=dict(role='assistant', content=[dict(type='tool_use', name='Agent', id='child', input={})])),
+                    dict(type='api-request', shapeHash='0'*64, keep=0, tail=[], params={}, requestDigest='0'*64)):
+            with self.subTest(kind=bad['type']), self.assertRaises(ValueError):
+                sessions._validate_claude(rows + inline + [bad], self.sid, [self.root])
+        corrupted = copy.deepcopy(rows); corrupted[-1]['requestDigest'] = '0'*64
+        with self.assertRaisesRegex(ValueError, 'digest'):
+            sessions._validate_claude(corrupted + inline, self.sid, [self.root])
 
     def test_claude_request_shape_blob_delta_and_cache_control_are_validated(self):
         rows = self.requests()

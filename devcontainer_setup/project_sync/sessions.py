@@ -164,6 +164,50 @@ def _validate_codex_scope(rows, roots):
             structural(payload.get('thread_settings', {}))
 
 
+# These known attachments carry their complete historical payload inline.
+# Their commands, paths, instruction text and tool schemas are never resolved.
+CLAUDE_INLINE_FIELDS = {
+    'hook_success': (('command', 'content', 'stdout', 'stderr', 'hookName', 'hookEvent', 'toolUseID'), ()),
+    'hook_additional_context': (('hookName', 'hookEvent', 'toolUseID'), ('content',)),
+    'deferred_tools_delta': ((), ('addedLines', 'addedNames', 'readdedNames', 'removedNames', 'wireHiddenNames', 'pendingMcpServers', 'failedMcpServers', 'needsAuthMcpServers')),
+    'mcp_instructions_delta': ((), ('addedBlocks', 'addedNames', 'removedNames')),
+    'instructions': ((), ()),
+    'prompt_snapshot': (('contextRendering',), ('systemPrompt',)),
+}
+
+
+def _validate_claude_inline(attachment):
+    """Check known inline shapes without mutating or following provenance."""
+    kind = attachment['type']
+    strings, lists = CLAUDE_INLINE_FIELDS[kind]
+    valid = (all(isinstance(attachment.get(key), str) for key in strings)
+             and all(isinstance(attachment.get(key), list)
+                     and all(isinstance(value, str) for value in attachment[key]) for key in lists))
+    if kind == 'hook_success':
+        duration = attachment.get('durationMs')
+        valid = (valid and type(duration) in (int, float) and 0 <= duration < float('inf')
+                 and type(attachment.get('exitCode')) is int)
+    elif kind == 'deferred_tools_delta':
+        valid = valid and type(attachment.get('toolSearchAbsent')) is bool
+    elif kind == 'instructions':
+        files = attachment.get('files')
+        valid = (valid and isinstance(files, list)
+                 and all(isinstance(item, dict) and isinstance(item.get('path'), str)
+                         and isinstance(item.get('content'), str) and item.get('type') in ('User', 'Project') for item in files))
+    elif kind == 'prompt_snapshot':
+        flags = ('echoWireToolInputs', 'reminderFold', 'inlineTools', 'keptReminders', 'systemTurns', 'toolChangeHeader')
+        valid = valid and all(type(attachment[key]) is bool for key in flags if key in attachment)
+        if 'cliPrefix' in attachment:
+            valid = valid and isinstance(attachment['cliPrefix'], str)
+        if 'tools' in attachment:
+            tools = attachment['tools']
+            valid = (valid and isinstance(tools, list)
+                     and all(isinstance(tool, dict) and isinstance(tool.get('name'), str)
+                             and isinstance(tool.get('description'), str) and isinstance(tool.get('schema'), dict) for tool in tools))
+    if not valid:
+        raise ValueError('Invalid Claude inline attachment shape')
+
+
 def _validate_claude(rows, sid, roots, *, child=False):
     """Validate inline native request dependencies and structural checkout scope."""
     shapes, blobs, previous = {}, {}, []
@@ -191,8 +235,9 @@ def _validate_claude(rows, sid, roots, *, child=False):
                     blobs[digest] = normalized
         elif kind == 'attachment':
             attachment = row.get('attachment')
-            supported = {'environment', 'model', 'total_tokens_reminder', 'session_context', 'date', 'credential_org', 'advisor_tool'}
-            if not isinstance(attachment, dict) or attachment.get('type') not in supported:
+            supported = {'environment', 'model', 'total_tokens_reminder', 'session_context', 'date', 'credential_org', 'advisor_tool'} | CLAUDE_INLINE_FIELDS.keys()
+            if (not isinstance(attachment, dict) or not isinstance(attachment.get('type'), str)
+                    or attachment['type'] not in supported):
                 raise ValueError('Unsupported Claude attachment dependency')
             if attachment['type'] == 'environment':
                 snapshot = attachment.get('snapshot')
@@ -201,6 +246,8 @@ def _validate_claude(rows, sid, roots, *, child=False):
                 _scoped_roots(snapshot.get('workingDirectory'), roots, child=child)
                 for directory in snapshot.get('additionalWorkingDirectories', []):
                     _scoped_roots(directory, roots, child=True)
+            elif attachment['type'] in CLAUDE_INLINE_FIELDS:
+                _validate_claude_inline(attachment)
         elif kind in ('api-request-shape', 'api-request-blob'):
             key, value, known = ('shapeHash', row.get('shape'), shapes) if kind == 'api-request-shape' else ('hash', row.get('message'), blobs)
             if not isinstance(value, dict):
