@@ -26,8 +26,8 @@
 **Interface:** Add `publish_conversations(project, store, snapshot_id, *, state=None, env=None) -> dict` with `imported`, `unchanged`, and `issues` lists. Consume schema-2 manifests containing `project` and `conversations`, no `files`. Preserve existing capture API and validation of supported native closure. The RPC/controller invokes this API on either destination; it must not launch an interactive agent or a model turn.
 
 - [ ] Write failing tests for idempotent picker-ready imports, metadata-only changes, conflicting native identities, completed-turn advance and echo suppression.
-- [ ] Codex: reuse validated no-turn app-server fork/import operations; publish native fork with destination cwd, without developer context injection or automatic resume of already published results.
-- [ ] Claude: materialize a new standalone session with destination cwd/namespace and new session ID while preserving messages, ancestry and cache/request-dependent fields. Make native discovery work; use only supported/verified index structures.
+- [ ] Codex: publish a separate new-ID selected-leaf transcript with destination metadata; preserve retained history rows and dependency ancestor bytes/offsets. Use native no-turn read/resume metadata operations once to index that exclusively owned import. No developer context injection or automatic resume of completed publications. Native metadata-only forks were tested and hidden by the native session list, so do not use that path.
+- [ ] Claude: materialize a new standalone session with destination cwd/namespace and new session ID while preserving messages, ancestry and cache/request-dependent fields. Verify native discovery with the official SDK; it discovers standalone transcripts without synthetic index files.
 - [ ] Journal owned imports safely. Derive stable revision keys from semantic content/cutoff/closure, excluding mtime/display fields. Suppress unchanged imported sources/dependencies/forks from capture; allow newly completed turns to be exported.
 - [ ] Remove dead managed launch/argv/memory injection functions after callers are retired by Root; retain no-turn client/history utilities.
 - [ ] Run native/session covering tests, commit only owned paths, write report under ignored `.superpowers/sdd/`.
@@ -40,9 +40,9 @@
 
 - [ ] Write failing tests proving no source/Git/index objects enter a checkpoint, no repository mutation/restore API exists, and both import directions run with retry-safe behavior.
 - [ ] Reuse verified object transport and store. Remove file capture and restore dependency. Do not weaken digest, identity, size or interrupted-transfer checks.
-- [ ] Replace background code checkpoints with the two-way conversation cycle while keeping scratch synchronization independent and conflict-preserving. Upgrade the runtime producer version so old workers are replaced normally.
+- [ ] Replace background code checkpoints with the two-way conversation cycle while keeping scratch synchronization independent and conflict-preserving. Call notes.configure_memory(project) on local connection and remote publish to route native Claude memory through the project-local setting. Upgrade the runtime producer version so old workers are replaced normally.
 - [ ] Connect Herdr to a verified existing, non-generated Codespace checkout; filter `.devcontainer-work` candidates. Existing checkout and dirty index remain untouched; branch differences do not trigger automatic Git operations.
-- [ ] Migrate legacy registry/bindings without using generated or recovered working copies. Preserve legacy state/directories. If original checkout cannot be identified uniquely, show available choices rather than creating or overwriting a directory.
+- [ ] Migrate legacy registry/bindings without using generated or recovered working copies. Pause and retain the old verified owned Mutagen session/baseline during endpoint retarget, rather than terminating it; retain config/receipt archives and safely reconcile pending legacy retarget intents. Preserve legacy state/directories. If original checkout cannot be identified uniquely, show available choices rather than creating or overwriting a directory.
 - [ ] Local status stays available offline; report actual scratch and conversation synchronization health instead of code-recovery promises. Remove unused local recovery and agent-launch branches.
 - [ ] Run focused replication/workspace/scratch tests, commit owned paths, write report.
 
