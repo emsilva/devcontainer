@@ -170,6 +170,19 @@ class NativeMemoryTests(unittest.TestCase):
         self.assertFalse(self.path.exists())
         self.assertEqual((self.source / 'MEMORY.md').read_text(), 'Concurrent legacy edit\n')
 
+    @unittest.skipIf(os.geteuid() == 0, 'Root can read mode-000 directories')
+    def test_unreadable_nested_notes_refuse_without_redirecting(self):
+        self.legacy()
+        directory = self.source / 'topics'
+        directory.chmod(0)
+        try:
+            with self.assertRaises(OSError):
+                notes.configure_memory(self.project)
+            self.assertFalse(self.path.exists())
+            self.assertFalse(self.destination.exists())
+        finally:
+            directory.chmod(0o700)
+
     def test_concurrent_destination_creation_never_overwrites_owner_note(self):
         self.legacy()
         original = notes._copy_memory

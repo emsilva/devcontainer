@@ -188,18 +188,26 @@ def _memory_tree(source):
     if not source.is_dir():
         raise ValueError('Claude memory source must be a directory; settings preserved')
     files, total = {}, 0
-    for path in source.rglob('*'):
-        if path.is_symlink():
-            raise ValueError('Linked Claude memory notes cannot be migrated; settings preserved')
-        if path.is_dir():
-            continue
-        data = _memory_bytes(path)
-        if data is None:
-            raise ValueError('Claude memory changed during migration; settings preserved')
-        total += len(data)
-        files[path.relative_to(source).as_posix()] = data
-        if len(files) > 4096 or total > 64 * 1024 * 1024:
-            raise ValueError('Claude project memory exceeds migration limits; settings preserved')
+    def visit(directory):
+        nonlocal total
+        # pathlib's recursive glob suppresses unreadable-directory errors. A
+        # migration must fail rather than certify an incomplete memory tree.
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                path = Path(entry.path)
+                if entry.is_symlink():
+                    raise ValueError('Linked Claude memory notes cannot be migrated; settings preserved')
+                if entry.is_dir(follow_symlinks=False):
+                    visit(path)
+                    continue
+                data = _memory_bytes(path)
+                if data is None:
+                    raise ValueError('Claude memory changed during migration; settings preserved')
+                total += len(data)
+                files[path.relative_to(source).as_posix()] = data
+                if len(files) > 4096 or total > 64 * 1024 * 1024:
+                    raise ValueError('Claude project memory exceeds migration limits; settings preserved')
+    visit(source)
     return files
 
 
