@@ -1,4 +1,4 @@
-"""Verified content-addressed checkpoints, independent of live source custody."""
+"""Verified conversation-only exchange; repositories remain entirely user managed."""
 from __future__ import annotations
 
 import base64
@@ -6,7 +6,6 @@ import hashlib
 from pathlib import Path
 
 from .checkpoint_store import Store
-from .project_files import capture_files
 from .rpc import BATCH_BYTES, BATCH_ITEMS, SINGLE_BYTES, _decode, _digests
 
 
@@ -29,29 +28,33 @@ def references(value):
             yield from references(item)
 
 
-def capture(project, store, *, env=None):
-    files = capture_files(project, store)
-    conversations = capture_conversations(project, store, state=store.state, env=env)
-    return store.save(dict(schema=1,
+def capture(project, store, *, env=None, historical_roots=()):
+    conversations = capture_conversations(project, store, state=store.state, env=env, historical_roots=historical_roots)
+    return store.save(dict(schema=2,
         project=dict(identity=project.identity, project_id=project.project_id, root=str(project.root)),
-        files=files, conversations=conversations,
-        producer=dict(format='devcontainer-project-checkpoint-v1')))
+        conversations=conversations,
+        producer=dict(format='devcontainer-project-conversations-v2')))
 
 
 def validate_manifest(manifest, identity, project_id=None):
-    if (manifest.get('schema') != 1 or manifest.get('project', {}).get('identity') != identity
-            or (project_id is not None and manifest['project'].get('project_id') != project_id)):
+    if (not isinstance(manifest, dict) or manifest.get('schema') != 2
+            or set(manifest) != {'schema', 'project', 'conversations', 'producer'}):
+        raise ValueError('New transfers require conversation-only schema-2 manifests')
+    project = manifest.get('project')
+    if (not isinstance(project, dict) or project.get('identity') != identity
+            or project.get('project_id') != hashlib.sha256(identity.encode()).hexdigest()[:24]
+            or (project_id is not None and project.get('project_id') != project_id)):
         raise ValueError('Checkpoint project identity differs')
-    files_project = manifest.get('files', {}).get('project', {})
-    if (files_project.get('identity') != identity
-            or files_project.get('project_id') != manifest['project'].get('project_id')):
-        raise ValueError('Checkpoint file project identity differs')
+    conversations = manifest.get('conversations')
+    if (not isinstance(conversations, dict) or not isinstance(conversations.get('entries'), list)
+            or not isinstance(conversations.get('issues'), list)):
+        raise ValueError('Invalid conversation-only manifest')
+    list(references(manifest))
 
 
 def transfer(source_store, destination, snapshot_id, *, source, identity=None):
     manifest = source_store.load(snapshot_id)
-    if identity is not None:
-        validate_manifest(manifest, identity)
+    validate_manifest(manifest, identity or manifest.get('project', {}).get('identity', ''))
     digests = sorted(set(references(manifest)))
     if isinstance(destination, RemoteStore):
         missing = destination.missing(digests)
@@ -179,9 +182,39 @@ class RemoteStore:
         return self.endpoint.call('acknowledge', snapshot_id=snapshot_id, source=source)
 
 
-def checkpoint_remote(connection, project, state, remote_root):
+def _memory(project):
+    from .notes import configure_memory
+    try:
+        configure_memory(project)
+    except (OSError, ValueError) as error:
+        from .sessions import display_text
+        return [dict(component='memory', reason=display_text(str(error), 400))]
+    return []
+
+
+def sync_project_data(connection, project, state, remote_root, *, env=None, historical_roots=()):
+    """Publish each direction independently of scratch and retain verified receipts."""
+    from .conversations import publish_conversations
     from .rpc import RemoteEndpoint
+    state = Path(state)
+    store = Store(state)
     endpoint = RemoteEndpoint(connection, remote_root, project.identity)
-    snapshot_id = endpoint.call('capture')['snapshot_id']
-    return transfer(RemoteStore(endpoint), Store(Path(state)), snapshot_id,
-                    source='codespace', identity=project.identity)
+    issues = _memory(project)
+    snapshot_id = capture(project, store, env=env)
+    remote_store = RemoteStore(endpoint)
+    transfer(store, remote_store, snapshot_id, source='desktop', identity=project.identity)
+    remote_publication = endpoint.call('publish', snapshot_id=snapshot_id)
+    local_publication = dict(imported=[], unchanged=[], issues=[])
+    # Historical roots are explicitly supplied from verified migration records.
+    # Each endpoint repeats canonical Git identity verification before capture.
+    for root in dict.fromkeys([remote_root, *historical_roots]):
+        source = endpoint if root == remote_root else RemoteEndpoint(connection, root, project.identity)
+        captured = source.call('capture')['snapshot_id']
+        receipt = transfer(RemoteStore(source), store, captured, source='codespace', identity=project.identity)
+        publication = publish_conversations(project, store, captured, state=state, env=env)
+        for key in local_publication:
+            local_publication[key].extend(publication[key])
+    issues.extend(remote_publication.get('issues', []))
+    issues.extend(local_publication['issues'])
+    return dict(schema=2, receipt=receipt, local_publication=local_publication,
+                remote_publication=remote_publication, issues=issues)

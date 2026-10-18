@@ -58,21 +58,26 @@ def _rows(data):
     return result
 
 
-def _scopes(project, state):
+def _scopes(project, state, historical_roots=()):
     scopes = {str(project.root)}
+    registry = {}
     if state is not None:
         try:
             registry = read_json(Path(state) / 'workspace.json')
         except FileNotFoundError:
-            registry = {}
-        if registry:
-            if registry.get('project_id') != project.project_id or registry.get('identity') != project.identity:
-                raise ValueError('Workspace registry belongs to another project')
-            for key in ('local_root', 'local_active_root', 'remote_root', 'remote_active_root'):
-                value = registry.get(key)
-                if value is not None:
-                    sessions._scoped_roots(value, [value])
-                    scopes.add(value)
+            pass
+        if registry and (registry.get('project_id') != project.project_id or registry.get('identity') != project.identity):
+            raise ValueError('Workspace registry belongs to another project')
+    # Legacy active-root strings are not scope attestations. Migration verifies
+    # actual Git identity before retaining these host-specific historical roots;
+    # RPC independently verifies every explicit remote capture root.
+    for roots in (registry.get('verified_local_historical_roots', []),
+                  registry.get('verified_remote_historical_roots', []), historical_roots):
+        if not isinstance(roots, (list, tuple)) or len(roots) > 100:
+            raise ValueError('Historical project scopes exceed verified root bound')
+        for root in roots:
+            sessions._scoped_roots(root, [root])
+            scopes.add(root)
     return sorted(scopes)
 
 
@@ -347,9 +352,9 @@ def _import_aliases(project, state):
     return aliases
 
 
-def capture_conversations(project, store, *, state=None, env=None):
+def capture_conversations(project, store, *, state=None, env=None, historical_roots=()):
     """Observe ordinary project sessions without a native process or writer lock."""
-    scopes = _scopes(project, state)
+    scopes = _scopes(project, state, historical_roots)
     result = dict(schema=SCHEMA, entries=[], issues=[])
     def issue(agent, sid, error):
         result['issues'].append(dict(agent=agent, session_id=sid, reason=sessions.display_text(str(error), 400)))

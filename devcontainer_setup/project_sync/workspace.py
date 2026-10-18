@@ -1,4 +1,4 @@
-"""Local-first Herdr workspaces backed by acknowledged project checkpoints."""
+"""Connect Herdr to existing checkouts with scratch and native conversation sync."""
 from __future__ import annotations
 
 import json
@@ -26,7 +26,7 @@ def registry(project, state):
         raise ValueError('Workspace registry differs from this project; existing state preserved')
     allowed = [value.get(k) for k in ('local_root', 'local_active_root', 'remote_root', 'remote_active_root')]
     if str(project.root) not in allowed:
-        raise ValueError('Another checkout already owns this project pairing; use its task work entrypoint')
+        raise ValueError('Another checkout already owns this project pairing; use its task work:cs entrypoint')
     return value
 
 
@@ -37,60 +37,10 @@ def _project(root, identity):
     return project
 
 
-def _recover(project, state, value):
-    from .project_files import restore_files
-    store = Store(Path(state))
-    latest = store.latest('codespace')
-    if latest is None:
-        raise ValueError('No acknowledged Codespace checkpoint is available on this Mac yet')
-    snapshot_id = latest['snapshot_id']
-    manifest = store.load(snapshot_id)
-    from .replication import validate_manifest
-    validate_manifest(manifest, project.identity, project.project_id)
-    destination = Path(state) / 'recovered' / snapshot_id
-    # Existing directories are never reconstructed over user work. Only registry
-    # ownership permits reuse, and every fresh recovery gets an absent directory.
-    if destination.exists():
-        destination = Path(state) / 'recovered' / (snapshot_id + '-' + str(time.time_ns()))
-    from .state import _parent
-    with _parent(destination, create=True, private=True):
-        pass
-    recovered = restore_files(store, manifest['files'], destination)
-    value.update(local_active_root=str(recovered.root), active_host='local', recovered_from=snapshot_id)
-    _write(state, value)
-    print('Recovered the last checkpoint received on this Mac:', latest['received_at'])
-    print('Working copy:', recovered.root)
-    return recovered
-
-
-def local_project(project, state):
-    state = Path(state)
-    with locked(state / 'workspace-control.lock', blocking=True):
-        value = registry(project, state)
-        scratch.complete_retarget(state)
-        if value.get('active_host') == 'codespace':
-            # Deliberately no Codespaces API, SSH, source-release or network gate.
-            scratch.stop(state)
-            active = _recover(project, state, value)
-        else:
-            active = _project(value['local_active_root'], project.identity)
-            _write(state, value)
-        binding_path = state / scratch.CONFIG
-        if binding_path.exists():
-            binding = read_json(binding_path)
-            if binding.get('identity') != project.identity:
-                raise ValueError('Scratch pairing project identity differs')
-            try:
-                scratch.retarget(active.root, state, binding['codespace'], binding['remote_root'])
-                scratch.start(active.root, state)
-            except (OSError, ValueError):
-                print('Local work is available. Background protection is stopped; inspect task work:status.')
-    return active
-
-
-def local(project, state):
-    from .herdr import open_local
-    return open_local(local_project(project, state), state)
+def _ordinary(root):
+    return (isinstance(root, str) and Path(root).is_absolute()
+            and '..' not in Path(root).parts and '.devcontainer-work' not in Path(root).parts
+            and not any(ord(c) < 32 for c in root))
 
 
 def _choose_pairing(project, state, value):
@@ -99,8 +49,8 @@ def _choose_pairing(project, state, value):
     primary = _project(value['local_root'], project.identity)
     service = Codespaces(primary, state)
     binding_path = Path(state) / scratch.CONFIG
-    if binding_path.exists():
-        binding = read_json(binding_path)
+    binding = read_json(binding_path) if binding_path.exists() else None
+    if binding:
         if binding.get('identity') != project.identity:
             raise ValueError('Codespace pairing belongs to another project')
         name = binding['codespace']
@@ -109,88 +59,144 @@ def _choose_pairing(project, state, value):
             raise ValueError('Paired Codespace repository differs')
         if row.get('state') != 'Available':
             service.start_codespace(name)
-        return name, value.get('remote_root') or binding['remote_root']
-    spaces = service.spaces()
-    if not spaces:
-        raise ValueError('No Codespace for this repository/branch; create one in setup first')
-    labels = [r['name'] + ' (' + r.get('state', 'unknown') + ')' for r in spaces]
-    index = 0 if len(spaces) == 1 else labels.index(Gum().choose('Codespace', labels))
-    row = spaces[index]
-    if row.get('state') != 'Available':
-        service.start_codespace(row['name'])
-    roots = service.roots(row['name'])
+        # Verify even a saved original: old registries may point at generated
+        # worktrees, or the checkout may have been removed or repurposed.
+        roots = service.roots(name, accept_new=False)
+    else:
+        spaces = service.spaces()
+        if not spaces:
+            raise ValueError('No Codespace for this repository; create one in setup first')
+        labels = [r['name'] + ' (' + r.get('state', 'unknown') + ')' for r in spaces]
+        row = spaces[0] if len(spaces) == 1 else spaces[labels.index(Gum().choose('Codespace', labels))]
+        name = row['name']
+        if row.get('state') != 'Available':
+            service.start_codespace(name)
+        roots = service.roots(name)
+    roots = [root for root in roots if _ordinary(root)]
+    for saved in (value.get('remote_root'), binding.get('remote_root') if binding else None):
+        if saved in roots:
+            return name, saved
+    if len(roots) == 1:
+        return name, roots[0]
     if not roots:
-        raise ValueError('No verified project checkout found in Codespace')
-    root = roots[0] if len(roots) == 1 else Gum().choose('Project checkout', roots)
-    service.pair(row['name'], root)
-    return row['name'], root
+        raise ValueError('No verified ordinary project checkout found; existing bindings preserved')
+    raise ValueError('Choose a verified ordinary project checkout: ' + ', '.join(roots))
+
+
+def _verify_roots(connection, project, roots):
+    verified = []
+    for root in dict.fromkeys(roots):
+        if not isinstance(root, str) or not Path(root).is_absolute() or '..' in Path(root).parts:
+            continue
+        try:
+            remote = json.loads(scratch._remote(connection, root, allow_missing_scratch=True))
+            if remote.get('identity') == project.identity and remote.get('root') == root:
+                verified.append(root)
+        except (OSError, ValueError):
+            continue
+    return verified
+
+
+def _conversation_receipt(project, state):
+    try:
+        store = Store(Path(state))
+        latest = store.latest('codespace')
+        if latest is None:
+            return None, {}
+        manifest = store.load(latest['snapshot_id'])
+        from .replication import validate_manifest
+        validate_manifest(manifest, project.identity, project.project_id)
+        return latest, manifest['conversations']
+    except (OSError, ValueError, KeyError):
+        # Legacy objects/receipts remain retained, without claiming current health.
+        return None, {}
 
 
 def _ready(project, state, timeout=120):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         runtime = scratch.status(state)
-        if runtime.get('phase') == 'syncing' and runtime.get('checkpoint') and not runtime.get('checkpoint_error'):
+        latest, _ = _conversation_receipt(project, state)
+        if (runtime.get('running') and runtime.get('phase') == 'syncing'
+                and runtime.get('conversations', {}).get('schema') == 2 and latest
+                and not runtime.get('conversation_error')):
             return
         if not runtime.get('running'):
-            raise ValueError('Project backup worker stopped; inspect task scratch:logs')
+            raise ValueError('Scratch/conversation worker stopped; inspect task scratch:logs')
         time.sleep(.25)
-    raise ValueError('Waiting for the first Mac checkpoint timed out; inspect task work:status and scratch:logs')
+    raise ValueError('Waiting for conversation synchronization timed out; inspect task work:status and scratch:logs')
 
 
 def remote(project, state):
     if os.environ.get('CODESPACES') == 'true':
-        raise ValueError('Run task work:cs on your Mac so it can receive recovery checkpoints')
+        raise ValueError('Run task work:cs on your Mac to connect the project')
     from .herdr import open_remote
     from .ssh_hosts import configure_ssh
-    from .replication import capture, checkpoint_remote, transfer, RemoteStore
-    from .rpc import RemoteEndpoint
+    from .replication import sync_project_data
     from .transport import CodespaceConnection
     state = Path(state)
     with locked(state / 'workspace-control.lock', blocking=True):
         value = registry(project, state)
-        scratch.complete_retarget(state)
+        primary = _project(value['local_root'], project.identity)
+        if not _ordinary(str(primary.root)) or primary.root.is_relative_to(state):
+            raise ValueError('Saved local checkout is generated; select the original ordinary checkout')
         print('Connecting Codespace…', flush=True)
-        name, original_remote = _choose_pairing(project, state, value)
-        active_local = _project(value['local_active_root'], project.identity)
+        # Selection/verification precedes any controller/binding changes.
+        name, remote_root = _choose_pairing(primary, state, value)
+        if not _ordinary(remote_root):
+            raise ValueError('Choose a verified ordinary Codespace checkout')
         with CodespaceConnection(name, state=state) as connection:
-            # Preserve remote work before making a new desktop-seeded checkout.
-            prior_root = value.get('remote_active_root') or original_remote
-            print('Saving the Codespace’s current work on this Mac…', flush=True)
-            checkpoint_remote(connection, project, state, prior_root)
-            if value.get('active_host') != 'codespace' or not value.get('remote_active_root'):
-                print('Preparing a Codespace working copy from this desktop…', flush=True)
-                store = Store(state)
-                snapshot_id = capture(active_local, store)
-                store.acknowledge(snapshot_id, source='local')
-                endpoint = RemoteEndpoint(connection, original_remote, project.identity)
-                transfer(store, RemoteStore(endpoint), snapshot_id, source='desktop', identity=project.identity)
-                destination = '/workspaces/.devcontainer-work/' + project.project_id + '/' + snapshot_id
-                active_remote = endpoint.call('restore', snapshot_id=snapshot_id, destination=destination)['root']
-            else:
-                active_remote = value['remote_active_root']
-        scratch.retarget(active_local.root, state, name, active_remote)
-        print('Starting Mac backups and scratch sync…', flush=True)
-        scratch.start(active_local.root, state)
-        _ready(active_local, state)
-        configure_ssh(project, state)
-        value.update(codespace=name, remote_root=original_remote, remote_active_root=active_remote, active_host='codespace')
-        _write(state, value)
-    latest = Store(state).latest('codespace')
-    conversations = Store(state).load(latest['snapshot_id']).get('conversations', {})
-    print(f"Mac checkpoint received: {latest['received_at']}. Keep this Mac awake and connected.")
-    print(f"Conversations: {len(conversations.get('entries', []))} protected; "
-          f"{len(conversations.get('issues', []))} need attention. Details: task work:status")
-    return open_remote(project, state, active_remote)
+            old_roots = [value.get(k) for k in ('remote_root', 'remote_active_root')]
+            old_roots += value.get('verified_remote_historical_roots', value.get('verified_historical_roots', []))
+            local_candidates = list(value.get('verified_local_historical_roots', []))
+            # Migrate the first mixed-root producer without dropping local history.
+            local_candidates += value.get('verified_historical_roots', [])
+            historical = _verify_roots(connection, primary, [r for r in old_roots if r and r != remote_root])
+            local_old = value.get('local_active_root')
+            local_history = []
+            for local_root in dict.fromkeys([local_old, *local_candidates]):
+                if local_root and local_root != str(primary.root):
+                    try:
+                        local_history.append(str(_project(local_root, primary.identity).root))
+                    except (OSError, ValueError):
+                        pass
+            retained = sorted(set(historical + local_history))
+            # Persist only verified historical scopes. Registry fields authorize
+            # capture, so unverified prior active roots cannot remain in them.
+            updated = dict(value, local_active_root=str(primary.root), remote_root=remote_root,
+                         remote_active_root=remote_root, verified_historical_roots=retained,
+                         verified_local_historical_roots=sorted(set(local_history)),
+                         verified_remote_historical_roots=sorted(set(historical)),
+                         codespace=name, active_host='codespace')
+            if updated != value:
+                atomic_write(state / 'workspace-history' / (str(time.time_ns()) + '.json'),
+                             json.dumps(value, sort_keys=True).encode() + b'\n')
+            _write(state, updated)
+            synced = sync_project_data(connection, primary, state, remote_root, historical_roots=historical)
+        scratch.retarget(primary.root, state, name, remote_root)
+        print('Starting scratch and conversation synchronization…', flush=True)
+        scratch.start(primary.root, state)
+        _ready(primary, state)
+        configure_ssh(primary, state)
+    if synced['issues']:
+        print('Conversation/memory synchronization has issues; inspect task work:status.')
+    return open_remote(primary, state, remote_root)
 
 
 def status(project, state):
     value = registry(project, state)
-    store = Store(Path(state))
-    latest = store.latest('codespace')
-    conversations = store.load(latest['snapshot_id']).get('conversations', {}) if latest else {}
+    latest, conversations = _conversation_receipt(project, state)
     runtime = scratch.status(state)
-    sync = scratch.inspect_sync(Path(value['local_active_root']), state) if runtime.get('running') else runtime
+    try:
+        binding = read_json(Path(state) / scratch.CONFIG) if (Path(state) / scratch.CONFIG).exists() else {}
+        sync = scratch.inspect_sync(Path(binding.get('root', value['local_root'])), state) if runtime.get('running') else runtime
+    except (OSError, ValueError) as error:
+        sync = dict(running=runtime.get('running', False), issue=str(error))
+    publication = runtime.get('conversations', {})
+    issues = publication.get('issues', conversations.get('issues', []))
     return dict(workspace=value, worker=runtime, scratch=sync, last_mac_checkpoint=latest,
-                conversations=dict(protected=len(conversations.get('entries', [])), issues=conversations.get('issues', [])),
-                protection='Only checkpoints acknowledged on this awake, connected Mac are recoverable')
+                conversations=dict(protected=len(conversations.get('entries', [])), issues=issues,
+                                   healthy=bool(runtime.get('running') and runtime.get('phase') == 'syncing'
+                                                and latest and publication.get('schema') == 2 and not issues
+                                                and not runtime.get('conversation_error'))),
+                synchronization='Scratch and project conversations only; Git is managed manually')

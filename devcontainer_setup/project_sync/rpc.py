@@ -1,4 +1,4 @@
-"""Small authenticated-SSH RPC surface for immutable project recovery data."""
+"""Small authenticated-SSH RPC surface for immutable project conversation data."""
 from __future__ import annotations
 
 import base64
@@ -15,7 +15,7 @@ BATCH_BYTES = 32 * 1024 * 1024
 BATCH_ITEMS = 1024
 SINGLE_BYTES = 256 * 1024 * 1024
 OPERATIONS = {'capture', 'manifest', 'blob', 'put_blob', 'has_blobs', 'get_blobs',
-              'put_blobs', 'save', 'acknowledge', 'restore'}
+              'put_blobs', 'save', 'acknowledge', 'publish'}
 
 
 def _digest(value):
@@ -57,7 +57,16 @@ class LocalEndpoint:
             raise ValueError('Unsupported checkpoint operation')
         if operation == 'capture':
             from .replication import capture
-            return {'snapshot_id': capture(self.project, self.store)}
+            roots = values.get('historical_roots', [])
+            if not isinstance(roots, list) or len(roots) > 100:
+                raise ValueError('Historical root inventory exceeds bound')
+            for root in roots:
+                if not isinstance(root, str) or not Path(root).is_absolute() or '..' in Path(root).parts:
+                    raise ValueError('Invalid historical checkout')
+                historical = discover_project(Path(root))
+                if str(historical.root) != root or historical.identity != self.project.identity:
+                    raise ValueError('Historical checkout identity differs')
+            return {'snapshot_id': capture(self.project, self.store, historical_roots=roots)}
         if operation == 'has_blobs':
             missing, sizes = [], {}
             for digest in _digests(values['digests']):
@@ -108,35 +117,27 @@ class LocalEndpoint:
             validate_manifest(manifest, self.project.identity, self.project.project_id)
             return {'snapshot_id': self.store.save(manifest)}
         snapshot_id = _digest(values['snapshot_id'])
-        if operation == 'restore':
-            expected = Path('/workspaces/.devcontainer-work') / self.project.project_id / snapshot_id
-            if str(expected) != values['destination']:
-                raise ValueError('Recovery destination differs from owned project checkout')
         manifest = self._manifest(snapshot_id)
         if operation == 'manifest':
             return {'manifest': manifest}
         if operation == 'acknowledge':
             return self.store.acknowledge(snapshot_id, source=values['source'])
-        from .project_files import restore_files
-        # Remote callers may create only this project's immutable-id checkout.
-        destination = Path('/workspaces/.devcontainer-work') / self.project.project_id / snapshot_id
-        if str(destination) != values['destination']:
-            raise ValueError('Recovery destination differs from owned project checkout')
-        if destination.exists():
-            from .state import read_json
-            receipt = read_json(self.store.state / 'remote-recovery' / (snapshot_id + '.json'))
-            found = discover_project(destination)
-            if receipt.get('root') != str(destination) or found.identity != self.project.identity:
-                raise ValueError('Existing recovery checkout lacks matching ownership')
-        else:
-            from .state import _parent
-            with _parent(destination, create=True):
+        from .conversations import publish_conversations
+        from .replication import _memory
+        from .scratch import _scratch
+        from .state import _parent
+        directory = self.project.root / '.scratch'
+        with _parent(directory) as (parent, name):
+            import os
+            try:
+                os.mkdir(name, mode=0o700, dir_fd=parent)
+            except FileExistsError:
                 pass
-            restore_files(self.store, manifest['files'], destination)
-            from .state import atomic_write
-            atomic_write(self.store.state / 'remote-recovery' / (snapshot_id + '.json'),
-                         json.dumps({'root': str(destination)}).encode())
-        return {'root': str(destination)}
+        _scratch(self.project.root)
+        issues = _memory(self.project)
+        published = publish_conversations(self.project, self.store, snapshot_id, state=self.store.state)
+        published['issues'].extend(issues)
+        return published
 
 
 def _dispatch(request):
@@ -187,5 +188,5 @@ class RemoteEndpoint:
             raise ValueError('Checkpoint response exceeds bounded size')
         response = json.loads(raw)
         if response.get('ok') is not True or not isinstance(response.get('result'), dict):
-            raise ValueError('Remote checkpoint operation refused; previous recovery data preserved')
+            raise ValueError('Remote conversation operation refused; previous receipts preserved')
         return response['result']

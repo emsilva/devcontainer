@@ -1,4 +1,4 @@
-"""Detached scratch-only synchronization and immutable recovery snapshots."""
+"""Detached scratch reconciliation and project conversation synchronization."""
 from __future__ import annotations
 import base64
 import hashlib
@@ -194,12 +194,12 @@ def start(root: Path, state: Path) -> dict:
     _scratch(root)
     runtime_id = _runtime_id()
     current = status(state)
-    if current.get('running') and (current.get('checkpoint_version') != 1 or current.get('runtime_id') != runtime_id):
+    if current.get('running') and (current.get('checkpoint_version') != 2 or current.get('runtime_id') != runtime_id):
         stop(state)
     with locked(state / 'scratch-control.lock', blocking=True):
         current = status(state)
         if current['running']:
-            if current.get('checkpoint_version') == 1 and current.get('runtime_id') == runtime_id:
+            if current.get('checkpoint_version') == 2 and current.get('runtime_id') == runtime_id:
                 return current
             raise ValueError('Another worker started during the helper upgrade; retry task work:cs.')
         if current.get('phase') != 'stopped' and current.get('session'):
@@ -248,7 +248,7 @@ def _saved_session(state, config=None):
     return receipt
 
 
-def _session_info(binary, state, receipt):
+def _session_info(binary, state, receipt, *, persist=True):
     # List all sessions so an absent selector is distinguishable from a failed
     # daemon/API request. Never infer absence from arbitrary command failure.
     entries = json.loads(_mutagen(binary, state, 'sync', 'list', '--template={{json .}}'))
@@ -268,7 +268,8 @@ def _session_info(binary, state, receipt):
     if receipt.get('identifier') is not None and receipt['identifier'] != identifier:
         raise ValueError('Owned Mutagen session identity changed; existing baseline was preserved.')
     receipt.update(identifier=identifier, established=True)
-    _write(Path(state) / SESSION, receipt)
+    if persist:
+        _write(Path(state) / SESSION, receipt)
     return info
 
 
@@ -299,7 +300,7 @@ def inspect_sync(root, state):
     receipt = _saved_session(state, config)
     if receipt is None:
         return dict(phase='connecting', conflicts=[])
-    info = _session_info(install_mutagen(state), state, receipt)
+    info = _session_info(install_mutagen(state, allow_download=False), state, receipt)
     return _reconciliation(info) if info else dict(phase='connecting', conflicts=[])
 
 
@@ -380,8 +381,17 @@ def complete_retarget(state):
     return retarget(Path(candidate['root']), state, candidate['codespace'], candidate['remote_root'])
 
 
+def _verify_destination(project, state, codespace, remote_root):
+    if '.devcontainer-work' in Path(remote_root).parts:
+        raise ValueError('Choose a verified ordinary Codespace checkout before retargeting')
+    with CodespaceConnection(codespace, state=Path(state)) as connection:
+        remote = json.loads(_remote(connection, remote_root, allow_missing_scratch=True))
+    if remote.get('identity') != project.identity or remote.get('root') != remote_root:
+        raise ValueError('Remote repository identity/checkout differs; old binding preserved')
+
+
 def retarget(root, state, codespace, remote_root):
-    """Explicitly replace a verified owned scratch binding, retaining its receipts."""
+    """Retire a verified binding by pausing and retaining its exact baseline."""
     state = Path(state)
     project = discover_project(Path(root))
     _scratch(project.root)
@@ -391,65 +401,77 @@ def retarget(root, state, codespace, remote_root):
     candidate = dict(version=1, identity=project.identity, root=str(project.root),
                      codespace=codespace, remote_root=remote_root)
     intent_path = state / 'scratch-retarget.json'
+    path = state / CONFIG
     with locked(state / 'scratch-control.lock', blocking=True):
-        if not intent_path.exists():
-            try:
-                if read_json(state / CONFIG) == candidate:
-                    return candidate  # Reopening work must not tear down live SSH clients.
-            except FileNotFoundError:
-                pass
+        if not intent_path.exists() and path.exists() and read_json(path) == candidate:
+            return candidate
+    # Before stop, archives or config writes, authenticate the selected normal
+    # checkout. Discovery and retarget never create/restore repository files.
+    _verify_destination(project, state, codespace, remote_root)
     if not intent_path.exists() or status(state).get('running'):
         stop(state)
     with locked(state / 'scratch-control.lock', blocking=True):
-        path = state / CONFIG
+        if not intent_path.exists() and not path.exists():
+            _write(path, candidate)
+            return candidate
+        legacy_intent = False
         if intent_path.exists():
             intent = read_json(intent_path)
-            if intent.get('schema') != 1 or intent.get('candidate') != candidate:
-                raise ValueError('An interrupted scratch retarget needs its original destination; previous data preserved')
-            previous = intent['previous']
-            actual = read_json(path)
-            if actual not in (previous, candidate):
+            previous = intent.get('previous')
+            if (intent.get('schema') not in (1, 2) or not isinstance(previous, dict)
+                    or previous.get('identity') != project.identity
+                    or intent.get('candidate', {}).get('identity') != project.identity):
+                raise ValueError('Invalid interrupted scratch retarget; existing state preserved')
+            if read_json(path) not in (previous, intent['candidate']):
                 raise ValueError('Scratch binding changed during interrupted retarget')
             receipt = intent.get('receipt')
             archive = Path(intent['archive'])
             if archive.parent != state / 'retired-bindings':
                 raise ValueError('Invalid scratch retarget archive')
-            saved = _saved_session(state)
-            if saved is not None and saved != receipt:
-                raise ValueError('Scratch receipt changed during interrupted retarget')
-            if receipt:
-                binary = install_mutagen(state)
-                # The durable intent was written only after verifying the owned
-                # baseline. Its exact receipt permits absence after termination.
-                info = _session_info(binary, state, {**receipt, 'established': False})
-                if info is not None:
-                    _mutagen(binary, state, 'sync', 'terminate', info['identifier'])
-                _write(archive / SESSION, receipt)
-                (state / SESSION).unlink(missing_ok=True)
-            _write(archive / CONFIG, previous)
-            _write(path, candidate)
-            intent_path.unlink()
-            return candidate
-        if not path.exists():
-            _write(path, candidate)
-            return candidate
-        previous = read_json(path)
-        if previous == candidate:
-            return candidate
-        if previous.get('identity') != project.identity:
-            raise ValueError('Cannot retarget another project identity')
-        receipt = _saved_session(state, previous)
-        archive = state / 'retired-bindings' / (str(time.time_ns()) + '-' + secrets.token_hex(4))
+            legacy_intent = intent['schema'] == 1
+            # Preserve the old intent, including its generated candidate, as
+            # evidence; never replay a generated endpoint into the live binding.
+            original_intent = archive / 'retarget-intent.json'
+            if not original_intent.exists():
+                _write(original_intent, intent)
+            # Journal the authenticated normal destination before changing any
+            # receipt/config so a crash after config publication can replay.
+            if intent['candidate'] != candidate:
+                intent = dict(intent, candidate=candidate)
+                _write(intent_path, intent)
+        else:
+            previous = read_json(path)
+            if previous == candidate:
+                return candidate
+            if previous.get('identity') != project.identity:
+                raise ValueError('Cannot retarget another project identity')
+            receipt = _saved_session(state, previous)
+            archive = state / 'retired-bindings' / (str(time.time_ns()) + '-' + secrets.token_hex(4))
+            intent = dict(schema=2, previous=previous, candidate=candidate, receipt=receipt, archive=str(archive))
+            _write(intent_path, intent)
+        saved = _saved_session(state)
+        if saved is not None and saved != receipt:
+            raise ValueError('Scratch receipt changed during interrupted retarget')
         _write(archive / CONFIG, previous)
+        baseline = 'none'
         if receipt:
+            if receipt.get('binding') != previous:
+                raise ValueError('Retarget receipt does not own the old binding')
             binary = install_mutagen(state)
-            info = _session_info(binary, state, receipt)
-            _write(intent_path, dict(schema=1, previous=previous, candidate=candidate,
-                                    receipt=receipt, archive=str(archive)))
+            checked = dict(receipt)
+            if legacy_intent:
+                # Old schema-1 producers may already have terminated the
+                # baseline before crashing. Preserve that fact in the archive.
+                checked['established'] = False
+            info = _session_info(binary, state, checked, persist=False)
             if info is not None:
-                _mutagen(binary, state, 'sync', 'terminate', info['identifier'])
+                _mutagen(binary, state, 'sync', 'pause', info['identifier'])
+                baseline = 'paused'
+            else:
+                baseline = 'missing-before-migration' if legacy_intent else 'never-established'
             _write(archive / SESSION, receipt)
-            (state / SESSION).unlink()
+            (state / SESSION).unlink(missing_ok=True)
+        _write(archive / 'migration.json', dict(baseline=baseline, destination=candidate))
         _write(path, candidate)
         intent_path.unlink(missing_ok=True)
     return candidate
@@ -478,7 +500,7 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
         receipt = _saved_session(state, config)
         runtime = {'pid': os.getpid(), 'nonce': nonce, 'process_identity': _process_identity(os.getpid()),
                    'phase': 'starting', 'session': receipt['name'] if receipt else None,
-                   'checkpoint_version': 1, 'runtime_id': _runtime_id()}
+                   'checkpoint_version': 2, 'runtime_id': _runtime_id()}
         def update(phase, **values):
             runtime.update(phase=phase, **values)
             _write(state / RUNTIME, runtime)
@@ -531,16 +553,25 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                         update('syncing')
                         backoff = 2
                         logger.info('Scratch connection established.')
-                        def checkpoint():
-                            from .replication import checkpoint_remote
+                        def synchronize():
+                            from .replication import sync_project_data
                             try:
-                                saved = checkpoint_remote(connection, discover_project(root), state, config['remote_root'])
-                                update('syncing', checkpoint=saved, checkpoint_error=None)
+                                registry_path = state / 'workspace.json'
+                                value = read_json(registry_path) if registry_path.exists() else {}
+                                old_roots = value.get('verified_remote_historical_roots', [])
+                                # Only remote-side roots which still verify can
+                                # authorize capture. Local historical scopes are
+                                # read separately from the local registry.
+                                from .workspace import _verify_roots
+                                historical = _verify_roots(connection, discover_project(root), old_roots)
+                                result = sync_project_data(connection, discover_project(root), state,
+                                                           config['remote_root'], historical_roots=historical)
+                                update('syncing', conversations=result, conversation_error=None)
                             except Exception:
-                                # Leave the last acknowledged checkpoint intact;
-                                # scratch reconciliation does not imply code protection.
-                                update('syncing', checkpoint_error='Checkpoint incomplete; previous recovery data preserved')
-                        checkpoint()
+                                # Conversation publication cannot stop scratch
+                                # reconciliation or overwrite its previous receipt.
+                                update('syncing', conversation_error='Conversation sync incomplete; previous receipts preserved')
+                        synchronize()
                         while not exiting.wait(5):
                             if connection.child.poll() is not None:
                                 raise ValueError('Codespace forward disconnected; waiting to reconnect.')
@@ -550,7 +581,7 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                                 raise ValueError('Remote repository identity changed; synchronization paused.')
                             summary = _mutagen(binary, state, 'sync', 'list', session)
                             update('syncing', detail=summary)
-                            checkpoint()
+                            synchronize()
                 except Exception as error:
                     if receipt:
                         try:
