@@ -1,13 +1,8 @@
 version: '3'
 
 tasks:
-  work:
-    desc: Open local project work in Herdr
-    interactive: true
-    cmds:
-      - bash scripts/project-sync.sh work {{.CLI_ARGS}}
   work:cs:
-    desc: Connect Codespace to local Herdr with continuous recovery on this Mac
+    desc: Connect Codespace Herdr and sync scratch and project conversations
     interactive: true
     cmds:
       - bash scripts/project-sync.sh work --codespace {{.CLI_ARGS}}
@@ -16,23 +11,13 @@ tasks:
     cmds:
       - bash scripts/project-sync.sh work --disconnect {{.CLI_ARGS}}
   work:status:
-    desc: Show the last checkpoint received on this Mac
+    desc: Show scratch and project conversation synchronization status
     cmds:
       - bash scripts/project-sync.sh work --status {{.CLI_ARGS}}
   work:stop:
-    desc: Stop this project backup and scratch worker
+    desc: Stop this project scratch and conversation sync worker
     cmds:
       - bash scripts/project-sync.sh work --stop {{.CLI_ARGS}}
-  work:codex:
-    desc: Start Codex here; add -- --resume to choose a conversation
-    interactive: true
-    cmds:
-      - bash scripts/project-sync.sh work --agent codex {{.CLI_ARGS}}
-  work:claude:
-    desc: Start Claude here; add -- --resume to choose a conversation
-    interactive: true
-    cmds:
-      - bash scripts/project-sync.sh work --agent claude {{.CLI_ARGS}}
   setup:
     desc: Configure a project with the interactive wizard (task setup -- --project PATH)
     interactive: true

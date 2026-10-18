@@ -85,6 +85,19 @@ class CodespaceAPITests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'repository'):
                 service.space()
 
+    def test_repository_inventory_does_not_filter_or_query_local_branch(self):
+        service = self.service()
+        rows = [dict(name='space', repository={'full_name':'o/r'}, git_status={'ref':'other-branch'})]
+        with patch.object(service, '_api_env', return_value={}), patch.object(service, '_api', return_value=[{'codespaces':rows}]), patch('subprocess.check_output', side_effect=AssertionError('branch must be manual')):
+            self.assertEqual(service.spaces(), rows)
+
+    def test_generated_worktrees_are_excluded_from_remote_checkout_inventory(self):
+        service = self.service()
+        connection = Mock(); connection.__enter__ = Mock(return_value=connection); connection.__exit__ = Mock(return_value=None)
+        connection.python.return_value = json.dumps([['/workspaces/ordinary','https://github.com/o/r'], ['/workspaces/.devcontainer-work/p/s','https://github.com/o/r']]).encode()
+        with patch('devcontainer_setup.project_sync.codespaces.CodespaceConnection', return_value=connection):
+            self.assertEqual(service.roots('space'), ['/workspaces/ordinary'])
+
     def test_inventory_output_and_request_time_are_bounded(self):
         import subprocess
         service = self.service()

@@ -1,4 +1,4 @@
-"""Native stdio client and project-note context without replacing profiles."""
+"""Metadata-only native stdio client and paginated conversation history."""
 from __future__ import annotations
 
 import json
@@ -7,33 +7,7 @@ import subprocess
 import threading
 import time
 
-from .sessions import _read
-
 MEMORY_CONFIG = {'features.memories': False, 'memories.use_memories': False, 'memories.generate_memories': False}
-
-
-def project_context(project):
-    directory = project.root / '.scratch/memory'
-    text = ['Current project notes from .scratch/memory/ follow. Use only these project notes for this checkout.']
-    total = 0
-    if directory.is_symlink():
-        raise ValueError('Project memory directory cannot be a symlink')
-    if directory.exists():
-        for path in sorted(directory.rglob('*')):
-            if path.is_symlink():
-                raise ValueError('Project memory cannot contain symlinks')
-            if not path.is_file():
-                continue
-            data = _read(path)
-            total += len(data)
-            if total > 256 * 1024:
-                raise ValueError('Project notes exceed native launch context limit (256 KiB)')
-            try:
-                value = data.decode('utf-8')
-            except UnicodeError as exc:
-                raise ValueError('Project notes must contain UTF-8 text') from exc
-            text.extend(['\n--- ' + path.relative_to(project.root).as_posix() + ' ---', value])
-    return '\n'.join(text)
 
 
 class CodexClient:

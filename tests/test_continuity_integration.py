@@ -71,8 +71,9 @@ class ContinuityIntegrationTests(unittest.TestCase):
         names = {entry['name'] for entry in json.loads(listed.stdout)['tasks']}
         self.assertTrue({'up', 'test', 'scratch:configure', 'scratch:start', 'scratch:stop',
                          'scratch:status', 'scratch:logs', 'scratch:backup',
-                         'work', 'work:cs', 'work:status', 'work:stop', 'work:codex', 'work:claude'} <= names,
+                         'work:cs', 'work:disconnect', 'work:status', 'work:stop'} <= names,
                         sorted(names))
+        self.assertFalse({'work', 'work:codex', 'work:claude'} & names)
         result = subprocess.run(['task', 'test'], cwd=self.root, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('user-test', result.stdout)

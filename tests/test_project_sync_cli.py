@@ -45,6 +45,14 @@ class ProjectSyncCLITests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn('invalid choice', result.stderr)
 
+    def test_agent_launchers_and_implicit_local_recovery_are_removed(self):
+        for args in (('work',), ('work', '--agent', 'codex'),
+                     ('work', '--agent', 'claude', '--resume')):
+            with self.subTest(args=args):
+                result = self.run_cli(*args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertFalse(self.state.exists())
+
     def test_work_status_is_offline_and_does_not_create_state(self):
         result = self.run_cli('work', '--status')
         self.assertEqual(result.returncode, 0, result.stderr)

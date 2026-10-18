@@ -9,7 +9,7 @@ import subprocess
 import time as clock
 
 from .ssh_hosts import configure_ssh
-from .state import _parent, _regular, atomic_write, read_json
+from .state import atomic_write, read_json
 
 
 class _NotRunning(ValueError):
@@ -117,40 +117,6 @@ def _workspace(project, root: str, prefix: list[str]):
     if not isinstance(workspace_id, str) or not workspace_id or workspace_id.startswith('-'):
         raise ValueError('Herdr returned an invalid workspace ID')
     _json([*prefix, 'workspace', 'focus', workspace_id])
-
-
-def open_local(project, state: Path) -> int:
-    """Focus this checkout in the current Herdr, or attach a named local session."""
-    if os.environ.get('HERDR_ENV') == '1':
-        _workspace(project, str(project.root), [])
-        return 0
-    prefix = ['--session', _session(project)]
-    try:
-        _workspace(project, str(project.root), prefix)
-    except _NotRunning:
-        # A restored named session can contain an older checkout. Start its
-        # native persistent server, then select the actual recovery root before
-        # attaching a client. Never reset or close its existing workspaces.
-        log = Path(state) / 'herdr-local-server.log'
-        with _parent(log, create=True, private=True) as (parent, name):
-            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK,
-                         0o600, dir_fd=parent)
-            with os.fdopen(fd, 'ab') as output:
-                _regular(output.fileno())
-                os.fchmod(output.fileno(), 0o600)
-                child = subprocess.Popen(['herdr', *prefix, 'server'], cwd=project.root,
-                        stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
-                        start_new_session=True)
-        deadline = clock.monotonic() + 15
-        while True:
-            try:
-                _workspace(project, str(project.root), prefix)
-                break
-            except _NotRunning:
-                if child.poll() is not None or clock.monotonic() >= deadline:
-                    raise ValueError(f'Project Herdr server did not start; inspect {log}') from None
-                clock.sleep(.1)
-    return subprocess.call(['herdr', *prefix], cwd=project.root)
 
 
 def _matching_machines(alias, session):

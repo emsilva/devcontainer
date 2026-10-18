@@ -50,11 +50,9 @@ class Codespaces:
 
     def spaces(self):
         pages = self._api('GET', 'user/codespaces?per_page=100', self._api_env(), paginate=True)
-        branch = subprocess.check_output(['git', '-C', str(self.project.root), 'branch', '--show-current'], text=True).strip()
         return [
             row for page in pages for row in page.get('codespaces', [])
             if self._matches_repository(row)
-            and row.get('git_status', {}).get('ref') == branch
             and _name(row['name'])
         ]
 
@@ -68,7 +66,7 @@ class Codespaces:
             raise ValueError('Paired Codespace repository differs; pair the correct project checkout')
         return row
 
-    def roots(self, name):
+    def roots(self, name, *, accept_new=True):
         _name(name)
         # Discovery uses the owned read-only transport and never starts a space.
         code = """import pathlib
@@ -77,7 +75,7 @@ import json
 
 roots = []
 for path in list(pathlib.Path('/workspaces').iterdir())[:100]:
-    if not path.is_dir():
+    if path.name == '.devcontainer-work' or not path.is_dir():
         continue
     result = subprocess.run(
         ['git', '-C', str(path), 'rev-parse', '--show-toplevel'],
@@ -96,7 +94,7 @@ print(json.dumps(roots))
         from .state import _identity
         with CodespaceConnection(name, state=self.state) as connection:
             # Explicit pairing discovery is the first host-key acceptance boundary.
-            connection.accept_new = True
+            connection.accept_new = accept_new
             raw = connection.python(code)
         if len(raw) > 65536:
             raise ValueError('Checkout inventory exceeds limit')
@@ -105,6 +103,7 @@ print(json.dumps(roots))
             try:
                 if (
                     _identity(remote) == self.project.identity
+                    and '.devcontainer-work' not in Path(root).parts
                     and root.startswith('/')
                     and '..' not in Path(root).parts
                     and not any(ord(c) < 32 for c in root)

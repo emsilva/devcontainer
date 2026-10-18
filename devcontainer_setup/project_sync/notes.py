@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import tomllib
 
-from .state import _parent, _regular
+from .state import _parent, _regular, atomic_write
 
 _NOTES = b'''## Project memory
 
@@ -146,5 +148,37 @@ def integrate_notes(project: Path, files: dict[str, bytes], enabled: bool) -> No
         if data and data != desired:
             raise ValueError(f'Existing scratch marker {name} differs; review required')
         additions[name] = desired
+    ignore = _read(project, '.gitignore', files)
+    line = b'/.claude/settings.local.json'
+    if line not in ignore.splitlines():
+        additions['.gitignore'] = ignore.rstrip(b'\n') + (b'\n' if ignore else b'') + line + b'\n'
     # Apply together so any refusal leaves the caller's candidate map untouched.
     files.update(additions)
+
+
+def configure_memory(project) -> None:
+    """Route native Claude auto-memory through this checkout's scratch tree."""
+    root = Path(project.root)
+    name = '.claude/settings.local.json'
+    raw = _read(root, name, {})
+    try:
+        settings = json.loads(raw) if raw else {}
+    except (ValueError, UnicodeDecodeError):
+        raise ValueError('Project Claude local settings are not valid JSON; existing settings preserved') from None
+    if not isinstance(settings, dict):
+        raise ValueError('Project Claude local settings must be an object; existing settings preserved')
+    directory = str(root / '.scratch/memory/claude')
+    previous = settings.get('autoMemoryDirectory')
+    if previous is not None and previous != directory:
+        raise ValueError('Existing project Claude memory directory differs; existing settings preserved')
+    if previous == directory:
+        return
+    if (root / '.git').exists():
+        tracked = subprocess.run(['git', '-C', str(root), 'ls-files', '--error-unmatch', '--', name],
+                                 capture_output=True, timeout=15)
+        if tracked.returncode == 0:
+            raise ValueError('Project Claude local settings are tracked; existing file preserved')
+        if tracked.returncode != 1:
+            raise ValueError('Cannot verify project Claude local settings ownership; existing file preserved')
+    settings['autoMemoryDirectory'] = directory
+    atomic_write(root / name, (json.dumps(settings, indent=2, sort_keys=True) + '\n').encode(), mode=0o600)

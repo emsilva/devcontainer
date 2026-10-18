@@ -53,7 +53,7 @@ def _curl_download(url):
             return source.read(100 * 1024 * 1024 + 1)
 
 
-def install_mutagen(state: Path, *, asset=None) -> Path:
+def install_mutagen(state: Path, *, asset=None, allow_download=True) -> Path:
     from .state import atomic_write, locked, read_json
     system = platform.system().lower()
     arch = {'aarch64': 'arm64', 'arm64': 'arm64', 'x86_64': 'amd64', 'amd64': 'amd64'}.get(platform.machine().lower())
@@ -75,6 +75,8 @@ def install_mutagen(state: Path, *, asset=None) -> Path:
             if 'mutagen' not in receipt.get('files', {}):
                 raise ValueError('Invalid Mutagen installation receipt.')
             return binary
+        if not allow_download:
+            raise ValueError('Mutagen is not installed in this project state; start scratch sync to install it.')
         data = _download(asset['url'])
         if hashlib.sha256(data).hexdigest() != asset['sha256']:
             raise ValueError('Mutagen archive checksum mismatch; nothing was installed.')

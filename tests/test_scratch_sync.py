@@ -79,7 +79,7 @@ class ScratchTests(unittest.TestCase):
         with tarfile.open(first) as archive:
             self.assertEqual(archive.extractfile('.scratch/ignored.bin').read(), payload)
 
-    def test_retarget_replays_owned_termination_after_interrupted_archive(self):
+    def test_retarget_replays_owned_pause_after_interrupted_archive(self):
         m = self.module
         project = m.discover_project(self.root)
         previous = dict(version=1, identity=project.identity, root=str(self.root),
@@ -93,20 +93,107 @@ class ScratchTests(unittest.TestCase):
         def interrupted(path, value):
             if Path(path).name == m.SESSION and Path(path).parent != self.state and not failed:
                 failed.append(True)
-                raise OSError('interrupted after owned termination')
+                raise OSError('interrupted after owned pause')
             return write(path, value)
-        with patch.object(m, 'stop'), patch.object(m, 'install_mutagen', return_value=Path('/fixture/mutagen')), \
-                patch.object(m, '_session_info', side_effect=[{'identifier':'sync_owned'}, None]), \
+        with patch.object(m, '_verify_destination', create=True), patch.object(m, 'stop'), patch.object(m, 'install_mutagen', return_value=Path('/fixture/mutagen')), \
+                patch.object(m, '_session_info', return_value={'identifier':'sync_owned'}), \
                 patch.object(m, '_mutagen') as command, patch.object(m, '_write', side_effect=interrupted):
             with self.assertRaises(OSError):
                 m.retarget(self.root, self.state, 'fixture', '/workspaces/recovered')
             self.assertTrue((self.state / 'scratch-retarget.json').exists())
             m.complete_retarget(self.state)
-        self.assertEqual(command.call_count, 1)
-        self.assertEqual(command.call_args.args[2:], ('sync', 'terminate', 'sync_owned'))
+        self.assertEqual(command.call_count, 2)
+        self.assertEqual(command.call_args.args[2:], ('sync', 'pause', 'sync_owned'))
         self.assertEqual(m.read_json(self.state / m.CONFIG)['remote_root'], '/workspaces/recovered')
         self.assertFalse((self.state / m.SESSION).exists())
         self.assertFalse((self.state / 'scratch-retarget.json').exists())
+
+    def test_retarget_checks_new_remote_identity_before_stopping_or_archiving(self):
+        m = self.module
+        project = m.discover_project(self.root)
+        previous = dict(version=1, identity=project.identity, root=str(self.root), codespace='space', remote_root='/workspaces/original')
+        m._write(self.state / m.CONFIG, previous)
+        before = (self.state / m.CONFIG).read_bytes()
+        with patch.object(m, '_verify_destination', side_effect=ValueError('remote identity differs'), create=True), patch.object(m, 'stop') as stop:
+            with self.assertRaisesRegex(ValueError, 'identity'):
+                m.retarget(self.root, self.state, 'space', '/workspaces/new')
+        stop.assert_not_called()
+        self.assertEqual((self.state / m.CONFIG).read_bytes(), before)
+        self.assertFalse((self.state / 'retired-bindings').exists())
+
+    def test_pending_generated_retarget_is_reconciled_to_verified_ordinary_checkout(self):
+        m = self.module; project = m.discover_project(self.root)
+        previous = dict(version=1, identity=project.identity, root=str(self.root), codespace='space', remote_root='/workspaces/original')
+        obsolete = dict(previous, remote_root='/workspaces/.devcontainer-work/project/snapshot')
+        receipt = dict(name='scratch-'+'b'*48, nonce='b'*48, binding=previous, established=True, identifier='sync_kept')
+        archive = self.state / 'retired-bindings/interrupted'
+        m._write(self.state / m.CONFIG, previous); m._write(self.state / m.SESSION, receipt)
+        m._write(self.state / 'scratch-retarget.json', dict(schema=1, previous=previous, candidate=obsolete, receipt=receipt, archive=str(archive)))
+        with patch.object(m, '_verify_destination', create=True), patch.object(m, 'stop'), patch.object(m, 'install_mutagen', return_value=Path('/fixture/tool')), patch.object(m, '_session_info', return_value={'identifier':'sync_kept'}), patch.object(m, '_mutagen') as command:
+            m.retarget(self.root, self.state, 'space', '/workspaces/ordinary')
+        self.assertEqual(command.call_args.args[2:], ('sync', 'pause', 'sync_kept'))
+        self.assertEqual(m.read_json(self.state / m.CONFIG)['remote_root'], '/workspaces/ordinary')
+        self.assertEqual(m.read_json(archive / m.SESSION)['identifier'], 'sync_kept')
+        self.assertEqual(m.read_json(archive / 'retarget-intent.json')['candidate'], obsolete)
+        self.assertFalse((self.state / m.SESSION).exists())
+
+    def test_pending_generated_retarget_retries_crash_after_final_config_write(self):
+        m = self.module; project = m.discover_project(self.root)
+        previous = dict(version=1, identity=project.identity, root=str(self.root), codespace='space', remote_root='/workspaces/original')
+        obsolete = dict(previous, remote_root='/workspaces/.devcontainer-work/project/snapshot')
+        receipt = dict(name='scratch-'+'b'*48, nonce='b'*48, binding=previous, established=True, identifier='sync_kept')
+        archive = self.state / 'retired-bindings/interrupted'
+        m._write(self.state / m.CONFIG, previous); m._write(self.state / m.SESSION, receipt)
+        original = dict(schema=1, previous=previous, candidate=obsolete, receipt=receipt, archive=str(archive))
+        m._write(self.state / 'scratch-retarget.json', original)
+        unlink = Path.unlink; failed = []
+        def interrupted(path, *args, **kwargs):
+            if path == self.state / 'scratch-retarget.json' and not failed:
+                failed.append(True); raise OSError('crash before final intent unlink')
+            return unlink(path, *args, **kwargs)
+        with patch.object(m, '_verify_destination', create=True), patch.object(m, 'stop'), patch.object(m, 'install_mutagen', return_value=Path('/fixture/tool')), patch.object(m, '_session_info', return_value={'identifier':'sync_kept'}), patch.object(m, '_mutagen'), patch.object(Path, 'unlink', interrupted):
+            with self.assertRaises(OSError): m.retarget(self.root, self.state, 'space', '/workspaces/ordinary')
+            m.retarget(self.root, self.state, 'space', '/workspaces/ordinary')
+        self.assertEqual(m.read_json(archive / 'retarget-intent.json'), original)
+        self.assertFalse((self.state / 'scratch-retarget.json').exists())
+        self.assertEqual(m.read_json(self.state / m.CONFIG)['remote_root'], '/workspaces/ordinary')
+
+    def test_pending_generated_live_config_retries_crash_after_candidate_journal_write(self):
+        m = self.module; project = m.discover_project(self.root)
+        previous = dict(version=1, identity=project.identity, root=str(self.root), codespace='space', remote_root='/workspaces/original')
+        obsolete = dict(previous, remote_root='/workspaces/.devcontainer-work/project/snapshot')
+        receipt = dict(name='scratch-'+'b'*48, nonce='b'*48, binding=previous, established=True, identifier='sync_kept')
+        archive = self.state / 'retired-bindings/interrupted'
+        original = dict(schema=1, previous=previous, candidate=obsolete, receipt=receipt, archive=str(archive))
+        intent_path = self.state / 'scratch-retarget.json'
+        m._write(self.state / m.CONFIG, obsolete); m._write(self.state / m.SESSION, receipt)
+        m._write(intent_path, original)
+        write = m._write; failed = []
+        def interrupted(path, value):
+            write(path, value)
+            if Path(path) == intent_path and value['candidate']['remote_root'] == '/workspaces/ordinary' and not failed:
+                failed.append(True); raise OSError('crash immediately after candidate journal write')
+        with patch.object(m, '_verify_destination'), patch.object(m, 'stop'), patch.object(m, 'install_mutagen', return_value=Path('/fixture/tool')), patch.object(m, '_session_info', return_value={'identifier':'sync_kept'}), patch.object(m, '_mutagen') as command, patch.object(m, '_write', side_effect=interrupted):
+            with self.assertRaises(OSError): m.retarget(self.root, self.state, 'space', '/workspaces/ordinary')
+            self.assertEqual(m.read_json(self.state / m.CONFIG), obsolete)
+            self.assertEqual(m.read_json(intent_path)['candidate']['remote_root'], '/workspaces/ordinary')
+            self.assertEqual(m.read_json(intent_path)['observed_binding'], obsolete)
+            command.assert_not_called()
+            m._write(self.state / m.CONFIG, dict(previous, remote_root='/workspaces/unrecorded'))
+            with self.assertRaisesRegex(ValueError, 'binding changed'):
+                m.retarget(self.root, self.state, 'space', '/workspaces/ordinary')
+            command.assert_not_called()
+            m._write(self.state / m.CONFIG, obsolete)
+            m.retarget(self.root, self.state, 'space', '/workspaces/ordinary')
+        self.assertEqual(m.read_json(archive / 'retarget-intent.json'), original)
+        self.assertEqual(m.read_json(self.state / m.CONFIG)['remote_root'], '/workspaces/ordinary')
+        self.assertFalse(intent_path.exists())
+        self.assertEqual(command.call_args.args[2:], ('sync', 'pause', 'sync_kept'))
+
+    def test_pending_start_error_names_existing_work_cs_task(self):
+        self.module._write(self.state / 'scratch-retarget.json', {'pending': True})
+        with self.assertRaisesRegex(ValueError, 'run task work:cs '):
+            self.module.start(self.root, self.state)
 
     def test_same_binding_retarget_keeps_the_existing_forward_and_worker(self):
         m = self.module
@@ -154,6 +241,14 @@ class ScratchTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'identity'):
                 self.module.configure(self.root, self.state, 'bound-name', '/workspaces/repo')
         self.assertFalse((self.state / 'scratch.json').exists())
+
+    def test_status_does_not_download_missing_mutagen_tool(self):
+        tools = importlib.import_module('devcontainer_setup.project_sync.tools')
+        receipt = dict(name='scratch-'+'a'*48, nonce='a'*48, binding={}, established=True)
+        with patch.object(self.module, 'status', return_value=dict(running=True, phase='syncing')), patch.object(self.module, '_config', return_value={}), patch.object(self.module, '_saved_session', return_value=receipt), patch.object(tools, '_download', side_effect=AssertionError('status attempted network')) as download:
+            with self.assertRaisesRegex(ValueError, 'installed|cached'):
+                self.module.inspect_sync(self.root, self.state)
+        download.assert_not_called()
 
     def test_checksum_failure_does_not_publish_tool(self):
         tools = importlib.import_module('devcontainer_setup.project_sync.tools')
@@ -506,6 +601,57 @@ class ScratchTests(unittest.TestCase):
                     if any(entry['name'] == name for entry in current):
                         self.module._mutagen(binary, state, 'sync', 'terminate', name)
                 self.module._mutagen(binary, state, 'daemon', 'stop')
+
+    @unittest.skipUnless(os.environ.get('MUTAGEN_TEST_BINARY'), 'set MUTAGEN_TEST_BINARY for real retained-baseline migration gate')
+    def test_actual_retarget_retains_paused_old_baseline_and_new_session_has_no_old_deletions(self):
+        m = self.module; binary = Path(os.environ['MUTAGEN_TEST_BINARY']).resolve()
+        temporary_root = '/private/tmp' if Path('/private/tmp').is_dir() else '/tmp'
+        with tempfile.TemporaryDirectory(prefix='t2-migrate-', dir=temporary_root) as directory:
+            base = Path(directory).resolve(); state = base / 's'
+            roots = [base / name for name in ('local', 'old', 'normal')]
+            for root in roots:
+                root.mkdir(); (root / '.scratch').mkdir()
+                subprocess.run(['git', 'init', '-q', str(root)], check=True)
+                subprocess.run(['git', '-C', str(root), 'remote', 'add', 'origin', 'https://github.com/fixture/migrate'], check=True)
+            local, old, normal = roots
+            alpha, beta, new_beta = [root / '.scratch' for root in roots]
+            (alpha / 'same-name').write_text('old baseline')
+            nonce = 'c'*48; old_name = 'scratch-'+nonce; new_name = 'scratch-'+'d'*48
+            project = m.discover_project(local)
+            previous = dict(version=1, identity=project.identity, root=str(local), codespace='fixture', remote_root=str(old))
+            created = []
+            try:
+                m._mutagen(binary, state, 'sync', 'create', str(alpha), str(beta), '--name='+old_name, '--mode=two-way-safe', '--hash=sha256', '--no-global-configuration')
+                created.append(old_name); m._mutagen(binary, state, 'sync', 'flush', old_name)
+                info = json.loads(m._mutagen(binary, state, 'sync', 'list', '--template={{json .}}'))[0]
+                m._write(state / m.CONFIG, previous)
+                m._write(state / m.SESSION, dict(name=old_name, nonce=nonce, identifier=info['identifier'], established=True, binding=previous))
+                def verify(project, state, codespace, root):
+                    self.assertEqual(m.discover_project(Path(root)).identity, project.identity)
+                with patch.object(m, '_verify_destination', side_effect=verify), patch.object(m, 'install_mutagen', return_value=binary):
+                    m.retarget(local, state, 'fixture', str(normal))
+                retained = json.loads(m._mutagen(binary, state, 'sync', 'list', '--template={{json .}}'))
+                self.assertEqual(len(retained), 1)
+                self.assertEqual(retained[0]['identifier'], info['identifier'])
+                self.assertTrue(retained[0]['paused'])
+                archived = list((state / 'retired-bindings').glob('*/scratch-session.json'))
+                self.assertEqual(len(archived), 1)
+                self.assertEqual(m.read_json(archived[0])['identifier'], info['identifier'])
+                (alpha / 'same-name').unlink()
+                (new_beta / 'same-name').write_text('new endpoint owner content')
+                m._mutagen(binary, state, 'sync', 'create', str(alpha), str(new_beta), '--name='+new_name, '--mode=two-way-safe', '--hash=sha256', '--no-global-configuration')
+                created.append(new_name); m._mutagen(binary, state, 'sync', 'flush', new_name)
+                sessions = json.loads(m._mutagen(binary, state, 'sync', 'list', '--template={{json .}}'))
+                self.assertEqual(len({row['identifier'] for row in sessions}), 2)
+                self.assertEqual((new_beta / 'same-name').read_text(), 'new endpoint owner content')
+                self.assertEqual((alpha / 'same-name').read_text(), 'new endpoint owner content')
+                self.assertEqual((beta / 'same-name').read_text(), 'old baseline')
+                self.assertTrue(next(row for row in sessions if row['name']==old_name)['paused'])
+            finally:
+                # Only disposable fixture sessions are removed by test cleanup.
+                for name in created:
+                    m._mutagen(binary, state, 'sync', 'terminate', name)
+                m._mutagen(binary, state, 'daemon', 'stop')
 
     def test_supervisor_reuses_exact_saved_baseline_after_stop_or_create_interruption(self):
         from types import SimpleNamespace

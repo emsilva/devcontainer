@@ -34,7 +34,7 @@ class NotesTests(unittest.TestCase):
         self.put('CLAUDE.md', claude)
         before = {str(p.relative_to(self.root)): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
         files = self.generate()
-        self.assertEqual(set(files), {'AGENTS.md', 'CLAUDE.md', '.codex/config.toml', '.scratch/.gitignore', '.scratch/README.md'})
+        self.assertEqual(set(files), {'AGENTS.md', 'CLAUDE.md', '.codex/config.toml', '.scratch/.gitignore', '.scratch/README.md', '.gitignore'})
         self.assertTrue(files['AGENTS.md'].startswith(agents))
         self.assertTrue(files['CLAUDE.md'].startswith(claude))
         self.assertIn(b'.scratch/memory/', files['AGENTS.md'])

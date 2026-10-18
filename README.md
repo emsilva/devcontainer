@@ -23,7 +23,7 @@ The wizard asks you to:
 2. Apply dotfiles, enabled by default. Enter a repo such as `emsilva/dotfiles`;
    the wizard remembers it for your next project.
 3. Keep scratch files and project notes synced with your Mac, enabled by default.
-   This also enables recovery of supported completed Codex and Claude turns.
+   This also synchronizes supported completed Codex and Claude conversations.
 4. Choose commit-only setup or a Codespace. For a new Codespace, select its machine
    size and idle timeout, then open it in a browser or VS Code. Reuse shows the
    existing Codespace's actual settings.
@@ -41,11 +41,11 @@ small helpers, and a Taskfile include. Personal preferences live in
 
 | Command | Action |
 |---|---|
-| `task work` | Open local project work in Herdr |
-| `task work:codex` / `task work:claude` | Start a new conversation here |
-| `task work:cs` | Connect Codespace to local Herdr and back up work to this Mac |
+| `codex` / `claude` | Start a native agent in the current checkout |
+| `codex resume` / `claude --resume` | Choose a native conversation |
+| `task work:cs` | Connect Codespace Herdr and sync scratch and project conversations |
 | `task work:disconnect` | Disconnect this project's Codespace from the local Herdr UI |
-| `task work:status` / `task work:stop` | Check protection / stop this project’s worker |
+| `task work:status` / `task work:stop` | Inspect sync / stop this project’s worker |
 | `task devcontainer:setup` | Review or change the setup |
 | `task devcontainer:setup -- --scan` | Show runtime and tool recommendations |
 | `task devcontainer:setup -- --dry-run` | Preview the recommended file changes |
@@ -70,56 +70,50 @@ task devcontainer:upgrade:agents
 Fresh containers install the current vendor releases. Normal setup keeps valid
 installations; the update command refreshes them explicitly.
 
-## Keep working when Codespaces is unavailable
+## Work locally or in Codespaces
 
-Enable project continuity in setup. On your Mac, run:
+Use your normal checkout on each machine. Commit, push, pull, and change branches
+with Git yourself. Project sync transfers no source files or Git index, and creates
+no working copies.
+
+On your Mac, connect with:
 
 ```sh
 task work:cs
 ```
 
-This starts the paired Codespace if needed, connects its saved machine in local Herdr,
-and starts a Mac worker. Select the project's Codespace group to work in Codex or
-Claude there. The worker keeps verified
-checkpoints of committed history, staged and unstaged code, nonignored new files,
-`.scratch/`, project notes, and supported completed conversation turns on your Mac.
-The first entry seeds a separate remote checkout from your desktop; existing
-checkouts and their edits are preserved.
+This starts the paired Codespace if needed, connects its saved machine in local
+Herdr, and starts scratch and conversation sync. Select its Codespace group, then
+run `codex` or `claude` in the existing project checkout. On your Mac, run the same
+commands in your local checkout. Use `codex resume` or `claude --resume` to choose
+a conversation through the native picker.
 
-Herdr connects through GitHub's native SSH transport so its activity resets the
-Codespace idle timer. Silent connections can still time out normally. Background
-backups never restart the Codespace. Reopening reuses the workspace and sync worker.
-Updated helpers automatically replace an older worker when you reconnect.
-
-When credits run out or the Codespace is unreachable, run:
-
-```sh
-task work
-```
-
-Herdr opens a separate local recovery checkout from the last checkpoint actually
-received on this Mac. No working Codespace or remote release is required. Your
-original Mac checkout stays intact. Repeated entry reuses the recovery checkout,
-preserving new local edits.
-
-Use `task work:codex` or `task work:claude` for a fresh conversation in the active
-local workspace. Add `-- --resume` to choose a project conversation. Across hosts,
-a native fork continues the checkpoint under a new ID; source histories remain
-intact. Native profiles and sign-in stay on each host.
-
-Put temporary files in `.scratch/` and shared project notes in `.scratch/memory/`.
-Scratch uses automatic two-way safe sync; conflicts preserve both versions and
-are reported. Setup adds project-memory guidance to `AGENTS.md` and `CLAUDE.md`.
+Put temporary project files in `.scratch/` and shared notes in `.scratch/memory/`.
+Scratch sync runs automatically in both directions; conflicts are preserved for
+resolution. Project instructions tell agents to read shared notes. Claude's
+project-local auto-memory directory also lives under scratch; global profiles,
+settings, sign-in, databases, and personal memory libraries stay on each host.
 Only scratch markers are tracked by Git.
 
-Keep the Mac awake and connected while working remotely. `task work:status`
-reports the actual last received checkpoint and any unsupported conversations;
-scratch synchronization alone does not certify code or conversation protection.
-Use `task work:disconnect` on your Mac to disconnect this project's saved Codespace
-machine from Herdr. Your local Herdr, remote sessions, and Mac backups keep running.
-Run `task work:cs` to reconnect and reuse the workspace.
-Use `task work:stop` to stop this project’s backup and scratch worker. See
-[recovery details and limitations](docs/project-continuity.md).
+Supported completed conversation turns are verified and published into the other
+host's native session store with destination paths and new session IDs. Unchanged
+imports are deduplicated. Continue a given conversation on one host at a time.
+Unsupported native history formats are reported without altering their originals.
+
+Keep this Mac awake and connected while working remotely. If Codespaces becomes
+unavailable, your received scratch files, notes, and imported conversations remain
+available locally. Code edits reach your Mac through Git, so commit and push the
+code you want to keep. Transcripts do not restore uncommitted source files.
+
+`task work:status` reports scratch conflicts, conversation sync and the last
+successful receipt. `task work:disconnect` disconnects this project's saved
+Codespace machine from Herdr while sync keeps running. `task work:stop` stops the
+sync worker. Background reconnects cannot start a stopped Codespace; `task work:cs`
+is the explicit start command. Reconnects reuse the saved machine and workspace.
+
+Older generated recovery checkouts and stored checkpoints remain untouched during
+migration. Inspect them and move any desired code through Git before removing
+them yourself. See [continuity details](docs/project-continuity.md).
 
 ## Resume a Codespace setup
 

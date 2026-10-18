@@ -1,199 +1,162 @@
-"""Real checkpoint recovery while every remote control surface is unavailable."""
-import copy
-import io
-from contextlib import ExitStack, redirect_stdout
+"""Existing-checkout connection and legacy migration never mutate repositories."""
+import json
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
-from unittest import mock
-
-from devcontainer_setup.project_sync import workspace
+from unittest.mock import patch, Mock
+from devcontainer_setup.project_sync import workspace, scratch
 from devcontainer_setup.project_sync.checkpoint_store import Store
-from devcontainer_setup.project_sync.project_files import capture_files
 from devcontainer_setup.project_sync.state import discover_project, read_json
 
-
-def git(root, *args, data=None):
-    return subprocess.run(['git', '--no-optional-locks', '-c', 'diff.autoRefreshIndex=false', '-C', str(root), *args], input=data,
-                          capture_output=True, check=True).stdout
-
-
-class WorkspaceRecoveryTests(unittest.TestCase):
+class ExistingCheckoutTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.base = Path(self.temporary.name).resolve()
-        self.root = self.base / 'desktop'
-        self.root.mkdir()
-        git(self.root, 'init', '-b', 'work')
-        git(self.root, 'config', 'user.name', 'Recovery fixture')
-        git(self.root, 'config', 'user.email', 'fixture@example.com')
-        git(self.root, 'remote', 'add', 'origin', 'https://github.com/example/workspace-recovery.git')
-        (self.root / 'app').write_bytes(b'initial\n')
-        (self.root / '.gitignore').write_text('.scratch/\n')
-        git(self.root, 'add', '.')
-        git(self.root, 'commit', '-qm', 'Initial')
-        self.remote = self.base / 'codespace'
-        shutil.copytree(self.root, self.remote)
-        (self.root / 'app').write_bytes(b'desktop staged owner edit')
-        git(self.root, 'add', 'app')
-        (self.root / 'app').write_bytes(b'desktop unstaged owner edit')
-        (self.remote / 'app').write_bytes(b'\x00remote staged\xff')
-        git(self.remote, 'add', 'app')
-        (self.remote / 'app').write_bytes(b'\x00remote current\xfe')
-        (self.remote / 'untracked').write_text('remote untracked')
-        (self.remote / '.scratch/memory').mkdir(parents=True)
-        (self.remote / '.scratch/memory/context.md').write_text('offline handoff context')
-        self.project = discover_project(self.root)
-        self.state = self.base / 'state'
-        self.store = Store(self.state)
-        self.snapshot = self.checkpoint()
-        self.store.acknowledge(self.snapshot, source='codespace')
-        self.seed_registry()
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name).resolve(); self.root = self.base / 'desktop'; self.root.mkdir()
+        self.git('init', '-q'); self.git('remote', 'add', 'origin', 'https://github.com/example/ordinary')
+        self.project = discover_project(self.root); self.state = self.base / 'state'
+        self.original = '/workspaces/ordinary'; self.generated = '/workspaces/.devcontainer-work/project/snapshot'
+        (self.root / '.scratch').mkdir()
 
-    def checkpoint(self):
-        remote_project = discover_project(self.remote)
-        return self.store.save({'schema': 1, 'project': {
-            'identity': self.project.identity, 'project_id': self.project.project_id,
-            'root': str(self.remote)}, 'files': capture_files(remote_project, self.store),
-            'conversations': {'entries': [], 'issues': []}, 'producer': {'fixture': True}})
+    def git(self, *args):
+        return subprocess.check_output(['git', '-C', str(self.root), *args], stderr=subprocess.DEVNULL)
 
-    def seed_registry(self, **values):
-        entry = dict(schema=1, project_id=self.project.project_id, identity=self.project.identity,
-                     local_root=str(self.root), local_active_root=str(self.root),
-                     remote_root=str(self.remote), remote_active_root=str(self.remote),
-                     active_host='codespace')
-        entry.update(values)
-        workspace._write(self.state, entry)
+    def registry(self, **updates):
+        value = dict(schema=1, identity=self.project.identity, project_id=self.project.project_id,
+                     local_root=str(self.root), local_active_root=str(self.root), active_host='codespace',
+                     codespace='space', remote_root=self.original, remote_active_root=self.generated)
+        value.update(updates); workspace._write(self.state, value); return value
 
-    def source_receipt(self, root):
-        return (git(root, 'rev-parse', 'HEAD'), (root / '.git/index').read_bytes(),
-                git(root, 'ls-files', '--stage', '-z'), git(root, 'diff', '--binary'),
-                git(root, 'diff', '--cached', '--binary'), (root / 'app').read_bytes())
+    def connection(self):
+        connection = Mock(); connection.__enter__ = Mock(return_value=connection); connection.__exit__ = Mock(return_value=None)
+        return connection
 
-    def local(self, project=None):
-        actual_run = subprocess.run
-        def offline(args, *a, **kw):
-            self.assertEqual(Path(args[0]).name, 'git', 'offline local work invoked a non-Git process')
-            self.assertFalse({'fetch', 'clone', 'push', 'pull'} & set(args))
-            return actual_run(args, *a, **kw)
-        with ExitStack() as stack:
-            stack.enter_context(mock.patch('devcontainer_setup.project_sync.herdr.open_local', return_value=0))
-            stack.enter_context(mock.patch('devcontainer_setup.project_sync.transport.CodespaceConnection',
-                                          side_effect=AssertionError('SSH must be unavailable')))
-            stack.enter_context(mock.patch('devcontainer_setup.project_sync.codespaces.Codespaces',
-                                          side_effect=AssertionError('Codespaces API must be unavailable')))
-            stack.enter_context(mock.patch.object(workspace.scratch, 'stop', return_value={'phase': 'stopped'}))
-            stack.enter_context(mock.patch.object(subprocess, 'run', side_effect=offline))
-            stack.enter_context(redirect_stdout(io.StringIO()))
-            return workspace.local(project or self.project, self.state)
-
-    def test_first_offline_work_recovers_staged_state_and_preserves_both_original_checkouts(self):
-        desktop_before, remote_before = self.source_receipt(self.root), self.source_receipt(self.remote)
-        try:
-            self.assertEqual(self.local(), 0)
-        except OSError as error:
-            self.fail('First offline entry must create its owned recovery parents: ' + str(error))
+    def test_remote_uses_verified_ordinary_checkout_and_never_capture_restore_or_git(self):
+        self.registry()
+        with patch.object(workspace, '_choose_pairing', return_value=('space', self.original)), \
+                patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection()), \
+                patch.object(workspace, '_verify_roots', return_value=[self.generated]), \
+                patch('devcontainer_setup.project_sync.replication.sync_project_data', return_value=dict(receipt={}, issues=[])) as sync, \
+                patch.object(scratch, 'retarget') as retarget, patch.object(scratch, 'start'), \
+                patch.object(workspace, '_ready'), patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), \
+                patch('devcontainer_setup.project_sync.herdr.open_remote', return_value=0) as opened, \
+                patch('devcontainer_setup.project_sync.notes.configure_memory'):
+            self.assertEqual(workspace.remote(self.project, self.state), 0)
+        self.assertEqual(retarget.call_args.args[3], self.original)
+        self.assertEqual(opened.call_args.args[2], self.original)
+        self.assertEqual(sync.call_args.kwargs['historical_roots'], [self.generated])
         value = read_json(self.state / 'workspace.json')
-        recovered = Path(value['local_active_root'])
-        self.assertEqual(recovered.parent, self.state / 'recovered')
-        self.assertEqual(value['recovered_from'], self.snapshot)
-        self.assertEqual(value['active_host'], 'local')
-        self.assertEqual((recovered / 'app').read_bytes(), b'\x00remote current\xfe')
-        self.assertEqual(git(recovered, 'show', ':app'), b'\x00remote staged\xff')
-        self.assertEqual((recovered / 'untracked').read_text(), 'remote untracked')
-        self.assertEqual((recovered / '.scratch/memory/context.md').read_text(), 'offline handoff context')
-        self.assertEqual(self.source_receipt(self.root), desktop_before)
-        self.assertEqual(self.source_receipt(self.remote), remote_before)
+        self.assertEqual(value['remote_active_root'], self.original)
+        self.assertIn(self.generated, value['verified_historical_roots'])
+        self.assertTrue(list((self.state / 'workspace-history').glob('*.json')))
 
-    def test_repeated_local_work_reuses_owned_root_and_keeps_edits_after_new_checkpoint(self):
-        self.local()
-        recovered = Path(read_json(self.state / 'workspace.json')['local_active_root'])
-        (recovered / 'app').write_bytes(b'recovered staged owner edit')
-        git(recovered, 'add', 'app')
-        (recovered / 'app').write_bytes(b'recovered unstaged owner edit')
-        before = self.source_receipt(recovered)
-        (self.remote / 'app').write_bytes(b'later remote state')
-        newer = self.checkpoint()
-        self.store.acknowledge(newer, source='codespace')
-        self.assertNotEqual(newer, self.snapshot)
-        self.local(discover_project(recovered))
-        self.local()
-        self.assertEqual(read_json(self.state / 'workspace.json')['local_active_root'], str(recovered))
-        self.assertEqual(self.source_receipt(recovered), before)
-        self.assertEqual(len(list((self.state / 'recovered').iterdir())), 1)
+    def test_choose_pairing_discovers_original_when_registry_root_was_overwritten(self):
+        value = self.registry(remote_root=self.generated)
+        scratch._write(self.state / scratch.CONFIG, dict(version=1, identity=self.project.identity,
+                         root=str(self.root), codespace='space', remote_root=self.generated))
+        with patch('devcontainer_setup.project_sync.codespaces.Codespaces') as cls:
+            service = cls.return_value
+            service._api.return_value = dict(name='space', state='Available')
+            service._matches_repository.return_value = True; service.roots.return_value = [self.original]
+            self.assertEqual(workspace._choose_pairing(self.project, self.state, value), ('space', self.original))
+            service.roots.assert_called_once_with('space', accept_new=False)
+            service.pair.assert_not_called()
+        self.assertEqual(read_json(self.state / scratch.CONFIG)['remote_root'], self.generated)
 
-    def test_recovery_collision_preserves_existing_destination_and_uses_new_root(self):
-        existing = self.state / 'recovered' / self.snapshot
-        existing.mkdir(parents=True)
-        (existing / 'owner').write_text('preserve collided destination')
-        self.local()
-        active = Path(read_json(self.state / 'workspace.json')['local_active_root'])
-        self.assertNotEqual(active, existing)
-        self.assertEqual((existing / 'owner').read_text(), 'preserve collided destination')
-        self.assertEqual((active / 'app').read_bytes(), b'\x00remote current\xfe')
+    def test_missing_or_ambiguous_original_preserves_binding_and_shows_choices(self):
+        value = self.registry(remote_root=self.generated)
+        scratch._write(self.state / scratch.CONFIG, dict(version=1, identity=self.project.identity,
+                         root=str(self.root), codespace='space', remote_root=self.generated))
+        before = (self.state / scratch.CONFIG).read_bytes()
+        for roots in ([], ['/workspaces/one', '/workspaces/two']):
+            with self.subTest(roots=roots), patch('devcontainer_setup.project_sync.codespaces.Codespaces') as cls:
+                service = cls.return_value; service._api.return_value = dict(name='space', state='Available')
+                service._matches_repository.return_value = True; service.roots.return_value = roots
+                with self.assertRaisesRegex(ValueError, 'checkout.*' + ('one' if roots else 'found')):
+                    workspace._choose_pairing(self.project, self.state, value)
+            self.assertEqual((self.state / scratch.CONFIG).read_bytes(), before)
 
-    def test_local_refuses_cross_project_pairing_without_altering_registry(self):
-        self.seed_registry(identity='github.com/someone/else')
-        before = (self.state / 'workspace.json').read_bytes()
-        with self.assertRaisesRegex(ValueError, 'registry|project'):
-            self.local()
-        self.assertEqual((self.state / 'workspace.json').read_bytes(), before)
-        self.assertFalse((self.state / 'recovered').exists())
+    def test_saved_ordinary_original_wins_over_other_candidates(self):
+        value = self.registry()
+        scratch._write(self.state / scratch.CONFIG, dict(identity=self.project.identity, codespace='space', remote_root=self.generated))
+        with patch('devcontainer_setup.project_sync.codespaces.Codespaces') as cls:
+            service = cls.return_value; service._api.return_value = dict(name='space', state='Available')
+            service._matches_repository.return_value = True; service.roots.return_value = ['/workspaces/other', self.original]
+            self.assertEqual(workspace._choose_pairing(self.project, self.state, value), ('space', self.original))
 
-    def test_local_refuses_outer_project_identity_before_materializing_recovery(self):
-        manifest = self.store.load(self.snapshot)
-        manifest['project']['identity'] = 'github.com/foreign/other'
-        snapshot = self.store.save(manifest)
-        self.store.acknowledge(snapshot, source='codespace')
-        before = (self.state / 'workspace.json').read_bytes()
-        with self.assertRaisesRegex(ValueError, 'identity'):
-            self.local()
-        self.assertEqual((self.state / 'workspace.json').read_bytes(), before)
-        self.assertFalse((self.state / 'recovered').exists())
+    def test_verify_historical_root_uses_remote_canonical_identity(self):
+        connection = self.connection()
+        connection.python.return_value = json.dumps(dict(root=self.generated, identity=self.project.identity)).encode()
+        self.assertEqual(workspace._verify_roots(connection, self.project, [self.generated]), [self.generated])
+        connection.python.return_value = json.dumps(dict(root=self.generated, identity='github.com/foreign/repo')).encode()
+        self.assertEqual(workspace._verify_roots(connection, self.project, [self.generated]), [])
 
-    def test_local_refuses_mismatched_file_project_inside_valid_outer_manifest(self):
-        manifest = self.store.load(self.snapshot)
-        foreign = copy.deepcopy(manifest['files']['project'])
-        foreign.update(remote='https://github.com/foreign/other.git', identity='github.com/foreign/other')
-        import hashlib
-        foreign['project_id'] = hashlib.sha256(foreign['identity'].encode()).hexdigest()[:24]
-        manifest['files']['project'] = foreign
-        snapshot = self.store.save(manifest)
-        self.store.acknowledge(snapshot, source='codespace')
-        (self.state / 'recovered').mkdir()
-        before = (self.state / 'workspace.json').read_bytes()
-        with self.assertRaisesRegex(ValueError, 'identity|project'):
-            self.local()
-        self.assertEqual((self.state / 'workspace.json').read_bytes(), before)
-        self.assertEqual(list((self.state / 'recovered').iterdir()), [])
+    def test_status_is_offline_and_legacy_checkpoint_never_counts_as_conversation_health(self):
+        self.registry()
+        store = Store(self.state)
+        old = store.save(dict(schema=1, project=dict(identity=self.project.identity), files={}, conversations=dict(entries=[{}])))
+        store.acknowledge(old, source='codespace')
+        with patch.object(scratch, 'status', return_value=dict(running=False, phase='stopped')), \
+                patch('devcontainer_setup.project_sync.codespaces.Codespaces', side_effect=AssertionError('offline')):
+            result = workspace.status(self.project, self.state)
+        self.assertIsNone(result['last_mac_checkpoint'])
+        self.assertFalse(result['conversations']['healthy'])
+        self.assertEqual(store.load(old)['schema'], 1)
+        self.assertNotIn('recoverable', str(result))
 
-    def test_local_refuses_unacknowledged_remote_snapshot(self):
-        receipt = self.state / 'checkpoints/receipts/codespace.json'
-        receipt.unlink()
-        with self.assertRaisesRegex(ValueError, 'acknowledged'):
-            self.local()
-        self.assertFalse((self.state / 'recovered').exists())
+    def test_ready_requires_schema_two_receipt_not_old_worker_checkpoint(self):
+        self.registry()
+        with patch.object(scratch, 'status', return_value=dict(running=True, phase='syncing', checkpoint={'snapshot_id':'old'}, checkpoint_error=None)), \
+                patch.object(workspace.time, 'monotonic', side_effect=[0, 1, 121]), patch.object(workspace.time, 'sleep'):
+            with self.assertRaisesRegex(ValueError, 'conversation'):
+                workspace._ready(self.project, self.state)
 
-    def test_registered_sibling_checkout_is_required_even_for_same_repository(self):
-        sibling = self.base / 'unregistered-sibling'
-        shutil.copytree(self.root, sibling)
-        before = (self.state / 'workspace.json').read_bytes()
-        with self.assertRaisesRegex(ValueError, 'checkout|owns|pairing'):
-            self.local(discover_project(sibling))
-        self.assertEqual((self.state / 'workspace.json').read_bytes(), before)
+    def test_repeated_connection_retains_separate_verified_local_historical_roots(self):
+        recovered = self.base / 'recovered'
+        shutil.copytree(self.root, recovered)
+        self.registry(local_active_root=str(recovered))
+        for attempt in range(2):
+            with patch.object(workspace, '_choose_pairing', return_value=('space', self.original)), patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection()), patch.object(workspace, '_verify_roots', return_value=[self.generated]) as verify, patch('devcontainer_setup.project_sync.replication.sync_project_data', return_value=dict(receipt={}, issues=[])), patch.object(scratch, 'retarget'), patch.object(scratch, 'start'), patch.object(workspace, '_ready'), patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), patch('devcontainer_setup.project_sync.herdr.open_remote', return_value=0), patch('devcontainer_setup.project_sync.notes.configure_memory'):
+                workspace.remote(self.project, self.state)
+            value = read_json(self.state / 'workspace.json')
+            self.assertIn(str(recovered), value['verified_local_historical_roots'])
+            self.assertNotIn(str(recovered), verify.call_args.args[2])
 
-    def test_failed_background_retarget_keeps_offline_recovery_available(self):
-        from devcontainer_setup.project_sync.state import atomic_write
-        import json
-        atomic_write(self.state / workspace.scratch.CONFIG, json.dumps({
-            'version': 1, 'identity': self.project.identity, 'root': str(self.root),
-            'codespace': 'unreachable-space', 'remote_root': str(self.remote)}).encode())
-        with mock.patch.object(workspace.scratch, 'retarget', side_effect=OSError('offline worker')) as retarget:
-            with mock.patch.object(workspace.scratch, 'start', side_effect=AssertionError('retarget did not complete')):
-                self.assertEqual(self.local(), 0)
-        self.assertEqual(retarget.call_count, 1)
-        active = Path(read_json(self.state / 'workspace.json')['local_active_root'])
-        self.assertEqual((active / 'app').read_bytes(), b'\x00remote current\xfe')
+    def test_stopped_or_waiting_worker_never_reports_healthy_conversations(self):
+        self.registry()
+        store = Store(self.state)
+        manifest = dict(schema=2, project=dict(identity=self.project.identity, project_id=self.project.project_id), conversations=dict(entries=[], issues=[]), producer={})
+        snapshot = store.save(manifest); store.acknowledge(snapshot, source='codespace')
+        for running, phase in ((False, 'stopped'), (True, 'waiting')):
+            with patch.object(scratch, 'status', return_value=dict(running=running, phase=phase, conversations=dict(schema=2, issues=[]))), patch.object(scratch, 'inspect_sync', return_value={}):
+                self.assertFalse(workspace.status(self.project, self.state)['conversations']['healthy'])
+
+    def test_status_survives_legacy_binding_root_mismatch_offline(self):
+        self.registry(local_active_root=str(self.base / 'recovered'))
+        with patch.object(scratch, 'status', return_value=dict(running=True, phase='syncing')), patch.object(scratch, 'inspect_sync', side_effect=ValueError('Scratch configuration does not match this repository/checkout')):
+            result = workspace.status(self.project, self.state)
+        self.assertIn('issue', str(result['scratch']).lower())
+
+    def test_ready_rejects_stopped_runtime_even_with_previous_schema_two_receipt(self):
+        store = Store(self.state)
+        snapshot = store.save(dict(schema=2, project=dict(identity=self.project.identity, project_id=self.project.project_id), conversations=dict(entries=[], issues=[]), producer={}))
+        store.acknowledge(snapshot, source='codespace')
+        with patch.object(scratch, 'status', return_value=dict(running=False, phase='syncing', conversations=dict(schema=2))):
+            with self.assertRaisesRegex(ValueError, 'stopped'):
+                workspace._ready(self.project, self.state)
+
+    def test_registry_archive_preserves_changed_saved_root_and_original_scope_lists(self):
+        recovered = self.base / 'recovered'; shutil.copytree(self.root, recovered)
+        original = self.registry(remote_root=self.generated, remote_active_root=self.original,
+                                 verified_local_historical_roots=[str(recovered)], verified_historical_roots=[self.generated])
+        expected = json.loads(json.dumps(original))
+        with patch.object(workspace, '_choose_pairing', return_value=('space', self.original)), patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection()), patch.object(workspace, '_verify_roots', return_value=[self.generated]), patch('devcontainer_setup.project_sync.replication.sync_project_data', return_value=dict(receipt={}, issues=[])), patch.object(scratch, 'retarget'), patch.object(scratch, 'start'), patch.object(workspace, '_ready'), patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), patch('devcontainer_setup.project_sync.herdr.open_remote', return_value=0), patch('devcontainer_setup.project_sync.notes.configure_memory'):
+            workspace.remote(self.project, self.state)
+        archives = list((self.state / 'workspace-history').glob('*.json'))
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(read_json(archives[0]), expected)
+
+    def test_retired_local_recovery_and_agent_launch_apis_absent(self):
+        for name in ('local', 'local_project', '_recover'):
+            self.assertFalse(hasattr(workspace, name))

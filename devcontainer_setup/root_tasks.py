@@ -2,7 +2,7 @@
 import hashlib
 import re
 
-ALIASES = ('work', 'work:cs', 'work:disconnect', 'work:status', 'work:stop', 'work:codex', 'work:claude',
+ALIASES = ('work:cs', 'work:disconnect', 'work:status', 'work:stop',
            'scratch:configure', 'scratch:start', 'scratch:stop', 'scratch:status', 'scratch:logs', 'scratch:backup')
 LEGACY = ('work', 'work:codex', 'work:claude', 'work:codex:cs', 'work:claude:cs',
           'agent:codex', 'agent:claude', 'agent:sessions', 'agent:handoff', 'agent:recover',
@@ -39,7 +39,7 @@ def integrate(text):
         key = re.escape(alias)
         if re.search(rf'''^  (?:{key}:(?=\s|$)|'{key}':|"{key}":)''', body, re.M):
             continue
-        additions += (f'  {alias}:\n' + ('    interactive: true\n' if alias in ('work', 'work:cs', 'work:codex', 'work:claude') else '')
+        additions += (f'  {alias}:\n' + ('    interactive: true\n' if alias == 'work:cs' else '')
                       + '    cmds:\n' + f'      - task: devcontainer:{alias}\n'
                       + '        vars: {CLI_ARGS: "{{.CLI_ARGS}}"}\n')
     block = ('  # '+LABEL+' begin sha256='+hashlib.sha256(additions.encode()).hexdigest()+'\n'

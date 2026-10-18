@@ -220,31 +220,26 @@ if __name__ == '__main__':
 
 class NativeRestoreTests(NativeFixture):
     def restore(self, entry, **kwargs):
-        return self.api.restore_conversation(self.project, self.store, entry, state=self.root / 'state', env=self.env, **kwargs)
+        return self.api._publish_conversation(self.project, self.store, entry, state=self.root / 'state', env=self.env, **kwargs)
 
-    def test_codex_fork_indexes_only_new_imports_and_verifies_completed_history(self):
-        path = self.codex()
-        original = path.read_bytes()
-        entry = self.capture()['entries'][0]
+    def test_codex_new_envelope_retains_history_without_touching_original(self):
+        path = self.codex(); original = path.read_bytes(); entry = self.capture()['entries'][0]
         calls = []
-        child = str(uuid.uuid4())
         class Client:
             def __init__(inner, *args, **kwargs): pass
             def __enter__(inner): return inner
             def __exit__(inner, *args): pass
             def call(inner, method, params):
                 calls.append((method, params))
-                if method == 'thread/fork':
-                    return dict(thread=dict(id=child, cwd=str(self.project.root), path=str(self.home / 'fork.jsonl')), runtimeWorkspaceRoots=[str(self.project.root)])
-                return {}
+                if method == 'thread/resume': inner.publication_id = params['threadId']
+                if method == 'thread/list': return dict(data=[dict(id=inner.publication_id)], nextCursor=None)
+                return dict(thread=dict(id=params['threadId']))
         with patch.object(self.api.agents, 'CodexClient', Client), patch.object(self.api.agents, '_history', return_value=dict(turns=[dict(id=self.turn, status='completed')], items=[])):
             result = self.restore(entry)
-        self.assertEqual(result['session_id'], child)
-        self.assertFalse(any(method == 'thread/resume' for method, _ in calls))
-        fork = next(params for method, params in calls if method == 'thread/fork')
-        self.assertTrue(fork['deferGoalContinuation'])
-        self.assertEqual(fork['lastTurnId'], self.turn)
-        self.assertEqual(fork['path'], str(path))
+        self.assertNotEqual(result['session_id'], self.sid)
+        self.assertEqual([method for method, _ in calls], ['thread/resume', 'thread/list'])
+        clone = next(p for p in self.home.rglob('*.jsonl') if p.name.endswith(result['session_id'] + '.jsonl'))
+        self.assertEqual(clone.read_bytes().splitlines()[1:], original.splitlines()[1:])
         self.assertEqual(path.read_bytes(), original)
 
     def test_wrong_identity_digest_and_ancestor_offset_fail_before_native_writes(self):
@@ -266,26 +261,10 @@ class NativeRestoreTests(NativeFixture):
             def __init__(inner, *args, **kwargs): pass
             def __enter__(inner): return inner
             def __exit__(inner, *args): pass
+            def call(inner, method, params): return dict(thread=dict(id=params['threadId']))
         with patch.object(self.api.agents, 'CodexClient', Client), patch.object(self.api.agents, '_history', return_value=dict(turns=[], items=[])), self.assertRaisesRegex(ValueError, 'history|turn'):
             self.restore(entry)
 
-    def test_claude_restoration_uses_unique_parent_alias_preserving_existing_original(self):
-        path = self.claude()
-        original = path.read_bytes()
-        entry = self.capture()['entries'][0]
-        result = self.restore(entry)
-        argv = result['argv']
-        self.assertIn('--fork-session', argv)
-        self.assertEqual(argv[argv.index('--session-id') + 1], result['session_id'])
-        parent = argv[argv.index('--resume') + 1]
-        self.assertNotEqual(parent, self.sid)
-        alias = path.with_name(parent + '.jsonl')
-        self.assertEqual(alias.read_bytes(), original)
-        self.assertEqual(path.read_bytes(), original)
-        self.assertEqual(result['env']['CLAUDE_CODE_DISABLE_AUTO_MEMORY'], '1')
-        again = self.api.capture_conversations(self.project, self.store, state=self.root / 'state', env=self.env)
-        self.assertEqual(again['issues'], [])
-        self.assertEqual([x['session_id'] for x in again['entries']], [self.sid])
 
 
 class ContinuedClaudeTests(NativeFixture):
@@ -321,11 +300,16 @@ class ContinuedClaudeTests(NativeFixture):
         subprocess.run(['git', '-C', str(destination), 'remote', 'add', 'origin', source.remote], check=True)
         dp = discover_project(destination)
         state = self.root / 'continued-state'
-        result = self.api.restore_conversation(dp, self.store, entry, state=state, env=self.env)
-        child_id = result['session_id']
-        alias_id = result['argv'][result['argv'].index('--resume') + 1]
+        child_id, alias_id = str(uuid.uuid4()), str(uuid.uuid4())
+        result = dict(session_id=child_id, provenance=dict(agent='claude', source_session_id=self.sid, source_root=str(source.root), cutoff=entry['cutoff']))
         directory = Path(self.env['CLAUDE_CONFIG_DIR']) / 'projects' / claude_namespace(destination)
+        directory.mkdir(parents=True)
         alias = directory / (alias_id + '.jsonl')
+        alias.write_bytes(parent.read_bytes()); alias.chmod(0o400)
+        info = alias.stat()
+        receipt_path = state / 'conversation-imports/legacy/receipt.json'
+        receipt_path.parent.mkdir(parents=True)
+        receipt_path.write_text(json.dumps(dict(schema=1, status='complete', agent='claude', project_id=dp.project_id, identity=dp.identity, source_session_id=self.sid, destination_root=str(destination), result=result, files=[dict(destination=str(alias), physical_alias=alias_id, source_session_id=self.sid, created=True, inode=[info.st_dev, info.st_ino], size=info.st_size, sha256=entry['files'][0]['sha256'], scope_roots=entry['scope_roots'])])))
         inherited = [json.loads(line) for line in alias.read_bytes().splitlines()]
         for row in inherited:
             row['sessionId'] = child_id
@@ -345,7 +329,7 @@ class ContinuedClaudeTests(NativeFixture):
         self.assertIn(str(source.root), entry['scope_roots'])
         self.assertEqual(self.store.read(entry['files'][0]['blob']), child.read_bytes())
         self.api._preflight(dp, self.store, entry)
-        second = self.api.restore_conversation(dp, self.store, entry, state=self.root / 'second-recovery', env=self.env)
+        second = self.api._publish_conversation(dp, self.store, entry, state=self.root / 'second-recovery', env=self.env)
         self.assertNotEqual(second['session_id'], result['session_id'])
 
     def test_modified_alias_wrong_child_and_receipt_scope_mismatch_refuse(self):
@@ -387,7 +371,7 @@ class NativePublicationTests(NativeFixture):
         entry, env, state = self.prepare()
         with patch.object(self.api, 'atomic_write', side_effect=OSError('fixture journal unavailable')):
             with self.assertRaisesRegex(OSError, 'journal unavailable'):
-                self.api.restore_conversation(self.project, self.store, entry, state=state, env=env)
+                self.api._publish_conversation(self.project, self.store, entry, state=state, env=env)
         self.assertEqual(list(Path(env['CODEX_HOME']).rglob('*.jsonl')), [])
 
     def test_interrupted_partial_stage_write_never_publishes_native_identity(self):
@@ -401,7 +385,7 @@ class NativePublicationTests(NativeFixture):
             raise OSError('fixture interrupted staged write')
         with patch.object(self.api.os, 'write', side_effect=partial), patch.object(self.api.agents, 'CodexClient', side_effect=AssertionError('native writer reached before staging fault')):
             with self.assertRaisesRegex(OSError, 'staged write'):
-                self.api.restore_conversation(self.project, self.store, entry, state=state, env=env)
+                self.api._publish_conversation(self.project, self.store, entry, state=state, env=env)
         self.assertEqual(list(Path(env['CODEX_HOME']).rglob('*.jsonl')), [])
 
     def test_foreign_final_created_during_publication_is_never_overwritten_or_resumed(self):
@@ -414,13 +398,13 @@ class NativePublicationTests(NativeFixture):
             finally: os.close(fd)
             return link(source, target, **kwargs)
         with patch.object(self.api.os, 'link', side_effect=collision), self.assertRaises(FileExistsError):
-            self.api.restore_conversation(self.project, self.store, entry, state=state, env=env)
+            self.api._publish_conversation(self.project, self.store, entry, state=state, env=env)
         final = next(Path(env['CODEX_HOME']).rglob('*.jsonl'))
         with patch.object(self.api.agents, 'CodexClient', side_effect=AssertionError('foreign native identity resumed')), self.assertRaisesRegex(ValueError, 'ownership'):
-            self.api.restore_conversation(self.project, self.store, entry, state=state, env=env)
+            self.api._publish_conversation(self.project, self.store, entry, state=state, env=env)
         self.assertEqual(final.read_bytes(), foreign)
 
-    def test_claude_retry_reuses_journaled_readonly_alias_after_complete_receipt_failure(self):
+    def test_claude_retry_reuses_journaled_writable_import_after_complete_receipt_failure(self):
         path = self.claude()
         entry = self.capture()['entries'][0]
         state = self.root / 'claude-publish-state'
@@ -432,14 +416,14 @@ class NativePublicationTests(NativeFixture):
                 raise OSError('fixture complete receipt unavailable')
             return write(path, data, *args, **kwargs)
         with patch.object(self.api, 'atomic_write', side_effect=interrupt), self.assertRaisesRegex(OSError, 'complete receipt'):
-            self.api.restore_conversation(self.project, self.store, entry, state=state, env=self.env)
+            self.api._publish_conversation(self.project, self.store, entry, state=state, env=self.env)
         aliases = [candidate for candidate in path.parent.glob('*.jsonl') if candidate != path]
         self.assertEqual(len(aliases), 1)
-        result = self.api.restore_conversation(self.project, self.store, entry, state=state, env=self.env)
-        self.assertEqual(result['argv'][result['argv'].index('--resume') + 1], aliases[0].stem)
+        result = self.api._publish_conversation(self.project, self.store, entry, state=state, env=self.env)
+        self.assertEqual(result['session_id'], aliases[0].stem)
         self.assertEqual(len(list(path.parent.glob('*.jsonl'))), 2)
-        self.assertEqual(aliases[0].read_bytes(), path.read_bytes())
-        self.assertEqual(aliases[0].stat().st_mode & 0o777, 0o400)
+        self.assertEqual([row['message'] for row in map(json.loads, aliases[0].read_bytes().splitlines())], [row['message'] for row in map(json.loads, path.read_bytes().splitlines())])
+        self.assertEqual(aliases[0].stat().st_mode & 0o777, 0o600)
 
     def test_interrupted_after_publication_retries_only_owned_published_inode(self):
         entry, env, state = self.prepare()
@@ -451,6 +435,8 @@ class NativePublicationTests(NativeFixture):
             def __exit__(inner, *args): pass
             def call(inner, method, params):
                 calls.append((method, params))
+                if method == 'thread/resume': inner.publication_id = params['threadId']
+                if method == 'thread/list': return dict(data=[dict(id=inner.publication_id)], nextCursor=None)
                 if method == 'thread/resume':return dict(thread=dict(id=params['threadId']))
                 if method == 'thread/fork':return dict(thread=dict(id=child, cwd=str(self.project.root)), runtimeWorkspaceRoots=[str(self.project.root)])
                 return {}
@@ -460,12 +446,12 @@ class NativePublicationTests(NativeFixture):
             raise OSError('fixture interruption after publication')
         with patch.object(self.api.os, 'link', side_effect=interrupted), patch.object(self.api.agents, 'CodexClient', Client), patch.object(self.api.agents, '_history', return_value=dict(turns=[dict(id=self.turn, status='completed')], items=[])):
             with self.assertRaisesRegex(OSError, 'after publication'):
-                self.api.restore_conversation(self.project, self.store, entry, state=state, env=env)
+                self.api._publish_conversation(self.project, self.store, entry, state=state, env=env)
         self.assertEqual(calls, [])
         with patch.object(self.api.agents, 'CodexClient', Client), patch.object(self.api.agents, '_history', return_value=dict(turns=[dict(id=self.turn, status='completed')], items=[])):
-            result = self.api.restore_conversation(self.project, self.store, entry, state=state, env=env)
-        self.assertEqual(result['session_id'], child)
-        self.assertEqual([params['threadId'] for method, params in calls if method == 'thread/resume'], [self.sid])
+            result = self.api._publish_conversation(self.project, self.store, entry, state=state, env=env)
+        self.assertNotEqual(result['session_id'], self.sid)
+        self.assertEqual([params['threadId'] for method, params in calls if method == 'thread/resume'], [result['session_id']])
         finals = list(Path(env['CODEX_HOME']).rglob('*.jsonl'))
         self.assertEqual(len(finals), 1)
         self.assertEqual(finals[0].stat().st_nlink, 1)
@@ -486,6 +472,8 @@ class NativeRetryTests(NativeFixture):
             def __exit__(inner, *args): pass
             def call(inner, method, params):
                 calls.append((method, params))
+                if method == 'thread/resume': inner.publication_id = params['threadId']
+                if method == 'thread/list': return dict(data=[dict(id=inner.publication_id)], nextCursor=None)
                 if method == 'thread/resume':
                     if failures[0]:
                         failures[0] = False
@@ -496,43 +484,7 @@ class NativeRetryTests(NativeFixture):
                 return {}
         with patch.object(self.api.agents, 'CodexClient', Client), patch.object(self.api.agents, '_history', return_value=dict(turns=[dict(id=self.turn, status='completed')], items=[])):
             with self.assertRaisesRegex(ValueError, 'interruption'):
-                self.api.restore_conversation(self.project, self.store, entry, state=state, env=destination_env)
-            result = self.api.restore_conversation(self.project, self.store, entry, state=state, env=destination_env)
-        self.assertEqual(result['session_id'], child)
+                self.api._publish_conversation(self.project, self.store, entry, state=state, env=destination_env)
+            result = self.api._publish_conversation(self.project, self.store, entry, state=state, env=destination_env)
+        self.assertNotEqual(result['session_id'], self.sid)
         self.assertEqual(len([method for method, _ in calls if method == 'thread/resume']), 2)
-
-class NativeLaunchTests(NativeFixture):
-    def test_default_launch_starts_new_and_resume_can_select_acknowledged_checkpoint(self):
-        from types import SimpleNamespace
-        entry = dict(agent='codex', session_id=self.sid, title='Completed project turn')
-        manifest = dict(project=dict(project_id=self.project.project_id, identity=self.project.identity), conversations=dict(entries=[entry]))
-        class Store:
-            def __init__(inner, state): pass
-            def latest(inner, source): return dict(snapshot_id='fixture') if source == 'codespace' else None
-            def load(inner, key): return manifest
-        class Gum:
-            def choose(inner, title, options): return options[0]
-        state = self.root / 'launch-state'
-        restored = dict(session_id=str(uuid.uuid4()), argv=['codex', 'resume', 'recovered-id'], env={})
-        with patch('devcontainer_setup.project_sync.checkpoint_store.Store', Store), patch('devcontainer_setup.project_sync.terminal.Gum', Gum), patch.object(self.api, '_new_codex', return_value=self.sid) as new, patch.object(self.api, 'capture_conversations', return_value=dict(entries=[], issues=[])), patch.object(self.api, 'restore_conversation', return_value=restored) as restore, patch.object(self.api.subprocess, 'run', return_value=SimpleNamespace(returncode=0)) as run:
-            self.assertEqual(self.api.launch(self.project, state, 'codex', env=self.env), 0)
-            new.assert_called_once()
-            restore.assert_not_called()
-            self.assertIn(self.sid, run.call_args.args[0])
-            self.assertEqual(self.api.launch(self.project, state, 'codex', resume=True, env=self.env), 0)
-            restore.assert_called_once()
-            self.assertEqual(run.call_args.args[0], restored['argv'])
-
-    def test_fresh_claude_uses_project_notes_without_global_memory_or_profile_changes(self):
-        from types import SimpleNamespace
-        memory = self.project.root / '.scratch/memory'
-        memory.mkdir(parents=True)
-        (memory / 'project.md').write_text('The project marker is TULIP.')
-        with patch.object(self.api.subprocess, 'run', return_value=SimpleNamespace(returncode=0)) as run:
-            self.assertEqual(self.api.launch(self.project, self.root / 'launch-state', 'claude', env=self.env), 0)
-        call = run.call_args
-        self.assertIn('--session-id', call.args[0])
-        self.assertNotIn('--resume', call.args[0])
-        self.assertIn('TULIP', call.args[0][call.args[0].index('--append-system-prompt') + 1])
-        self.assertEqual(call.kwargs['env']['CLAUDE_CODE_DISABLE_AUTO_MEMORY'], '1')
-        self.assertEqual(call.kwargs['cwd'], self.project.root)

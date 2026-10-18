@@ -34,72 +34,15 @@ class HerdrTests(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
 
-    def test_local_reuses_actual_checkout_and_focuses_opaque_workspace(self):
+    def test_workspace_reuses_actual_checkout_and_focuses_opaque_workspace(self):
         rows = {'result': {'workspaces': [
             {'workspace_id': 'opaque-other', 'label': 'repo', 'worktree': {'checkout_path': '/other'}},
             {'workspace_id': 'opaque-real', 'label': 'anything', 'worktree': {'checkout_path': str(self.project.root)}}]}}
         with mock.patch.object(herdr.subprocess, 'run', side_effect=[completed(rows), completed({'result': {}})]) as run:
-            self.assertEqual(herdr.open_local(self.project, self.state), 0)
+            herdr._workspace(self.project, str(self.project.root), [])
         self.assertEqual(run.call_args_list[-1].args[0], ['herdr', 'workspace', 'focus', 'opaque-real'])
         self.assertFalse(any('create' in call.args[0] for call in run.call_args_list))
 
-    def test_local_creates_in_current_herdr_or_attaches_named_session_outside(self):
-        with mock.patch.object(herdr.subprocess, 'run', side_effect=[
-            completed({'result': {'workspaces': []}}),
-            completed({'result': {'workspace': {'workspace_id': 'new-opaque'}}}),
-            completed({'result': {}}),
-        ]) as run:
-            self.assertEqual(herdr.open_local(self.project, self.state), 0)
-        create = run.call_args_list[1].args[0]
-        self.assertIn(str(self.project.root), create)
-        self.assertIn('--no-focus', create)
-        with mock.patch.dict(os.environ, {'HERDR_ENV': ''}), \
-                mock.patch.object(herdr.subprocess, 'run', side_effect=[
-                    completed({'result': {'workspaces': [{'workspace_id': 'outside',
-                        'worktree': {'checkout_path': str(self.project.root)}}]}}), completed({'result': {}})]), \
-                mock.patch.object(herdr.subprocess, 'call', return_value=0) as call:
-            self.assertEqual(herdr.open_local(self.project, self.state), 0)
-        self.assertEqual(call.call_args.kwargs['cwd'], self.project.root)
-        self.assertIn('--session', call.call_args.args[0])
-
-    def test_outside_existing_session_focuses_recovery_checkout_before_attach(self):
-        with mock.patch.dict(os.environ, {'HERDR_ENV': ''}), \
-                mock.patch.object(herdr.subprocess, 'run', side_effect=[
-                    completed({'result': {'workspaces': [{'workspace_id': 'old-root',
-                        'worktree': {'checkout_path': '/old/local/checkout'}}]}}),
-                    completed({'result': {'workspace': {'workspace_id': 'recovery-root'}}}),
-                    completed({'result': {}})]) as run, \
-                mock.patch.object(herdr.subprocess, 'Popen') as popen, \
-                mock.patch.object(herdr.subprocess, 'call', return_value=0):
-            self.assertEqual(herdr.open_local(self.project, self.state), 0)
-        prefix = ['herdr', '--session', 'project-' + 'a' * 24]
-        self.assertEqual(run.call_args_list[0].args[0], prefix + ['workspace', 'list'])
-        self.assertEqual(run.call_args_list[-1].args[0], prefix + ['workspace', 'focus', 'recovery-root'])
-        popen.assert_not_called()
-
-    def test_outside_stopped_session_starts_detached_then_focuses_actual_root(self):
-        stopped = subprocess.CompletedProcess([], 1, '', json.dumps({'error': {'code': 'server_not_running'}}))
-        with mock.patch.dict(os.environ, {'HERDR_ENV': ''}), \
-                mock.patch.object(herdr.subprocess, 'run', side_effect=[stopped,
-                    completed({'result': {'workspaces': []}}),
-                    completed({'result': {'workspace': {'workspace_id': 'recovered'}}}), completed({'result': {}})]) as run, \
-                mock.patch.object(herdr.subprocess, 'Popen') as popen, \
-                mock.patch.object(herdr.subprocess, 'call', return_value=0):
-            self.assertEqual(herdr.open_local(self.project, self.state), 0)
-        self.assertEqual(popen.call_args.args[0], ['herdr', '--session', 'project-' + 'a' * 24, 'server'])
-        self.assertTrue(popen.call_args.kwargs['start_new_session'])
-        self.assertEqual(popen.call_args.kwargs['cwd'], self.project.root)
-        self.assertEqual(popen.call_args.kwargs['stdin'], subprocess.DEVNULL)
-        self.assertEqual(run.call_args_list[-1].args[0][-2:], ['focus', 'recovered'])
-
-    def test_outside_protocol_failure_does_not_start_another_server(self):
-        broken = subprocess.CompletedProcess([], 1, '', json.dumps({'error': {'code': 'protocol_mismatch'}}))
-        with mock.patch.dict(os.environ, {'HERDR_ENV': ''}), \
-                mock.patch.object(herdr.subprocess, 'run', return_value=broken), \
-                mock.patch.object(herdr.subprocess, 'Popen') as popen:
-            with self.assertRaisesRegex(ValueError, 'Herdr command failed'):
-                herdr.open_local(self.project, self.state)
-        popen.assert_not_called()
 
     def test_remote_inside_herdr_reuses_machine_without_nested_client_or_settings_changes(self):
         config = self.home / '.config/herdr/config.toml'
@@ -244,7 +187,7 @@ request_path = "request.wav"
                 return completed({'result': {'workspace': {'workspace_id': 'new'}}})
             return completed({'result': {}})
         with mock.patch.object(herdr.subprocess, 'run', side_effect=native) as run:
-            self.assertEqual(herdr.open_local(self.project, self.state), 0)
+            herdr._workspace(self.project, str(self.project.root), [])
         self.assertEqual(run.call_args_list[-1].args[0], ['herdr', 'workspace', 'focus', 'new'])
 
     def test_native_workspace_without_worktree_metadata_reuses_its_launch_directory(self):
@@ -259,7 +202,7 @@ request_path = "request.wav"
                 return completed({'result': {'workspace': {'workspace_id': 'duplicate'}}})
             return completed({'result': {}})
         with mock.patch.object(herdr.subprocess, 'run', side_effect=native) as run:
-            self.assertEqual(herdr.open_local(self.project, self.state), 0)
+            herdr._workspace(self.project, str(self.project.root), [])
         self.assertEqual(run.call_args_list[1].args[0], ['herdr', 'pane', 'list', '--workspace', 'existing'])
         self.assertEqual(run.call_args_list[-1].args[0], ['herdr', 'workspace', 'focus', 'existing'])
         self.assertFalse(any('create' in call.args[0] for call in run.call_args_list))

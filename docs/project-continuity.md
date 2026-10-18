@@ -1,125 +1,115 @@
 # Project continuity
 
-Run `task work:cs` on the Mac to work in a Codespace through Herdr. Run `task work`
-to work locally, including when GitHub is unreachable. Use one host at a time for
-the same conversation. Herdr, GitHub CLI, Python, and each native agent must be
-available on their respective hosts; setup installs the container tools.
+Work in the existing repository checkout on your Mac and in Codespaces. Run
+`codex` or `claude` normally, and use `codex resume` or `claude --resume` to choose
+a native conversation. Continue a given conversation on one host at a time.
+
+## What moves between machines
+
+| Data | Transfer |
+| --- | --- |
+| Source code, commits, branches, staged and unstaged changes | Git operations you perform yourself |
+| `.scratch/` payloads, including `.scratch/memory/` | Automatic two-way safe sync |
+| Supported completed project conversation turns | Verified native session publication in each direction |
+| Credentials, global settings/databases and personal memory libraries | Remain on each host |
+
+Sync does not commit, push, pull, switch branches, stash, restore source files, or
+create checkouts. Uncommitted code stays on the host where it was edited.
 
 ## Daily commands
 
 | Command | Result |
 | --- | --- |
-| `task work:cs` | Explicitly start/connect Codespace, back it up to Mac, connect its local Herdr group |
-| `task work:disconnect` | Disconnect this project's saved Codespace machine from local Herdr |
-| `task work` | Open local Herdr; recover remote work when switching back |
-| `task work:codex` / `task work:claude` | Fresh native conversation on the current host |
-| `task work:codex -- --resume` | Choose a scoped conversation, including recoverable checkpoints |
-| `task work:claude -- --resume` | Choose a Claude conversation |
-| `task work:status` | Actual Mac receipt time, worker state, scratch conflicts, conversation issues |
-| `task work:stop` | Stop only this project’s owned sync/backup worker |
+| `task work:cs` | Start/connect the paired Codespace, start sync, connect its saved Herdr machine |
+| `task work:disconnect` | Disconnect only this project's saved Codespace machine from local Herdr |
+| `task work:status` | Show scratch and conversation synchronization status |
+| `task work:stop` | Stop this project's owned sync worker |
 
-If a project already has a custom `work` task, use `task devcontainer:work` and the
-other `devcontainer:work:*` tasks. Setup preserves custom root tasks.
+Run the connection tasks on your Mac. Inside Herdr, connection returns to your
+shell; select the Codespace group to work remotely. From another terminal, it
+opens local Herdr with that group available. Repeated entry reuses the existing
+project workspace. The controller verifies checkout identity and does not alter
+its branch or index.
 
-Run `task work:disconnect` on the Mac to disable only this project's saved Herdr
-machine. The Codespace group disconnects in local Herdr; remote workspaces and
-agents remain running, and Mac backups continue. This operation needs no SSH or
-GitHub connection. Repeating it is safe. `task work:cs` re-enables the saved
-machine and reuses the existing workspace. Use `task work:stop` separately to
-pause this project's backup and scratch worker.
+Disconnect leaves remote sessions, local Herdr and synchronization running. It
+needs no SSH or GitHub connection and is idempotent. Use `work:stop` separately to
+stop synchronization. Setup preserves custom project Taskfile operations and
+retires only verified producer-owned old work/agent launcher tasks.
 
-Inside Herdr, `task work:cs` returns after connecting the saved machine. Select
-the project's Codespace group to work in its remote panes. From another terminal,
-it opens the local Herdr UI with that group available. Both paths use the saved
-machine connection that `task work:disconnect` controls.
+## Scratch and project memory
 
-## What gets protected
+Scratch sync excludes its tracked `.gitignore` and README markers, VCS metadata,
+and transient tool caches. Deletions propagate. Simultaneous conflicting edits
+remain for explicit resolution; neither side silently wins.
 
-The Mac worker checkpoints the remote Git HEAD and its reachable history, exact
-index (including staged bytes), tracked and nonignored working files, deletions,
-file modes, safe links, and ignored `.scratch/` contents. A checkpoint is acknowledged
-only after every referenced object has arrived and passed its SHA256 check.
-Interrupted transfers leave the last good receipt intact.
+Shared project memory is Markdown under `.scratch/memory/`. Setup adds guidance
+to AGENTS.md and CLAUDE.md, so ordinary native agent launches can read and maintain
+those notes. Project Codex policy disables its shared global memory feature for
+this workflow. Claude's project-local settings route auto-memory to
+`.scratch/memory/claude/`, preserving unrelated local settings and any explicit
+auto-memory enable/disable choice. A conflicting custom memory directory is
+reported and preserved. No global profile or memory settings are changed.
 
-Checkpoints live in private host-local state, normally
-`~/.local/state/devcontainer-setup/projects/<project-id>/checkpoints/`. They are
-immutable, deduplicated by content, and currently retained without automatic
-pruning. Large repositories and long conversations consume local disk and take
-longer to checkpoint. Individual objects above 256 MiB refuse transfer. Do not treat the five-second polling delay as a guaranteed
-recovery-point interval: collection and transfer take additional time.
+## Conversations
 
-Ignored build outputs outside `.scratch/` are excluded. Unborn repositories,
-submodules, special files, split indexes, unsafe/colliding paths and unstable file
-reads can refuse a checkpoint. Sparse checkout support is unproven. Inspect the
-reported checkpoint failure before relying on protection.
+The Mac worker captures verified stable prefixes ending at supported completed
+turns, including required native ancestors. It transfers content-addressed blobs
+and validates their hashes and project identity before publication. Interruption
+leaves the previous successful receipt and source histories intact.
 
-## Conversations and memory
+Native imports use new IDs in the destination host's ordinary agent home and
+checkout namespace. Native Codex metadata operations prepare imported history without a
+model turn; Claude imports retain validated message content and ancestry. Use
+the normal native resume picker to select an imported conversation. Unchanged
+revisions are deduplicated, and unchanged imported histories are not echoed back
+as new conversations. Locally continued or active sessions are preserved.
 
-Collectors read native transcripts without changing the running conversation.
-They retain only a verified stable prefix ending at a supported completed turn,
-including required native ancestors. Native formats that cannot be validated are
-reported explicitly; originals remain untouched. Unfinished turns can be lost
-if the Codespace disappears before a supported completed prefix reaches the Mac.
+Only project-scoped conversations are eligible. Histories with unrelated-project
+or global-memory context can be refused. Unsupported child-agent/sidecar history
+or other unvalidated native formats are reported. Start agent conversations
+from the checkout root so its scope can be established. An unfinished turn may
+not be available until its next supported completion.
 
-Cross-host continuation creates a native fork with a new ID and verifies retained
-history. No source writer-release protocol is needed. Authentication, native global
-SQLite files, profiles, and personal memory libraries are never replicated.
-Existing source histories are never resumed just to collect a checkpoint.
+Native Codex can hide automated `exec` sessions and histories containing only
+inherited turns from its default resume picker. Such imports are reported as
+issues; they are not counted as successfully available conversations.
 
-Shared project memory belongs in `.scratch/memory/`. Managed launch reads those
-notes, and generated project Codex policy disables global memory for this workflow.
-A historical conversation containing global-memory or unrelated-project context
-may be refused rather than silently stripped or exported.
-Codex child-agent histories and Claude Agent/Task sidecars currently refuse
-continuation until their full dependency closure is supported. Conversations
-started from nested subdirectories are not currently discovered; launch the
-managed commands from the checkout root. These limits do not block code backups.
+If an agent import is unsupported, scratch sync can continue independently.
+Inspect `task work:status`; scratch connection health alone does not prove that
+all conversations have been published.
 
-## Recovery preserves working copies
+## Availability and migration
 
-First Codespace entry preserves its existing work as a checkpoint, then creates a
-separate desktop-seeded checkout under `/workspaces/.devcontainer-work/<project-id>/`.
-Herdr focuses that exact checkout. Repeated remote entry reuses it.
+A sleeping, disconnected or powered-off Mac receives nothing. The last successful
+conversation receipt and actual scratch status determine what is locally
+available. The polling delay is not a recovery interval guarantee: capture,
+validation and transfer take additional time.
 
-Switching back creates a new private local checkout under the project state’s
-`recovered/` directory and focuses it in Herdr. Existing Mac code and index are
-preserved. Once working locally, later remote receipts cannot overwrite the active
-local checkout. Switching to Codespace again creates another remote checkout from
-the active desktop work. Push normal project changes through Git as usual.
+When Codespaces is unavailable, use your existing Mac checkout and the ordinary
+native agents. Imported conversations and received scratch files remain available.
+Commit/push/pull code through Git; conversations cannot restore uncommitted code.
 
-Recovery uses the last checkpoint received on this Mac. A sleeping, disconnected,
-or powered-off Mac receives nothing. `task work:status` is the authority for the
-last receipt; a green scratch connection alone is insufficient.
+Older versions created remote `.devcontainer-work/` and private local `recovered/`
+checkouts. Migration selects a verified ordinary checkout and preserves those
+old directories and private checkpoint data. It never merges their code or
+indexes into the active checkout. Old scratch bindings are retained for review;
+new endpoints use their own safe reconciliation baseline. Inspect retired
+checkouts before manually deleting them.
 
-## Transport and advanced scratch controls
+## Transport and advanced controls
 
-The foreground command can start a stopped Codespace. The background worker has
-an enforced GET-only GitHub API capability and cannot start it or spend credits.
-It reconnects to an already running space. Run `task work:cs` after a Mac reboot.
-Connections wait up to 45 seconds for a successful SSH handshake after the local
-forward opens. Only this harmless probe is retried; project operations run once.
+The foreground connection command can start a stopped Codespace. The detached
+worker has a GET-only GitHub API capability and cannot restart a Codespace or
+spend credits. Run `task work:cs` again after a Mac reboot.
 
-After enabling a saved Herdr machine, workspace discovery waits up to 45 seconds
-for its remote API to become ready. Codespace restarts can leave its persisted
-socket present before the server is listening. Only read-only discovery is
-retried; workspace creation and focus requests are sent once.
+Connections wait up to 45 seconds for a successful SSH handshake and separately
+up to 45 seconds for the saved Herdr machine's remote API after startup. Only
+read-only readiness probes are retried; workspace creation and focus run once.
+An owned SSH alias uses GitHub's native SSH proxy with a dedicated strict host
+key. Herdr activity reports Codespace activity; silent background sync retains
+the configured idle timeout. Existing SSH and Herdr global settings are preserved.
 
-An owned SSH alias in `~/.ssh/config` connects Herdr through GitHub's native SSH
-proxy. Real Herdr traffic reports activity to Codespaces; silent connections
-retain the configured idle timeout. This proxy also has a GET-only capability:
-Herdr reconnect cannot restart a stopped Codespace. Background sync continues to
-use a plain port forward, without activity heartbeats. The dedicated host key and
-private include stay in project state. Existing SSH settings and Herdr configuration
-are preserved. Connecting uses the saved machine in the local Herdr UI.
-
-Scratch synchronization remains two-way safe. Deletions propagate; simultaneous
-conflicting changes remain for explicit resolution. The owned session’s identity
-and endpoints are verified before it can be stopped or retargeted. Old bindings,
-backups, and retired handoff data are retained privately.
-
-Advanced commands remain available: `task scratch:configure -- --codespace NAME
---remote-root /workspaces/PROJECT`, `scratch:start`, `scratch:status`, `scratch:logs`,
-`scratch:backup`, and `scratch:stop`. Prefer the daily `work` entrypoints.
-
-See [validation evidence](project-continuity-validation.md) for the exercised live
-workflow and failure cases.
+Advanced commands remain `task scratch:configure -- --codespace NAME --remote-root
+/workspaces/PROJECT`, `scratch:start`, `scratch:status`, `scratch:logs`,
+`scratch:backup`, and `scratch:stop`. Scratch backups contain scratch payloads only.
+Historical full-checkout recovery evidence is superseded by this design.
