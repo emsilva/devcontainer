@@ -70,6 +70,10 @@ or other unvalidated native formats are reported. Start agent conversations
 from the checkout root so its scope can be established. An unfinished turn may
 not be available until its next supported completion.
 
+Native Codex can hide automated `exec` sessions and histories containing only
+inherited turns from its default resume picker. Such imports are reported as
+issues; they are not counted as successfully available conversations.
+
 If an agent import is unsupported, scratch sync can continue independently.
 Inspect `task work:status`; scratch connection health alone does not prove that
 all conversations have been published.

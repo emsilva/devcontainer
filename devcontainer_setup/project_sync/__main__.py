@@ -1,4 +1,4 @@
-"""Project workspace and recovery commands, shipped to each consumer."""
+"""Codespace connection and project-data sync commands shipped to consumers."""
 from __future__ import annotations
 
 import argparse
