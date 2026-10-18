@@ -12,7 +12,6 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
-import subprocess
 import uuid
 
 from . import agents, sessions
@@ -81,6 +80,8 @@ def _claude_child_scopes(project, receipt, path, data, store, destination_roots)
     """Authorize historical roots only through an owned native fork's history."""
     if receipt.get('schema') != SCHEMA or receipt.get('status') != 'complete' or receipt.get('agent') != 'claude':
         return set()
+    if receipt.get('publication'):
+        return _published_claude_scopes(receipt, path, data, store, destination_roots)
     result = receipt.get('result', {})
     child_id = result.get('session_id')
     destination = receipt.get('destination_root')
@@ -186,8 +187,15 @@ def _receipt_scopes(project, state, path, data, store):
             if receipt.get('project_id') != project.project_id or receipt.get('identity') != project.identity:
                 continue
             scopes.update(_claude_child_scopes(project, receipt, path, data, store, destination_roots))
+            if receipt.get('publication') and receipt.get('agent') == 'claude':
+                continue
             for item in receipt.get('files', []):
-                if str(path) != item.get('destination'):
+                destination = Path(item.get('destination', ''))
+                archived_fork = (receipt.get('publication') and item.get('native_fork')
+                                 and len(destination.parents) >= 5
+                                 and path.is_relative_to(destination.parents[4] / 'archived_sessions')
+                                 and path.name == destination.name)
+                if str(path) != item.get('destination') and not archived_fork:
                     continue
                 size = item.get('size')
                 if type(size) is int and 0 <= size <= sessions.MAX_BYTES:
@@ -334,7 +342,7 @@ def _import_aliases(project, state):
     if state is not None:
         for receipt_path in (Path(state) / 'conversation-imports').glob('*/receipt.json'):
             receipt = read_json(receipt_path)
-            if receipt.get('project_id') == project.project_id and receipt.get('identity') == project.identity:
+            if not receipt.get('publication') and receipt.get('project_id') == project.project_id and receipt.get('identity') == project.identity:
                 aliases.update(item['destination'] for item in receipt.get('files', []) if item.get('physical_alias'))
     return aliases
 
@@ -389,6 +397,7 @@ def capture_conversations(project, store, *, state=None, env=None):
                 result['entries'].append(_claude_entry(project, store, sid, path, state=state, scopes=scopes))
             except (ValueError, OSError) as exc:
                 issue('claude', sid, exc)
+    result['entries'] = [entry for entry in result['entries'] if not _unchanged_import(project, store, state, entry)]
     result['entries'].sort(key=lambda item: (-item['updated_at'], item['agent'], item['session_id']))
     return result
 
@@ -583,37 +592,6 @@ def _create(path, data, mode=0o600, *, journal):
                     pass
 
 
-def _repair_publications(prior, home, agent, project, by_id):
-    for item in prior.get('files', []):
-        if not item.get('created') or not item.get('staged_path'):
-            continue
-        sid = item.get('source_session_id')
-        if sid not in by_id or item.get('sha256') != by_id[sid][0]['sha256'] or item.get('size') != len(by_id[sid][1]):
-            raise ValueError('Publication intent does not match the retained checkpoint')
-        target = Path(item['destination'])
-        if agent == 'codex':
-            valid = target.is_relative_to(home / 'sessions') and target.name == by_id[sid][0]['path']
-        else:
-            alias = sessions.session_uuid(item.get('physical_alias'))
-            valid = target == home / 'projects' / sessions.claude_namespace(project.root) / (alias + '.jsonl')
-        if not valid:
-            raise ValueError('Native publication target is outside its owned profile scope')
-        _publish(item)
-
-
-def _codex_argv(project, sid):
-    return ['codex', 'resume', '--cd', str(project.root), '-c', 'features.memories=false', '-c', 'memories.use_memories=false', '-c', 'memories.generate_memories=false', sid]
-
-
-def _claude_argv(project, *, sid=None, parent=None):
-    argv = ['claude', '--system-prompt-snapshot', 'off', '--append-system-prompt', agents.project_context(project)]
-    if parent:
-        argv += ['--resume', parent, '--fork-session', '--session-id', sid]
-    elif sid:
-        argv += ['--resume', sid]
-    return argv
-
-
 def _expected(by_id, order):
     turns, items = [], []
     for sid in order:
@@ -655,213 +633,424 @@ def _verify_history(history, expected):
             raise ValueError('Native reasoning history content does not match checkpoint')
 
 
-def restore_conversation(project, store, entry, *, state=None, env=None):
-    """Fork checked historical bytes using the destination's ordinary profile."""
-    from .state import state_dir
-    state = Path(state) if state is not None else state_dir(project, env)
+def _publish_conversation(project, store, entry, *, state, env=None):
     agent, sid, by_id, order = _preflight(project, store, entry)
-    key = hashlib.sha256(json.dumps(dict(entry=entry, destination_root=str(project.root)), sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-    directory = state / 'conversation-imports' / key
-    receipt_path = directory / 'receipt.json'
+    key = _revision(entry, by_id, order)
+    receipt_path = state / 'conversation-imports' / key / 'receipt.json'
     home = sessions.native_home(agent, env)
     with locked(state / 'conversation-recovery.lock', blocking=True):
         try:
             prior = read_json(receipt_path)
         except FileNotFoundError:
             prior = {}
-        if prior.get('status') == 'complete' and prior.get('project_id') == project.project_id and prior.get('identity') == project.identity and prior.get('destination_root') == str(project.root):
-            result = dict(prior['result'])
-            if agent == 'claude':
-                parent_item = next(item for item in prior['files'] if item.get('physical_alias'))
-                child = sessions._safe(home / 'projects' / sessions.claude_namespace(project.root) / (result['session_id'] + '.jsonl'))
-                if child.exists():
-                    sessions.assert_quiescent([child])
-                    result['argv'] = _claude_argv(project, sid=result['session_id'])
-                else:
-                    parent_path = Path(parent_item['destination'])
-                    data = _stable_prefix(parent_path)
-                    if len(data) != parent_item['size'] or hashlib.sha256(data).hexdigest() != parent_item['sha256'] or parent_path.stat().st_size != len(data):
-                        raise ValueError('Imported Claude fork source changed; original checkpoint preserved')
-                    result['argv'] = _claude_argv(project, sid=result['session_id'], parent=parent_item['physical_alias'])
-            else:
-                path = prior.get('fork_path')
-                if not path or not Path(path).exists():
-                    raise ValueError('Previously recovered native conversation is missing; preserved checkpoint remains available')
-                sessions.assert_quiescent([Path(path)])
-                with agents.CodexClient(project, env=env) as client:
-                    client.call('thread/resume', dict(threadId=result['session_id'], **agents._runtime(project)))
-                    client.call('thread/inject_items', dict(threadId=result['session_id'], items=[dict(type='message', role='developer', content=[dict(type='input_text', text=agents.project_context(project))])]))
-            return result
-        prior_import = (prior.get('status') == 'importing' and prior.get('project_id') == project.project_id
-                        and prior.get('identity') == project.identity and prior.get('destination_root') == str(project.root))
-        if prior_import:
-            _repair_publications(prior, home, agent, project, by_id)
-        receipt = dict(schema=SCHEMA, status='importing', project_id=project.project_id, identity=project.identity, agent=agent, source_session_id=sid, destination_root=str(project.root), files=[])
-        provenance = dict(agent=agent, source_session_id=sid, source_root=entry['source_root'], cutoff=entry['cutoff'], checkpoint=key)
+        if prior:
+            if (prior.get('project_id') != project.project_id or prior.get('identity') != project.identity
+                    or prior.get('destination_root') != str(project.root) or prior.get('agent') != agent):
+                raise ValueError('Native publication journal belongs to another destination')
+            if prior.get('status') == 'complete':
+                _check_published(prior, home, agent, project, receipt_path=receipt_path)
+                return prior['result']
+        receipt = dict(publication=True, source_checkpoint=entry, schema=SCHEMA, status='importing',
+                       project_id=project.project_id, identity=project.identity, agent=agent,
+                       source_session_id=sid, destination_root=str(project.root), files=[])
+        provenance = dict(agent=agent, source_session_id=sid, source_root=entry['source_root'],
+                          cutoff=entry['cutoff'], checkpoint=key)
         if agent == 'claude':
-            # A physical alias gives the native fork its bounded source without
-            # replacing or reading beyond any active same-ID original.
-            previous_alias = next((item for item in prior.get('files', []) if item.get('physical_alias') and item.get('source_session_id') == sid), None) if prior_import else None
-            alias = previous_alias['physical_alias'] if previous_alias else str(uuid.uuid4())
-            target = sessions._safe(home / 'projects' / sessions.claude_namespace(project.root) / (alias + '.jsonl'))
-            item, data, _ = by_id[sid]
-            base = dict(destination=str(target), physical_alias=alias, source_session_id=sid, size=len(data), sha256=item['sha256'], scope_roots=item['scope_roots'], created=True)
-            if target.exists():
-                if not previous_alias or _stable_prefix(target) != data or target.stat().st_size != len(data):
-                    raise ValueError('Existing Claude import alias is not the owned checkpoint')
-                receipt['files'].append(previous_alias)
-            else:
-                def journal(intent):
-                    receipt['files'].append(dict(base, **intent))
-                    atomic_write(receipt_path, json.dumps(receipt, sort_keys=True).encode() + b'\n')
-                _create(target, data, mode=0o400, journal=journal)
-            new = str(uuid.uuid4())
-            result = dict(session_id=new, argv=_claude_argv(project, sid=new, parent=alias), env={'CLAUDE_CODE_DISABLE_AUTO_MEMORY': '1'}, provenance=provenance)
-            receipt.update(status='complete', result=result)
-            atomic_write(receipt_path, json.dumps(receipt, sort_keys=True).encode() + b'\n')
-            return result
-        index = sessions._codex_index(home)
-        targets, newly_created, reconcile = {}, [], []
-        prior_owned = {}
-        if (prior.get('status') == 'importing' and prior.get('project_id') == project.project_id
-                and prior.get('identity') == project.identity and prior.get('destination_root') == str(project.root)):
-            prior_owned = {item['destination']: item for item in prior.get('files', []) if item.get('created')}
-        # Preflight every existing identity before creating even one import.
-        for current in order:
-            item, data, _ = by_id[current]
-            if current in index:
-                target = sessions._safe(index[current])
-                if _stable_prefix(target, len(data)) != data:
-                    raise ValueError('Existing native source identity diverges from checkpoint')
-                owned = prior_owned.get(str(target))
-                info = target.stat(follow_symlinks=False)
-                if owned and [info.st_dev, info.st_ino] == owned.get('inode') and owned.get('sha256') == item['sha256']:
-                    sessions.assert_quiescent([target])
-                    reconcile.append(current)
-            else:
-                name = item['path']
-                date = re.search(r'rollout-(\d{4})-(\d{2})-(\d{2})T', name)
-                parts = date.groups() if date else ('2000', '01', '01')
-                target = sessions._safe(home / 'sessions' / Path(*parts) / name)
-                if target.exists():
-                    raise ValueError('Native import destination exists outside the verified index')
-                newly_created.append(current)
-                reconcile.append(current)
-            targets[current] = target
-        # Journal each durable import before invoking the native writer. A retry
-        # may reconcile only the exact inode we created, never a foreign source.
-        for current in order:
-            item, data, _ = by_id[current]
-            base = dict(destination=str(targets[current]), size=len(data), sha256=item['sha256'], scope_roots=item['scope_roots'], source_session_id=current, created=current in reconcile)
-            if current in newly_created:
-                def journal(intent):
-                    receipt['files'].append(dict(base, **intent))
-                    atomic_write(receipt_path, json.dumps(receipt, sort_keys=True).encode() + b'\n')
-                _create(targets[current], data, journal=journal)
-            else:
-                info = targets[current].stat(follow_symlinks=False)
-                receipt['files'].append(dict(base, inode=[info.st_dev, info.st_ino]))
-                atomic_write(receipt_path, json.dumps(receipt, sort_keys=True).encode() + b'\n')
-        expected = _expected(by_id, order)
-        with agents.CodexClient(project, env=env) as client:
-            for current in reconcile:
-                # Only our absent imports may acquire native runtime settings.
-                resumed = client.call('thread/resume', dict(threadId=current, **agents._runtime(project)))
-                if resumed.get('thread', {}).get('id') != current:
-                    raise ValueError('Native import reconciliation selected the wrong identity')
-            history = agents._history(client, sid)
-            retained_turns = set(expected[0])
-            prefix = dict(turns=history.get('turns', [])[:len(expected[0])], items=[item for item in history.get('items', []) if item.get('turnId') in retained_turns])
-            _verify_history(prefix, expected)
-            response = client.call('thread/fork', dict(threadId=sid, path=str(targets[sid]), lastTurnId=entry['cutoff']['turn_id'], deferGoalContinuation=True, **agents._runtime(project)))
-            thread = response.get('thread', {})
-            new = sessions.session_uuid(thread.get('id'))
-            if new in by_id or thread.get('cwd') != str(project.root) or response.get('runtimeWorkspaceRoots') != [str(project.root)]:
-                raise ValueError('Native fork selected wrong identity or runtime roots')
-            _verify_history(agents._history(client, new), expected)
-            client.call('thread/inject_items', dict(threadId=new, items=[dict(type='message', role='developer', content=[dict(type='input_text', text=agents.project_context(project))])]))
-        result = dict(session_id=new, argv=_codex_argv(project, new), env={}, provenance=provenance)
-        receipt.update(status='complete', result=result, fork_path=thread.get('path'))
+            return _publish_claude(project, store, entry, by_id, home, prior, receipt, receipt_path, provenance)
+        return _publish_codex(project, store, entry, by_id, order, home, prior, receipt, receipt_path, provenance, env=env)
+
+
+def _publish_codex(project, store, entry, by_id, order, home, prior, receipt, receipt_path, provenance, *, env):
+    """Clone only the selected metadata envelope; ancestors remain byte exact."""
+    index = sessions._codex_index(home)
+    previous = {item.get('source_session_id'): item for item in prior.get('files', []) if not item.get('native_fork')}
+    targets = []
+    inherited = None
+    baselines = []
+    # Preflight the complete ancestor closure before publishing any new file.
+    for current in order[:-1]:
+        item, data, rows = by_id[current]
+        inherited, _ = _codex_turn(rows, inherited)
+        target = sessions._safe(index.get(current, _codex_target(home, item['path'])))
+        owned = previous.get(current) or _owned_staging(project, receipt_path.parents[2], target, current)
+        if target.exists():
+            existing = _stable_prefix(target)
+            if len(existing) < len(data):
+                if not owned or not data.startswith(existing):
+                    raise ValueError('Existing native ancestor is not an owned extendable prefix')
+                sessions.assert_quiescent([target])
+                with _parent(target) as (parent, name):
+                    _owned_content(parent, name, owned)
+            elif existing[:len(data)] != data:
+                raise ValueError('Existing native ancestor identity diverges from checkpoint')
+        targets.append((current, target, owned, inherited))
+    def persist():
         atomic_write(receipt_path, json.dumps(receipt, sort_keys=True).encode() + b'\n')
-        return result
-
-
-def _new_codex(project, *, env=None):
-    with agents.CodexClient(project, env=env) as client:
-        response = client.call('thread/start', dict(historyMode='paginated', **agents._runtime(project)))
-        sid = sessions.session_uuid(response.get('thread', {}).get('id'))
-        client.call('thread/inject_items', dict(threadId=sid, items=[dict(type='message', role='developer', content=[dict(type='input_text', text=agents.project_context(project))])]))
-    return sid
-
-
-def _resume_local(project, entry, *, env=None):
-    agent, sid = entry['agent'], entry['session_id']
-    home = sessions.native_home(agent, env)
-    if agent == 'codex':
-        index = sessions._codex_index(home)
-        sessions.assert_quiescent([index[sid]])
-        with agents.CodexClient(project, env=env) as client:
-            response = client.call('thread/resume', dict(threadId=sid, **agents._runtime(project)))
-            if response.get('thread', {}).get('id') != sid:
-                raise ValueError('Native local resume selected the wrong identity')
-            client.call('thread/inject_items', dict(threadId=sid, items=[dict(type='message', role='developer', content=[dict(type='input_text', text=agents.project_context(project))])]))
-        return dict(session_id=sid, argv=_codex_argv(project, sid), env={})
-    directory = home / 'projects'
-    candidates = [path for path in directory.glob('*/' + sid + '.jsonl') if path.parent.name in {sessions.claude_namespace(root) for root in entry['scope_roots']}]
-    if len(candidates) != 1:
-        raise ValueError('Cannot establish exact local Claude session identity')
-    sessions.assert_quiescent(candidates)
-    # Native Claude only resumes within its current project namespace. A prior
-    # checkout is recovered through a bounded new-identity fork instead.
-    if candidates[0].parent.name != sessions.claude_namespace(project.root):
-        return None
-    return dict(session_id=sid, argv=_claude_argv(project, sid=sid), env={'CLAUDE_CODE_DISABLE_AUTO_MEMORY': '1'})
-
-
-def launch(project, state, agent, *, resume=False, env=None):
-    """Start fresh by default; resume selects only this project's checked history."""
-    from .checkpoint_store import Store
-    from .terminal import Gum
-    if agent not in ('codex', 'claude'):
-        raise ValueError('Unsupported project agent')
-    values = dict(os.environ if env is None else env)
-    store = Store(Path(state))
-    result = None
-    if resume:
-        native = capture_conversations(project, store, state=state, env=values)
-        choices = []
-        seen = set()
-        for item in native['entries']:
-            if item['agent'] == agent:
-                choices.append((item, 'This machine', True))
-                seen.add(item['session_id'])
-        for source in ('codespace', 'desktop'):
-            latest = store.latest(source)
-            if latest:
-                manifest = store.load(latest['snapshot_id'])
-                if manifest.get('project', {}).get('project_id') != project.project_id or manifest.get('project', {}).get('identity') != project.identity:
-                    raise ValueError('Acknowledged conversation checkpoint belongs to another project')
-                for item in manifest.get('conversations', {}).get('entries', []):
-                    if item.get('agent') == agent and item.get('session_id') not in seen:
-                        choices.append((item, 'Recovery checkpoint', False))
-                        seen.add(item['session_id'])
-        if not choices:
-            for issue in native['issues']:
-                if issue['agent'] == agent:
-                    print('Conversation unavailable:', issue['reason'])
-            raise ValueError('No recoverable completed project conversations yet; start a new conversation first')
-        labels = [f"{index + 1}. {sessions.display_text(item.get('title'), 80) or 'Untitled conversation'} · {origin} · {item['session_id'][-8:]}" for index, (item, origin, _) in enumerate(choices)]
-        selected = Gum().choose('Resume a project conversation', labels)
-        item, _, local = choices[labels.index(selected)]
-        if local:
-            result = _resume_local(project, item, env=values)
-        if result is None:
-            result = restore_conversation(project, store, item, state=state, env=values)
-    elif agent == 'codex':
-        sid = _new_codex(project, env=values)
-        result = dict(session_id=sid, argv=_codex_argv(project, sid), env={})
+    for current, target, owned, cutoff in targets:
+        item, data, _ = by_id[current]
+        base = dict(destination=str(target), size=len(data), sha256=item['sha256'], scope_roots=item['scope_roots'], source_session_id=current, created=False)
+        if owned and owned.get('append_from') is not None and target.stat().st_size <= len(data):
+            _finish_append(owned, data)
+        if not target.exists():
+            def journal(intent):
+                receipt['files'].append(dict(base, **intent, created=True))
+                persist()
+            _create(target, data, journal=journal)
+        elif target.stat().st_size < len(data):
+            intent = dict(base, created=True, inode=owned['inode'], append_from=owned['size'], previous_sha256=owned['sha256'])
+            receipt['files'].append(intent)
+            persist()
+            _finish_append(intent, data)
+        else:
+            if owned and owned.get('staged_path'):
+                _publish(owned)
+            info = target.stat(follow_symlinks=False)
+            receipt['files'].append(dict(base, created=bool(owned), inode=[info.st_dev, info.st_ino]))
+            persist()
+        if receipt['files'][-1]['created']:
+            baselines.append(dict(agent='codex', session_id=current, turn_id=cutoff))
+    prior_fork = next((item for item in prior.get('files', []) if item.get('native_fork')), None)
+    new = sessions.session_uuid(prior_fork['session_id']) if prior_fork else str(uuid.uuid4())
+    item, original, _ = by_id[entry['session_id']]
+    target = _codex_target(home, item['path'].replace(entry['session_id'], new))
+    parts = original.splitlines(keepends=True)
+    head = json.loads(parts[0])
+    head['payload'].update(id=new, session_id=new, cwd=str(project.root), runtime_workspace_roots=[str(project.root)])
+    # Never reserialize inherited records: history_base byte offsets still bind
+    # their original ancestors, and cache/tool/message fields stay exact.
+    data = json.dumps(head, ensure_ascii=False, separators=(',', ':')).encode() + b'\n' + b''.join(parts[1:])
+    if prior_fork:
+        if prior_fork.get('destination') != str(target) or prior_fork.get('sha256') != hashlib.sha256(data).hexdigest():
+            raise ValueError('Native fork journal differs from retained history')
+        receipt['files'].append(prior_fork)
+        if not _publish(prior_fork):
+            raise ValueError('Journaled native fork stage disappeared')
     else:
-        sid = str(uuid.uuid4())
-        result = dict(session_id=sid, argv=[*_claude_argv(project), '--session-id', sid], env={'CLAUDE_CODE_DISABLE_AUTO_MEMORY': '1'})
-    values.update(result.get('env', {}))
-    return subprocess.run(result['argv'], cwd=project.root, env=values).returncode
+        def journal(intent):
+            receipt['files'].append(dict(intent, created=True, native_fork=True, session_id=new,
+                                         scope_roots=sorted(set(entry['scope_roots']) | {str(project.root)})))
+            persist()
+        _create(target, data, journal=journal)
+    receipt['fork_path'] = str(target)
+    receipt['result'] = dict(session_id=new, provenance=provenance)
+    receipt['baselines'] = baselines + [dict(agent='codex', session_id=new, turn_id=entry['cutoff']['turn_id'])]
+    persist()
+    with agents.CodexClient(project, env=env) as client:
+        # Only this new, journal-owned identity is loaded once for native history
+        # projection. Completed publications never resume on later cycles.
+        response = client.call('thread/resume', dict(threadId=new, **agents._runtime(project)))
+        if response.get('thread', {}).get('id') != new:
+            raise ValueError('Native import reconciliation selected the wrong identity')
+        _verify_history(agents._history(client, new), _expected(by_id, order))
+        _verify_discovery(client, new, project)
+    receipt['status'] = 'complete'
+    atomic_write(receipt_path, json.dumps(receipt, sort_keys=True).encode() + b'\n', mode=0o400)
+    return receipt['result']
+
+
+def _revision(entry, by_id, order):
+    """Content identity survives picker titles, mtimes and native fork envelopes."""
+    content = []
+    for sid in order:
+        for row in by_id[sid][2]:
+            if entry['agent'] == 'codex':
+                if row['type'] == 'session_meta':
+                    continue
+                if row['type'] == 'event_msg' and row['payload'].get('type') == 'thread_settings_applied':
+                    continue
+                value = dict(type=row['type'], payload=row['payload'])
+            else:
+                if row['type'] in ('summary', 'custom-title', 'tag', 'agent-name', 'agent-color'):
+                    continue
+                value = {key: child for key, child in row.items() if key not in ('sessionId', 'cwd', 'timestamp', 'version', 'gitBranch', 'promptId')}
+            content.append(value)
+    return hashlib.sha256(json.dumps(dict(agent=entry['agent'], project_id=entry['project_id'], turn_id=entry['cutoff']['turn_id'], content=content), sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def _publication_receipts(project, state):
+    if state is None:
+        return
+    for path in (Path(state) / 'conversation-imports').glob('*/receipt.json'):
+        receipt = read_json(path)
+        if (receipt.get('publication') and receipt.get('project_id') == project.project_id
+                and receipt.get('identity') == project.identity):
+            yield receipt
+
+
+def _unchanged_import(project, store, state, entry):
+    for receipt in _publication_receipts(project, state):
+        for baseline in receipt.get('baselines', []):
+            if baseline.get('agent') == entry['agent'] and baseline.get('session_id') == entry['session_id']:
+                # A completed-turn advance is the only reason to export an import.
+                # Still collect and fully validate its dependency closure first.
+                if baseline.get('turn_id') == entry['cutoff']['turn_id']:
+                    retained = next(item for item in entry['files'] if item['session_id'] == entry['session_id'])
+                    data = store.read(retained['blob'])
+                    for owned in receipt.get('files', []):
+                        if (Path(owned['destination']).name.endswith(entry['session_id'] + '.jsonl')
+                                and len(data) >= owned['size']
+                                and hashlib.sha256(data[:owned['size']]).hexdigest() == owned['sha256']):
+                            return True
+    return False
+
+
+def _claude_materialized(data, sid, destination):
+    rows = sessions._records(data, 'claude')
+    for row in rows:
+        if 'sessionId' in row:
+            row['sessionId'] = sid
+        if 'cwd' in row:
+            row['cwd'] = str(destination)
+    # Inline request/shape/cache payloads are deliberately untouched.
+    return b''.join(json.dumps(row, ensure_ascii=False, separators=(',', ':')).encode() + b'\n' for row in rows)
+
+
+def _published_claude_scopes(receipt, path, data, store, destinations):
+    result = receipt.get('result', {})
+    destination = receipt.get('destination_root')
+    if (destination not in destinations or path.name != str(result.get('session_id')) + '.jsonl'
+            or path.parent.name != sessions.claude_namespace(destination)):
+        return set()
+    source = receipt.get('source_checkpoint', {})
+    _, sid, by_id, _ = _preflight_proxy(receipt, store, source)
+    original = by_id[sid][1]
+    expected = _claude_materialized(original, result['session_id'], destination)
+    if data[:len(expected)] != expected:
+        raise ValueError('Published Claude inherited history changed')
+    roots = {destination}
+    for row in by_id[sid][2]:
+        if 'cwd' in row:
+            roots.add(row['cwd'])
+        attachment = row.get('attachment', {})
+        if attachment.get('type') == 'environment':
+            roots.add(attachment['snapshot']['workingDirectory'])
+            roots.update(attachment['snapshot'].get('additionalWorkingDirectories', []))
+    return roots
+
+
+def _preflight_proxy(receipt, store, entry):
+    from types import SimpleNamespace
+    return _preflight(SimpleNamespace(project_id=receipt['project_id'], identity=receipt['identity']), store, entry)
+
+
+def _publish_claude(project, store, entry, by_id, home, prior, receipt, receipt_path, provenance):
+    previous = prior.get('files', [])
+    sid = previous[0]['physical_alias'] if previous else str(uuid.uuid4())
+    target = sessions._safe(home / 'projects' / sessions.claude_namespace(project.root) / (sid + '.jsonl'))
+    data = _claude_materialized(by_id[entry['session_id']][1], sid, project.root)
+    sessions._validate_claude(sessions._records(data, 'claude'), sid, sorted(set(entry['scope_roots']) | {str(project.root)}))
+    receipt['source_checkpoint'] = entry
+    receipt['baselines'] = [dict(agent='claude', session_id=sid, turn_id=entry['cutoff']['turn_id'])]
+    if previous:
+        intent = previous[0]
+        if intent.get('sha256') != hashlib.sha256(data).hexdigest() or intent.get('destination') != str(target):
+            raise ValueError('Claude publication intent differs from source checkpoint')
+        receipt['files'] = previous
+        if not _publish(intent):
+            raise ValueError('Claude publication lost its journaled native transcript')
+    else:
+        def journal(intent):
+            receipt['files'] = [dict(intent, created=True, physical_alias=sid, source_session_id=entry['session_id'])]
+            atomic_write(receipt_path, json.dumps(receipt, sort_keys=True).encode() + b'\n')
+        _create(target, data, journal=journal)
+    result = dict(session_id=sid, provenance=provenance)
+    receipt.update(status='complete', result=result, fork_path=str(target))
+    atomic_write(receipt_path, json.dumps(receipt, sort_keys=True).encode() + b'\n', mode=0o400)
+    return result
+
+
+def _check_published(receipt, home, agent, project, *, receipt_path):
+    sid = sessions.session_uuid(receipt.get('result', {}).get('session_id'))
+    path = sessions._safe(Path(receipt.get('fork_path', '')))
+    if agent == 'claude':
+        valid = path == home / 'projects' / sessions.claude_namespace(project.root) / (sid + '.jsonl')
+    else:
+        valid = path.is_relative_to(home / 'sessions') and path.name.endswith(sid + '.jsonl')
+    if not valid:
+        raise ValueError('Published native conversation is outside its profile')
+    original_path = path
+    if not path.exists():
+        archived = receipt_path.with_name('archived.jsonl') if agent == 'claude' else sessions._codex_index(home).get(sid)
+        if archived is None or not Path(archived).exists():
+            raise ValueError('Published native conversation is missing')
+        path = sessions._safe(Path(archived))
+    item = next((item for item in receipt.get('files', []) if item.get('destination') == str(original_path)), None)
+    if item:
+        with _parent(path) as (parent, name):
+            _owned_content(parent, name, item, growing=True)
+
+
+def publish_conversations(project, store, snapshot_id, *, state=None, env=None):
+    """Publish checked history to ordinary native resume lists, without turns."""
+    from .state import state_dir
+    state = Path(state) if state is not None else state_dir(project, env)
+    manifest = store.load(snapshot_id)
+    if (not isinstance(manifest, dict) or manifest.get('schema') != 2 or 'files' in manifest
+            or manifest.get('project', {}).get('project_id') != project.project_id
+            or manifest.get('project', {}).get('identity') != project.identity):
+        raise ValueError('Publication requires a same-project conversation-only schema-2 manifest')
+    conversations = manifest.get('conversations')
+    if not isinstance(conversations, dict) or not isinstance(conversations.get('entries'), list):
+        raise ValueError('Invalid conversation publication manifest')
+    result = dict(imported=[], unchanged=[], issues=list(conversations.get('issues', [])))
+    for entry in conversations['entries']:
+        try:
+            agent, sid, by_id, order = _preflight(project, store, entry)
+            key = _revision(entry, by_id, order)
+            receipt_path = state / 'conversation-imports' / key / 'receipt.json'
+            try:
+                prior = read_json(receipt_path)
+            except FileNotFoundError:
+                prior = {}
+            published = _publish_conversation(project, store, entry, state=state, env=env)
+            _supersede_imports(project, store, state, entry, key, env=env)
+            result['unchanged' if prior.get('status') == 'complete' else 'imported'].append(dict(agent=agent, source_session_id=sid, session_id=published['session_id']))
+        except (ValueError, OSError, KeyError) as exc:
+            result['issues'].append(dict(agent=entry.get('agent'), session_id=entry.get('session_id'), reason=sessions.display_text(str(exc), 400)))
+    return result
+
+
+def _owned_staging(project, state, target, sid):
+    candidates = []
+    for receipt in _publication_receipts(project, state):
+        for item in receipt.get('files', []):
+            if (item.get('created') and not item.get('native_fork')
+                    and item.get('source_session_id') == sid and item.get('destination') == str(target)):
+                candidates.append(item)
+    return max(candidates, key=lambda item: item['size']) if candidates else None
+
+
+def _finish_append(intent, data):
+    """Append a journaled completed suffix only to an exclusively owned inode."""
+    target = sessions._safe(Path(intent['destination']))
+    if len(data) != intent['size'] or hashlib.sha256(data).hexdigest() != intent['sha256']:
+        raise ValueError('Native append intent disagrees with immutable checkpoint')
+    sessions.assert_quiescent([target])
+    with _parent(target) as (parent, name):
+        fd = os.open(name, os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        try:
+            info = os.fstat(fd)
+            previous = intent['append_from']
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid()
+                    or [info.st_dev, info.st_ino] != intent['inode']
+                    or not previous <= info.st_size <= len(data)):
+                raise ValueError('Native append inode ownership or size changed')
+            actual = os.pread(fd, info.st_size, 0)
+            if (actual != data[:info.st_size] or hashlib.sha256(actual[:previous]).hexdigest() != intent['previous_sha256']):
+                raise ValueError('Native append source prefix changed')
+            remaining = memoryview(data)[info.st_size:]
+            while remaining:
+                count = os.write(fd, remaining)
+                if count <= 0:
+                    raise OSError('Native append made no progress')
+                remaining = remaining[count:]
+            os.fsync(fd)
+            if os.fstat(fd).st_size != len(data) or os.pread(fd, len(data), 0) != data:
+                raise ValueError('Native append changed concurrently')
+        finally:
+            os.close(fd)
+
+
+def _codex_target(home, name):
+    date = re.search(r'rollout-(\d{4})-(\d{2})-(\d{2})T', name)
+    return home / 'sessions' / Path(*(date.groups() if date else ('2000', '01', '01'))) / name
+
+
+def _supersede_imports(project, store, state, entry, current_key, *, env):
+    """Retain continued/active imports; archive only provably untouched copies."""
+    agent = entry['agent']
+    home = sessions.native_home(agent, env)
+    with locked(state / 'conversation-recovery.lock', blocking=True):
+        for path in (state / 'conversation-imports').glob('*/receipt.json'):
+            if path.parent.name == current_key:
+                continue
+            old = read_json(path)
+            if (not old.get('publication') or old.get('status') != 'complete'
+                    or old.get('project_id') != project.project_id or old.get('identity') != project.identity
+                    or old.get('agent') != agent or old.get('source_session_id') != entry['session_id']
+                    or old.get('destination_root') != str(project.root)
+                    or old.get('source_checkpoint', {}).get('cutoff', {}).get('turn_id') == entry['cutoff']['turn_id']):
+                continue
+            old_source = next(item for item in old['source_checkpoint']['files'] if item['session_id'] == old['source_session_id'])
+            new_source = next(item for item in entry['files'] if item['session_id'] == entry['session_id'])
+            if not store.read(new_source['blob']).startswith(store.read(old_source['blob'])):
+                continue  # Replaying an older checkpoint never supersedes a newer import.
+            marker = path.with_name('superseded.json')
+            if marker.exists():
+                continue
+            sid = sessions.session_uuid(old['result']['session_id'])
+            target = sessions._safe(Path(old['fork_path']))
+            item = next((item for item in old['files'] if item.get('destination') == str(target)), None)
+            if not item:
+                continue
+            expected = (home / 'projects' / sessions.claude_namespace(project.root) / (sid + '.jsonl')
+                        if agent == 'claude' else _codex_target(home, old_source['path'].replace(old['source_session_id'], sid)))
+            if target != expected:
+                raise ValueError('Owned predecessor path no longer matches its native profile')
+            if not target.exists():
+                continue
+            try:
+                sessions.assert_quiescent([target])
+            except ValueError:
+                continue
+            archive = path.with_name('archived.jsonl')
+            if agent == 'claude' and archive.exists():
+                # Repair an interruption between link and unlink. Remove only
+                # the proven duplicate link before checking native content.
+                with _parent(target) as (parent, name), _parent(archive) as (other_parent, other_name):
+                    _owned_content(parent, name, item, growing=True)
+                    _owned_content(other_parent, other_name, item, growing=True)
+                    os.unlink(other_name, dir_fd=other_parent)
+                    os.fsync(other_parent)
+            with _parent(target) as (parent, name):
+                _owned_content(parent, name, item, growing=True)
+            data = _stable_prefix(target)
+            # Any unfinished user activity also retains the import. Native
+            # Codex resume appends only settings/context, which is safe to archive.
+            suffix = data[item['size']:]
+            if target.stat().st_size != len(data):
+                continue
+            if agent == 'claude' and suffix:
+                continue
+            if agent == 'codex' and suffix and any(row['type'] not in ('world_state', 'turn_context')
+                    and not (row['type'] == 'event_msg' and row['payload'].get('type') == 'thread_settings_applied') for row in _rows(suffix)):
+                continue
+            if agent == 'claude':
+                archive = path.with_name('archived.jsonl')
+                with _parent(target) as (source_parent, source_name), _parent(archive, create=True) as (destination_parent, destination_name):
+                    try:
+                        os.link(source_name, destination_name, src_dir_fd=source_parent, dst_dir_fd=destination_parent, follow_symlinks=False)
+                    except FileExistsError:
+                        _owned_content(destination_parent, destination_name, item, growing=True)
+                    os.fsync(destination_parent)
+                    _owned_content(source_parent, source_name, item, growing=True)
+                    os.unlink(source_name, dir_fd=source_parent)
+                    os.fsync(source_parent)
+            else:
+                with agents.CodexClient(project, env=env) as client:
+                    client.call('thread/archive', dict(threadId=sid))
+                archive = sessions._codex_index(home).get(sid)
+                if archive is None or not archive.is_relative_to(home / 'archived_sessions'):
+                    # An older native tool may defer archive visibility. Keep
+                    # its history and retry the harmless archive next cycle.
+                    continue
+            atomic_write(marker, json.dumps(dict(session_id=sid, superseded_by=current_key, archive=str(archive)), sort_keys=True).encode() + b'\n', mode=0o400)
+
+
+def _verify_discovery(client, sid, project):
+    cursor, seen = None, set()
+    while True:
+        params = dict(limit=100, cwd=str(project.root))
+        if cursor is not None:
+            params['cursor'] = cursor
+        page = client.call('thread/list', params)
+        if not isinstance(page.get('data'), list):
+            raise ValueError('Native picker returned an invalid conversation list')
+        if any(row.get('id') == sid for row in page['data']):
+            return
+        cursor = page.get('nextCursor')
+        if not cursor:
+            raise ValueError('Native resume picker does not expose this imported history yet')
+        if not isinstance(cursor, str) or cursor in seen or len(seen) >= 10000:
+            raise ValueError('Native picker pagination stalled or exceeded limit')
+        seen.add(cursor)
