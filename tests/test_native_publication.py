@@ -1,5 +1,6 @@
 """Picker-ready checkpoint imports never need an interactive/model turn."""
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -110,6 +111,124 @@ class PublicationTests(NativeFixture):
 
     def test_owned_ancestor_append_retries_after_partial_suffix(self):
         self.check_owned_append_retry(partial=True)
+
+    def test_owned_ancestor_supports_multiple_successive_completed_advances(self):
+        source, leaf, entry, env, turns, resumes = self.codex_ancestor_fixture()
+        self.assertEqual(self.publish(entry, env=env)['issues'], [])
+        target = self.api._codex_target(Path(env['CODEX_HOME']), source.name)
+        first_prefix, inode = target.read_bytes(), target.stat().st_ino
+        previous = first_prefix
+        for _ in range(3):
+            advanced = self.advance_ancestor(source, leaf, turns)
+            result = self.publish(advanced, env=env)
+            self.assertEqual(result['issues'], [])
+            self.assertEqual(target.stat().st_ino, inode)
+            self.assertTrue(target.read_bytes().startswith(previous))
+            self.assertTrue(target.read_bytes().startswith(first_prefix))
+            self.assertEqual(target.read_bytes(), source.read_bytes())
+            previous = target.read_bytes()
+            count = len(list(Path(env['CODEX_HOME']).rglob('*.jsonl')))
+            calls = len(resumes)
+            self.assertEqual(len(self.publish(advanced, env=env)['unchanged']), 1)
+            self.assertEqual(len(list(Path(env['CODEX_HOME']).rglob('*.jsonl'))), count)
+            self.assertEqual(len(resumes), calls)
+        self.assertEqual(len(resumes), 4)
+
+    def check_successive_append_interruption(self, *, advance_before_retry):
+        source, leaf, entry, env, turns, resumes = self.codex_ancestor_fixture()
+        self.assertEqual(self.publish(entry, env=env)['issues'], [])
+        target = self.api._codex_target(Path(env['CODEX_HOME']), source.name)
+        first_prefix, inode = target.read_bytes(), target.stat().st_ino
+        first_advance = self.advance_ancestor(source, leaf, turns)
+        self.assertEqual(self.publish(first_advance, env=env)['issues'], [])
+        before = target.read_bytes()
+        second_advance = self.advance_ancestor(source, leaf, turns)
+        write, progressed = os.write, []
+        def interrupt(fd, data):
+            if os.fstat(fd).st_ino == inode:
+                if progressed: raise OSError('fixture successive partial append')
+                progressed.append(True)
+                return write(fd, data[:max(1, len(data)//2)])
+            return write(fd, data)
+        with patch.object(self.api.os, 'write', side_effect=interrupt):
+            result = self.publish(second_advance, env=env)
+        self.assertIn('fixture successive partial append', result['issues'][0]['reason'])
+        self.assertTrue(target.read_bytes().startswith(before))
+        self.assertGreater(target.stat().st_size, len(before))
+        self.assertLess(target.stat().st_size, source.stat().st_size)
+        latest = self.advance_ancestor(source, leaf, turns) if advance_before_retry else second_advance
+        result = self.publish(latest, env=env)
+        self.assertEqual(result['issues'], [])
+        self.assertEqual(target.stat().st_ino, inode)
+        self.assertTrue(target.read_bytes().startswith(first_prefix))
+        self.assertTrue(target.read_bytes().startswith(before))
+        self.assertEqual(target.read_bytes(), source.read_bytes())
+        if not advance_before_retry:
+            latest = self.advance_ancestor(source, leaf, turns)
+            self.assertEqual(self.publish(latest, env=env)['issues'], [])
+            self.assertEqual(target.stat().st_ino, inode)
+            self.assertEqual(target.read_bytes(), source.read_bytes())
+        calls = len(resumes)
+        count = len(list(Path(env['CODEX_HOME']).rglob('*.jsonl')))
+        self.assertEqual(len(self.publish(latest, env=env)['unchanged']), 1)
+        self.assertEqual(len(resumes), calls)
+        self.assertEqual(len(list(Path(env['CODEX_HOME']).rglob('*.jsonl'))), count)
+
+    def test_second_owned_ancestor_advance_retries_after_partial_suffix(self):
+        self.check_successive_append_interruption(advance_before_retry=False)
+
+    def test_historical_partial_append_reconciles_before_newer_advance(self):
+        self.check_successive_append_interruption(advance_before_retry=True)
+
+    def test_diverged_new_checkpoint_never_finishes_historical_partial_append(self):
+        source, leaf, entry, env, turns, _ = self.codex_ancestor_fixture()
+        self.assertEqual(self.publish(entry, env=env)['issues'], [])
+        target = self.api._codex_target(Path(env['CODEX_HOME']), source.name)
+        inode = target.stat().st_ino
+        advanced = self.advance_ancestor(source, leaf, turns)
+        write, progressed = os.write, []
+        def interrupt(fd, data):
+            if os.fstat(fd).st_ino == inode:
+                if progressed: raise OSError('fixture historical partial append')
+                progressed.append(True)
+                return write(fd, data[:max(1, len(data)//2)])
+            return write(fd, data)
+        with patch.object(self.api.os, 'write', side_effect=interrupt):
+            self.assertTrue(self.publish(advanced, env=env)['issues'])
+        before = target.read_bytes()
+        self.advance_ancestor(source, leaf, turns)
+        source.write_bytes(source.read_bytes().replace(b'ORCHID', b'VIOLET'))
+        diverged = next(e for e in self.capture()['entries'] if e['session_id'] == leaf)
+        self.assertTrue(self.publish(diverged, env=env)['issues'])
+        self.assertEqual(target.stat().st_ino, inode)
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_completed_historical_append_requires_its_exact_final_prefix(self):
+        source, leaf, entry, env, turns, _ = self.codex_ancestor_fixture()
+        self.assertEqual(self.publish(entry, env=env)['issues'], [])
+        target = self.api._codex_target(Path(env['CODEX_HOME']), source.name)
+        before, inode = target.read_bytes(), target.stat().st_ino
+        advanced = self.advance_ancestor(source, leaf, turns)
+        self.assertEqual(self.publish(advanced, env=env)['issues'], [])
+        final = target.read_bytes()
+        for path in (self.root / 'publication-state').glob('conversation-imports/*/receipt.json'):
+            receipt = json.loads(path.read_bytes())
+            if receipt['source_checkpoint']['cutoff']['turn_id'] == advanced['cutoff']['turn_id']:
+                # Reproduce the immutable completed receipt shape written by
+                # the previous producer, which retained append_from on success.
+                item = next(item for item in receipt['files'] if item.get('source_session_id') == self.sid)
+                item.update(append_from=len(before), previous_sha256=hashlib.sha256(before).hexdigest())
+                self.api.atomic_write(path, json.dumps(receipt).encode() + b'\n', mode=0o400)
+        latest = self.advance_ancestor(source, leaf, turns)
+        target.write_bytes(final[:-1])  # Post-completion truncation is not a pending append.
+        truncated = target.read_bytes()
+        self.assertTrue(self.publish(latest, env=env)['issues'])
+        self.assertEqual(target.read_bytes(), truncated)
+        self.assertEqual(target.stat().st_ino, inode)
+        target.write_bytes(final)
+        self.assertEqual(self.publish(latest, env=env)['issues'], [])
+        self.assertEqual(target.stat().st_ino, inode)
+        self.assertEqual(target.read_bytes(), source.read_bytes())
 
     def test_codex_ancestor_publication_recovers_after_link_before_unlink(self):
         source, _, entry, env, _, resumes = self.codex_ancestor_fixture()

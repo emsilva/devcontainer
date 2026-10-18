@@ -719,7 +719,7 @@ def _publish_codex(project, store, entry, by_id, order, home, prior, receipt, re
         inherited, _ = _codex_turn(rows, inherited)
         target = index.get(current, _codex_target(home, item['path']))
         saved = previous.get(current)
-        owned = saved if saved and saved.get('created') is True else _owned_staging(project, receipt_path.parents[2], target, current)
+        owned = saved if saved and saved.get('created') is True else _owned_staging(project, store, receipt_path.parents[2], target, current, data)
         if owned and owned.get('staged_path'):
             _publish(owned)
         target = sessions._safe(target)
@@ -753,6 +753,10 @@ def _publish_codex(project, store, entry, by_id, order, home, prior, receipt, re
             receipt['files'].append(intent)
             persist()
             _finish_append(intent, data)
+            # Finalize this intent only after the complete suffix is fsynced.
+            # Interrupted journals retain append_from for exact-prefix retry.
+            receipt['files'][-1] = dict(base, created=True, inode=intent['inode'])
+            persist()
         else:
             info = target.stat(follow_symlinks=False)
             receipt['files'].append(dict(base, created=bool(owned), inode=[info.st_dev, info.st_ino]))
@@ -949,14 +953,38 @@ def publish_conversations(project, store, snapshot_id, *, state=None, env=None):
     return result
 
 
-def _owned_staging(project, state, target, sid):
+def _owned_staging(project, store, state, target, sid, desired):
+    """Return verified historical ownership, never a newer append's intent."""
     candidates = []
     for receipt in _publication_receipts(project, state):
         for item in receipt.get('files', []):
             if (item.get('created') is True and not item.get('native_fork')
                     and item.get('source_session_id') == sid and item.get('destination') == str(target)):
-                candidates.append(item)
-    return max(candidates, key=lambda item: item['size']) if candidates else None
+                candidates.append((item, receipt))
+    if not candidates:
+        return None
+    item, receipt = max(candidates, key=lambda candidate: candidate[0]['size'])
+    if item.get('append_from') is None:
+        return item
+    # Older receipts can retain a completed append intent, or an interrupted
+    # append can be overtaken by another source checkpoint. Its own retained
+    # final bytes must be proven before it can authorize a separate new append.
+    _, _, by_id, _ = _preflight(project, store, receipt['source_checkpoint'])
+    retained = by_id[sid][1]
+    if len(retained) != item['size'] or hashlib.sha256(retained).hexdigest() != item['sha256']:
+        raise ValueError('Historical native append differs from its retained checkpoint')
+    target = sessions._safe(target)
+    if target.stat().st_size < item['size']:
+        if receipt.get('status') == 'complete':
+            raise ValueError('Completed historical native append prefix is incomplete')
+        if not desired.startswith(retained):
+            raise ValueError('Historical native append is not a prefix of this checkpoint')
+        _finish_append(item, retained)
+    with _parent(target) as (parent, name):
+        _owned_content(parent, name, item, growing=True)
+    # Normalize only the returned baseline; immutable historical receipts stay
+    # intact, and incomplete provenance is retained until recovery succeeds.
+    return {key: value for key, value in item.items() if key not in ('append_from', 'previous_sha256')}
 
 
 def _finish_append(intent, data, *, check_only=False):
