@@ -26,6 +26,77 @@ class ScratchTests(unittest.TestCase):
         self.scratch.mkdir()
         self.module = importlib.import_module('devcontainer_setup.project_sync.scratch')
 
+    def _cache_link_fixture(self, scratch):
+        (scratch / 'memory').mkdir()
+        (scratch / 'memory/keep.md').write_text('retained note')
+        for directory, name in (('node_modules/.bin', 'tool'), ('.venv/bin', 'python')):
+            cache = scratch / directory
+            cache.mkdir(parents=True)
+            (cache / name).symlink_to('/excluded-owner-target')
+        (scratch / '.gitignore').write_text('*\n')
+        (scratch / 'README.md').write_text('tracked marker')
+        (scratch / 'memory/README.md').write_text('nested payload')
+
+    def _native_remote(self):
+        class LocalPython:
+            def python(self, code, payload=b'', timeout=60):
+                return subprocess.run([os.sys.executable, '-I', '-B', '-c', code], input=payload,
+                                      capture_output=True, check=True, timeout=timeout).stdout
+        return LocalPython()
+
+    def test_cache_links_are_pruned_locally_and_backups_retain_markers(self):
+        self._cache_link_fixture(self.scratch)
+        self.assertEqual(self.module._scratch(self.root), self.scratch)
+        with tarfile.open(self.module.backup(self.root, self.state)) as archive:
+            names = set(archive.getnames())
+            self.assertTrue({'.scratch/memory/keep.md', '.scratch/.gitignore',
+                             '.scratch/README.md', '.scratch/memory/README.md'} <= names)
+            self.assertFalse(any('node_modules' in name or '.venv' in name for name in names))
+
+    def test_actual_canonical_remote_prunes_cache_links_and_snapshots_markers(self):
+        self._cache_link_fixture(self.scratch)
+        remote = self._native_remote()
+        identity = json.loads(self.module._remote(remote, str(self.root)))
+        self.assertEqual(identity['identity'], 'github.com/owner/repo')
+        data = self.module._remote(remote, str(self.root), snapshot=True)
+        with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+            self.assertEqual(archive.extractfile('.scratch/memory/keep.md').read(), b'retained note')
+            self.assertEqual(archive.extractfile('.scratch/.gitignore').read(), b'*\n')
+            self.assertEqual(archive.extractfile('.scratch/README.md').read(), b'tracked marker')
+            self.assertFalse(any('node_modules' in name or '.venv' in name for name in archive.getnames()))
+
+    def test_excluded_directory_links_are_not_followed_but_included_links_are_refused(self):
+        (self.scratch / '.cache').symlink_to(self.root / 'missing-cache', target_is_directory=True)
+        self.assertEqual(self.module._scratch(self.root), self.scratch)
+        self.module._remote(self._native_remote(), str(self.root))
+        (self.scratch / 'owner-link').symlink_to(self.root / 'missing-owner')
+        with self.assertRaisesRegex(ValueError, 'symlink'):
+            self.module._scratch(self.root)
+        with self.assertRaises(subprocess.CalledProcessError) as caught:
+            self.module._remote(self._native_remote(), str(self.root))
+        self.assertIn(b'symlink', caught.exception.stderr)
+
+    def test_included_special_files_are_refused_locally_and_remotely(self):
+        os.mkfifo(self.scratch / 'owner-pipe')
+        with self.assertRaisesRegex(ValueError, 'special file'):
+            self.module._scratch(self.root)
+        with self.assertRaises(subprocess.CalledProcessError) as caught:
+            self.module._remote(self._native_remote(), str(self.root))
+        self.assertIn(b'special file', caught.exception.stderr)
+
+    def test_unreadable_included_directory_never_silently_disappears(self):
+        included = self.scratch / 'memory'
+        included.mkdir()
+        scan = os.scandir
+        def unreadable(path):
+            if Path(path) == included:
+                raise PermissionError('included directory unreadable')
+            return scan(path)
+        with patch('os.scandir', side_effect=unreadable):
+            with self.assertRaises(PermissionError):
+                self.module.backup(self.root, self.state)
+        self.assertFalse((self.state / 'backups').exists())
+
     def test_pair_older_checkout_without_scratch_before_seeding_it(self):
         remote = self.root.parent / 'legacy-codespace'
         shutil.copytree(self.root, remote, ignore=shutil.ignore_patterns('.scratch'))
@@ -218,6 +289,16 @@ class ScratchTests(unittest.TestCase):
         (self.scratch / 'link').symlink_to(self.root / 'outside')
         with self.assertRaisesRegex(ValueError, 'symlink'):
             self.module.backup(self.root, self.state)
+        (self.scratch / 'link').unlink()
+        self.scratch.rmdir()
+        outside = self.root / 'outside'
+        outside.mkdir()
+        self.scratch.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'symlink'):
+            self.module._scratch(self.root)
+        with self.assertRaisesRegex(ValueError, 'symlink'):
+            self.module.backup(self.root, self.state)
+        self.assertTrue(self.scratch.is_symlink())
 
     def test_missing_configuration_and_unrelated_pid_do_not_signal(self):
         self.assertFalse(self.module.status(self.state)['running'])
@@ -365,6 +446,9 @@ class ScratchTests(unittest.TestCase):
             self.skipTest('case-insensitive filesystem')
         with self.assertRaisesRegex(ValueError, 'case collision'):
             self.module.backup(self.root, self.state)
+        with self.assertRaises(subprocess.CalledProcessError) as caught:
+            self.module._remote(self._native_remote(), str(self.root))
+        self.assertIn(b'case collision', caught.exception.stderr)
 
     def test_state_inside_scratch_is_refused_before_backup(self):
         with self.assertRaisesRegex(ValueError, 'outside'):
@@ -560,7 +644,65 @@ class ScratchTests(unittest.TestCase):
         self.assertEqual(saved['identifier'], 'sync_' + 'D' * 43)
         self.assertTrue(saved['established'])
 
-    @unittest.skipUnless(os.environ.get('MUTAGEN_TEST_BINARY'), 'set MUTAGEN_TEST_BINARY to the pinned official binary for real restart gate')
+    @unittest.skipUnless(os.environ.get('CI') or os.environ.get('MUTAGEN_TEST_BINARY'), 'set MUTAGEN_TEST_BINARY for real cache-link boundary gate')
+    def test_actual_mutagen_cache_links_allow_note_lifecycle_and_same_baseline_restart(self):
+        binary = Path(os.environ['MUTAGEN_TEST_BINARY']).resolve()
+        temporary_root = '/private/tmp' if Path('/private/tmp').is_dir() else '/tmp'
+        with tempfile.TemporaryDirectory(prefix='t2-cache-', dir=temporary_root) as directory:
+            base = Path(directory).resolve(); state = base / 's'
+            alpha, beta = base / 'alpha/.scratch', base / 'beta/.scratch'
+            for endpoint in (alpha, beta):
+                endpoint.mkdir(parents=True)
+                self._cache_link_fixture(endpoint)
+                self.module._scratch(endpoint.parent)
+            name, nonce = 'scratch-' + 'f' * 48, 'f' * 48
+            created = False
+            try:
+                args = ['sync', 'create', str(alpha), str(beta), '--name=' + name,
+                        '--mode=two-way-safe', '--hash=sha256', '--symlink-mode=ignore',
+                        '--no-global-configuration']
+                args += ['--ignore=' + item for item in self.module.scratch_tree.MUTAGEN_IGNORES]
+                self.module._mutagen(binary, state, *args, timeout=120)
+                created = True
+                def flush():
+                    self.module._mutagen(binary, state, 'sync', 'flush', name)
+                flush()
+                (alpha / 'memory/new.md').write_text('created')
+                flush()
+                self.assertEqual((beta / 'memory/new.md').read_text(), 'created')
+                (beta / 'memory/new.md').write_text('changed remotely')
+                flush()
+                self.assertEqual((alpha / 'memory/new.md').read_text(), 'changed remotely')
+                info = json.loads(self.module._mutagen(binary, state, 'sync', 'list', '--template={{json .}}'))[0]
+                self.assertEqual(self.module._reconciliation(info)['phase'], 'synchronized')
+                receipt = dict(name=name, nonce=nonce, identifier=info['identifier'], established=True, binding={})
+                runtime = dict(pid=99999999, nonce=nonce, session=name, phase='syncing')
+                self.module._write(state / self.module.SESSION, receipt)
+                self.module._write(state / self.module.RUNTIME, runtime)
+                with patch.object(self.module, 'install_mutagen', return_value=binary):
+                    self.module._recover_session(state, runtime)
+                (alpha / 'memory/new.md').unlink()
+                after = json.loads(self.module._mutagen(binary, state, 'sync', 'list', '--template={{json .}}'))
+                self.assertEqual([row['identifier'] for row in after], [info['identifier']])
+                self.module._mutagen(binary, state, 'sync', 'resume', info['identifier'])
+                flush()
+                self.assertFalse((beta / 'memory/new.md').exists())
+                self.assertFalse((alpha / 'memory/new.md').exists())
+                self.assertEqual((beta / 'memory/keep.md').read_text(), 'retained note')
+                for endpoint in (alpha, beta):
+                    self.assertTrue((endpoint / 'node_modules/.bin/tool').is_symlink())
+                    self.assertTrue((endpoint / '.venv/bin/python').is_symlink())
+                    link = endpoint / 'memory/included-link'
+                    link.symlink_to('/included-owner-target')
+                    with self.assertRaisesRegex(ValueError, 'symlink'):
+                        self.module._scratch(endpoint.parent)
+                    link.unlink()
+            finally:
+                if created:
+                    self.module._mutagen(binary, state, 'sync', 'terminate', name)
+                self.module._mutagen(binary, state, 'daemon', 'stop')
+
+    @unittest.skipUnless(os.environ.get('CI') or os.environ.get('MUTAGEN_TEST_BINARY'), 'set MUTAGEN_TEST_BINARY to the pinned official binary for real restart gate')
     def test_actual_mutagen_offline_deletion_survives_controller_stop_restart(self):
         from devcontainer_setup.project_sync.state import atomic_write
         binary = Path(os.environ['MUTAGEN_TEST_BINARY']).resolve()
@@ -602,7 +744,7 @@ class ScratchTests(unittest.TestCase):
                         self.module._mutagen(binary, state, 'sync', 'terminate', name)
                 self.module._mutagen(binary, state, 'daemon', 'stop')
 
-    @unittest.skipUnless(os.environ.get('MUTAGEN_TEST_BINARY'), 'set MUTAGEN_TEST_BINARY for real retained-baseline migration gate')
+    @unittest.skipUnless(os.environ.get('CI') or os.environ.get('MUTAGEN_TEST_BINARY'), 'set MUTAGEN_TEST_BINARY for real retained-baseline migration gate')
     def test_actual_retarget_retains_paused_old_baseline_and_new_session_has_no_old_deletions(self):
         m = self.module; binary = Path(os.environ['MUTAGEN_TEST_BINARY']).resolve()
         temporary_root = '/private/tmp' if Path('/private/tmp').is_dir() else '/tmp'

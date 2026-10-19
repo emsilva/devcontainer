@@ -19,6 +19,7 @@ import time
 
 from .state import atomic_write, discover_project, locked, read_json
 from . import state as project_state
+from . import scratch_tree
 from .tools import MANIFEST, install_mutagen, mutagen_env
 from .transport import CodespaceConnection
 
@@ -59,17 +60,8 @@ def _scratch(root):
 
 
 def _validate_tree(path):
-    for directory, dirs, files in os.walk(path, followlinks=False):
-        folded = set()
-        for name in dirs + files:
-            item = Path(directory) / name
-            if item.is_symlink():
-                raise ValueError('Scratch symlinks are unsupported; preserve and resolve them explicitly.')
-            if name.casefold() in folded:
-                raise ValueError('Scratch case collisions are unsupported; preserve and resolve them explicitly.')
-            folded.add(name.casefold())
-            if not item.is_file() and not item.is_dir():
-                raise ValueError('Scratch contains an unsupported special file.')
+    for _ in scratch_tree.entries(path):
+        pass
 
 
 def _archive_path(state, label):
@@ -78,12 +70,12 @@ def _archive_path(state, label):
 
 
 def backup(root: Path, state: Path) -> Path:
-    """Include ignored payloads; snapshots never enter Git or the sync root."""
+    """Retain payloads and markers, excluding transient caches from private backups."""
     _private_location(root, state)
     source = _scratch(discover_project(Path(root)).root)
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode='w:gz', dereference=False) as archive:
-        archive.add(source, arcname='.scratch', recursive=True)
+        scratch_tree.add_backup(archive, source)
     path = _archive_path(state, 'local')
     atomic_write(path, buffer.getvalue(), mode=0o400)
     atomic_write(path.with_suffix(path.suffix + '.sha256'),
@@ -96,28 +88,25 @@ def _remote(connection, remote_root, *, snapshot=False, allow_missing_scratch=Fa
     # Do not duplicate identity normalization or rely on directory basenames.
     # Identity probes must also accept older checkouts before scratch is seeded.
     source = Path(project_state.__file__).read_bytes()
+    tree_source = Path(scratch_tree.__file__).read_bytes()
     code = '''import base64,io,json,os,pathlib,sys,tarfile,types
 m=types.ModuleType("_project_sync_state");sys.modules[m.__name__]=m
 exec(compile(base64.b64decode(__SOURCE__),"project-state.py","exec"),m.__dict__)
+tree=types.ModuleType("_scratch_tree");sys.modules[tree.__name__]=tree
+exec(compile(base64.b64decode(__TREE_SOURCE__),"scratch-tree.py","exec"),tree.__dict__)
 p=m.discover_project(pathlib.Path(__ROOT__))
 s=p.root/".scratch"
 if s.is_symlink():raise ValueError("Remote scratch symlink")
 if s.exists() and not s.is_dir():raise ValueError("Remote scratch is not a directory")
 if not s.is_dir() and (__SNAPSHOT__ or not __ALLOW_MISSING__):raise ValueError("Remote .scratch missing; configure project continuity remotely first")
-for parent,dirs,files in os.walk(s,followlinks=False):
- names=set()
- for name in dirs+files:
-  item=pathlib.Path(parent)/name
-  if item.is_symlink():raise ValueError("Remote scratch symlink")
-  if name.casefold() in names:raise ValueError("Remote scratch case collision")
-  names.add(name.casefold())
-  if not item.is_file() and not item.is_dir():raise ValueError("Remote scratch special file")
+if s.is_dir():
+ for _ in tree.entries(s):pass
 if __SNAPSHOT__:
  b=io.BytesIO()
- with tarfile.open(fileobj=b,mode="w:gz",dereference=False) as t:t.add(s,arcname=".scratch")
+ with tarfile.open(fileobj=b,mode="w:gz",dereference=False) as t:tree.add_backup(t,s)
  sys.stdout.buffer.write(b.getvalue())
 else:print(json.dumps({"identity":p.identity,"root":str(p.root)}))
-'''.replace('__SOURCE__', repr(base64.b64encode(source).decode())).replace('__ROOT__', repr(remote_root)).replace('__SNAPSHOT__', repr(snapshot)).replace('__ALLOW_MISSING__', repr(allow_missing_scratch))
+'''.replace('__SOURCE__', repr(base64.b64encode(source).decode())).replace('__TREE_SOURCE__', repr(base64.b64encode(tree_source).decode())).replace('__ROOT__', repr(remote_root)).replace('__SNAPSHOT__', repr(snapshot)).replace('__ALLOW_MISSING__', repr(allow_missing_scratch))
     return connection.python(code, timeout=90)
 
 
@@ -545,13 +534,11 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                             remote_snapshot = _remote(connection, config['remote_root'], snapshot=True)
                             remote_backup = _archive_path(state, 'remote')
                             atomic_write(remote_backup, remote_snapshot, mode=0o400)
-                            ignores = ['/.gitignore', '/README.md', '.DS_Store', '__pycache__',
-                                       '.venv', 'node_modules', '.cache', '.project-sync', '.handoff', '.mutagen']
                             args = ['sync', 'create', str(root / '.scratch'),
                                     'project-sync:' + config['remote_root'] + '/.scratch',
                                     '--name=' + session, '--mode=two-way-safe', '--hash=sha256',
                                     '--symlink-mode=ignore', '--no-global-configuration', '--ignore-vcs', '--paused']
-                            args += ['--ignore=' + item for item in ignores]
+                            args += ['--ignore=' + item for item in scratch_tree.MUTAGEN_IGNORES]
                             # Record the owned name before create; partial creation
                             # can then be cleaned without touching another session.
                             update('creating', session=session)

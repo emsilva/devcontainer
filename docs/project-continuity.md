@@ -38,9 +38,13 @@ retires only verified producer-owned old work/agent launcher tasks.
 
 ## Scratch and project memory
 
-Scratch sync excludes its tracked `.gitignore` and README markers, VCS metadata,
-and transient tool caches. Deletions propagate. Simultaneous conflicting edits
-remain for explicit resolution; neither side silently wins.
+Scratch sync excludes the root `.gitignore` and `README.md` markers, VCS metadata,
+and transient entries named `.DS_Store`, `__pycache__`, `.venv`, `node_modules`,
+`.cache`, `.project-sync`, `.handoff`, or `.mutagen` at any depth. Excluded trees
+are pruned before validation, so links inside tool caches do not block startup.
+Included links, special files, case collisions and a linked `.scratch` root are
+refused on both endpoints; unreadable included directories fail validation.
+Deletions propagate. Simultaneous conflicting edits remain for explicit resolution; neither side silently wins.
 
 Shared project memory is Markdown under `.scratch/memory/`. Setup adds guidance
 to AGENTS.md and CLAUDE.md, so ordinary native agent launches can read and maintain
@@ -121,5 +125,8 @@ the configured idle timeout. Existing SSH and Herdr global settings are preserve
 
 Advanced commands remain `task scratch:configure -- --codespace NAME --remote-root
 /workspaces/PROJECT`, `scratch:start`, `scratch:status`, `scratch:logs`,
-`scratch:backup`, and `scratch:stop`. Scratch backups contain scratch payloads only.
+`scratch:backup`, and `scratch:stop`. Scratch backups retain included scratch
+payloads and the root marker files even when Git ignores them. They exclude the same transient entries as sync, including
+cache links. Backups remain private and immutable; they contain no checkout or
+conversation data.
 Historical full-checkout recovery evidence is superseded by this design.
