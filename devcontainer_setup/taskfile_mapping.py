@@ -16,14 +16,18 @@ def scalar(value):
     value = re.sub(r'\s+#.*$', '', value).strip()
     if value.startswith('"'):
         try:
-            return json.loads(value)
+            decoded = json.loads(value)
         except ValueError as error:
             raise ValueError('Unsupported quoted Taskfile scalar') from error
-    if value.startswith("'") and value.endswith("'"):
-        return value[1:-1].replace("''", "'")
-    if not value or any(char in value for char in '{}[]&*!|>') or '{{' in value:
+    elif value.startswith("'") and value.endswith("'"):
+        decoded = value[1:-1].replace("''", "'")
+    elif not value or any(char in value for char in '{}[]&*!|>'):
         raise ValueError('Expand unsupported Taskfile scalar before setup')
-    return value
+    else:
+        decoded = value
+    if '{{' in decoded:
+        raise ValueError('Expand dynamic Taskfile scalar before setup')
+    return decoded
 
 
 def key_line(line):
@@ -119,5 +123,7 @@ def integrate_include(text):
     if block is None:
         return text.rstrip() + '\n\nincludes:\n' + entry
     lines = block.lines
+    if not lines[block.start].endswith('\n'):
+        lines[block.start] += '\n'
     lines.insert(block.start + 1, entry)
     return ''.join(lines)

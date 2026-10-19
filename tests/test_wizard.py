@@ -115,6 +115,8 @@ class WizardCliTests(unittest.TestCase):
             "includes:\n  'devcontainer': other.yml\ntasks:\n  owner: {}\n",
             "includes:\n  devcontainer: other.yml\n  'devcontainer': .devcontainer/Taskfile.yml\ntasks:\n",
             "includes:\n  owner: owner.yml\nincludes:\n  other: other.yml\ntasks:\n",
+            'includes:\n  owner: "{{.OWNER}}"\ntasks:\n  owner: {}\n',
+            "includes:\n  owner:\n    taskfile: '{{.OWNER}}'\n    optional: true\ntasks:\n  owner: {}\n",
         )
         for original in unsupported:
             with self.subTest(original=original):

@@ -142,8 +142,10 @@ def _stage_task_context(root: Path, project: Path, name: str, seen=None) -> None
     source = project / name
     if not source.resolve().is_relative_to(project.resolve()):
         raise ValueError('Taskfile include context escapes the reviewed project: ' + name)
+    if source.is_symlink():
+        raise ValueError('Taskfile include context is a symlink; review required: ' + name)
     if not target.exists():
-        if not source.is_file() or source.is_symlink():
+        if not source.is_file():
             return  # Task enforces required/optional includes itself.
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(source.read_bytes())
@@ -192,15 +194,18 @@ def _check_task_candidate(root: Path, project: Path | None) -> None:
         remaining = integrate(original, enabled=False)
         retired = (set(mapping(original, 'tasks', required=True).entries)
                    - set(mapping(remaining, 'tasks', required=True).entries))
-        # The generated include's inventory is retired only with byte ownership
-        # evidence. Owner includes and owner aliases remain protected.
+        # Derive ownership from Task's actual graph, never a namespace prefix:
+        # owner root tasks can legitimately use the generated include's prefix.
         config = project / '.devcontainer/devcontainer.json'
         if config.is_file():
             metadata = json.loads(config.read_text()).get('customizations', {}).get('devcontainerSetup', {})
             old = project / '.devcontainer/Taskfile.yml'
             digest = metadata.get('managedFiles', {}).get('.devcontainer/Taskfile.yml')
             if old.is_file() and hashlib.sha256(old.read_bytes()).hexdigest() == digest:
-                retired.update(task for task in before if task.startswith('devcontainer:'))
+                staged = before_root / '.devcontainer/Taskfile.yml'
+                if staged.is_file():
+                    staged.write_text('version: "3"\ntasks:\n')
+                    retired.update(before - _task_inventory(before_root, name))
         missing = before - after - retired
         if missing:
             raise ValueError('Candidate lost owner Task commands: ' + ', '.join(sorted(missing)))

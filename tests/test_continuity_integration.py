@@ -1,4 +1,5 @@
 """Consumer generation and real Taskfile surface for project continuity."""
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -182,6 +183,76 @@ class ContinuityIntegrationTests(unittest.TestCase):
         integrate_taskfile(self.root, files)
         with self.assertRaisesRegex(ValueError, 'include'):
             check_candidate(files, self.root)
+
+    def test_generated_graph_retirement_preserves_owner_prefix(self):
+        from devcontainer_setup.__main__ import check_candidate, integrate_taskfile
+        generated = b'version: "3"\ntasks:\n  managed: {}\n  obsolete: {}\n'
+        for owner_name in ('devcontainer:owner', 'devcontainer:nested:owner'):
+            with self.subTest(owner_name=owner_name):
+                config = json.loads(render(self.root, SOURCE, self.selection, REF)['.devcontainer/devcontainer.json'])
+                (self.root / '.devcontainer').mkdir(exist_ok=True)
+                (self.root / '.devcontainer/Taskfile.yml').write_bytes(generated)
+                config['customizations']['devcontainerSetup']['managedFiles'] = {
+                    '.devcontainer/Taskfile.yml': hashlib.sha256(generated).hexdigest()}
+                (self.root / '.devcontainer/devcontainer.json').write_text(json.dumps(config))
+                stanza = f'  "{owner_name}":\n    cmds: [echo OWNER_PREFIX]\n'
+                original = ('version: "3"\nincludes:\n  devcontainer: .devcontainer/Taskfile.yml\n'
+                            'tasks:\n  owner: {}\n' + stanza)
+                (self.root / 'Taskfile.yml').write_text(original)
+                self.assertIn('devcontainer:obsolete', self.inventory())
+                result = subprocess.run(['task', owner_name], cwd=self.root, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('OWNER_PREFIX', result.stdout)
+                files = render(self.root, SOURCE, self.selection, REF)
+                integrate_taskfile(self.root, files)
+                files['Taskfile.yml'] = original.replace(stanza, '').encode()
+                snapshot = dict(files)
+                with self.assertRaisesRegex(ValueError, 'lost owner Task commands: ' + owner_name):
+                    check_candidate(files, self.root)
+                self.assertEqual(files, snapshot)
+                self.assertEqual((self.root / 'Taskfile.yml').read_text(), original)
+                files['Taskfile.yml'] = original.encode()
+                check_candidate(files, self.root)
+                self.install(files)
+                self.assertNotIn('devcontainer:obsolete', self.inventory())
+                result = subprocess.run(['task', owner_name], cwd=self.root, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('OWNER_PREFIX', result.stdout)
+
+    def test_optional_internal_symlink_context_is_never_omitted_from_baseline(self):
+        from devcontainer_setup.__main__ import check_candidate, integrate_taskfile
+        actual = self.root / 'actual'
+        actual.mkdir()
+        (actual / 'Taskfile.yml').write_text('version: "3"\ntasks:\n  extra: {}\n')
+        (self.root / 'linked.yml').symlink_to('actual/Taskfile.yml')
+        original = ('version: "3"\nincludes:\n  owner:\n    taskfile: linked.yml\n'
+                    '    optional: true\ntasks:\n  keep: {}\n')
+        (self.root / 'Taskfile.yml').write_text(original)
+        self.assertIn('owner:extra', self.inventory())
+        files = render(self.root, SOURCE, self.selection, REF)
+        integrate_taskfile(self.root, files)
+        files['Taskfile.yml'] = b'version: "3"\ntasks:\n  keep: {}\n'
+        snapshot = dict(files)
+        with self.assertRaisesRegex(ValueError, 'symlink'):
+            check_candidate(files, self.root)
+        self.assertEqual(files, snapshot)
+        self.assertEqual((self.root / 'Taskfile.yml').read_text(), original)
+
+    def test_empty_include_mapping_at_eof_survives_full_candidate(self):
+        from devcontainer_setup.__main__ import check_candidate, integrate_continuity, integrate_taskfile
+        original = 'version: "3"\ntasks:\n  owner:\n    cmds: [echo EOF_OWNER]\nincludes:'
+        (self.root / 'Taskfile.yml').write_text(original)
+        self.assertEqual(self.inventory(), {'owner'})
+        files = render(self.root, SOURCE, self.selection, REF)
+        integrate_taskfile(self.root, files)
+        integrate_continuity(self.root, files, True)
+        check_candidate(files, self.root)
+        self.assertIn(b'includes:\n  devcontainer:', files['Taskfile.yml'])
+        self.install(files)
+        self.assertIn('owner', self.inventory())
+        result = subprocess.run(['task', 'owner'], cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('EOF_OWNER', result.stdout)
 
     def test_disable_and_reenable_retires_only_verified_aliases(self):
         from devcontainer_setup.__main__ import check_candidate, integrate_continuity, integrate_taskfile
