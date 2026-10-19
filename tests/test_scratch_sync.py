@@ -121,6 +121,165 @@ class ScratchTests(unittest.TestCase):
             self.module._remote(LocalPython(), str(remote), snapshot=True)
         self.assertIn(b'Remote .scratch missing', caught.exception.stderr)
 
+    def test_remote_preparation_verifies_identity_root_and_refuses_unsafe_scratch(self):
+        from devcontainer_setup.project_sync.state import discover_project
+        identity = discover_project(self.root).identity
+        remote = self.root.parent / 'prepare-remote'
+        shutil.copytree(self.root, remote, ignore=shutil.ignore_patterns('.scratch'))
+        connection = self._native_remote()
+        subprocess.run(['git', '-C', str(remote), 'remote', 'set-url', 'origin', 'https://github.com/foreign/repo'], check=True)
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.module._remote(connection, str(remote), prepare_identity=identity)
+        self.assertFalse((remote / '.scratch').exists())
+        subprocess.run(['git', '-C', str(remote), 'remote', 'set-url', 'origin', 'git@github.com:owner/repo.git'], check=True)
+        child = remote / 'child'; child.mkdir()
+        alias = self.root.parent / 'root-alias'; alias.symlink_to(remote, target_is_directory=True)
+        for root in (child, alias):
+            with self.subTest(root=root), self.assertRaises(subprocess.CalledProcessError):
+                self.module._remote(connection, str(root), prepare_identity=identity)
+            self.assertFalse((remote / '.scratch').exists())
+        scratch = remote / '.scratch'
+        scratch.write_text('owner file')
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.module._remote(connection, str(remote), prepare_identity=identity)
+        self.assertEqual(scratch.read_text(), 'owner file'); scratch.unlink()
+        target = self.root.parent / 'owner-directory'; target.mkdir()
+        scratch.symlink_to(target, target_is_directory=True)
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.module._remote(connection, str(remote), prepare_identity=identity)
+        self.assertEqual(list(target.iterdir()), []); self.assertTrue(scratch.is_symlink()); scratch.unlink()
+        for _ in range(2):
+            result = json.loads(self.module._remote(connection, str(remote), prepare_identity=identity))
+            self.assertEqual(result, dict(identity=identity, root=str(remote)))
+            self.assertEqual(list(scratch.iterdir()), [])
+        (scratch / 'included-link').symlink_to(target)
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.module._remote(connection, str(remote), prepare_identity=identity)
+        self.assertTrue((scratch / 'included-link').is_symlink())
+
+    @unittest.skipUnless(os.environ.get('CI') or os.environ.get('MUTAGEN_TEST_BINARY'), 'set MUTAGEN_TEST_BINARY for older-checkout connection gate')
+    def test_actual_older_checkout_prepares_scratch_and_enters_herdr_despite_publish_refusal(self):
+        import threading
+        from types import SimpleNamespace
+        from test_replication import ReplicationTests
+        from devcontainer_setup.project_sync import workspace, replication
+        from devcontainer_setup.project_sync.state import read_json
+        case = ReplicationTests(); case.setUp()
+        self.addCleanup(case.doCleanups)
+        root = case.root
+        remote = case.base / 'older-checkout'
+        shutil.copytree(root, remote)
+        self.assertFalse((remote / '.scratch').exists())
+        (root / '.scratch').mkdir(); (root / '.scratch/note.md').write_text('scratch payload')
+        case.conversation(case.local_env, text='LOCAL')
+        remote_sid, _ = case.conversation(case.connection.env, text='REMOTE', root=remote)
+        for checkout in (root, remote):
+            (checkout / 'source').write_text('staged')
+            subprocess.run(['git', '-C', str(checkout), 'add', 'source'], check=True)
+            (checkout / 'source').write_text('unstaged')
+        before = case.receipt(), case.checkout_receipt(remote)
+        binary = Path(os.environ['MUTAGEN_TEST_BINARY']).resolve()
+        temporary_root = '/private/tmp' if Path('/private/tmp').is_dir() else '/tmp'
+        with tempfile.TemporaryDirectory(prefix='t3-old-', dir=temporary_root) as directory:
+            state = Path(directory).resolve() / 's'
+            m = self.module
+            exiting = threading.Event()
+            failures = []
+            nonce = '9' * 48
+            class Connection:
+                def __init__(self, *args, **kwargs): self.child = SimpleNamespace(poll=lambda: None)
+                def __enter__(self): return self
+                def __exit__(self, *args): pass
+                def ssh_config(self, path): pass  # Native SSH is replaced by private local Mutagen endpoints.
+                def python(self, code, payload=b'', timeout=60):
+                    if payload and json.loads(payload)['request']['operation'] == 'publish':
+                        return b'{"ok":false,"error":"publication refused"}'
+                    try:
+                        return case.connection.python(code, payload, timeout)
+                    except AssertionError:
+                        raise ValueError('Remote Python command failed') from None
+            actual_mutagen, actual_exchange, actual_ready = m._mutagen, replication.sync_project_data, workspace._ready
+            mutagen_used = []
+            def mutagen(tool, owner, *args, **kwargs):
+                translated = tuple(str(remote / '.scratch') if arg == 'project-sync:' + str(remote / '.scratch') else arg for arg in args)
+                result = actual_mutagen(tool, owner, *translated, **kwargs)
+                if args[:1] == ('sync',):
+                    mutagen_used.append(True)
+                if args[:2] == ('sync', 'resume'):
+                    actual_mutagen(tool, owner, 'sync', 'flush', args[2])
+                return result
+            def exchange(*args, **kwargs):
+                self.assertIs(threading.current_thread(), worker, 'No foreground conversation exchange')
+                return actual_exchange(*args, env=case.local_env, **kwargs)
+            def supervise():
+                try:
+                    m.supervise(root, state, nonce)
+                except BaseException as error:
+                    failures.append(error)
+            worker = threading.Thread(target=supervise)
+            def start(*args):
+                worker.start()
+                deadline = time.monotonic() + 5
+                while not (state / m.RUNTIME).exists() and worker.is_alive() and time.monotonic() < deadline:
+                    time.sleep(.02)
+                return m.status(state)
+            observations = []
+            def open_herdr(project, owner, selected_root):
+                self.assertEqual(selected_root, str(remote))
+                self.assertEqual(m.inspect_sync(root, state)['phase'], 'synchronized')
+                self.assertEqual((remote / '.scratch/note.md').read_text(), 'scratch payload')
+                observations.append(True)
+                return 0
+            try:
+                with patch.object(m, 'CodespaceConnection', Connection), \
+                        patch('devcontainer_setup.project_sync.transport.CodespaceConnection', Connection), \
+                        patch.object(m, 'install_mutagen', return_value=binary), \
+                        patch.object(m, '_mutagen', side_effect=mutagen), \
+                        patch.object(m, '_process_identity', side_effect=lambda pid: 'project_sync.scratch --supervise ' + str(state) + ' ' + nonce if worker.is_alive() else None), \
+                        patch.object(m.signal, 'signal'), patch.object(m.threading, 'Event', return_value=exiting), \
+                        patch.object(m, 'start', side_effect=start), \
+                        patch.object(workspace, '_prerequisites'), \
+                        patch.object(workspace, '_choose_pairing', return_value=('fixture', str(remote))), \
+                        patch.object(workspace, '_ready', side_effect=lambda project, owner: actual_ready(project, owner, timeout=5)), \
+                        patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), \
+                        patch('devcontainer_setup.project_sync.ssh_hosts.refresh_ssh'), \
+                        patch('devcontainer_setup.project_sync.herdr.open_remote', side_effect=open_herdr), \
+                        patch.object(replication, 'sync_project_data', side_effect=exchange):
+                    # Discovery/configure and retarget remain read-only for the remote checkout.
+                    m.configure(root, state, 'fixture', str(remote))
+                    self.assertFalse((remote / '.scratch').exists())
+                    m.retarget(root, state, 'fixture', str(remote))
+                    self.assertFalse((remote / '.scratch').exists())
+                    self.assertEqual(workspace.remote(case.project, state), 0)
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline:
+                        runtime = read_json(state / m.RUNTIME)
+                        if runtime.get('conversations', {}).get('completed_at') is not None:
+                            break
+                        time.sleep(.02)
+                    history = runtime['conversations']
+                    self.assertEqual(history['outcome'], 'degraded')
+                    self.assertEqual(history['directions']['desktop_to_codespace']['stage'], 'publication')
+                    self.assertEqual(history['directions']['desktop_to_codespace']['outcome'], 'failed')
+                    inbound = history['directions']['codespace_to_desktop']
+                    self.assertEqual(inbound['outcome'], 'complete')
+                    self.assertIn(remote_sid, [row['source_session_id'] for row in inbound['publication']['imported']])
+                    self.assertEqual(before, (case.receipt(), case.checkout_receipt(remote)))
+                    self.assertEqual(observations, [True])
+                    exiting.set(); worker.join(timeout=10)
+                    self.assertFalse(worker.is_alive()); self.assertEqual(failures, [])
+            finally:
+                exiting.set()
+                if worker.ident is not None:
+                    worker.join(timeout=10)
+                try:
+                    self.assertFalse(worker.is_alive(), 'Fixture worker did not stop')
+                    if (state / m.SESSION).exists():
+                        actual_mutagen(binary, state, 'sync', 'terminate', read_json(state / m.SESSION)['name'])
+                finally:
+                    if mutagen_used:
+                        actual_mutagen(binary, state, 'daemon', 'stop')
+
     def test_remote_identity_still_refuses_existing_unsafe_scratch(self):
         class LocalPython:
             def python(self, code, payload=b'', timeout=60):
@@ -899,6 +1058,58 @@ class ScratchTests(unittest.TestCase):
                 runtime = json.loads((self.state / 'scratch-runtime.json').read_text())
                 self.assertEqual(runtime['session'], name)
                 self.assertEqual(runtime['nonce'], 'f' * 48)
+
+    def test_supervisor_never_recreates_missing_remote_scratch_for_any_saved_receipt(self):
+        m = self.module
+        (self.scratch / 'note.md').write_text('owner note')
+        class Event:
+            def is_set(self): return getattr(self, 'stopped', False)
+            def wait(self, timeout):
+                self.stopped = True
+                return True
+        native = self._native_remote()
+        class Connection:
+            def __init__(self, *args, **kwargs): pass
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def python(self, *args, **kwargs): return native.python(*args, **kwargs)
+            def ssh_config(self, path): pass
+        for established in (True, False):
+            with self.subTest(established=established):
+                remote = self.root.parent / ('missing-scratch-' + str(established))
+                shutil.copytree(self.root, remote, ignore=shutil.ignore_patterns('.scratch'))
+                config = dict(identity='github.com/owner/repo', codespace='fixture',
+                              root=str(self.root), remote_root=str(remote))
+                receipt = dict(name='scratch-' + 'a' * 48, nonce='a' * 48,
+                               binding=config, established=established)
+                if established:
+                    receipt['identifier'] = 'sync_preserved'
+                m._write(self.state / m.SESSION, receipt)
+                before = (self.state / m.SESSION).read_bytes()
+                def command(binary, state, *args, **kwargs):
+                    if args[:2] == ('sync', 'list'):
+                        return json.dumps([dict(name=receipt['name'], identifier='sync_preserved')])
+                    return ''
+                with patch.object(m, '_config', return_value=config), \
+                        patch.object(m, 'CodespaceConnection', Connection), \
+                        patch.object(m, 'install_mutagen', return_value=Path('/fake/tool')), \
+                        patch.object(m.threading, 'Event', Event), patch.object(m.signal, 'signal'), \
+                        patch('devcontainer_setup.project_sync.ssh_hosts.refresh_ssh'), \
+                        patch('devcontainer_setup.project_sync.replication.sync_project_data', side_effect=ValueError('fixture refusal')), \
+                        patch.object(m, 'backup') as backup, patch.object(m, '_mutagen', side_effect=command) as commands:
+                    m.supervise(self.root, self.state, 'f' * 48)
+                    # Concurrent offline status inspection cannot promote a
+                    # planned receipt before endpoint validation either.
+                    with patch.object(m, 'status', return_value=dict(running=True, phase='waiting')):
+                        m.inspect_sync(self.root, self.state)
+                self.assertFalse((remote / '.scratch').exists(), 'A saved baseline must never seed an empty endpoint')
+                self.assertEqual((self.state / m.SESSION).read_bytes(), before)
+                self.assertEqual((self.scratch / 'note.md').read_text(), 'owner note')
+                operations = [call.args[2:4] for call in commands.call_args_list]
+                self.assertNotIn(('sync', 'resume'), operations)
+                self.assertNotIn(('sync', 'create'), operations)
+                self.assertIn(('sync', 'pause'), operations)
+                backup.assert_not_called()
 
     def test_only_planned_session_absence_is_retryable_and_inventory_failure_is_not_absence(self):
         receipt = {'name': 'scratch-' + 'a' * 48, 'nonce': 'a' * 48, 'binding': {}, 'established': False}

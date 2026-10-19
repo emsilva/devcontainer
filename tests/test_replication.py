@@ -370,6 +370,37 @@ class ReplicationTests(unittest.TestCase):
         self.assertEqual(result['directions']['codespace_to_desktop']['outcome'], 'complete')
         self.assertEqual(result['directions']['codespace_to_desktop']['counts']['available'], 1)
 
+    def test_malformed_outer_rpc_envelopes_retain_outbound_custody_and_advance_inbound(self):
+        (self.root / 'source').write_text('staged'); self.git('add', 'source')
+        (self.root / 'source').write_text('unstaged'); before = self.receipt()
+        for envelope in ([], None, 42, 1.5, True, 'invalid'):
+            with self.subTest(envelope=envelope):
+                self.conversation(self.local_env, text='LOCAL-' + str(envelope))
+                remote_sid, _ = self.conversation(self.connection.env, text='REMOTE-' + str(envelope))
+                previous = self.store.latest('codespace')
+                actual = self.connection.python
+                def malformed(code, payload=b'', timeout=60):
+                    if payload and json.loads(payload)['request']['operation'] == 'publish':
+                        return json.dumps(envelope).encode()
+                    return actual(code, payload, timeout)
+                progress = []
+                with patch.object(self.connection, 'python', side_effect=malformed):
+                    result = replication.sync_project_data(self.connection, self.project, self.store.state,
+                                                          str(self.root), env=self.local_env, progress=progress.append)
+                outbound, inbound = (result['directions'][name] for name in ('desktop_to_codespace', 'codespace_to_desktop'))
+                self.assertEqual(result['outcome'], 'degraded')
+                self.assertEqual(progress[-1], result)
+                self.assertEqual(outbound['outcome'], 'failed')
+                self.assertEqual(outbound['stage'], 'publication')
+                self.assertEqual(outbound['receipt'], self.remote_store.latest('desktop'))
+                self.assertGreater(outbound['counts']['received'], 0)
+                self.assertEqual(outbound['counts']['available'], 0)
+                self.assertEqual(inbound['outcome'], 'complete')
+                self.assertNotEqual(inbound['receipt'], previous)
+                self.assertEqual(inbound['receipt'], self.store.latest('codespace'))
+                self.assertIn(remote_sid, [row['source_session_id'] for row in inbound['publication']['imported']])
+                self.assertEqual(before, self.receipt())
+
     def test_stage_timeout_interrupts_work_and_restores_signal_handler(self):
         import signal
         import threading

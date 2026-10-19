@@ -227,7 +227,7 @@ def status(project, state):
 
 def status_text(value):
     worker, scratch_status, history = value['worker'], value['scratch'], value['conversations']
-    lines = ['Connection: ' + ('running' if worker.get('running') else 'stopped'),
+    lines = ['Sync worker: ' + ('running' if worker.get('running') else 'stopped'),
              'Scratch: ' + scratch_status.get('phase', 'unknown'),
              'History: ' + history['outcome'] + ' (' + history['stage'] + ')']
     for name, label in zip(sync_cycle.DIRECTIONS, ('Desktop → Codespace', 'Codespace → Desktop')):

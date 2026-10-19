@@ -83,7 +83,7 @@ def backup(root: Path, state: Path) -> Path:
     return path
 
 
-def _remote(connection, remote_root, *, snapshot=False, allow_missing_scratch=False):
+def _remote(connection, remote_root, *, snapshot=False, allow_missing_scratch=False, prepare_identity=None):
     # Execute the canonical identity implementation on native remote Python.
     # Do not duplicate identity normalization or rely on directory basenames.
     # Identity probes must also accept older checkouts before scratch is seeded.
@@ -96,6 +96,12 @@ tree=types.ModuleType("_scratch_tree");sys.modules[tree.__name__]=tree
 exec(compile(base64.b64decode(__TREE_SOURCE__),"scratch-tree.py","exec"),tree.__dict__)
 p=m.discover_project(pathlib.Path(__ROOT__))
 s=p.root/".scratch"
+if __PREPARE_IDENTITY__ is not None:
+ if p.identity!=__PREPARE_IDENTITY__ or str(p.root)!=__ROOT__ or ".devcontainer-work" in p.root.parts:
+  raise ValueError("Scratch preparation requires the verified ordinary checkout identity/root")
+ with m._parent(s) as (parent,name):
+  try:os.mkdir(name,mode=0o700,dir_fd=parent)
+  except FileExistsError:pass
 if s.is_symlink():raise ValueError("Remote scratch symlink")
 if s.exists() and not s.is_dir():raise ValueError("Remote scratch is not a directory")
 if not s.is_dir() and (__SNAPSHOT__ or not __ALLOW_MISSING__):raise ValueError("Remote .scratch missing; configure project continuity remotely first")
@@ -106,7 +112,7 @@ if __SNAPSHOT__:
  with tarfile.open(fileobj=b,mode="w:gz",dereference=False) as t:tree.add_backup(t,s)
  sys.stdout.buffer.write(b.getvalue())
 else:print(json.dumps({"identity":p.identity,"root":str(p.root)}))
-'''.replace('__SOURCE__', repr(base64.b64encode(source).decode())).replace('__TREE_SOURCE__', repr(base64.b64encode(tree_source).decode())).replace('__ROOT__', repr(remote_root)).replace('__SNAPSHOT__', repr(snapshot)).replace('__ALLOW_MISSING__', repr(allow_missing_scratch))
+'''.replace('__SOURCE__', repr(base64.b64encode(source).decode())).replace('__TREE_SOURCE__', repr(base64.b64encode(tree_source).decode())).replace('__ROOT__', repr(remote_root)).replace('__SNAPSHOT__', repr(snapshot)).replace('__ALLOW_MISSING__', repr(allow_missing_scratch)).replace('__PREPARE_IDENTITY__', repr(prepare_identity))
     return connection.python(code, timeout=90)
 
 
@@ -289,12 +295,14 @@ def inspect_sync(root, state):
     receipt = _saved_session(state, config)
     if receipt is None:
         return dict(phase='connecting', conflicts=[])
-    info = _session_info(install_mutagen(state, allow_download=False), state, receipt)
+    info = _session_info(install_mutagen(state, allow_download=False), state, dict(receipt), persist=False)
     return _reconciliation(info) if info else dict(phase='connecting', conflicts=[])
 
 
 def _pause_saved_session(binary, state, receipt):
-    info = _session_info(binary, state, receipt)
+    # Pausing for safety must not promote a planned receipt before the remote
+    # endpoint passes validation. Resume inspection owns that durable update.
+    info = _session_info(binary, state, dict(receipt), persist=False)
     if info is not None:
         _mutagen(binary, state, 'sync', 'pause', info['identifier'])
     return info
@@ -522,7 +530,10 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                     _scratch(root)
                     update('connecting')
                     with CodespaceConnection(config['codespace'], state=state) as connection:
-                        remote = json.loads(_remote(connection, config['remote_root']))
+                        # Only first setup may seed missing scratch. A retained
+                        # baseline requires its existing endpoint before resume.
+                        remote = json.loads(_remote(connection, config['remote_root'],
+                                                    prepare_identity=config['identity'] if receipt is None else None))
                         if remote.get('identity') != config['identity'] or remote.get('root') != config['remote_root']:
                             raise ValueError('Remote repository identity changed; refusing synchronization.')
                         connection.ssh_config(state / 'ssh-config')
