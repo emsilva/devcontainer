@@ -162,6 +162,70 @@ def _stage_task_context(root: Path, project: Path, name: str, seen=None) -> None
         _stage_task_context(root, project, path.as_posix(), seen)
 
 
+def _literal_task_graph(root: Path, name: str):
+    """Static names supplement Task's public inventory (which omits internals)."""
+    from .taskfile_mapping import NAMES, include_namespaces, task_aliases, task_stanzas
+    definitions, contexts, seen = set(), [], set()
+
+    def visit(path, namespace='', ancestors=()):
+        if path in ancestors:
+            raise ValueError('Cannot prove Task reference retirement through cyclic includes: ' + path)
+        if (path, namespace) in seen or not (root / path).is_file():
+            return
+        seen.add((path, namespace))
+        text = (root / path).read_text()
+        try:
+            stanzas = list(task_stanzas(text))
+            for task, fields in stanzas:
+                definitions.update(namespace + alias for alias in [task] + task_aliases(fields))
+                if task == 'default' and namespace:
+                    definitions.add(namespace[:-1])  # Task's implicit include alias.
+        except ValueError as error:
+            raise ValueError(f'Cannot prove Task reference definitions in {path}: {error}') from error
+        contexts.append((path, namespace, stanzas))
+        for location, namespaces in include_namespaces(text):
+            included = Path(path).parent / location
+            if (root / included).is_dir():
+                choices = [included / item for item in NAMES if (root / included / item).is_file()]
+                if not choices:
+                    continue
+                included = choices[0]
+            for prefix in namespaces:
+                visit(included.as_posix(), namespace + (prefix + ':' if prefix else ''), ancestors + (path,))
+
+    visit(name)
+    return definitions, contexts
+
+
+def _check_owner_task_references(before_root, after_root, name, owned_aliases, owned_include):
+    from .taskfile_mapping import task_references
+    before, contexts = _literal_task_graph(before_root, name)
+    after, _ = _literal_task_graph(after_root, name)
+    lost = before - after
+    if not lost:
+        return
+    wildcards = sorted(item for item in lost if any(char in item for char in '*?['))
+    for path, namespace, stanzas in contexts:
+        if path == owned_include:
+            continue
+        for task, fields in stanzas:
+            owner = namespace + task
+            if owner not in after or (path == name and task in owned_aliases):
+                continue
+            try:
+                references = list(task_references(fields))
+            except ValueError as error:
+                raise ValueError(f'Owner Task {owner} reference in {path} cannot prove safe retirement: {error}') from error
+            for reference in references:
+                target = reference[1:] if namespace and reference.startswith(':') else namespace + reference
+                if target not in after and wildcards:
+                    raise ValueError(f'Owner Task {owner} reference {target} in {path} cannot prove safe '
+                                     'retirement of wildcard targets: ' + ', '.join(wildcards))
+                if target in lost:
+                    raise ValueError(f'Owner Task {owner} reference in {path} needs retiring target {target}; '
+                                     'retain the delegate or review the owner reference before setup')
+
+
 def _check_task_candidate(root: Path, project: Path | None) -> None:
     from .taskfile_mapping import NAMES, mapping
     present = {path.name for path in root.iterdir()}
@@ -194,6 +258,7 @@ def _check_task_candidate(root: Path, project: Path | None) -> None:
         remaining = integrate(original, enabled=False)
         retired = (set(mapping(original, 'tasks', required=True).entries)
                    - set(mapping(remaining, 'tasks', required=True).entries))
+        owned_aliases, owned_include = set(retired), None
         # Derive ownership from Task's actual graph, never a namespace prefix:
         # owner root tasks can legitimately use the generated include's prefix.
         config = project / '.devcontainer/devcontainer.json'
@@ -202,13 +267,20 @@ def _check_task_candidate(root: Path, project: Path | None) -> None:
             old = project / '.devcontainer/Taskfile.yml'
             digest = metadata.get('managedFiles', {}).get('.devcontainer/Taskfile.yml')
             if old.is_file() and hashlib.sha256(old.read_bytes()).hexdigest() == digest:
+                owned_include = '.devcontainer/Taskfile.yml'
                 staged = before_root / '.devcontainer/Taskfile.yml'
                 if staged.is_file():
-                    staged.write_text('version: "3"\ntasks:\n')
-                    retired.update(before - _task_inventory(before_root, name))
+                    content = staged.read_bytes()
+                    try:
+                        staged.write_text('version: "3"\ntasks:\n')
+                        retired.update(before - _task_inventory(before_root, name))
+                    finally:
+                        staged.write_bytes(content)
         missing = before - after - retired
         if missing:
             raise ValueError('Candidate lost owner Task commands: ' + ', '.join(sorted(missing)))
+        if retired or owned_include:
+            _check_owner_task_references(before_root, root, name, owned_aliases, owned_include)
 
 
 def check_candidate(files: dict[str, bytes], project: Path | None = None) -> None:

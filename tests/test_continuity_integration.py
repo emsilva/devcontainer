@@ -254,6 +254,196 @@ class ContinuityIntegrationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('EOF_OWNER', result.stdout)
 
+    def candidate(self, project, enabled=True):
+        from devcontainer_setup.__main__ import integrate_continuity, integrate_taskfile
+        files = render(project, SOURCE, dict(self.selection, continuity=enabled), REF)
+        integrate_taskfile(project, files)
+        integrate_continuity(project, files, enabled)
+        return files
+
+    def delegate_fixture(self, project, owner, target='obsolete', included=None):
+        config = json.loads(render(project, SOURCE, self.selection, REF)['.devcontainer/devcontainer.json'])
+        generated = ('version: "3"\ntasks:\n  ' + target + ':\n    cmds: [echo OWNER_DELEGATE]\n'
+                     '  unreferenced: {}\n').encode()
+        config['customizations']['devcontainerSetup']['managedFiles'] = {
+            '.devcontainer/Taskfile.yml': hashlib.sha256(generated).hexdigest()}
+        (project / '.devcontainer').mkdir()
+        (project / '.devcontainer/Taskfile.yml').write_bytes(generated)
+        (project / '.devcontainer/devcontainer.json').write_text(json.dumps(config))
+        (project / 'Taskfile.yml').write_text(
+            'version: "3"\nincludes:\n  devcontainer: .devcontainer/Taskfile.yml\n'
+            + ('  owner: owner.yml\n' if included else '') + 'tasks:\n' + owner)
+        if included:
+            (project / 'owner.yml').write_text(included)
+
+    def assert_owner_runs(self, project, task='owner'):
+        result = subprocess.run(['task', task], cwd=project, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('OWNER_DELEGATE', result.stdout)
+
+    def test_owner_task_references_block_retirement_but_allow_retained_delegate(self):
+        from devcontainer_setup.__main__ import check_candidate
+        forms = (
+            '  owner: {cmds: [{task: "devcontainer:obsolete"}]}\n',
+            "  'owner':\n    'cmds':\n      - 'task': 'devcontainer:obsolete'\n",
+            '  owner:\n    cmds: [{task: devcontainer:obsolete}]\n',
+            '  owner: {deps: [devcontainer:obsolete]}\n',
+            '  owner:\n    deps:\n      - devcontainer:obsolete\n',
+            '  owner:\n    deps:\n      - task: "devcontainer:obsolete"\n',
+            "  owner: {deps: [{'task': 'devcontainer:obsolete'}]}\n",
+            '  owner:\n    cmds:\n      - task: devcontainer:obsolete\n        vars: {OWNER: retained}\n',
+            '  owner:\n    deps:\n      - vars: {OWNER: retained}\n        task: devcontainer:obsolete\n',
+            '  owner: {"cmds":[{"task":"devcontainer:obsolete"}]}\n',
+        )
+        for owner in forms:
+            with self.subTest(owner=owner), tempfile.TemporaryDirectory(dir=self.root) as directory:
+                project = Path(directory)
+                self.delegate_fixture(project, owner)
+                self.assert_owner_runs(project)
+                original = (project / 'Taskfile.yml').read_bytes()
+                files = self.candidate(project)
+                snapshot = dict(files)
+                with self.assertRaisesRegex(ValueError, 'owner.*reference.*devcontainer:obsolete'):
+                    check_candidate(files, project)
+                self.assertEqual(files, snapshot)
+                self.assertEqual((project / 'Taskfile.yml').read_bytes(), original)
+                # Keeping a still-supported delegate is valid; the gate must
+                # neither rewrite the wrapper nor refuse all generated changes.
+                files['.devcontainer/Taskfile.yml'] += b'  obsolete:\n    cmds: [echo OWNER_DELEGATE]\n'
+                config = json.loads(files['.devcontainer/devcontainer.json'])
+                config['customizations']['devcontainerSetup']['managedFiles']['.devcontainer/Taskfile.yml'] = (
+                    hashlib.sha256(files['.devcontainer/Taskfile.yml']).hexdigest())
+                files['.devcontainer/devcontainer.json'] = json.dumps(config).encode()
+                check_candidate(files, project)
+                for name, data in files.items():
+                    path = project / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    if data is not None:
+                        path.write_bytes(data)
+                self.assertIn(owner.encode(), (project / 'Taskfile.yml').read_bytes())
+                self.assert_owner_runs(project)
+
+    def test_disable_refuses_owner_call_to_retiring_continuity_delegate_or_alias(self):
+        from devcontainer_setup.__main__ import check_candidate
+        for target in ('devcontainer:work:status', 'work:status'):
+            with self.subTest(target=target), tempfile.TemporaryDirectory(dir=self.root) as directory:
+                project = Path(directory)
+                self.delegate_fixture(project, '  owner: {cmds: [{task: "' + target + '"}]}\n',
+                                      target='work:status')
+                from devcontainer_setup.root_tasks import integrate
+                root = project / 'Taskfile.yml'
+                root.write_text(integrate(root.read_text()))
+                self.assert_owner_runs(project)
+                original = root.read_bytes()
+                files = self.candidate(project, enabled=False)
+                snapshot = dict(files)
+                with self.assertRaisesRegex(ValueError, 'owner.*reference.*' + target):
+                    check_candidate(files, project)
+                self.assertEqual(files, snapshot)
+                self.assertEqual(root.read_bytes(), original)
+
+    def test_included_owner_references_resolve_root_and_local_namespaces(self):
+        from devcontainer_setup.__main__ import check_candidate
+        for field in ('cmds', 'deps'):
+            for target in (':devcontainer:obsolete', 'helpers:obsolete'):
+                with self.subTest(field=field, target=target), tempfile.TemporaryDirectory(dir=self.root) as directory:
+                    project = Path(directory)
+                    included = ('version: "3"\nincludes:\n  helpers: .devcontainer/Taskfile.yml\n'
+                                'tasks:\n  wrapper: {' + field + ': [{task: "' + target + '"}]}\n')
+                    self.delegate_fixture(project, '  keep: {}\n', included=included)
+                    self.assert_owner_runs(project, 'owner:wrapper')
+                    files = self.candidate(project)
+                    snapshot = dict(files)
+                    with self.assertRaisesRegex(ValueError, 'owner:wrapper.*reference.*obsolete'):
+                        check_candidate(files, project)
+                    self.assertEqual(files, snapshot)
+                    self.assertEqual((project / 'owner.yml').read_text(), included)
+
+    def test_dynamic_owner_reference_refuses_unproven_retirement_without_evaluation(self):
+        from devcontainer_setup.__main__ import check_candidate
+        self.delegate_fixture(self.root, '  owner: {cmds: [{task: "{{.TARGET}}"}]}\n')
+        root = self.root / 'Taskfile.yml'
+        root.write_text(root.read_text() + 'vars:\n  TARGET: devcontainer:obsolete\n')
+        self.assert_owner_runs(self.root)
+        files = self.candidate(self.root)
+        snapshot = dict(files)
+        with self.assertRaisesRegex(ValueError, 'owner.*reference.*dynamic'):
+            check_candidate(files, self.root)
+        self.assertEqual(files, snapshot)
+
+    def test_internal_delegate_and_alias_references_cannot_hide_from_inventory(self):
+        from devcontainer_setup.__main__ import check_candidate
+        for reference in ('devcontainer:obsolete', 'devcontainer:old-alias'):
+            with self.subTest(reference=reference), tempfile.TemporaryDirectory(dir=self.root) as directory:
+                project = Path(directory)
+                self.delegate_fixture(project, '  owner: {deps: ["' + reference + '"]}\n')
+                path = project / '.devcontainer/Taskfile.yml'
+                path.write_text(path.read_text().replace('  obsolete:\n',
+                                '  obsolete:\n    internal: true\n    aliases: [old-alias]\n'))
+                config = json.loads((project / '.devcontainer/devcontainer.json').read_bytes())
+                config['customizations']['devcontainerSetup']['managedFiles']['.devcontainer/Taskfile.yml'] = (
+                    hashlib.sha256(path.read_bytes()).hexdigest())
+                (project / '.devcontainer/devcontainer.json').write_text(json.dumps(config))
+                self.assert_owner_runs(project)
+                files = self.candidate(project)
+                with self.assertRaisesRegex(ValueError, 'owner.*reference.*' + reference):
+                    check_candidate(files, project)
+
+    def test_reference_retirement_validation_never_runs_owner_evaluation(self):
+        from devcontainer_setup.__main__ import check_candidate
+        self.delegate_fixture(self.root, '  owner: {}\n')
+        markers = [self.root / name for name in ('VAR', 'STATUS', 'PRECONDITION', 'COMMAND')]
+        root = self.root / 'Taskfile.yml'
+        text = root.read_text().replace('  owner: {}\n',
+            '  owner:\n    desc: "{{.OWNER}}"\n'
+            f'    preconditions: [touch {markers[2]}]\n'
+            f'    status: [touch {markers[1]}]\n'
+            '    cmds:\n      - |\n'
+            f'        touch {markers[3]}\n'
+            '        echo "task: devcontainer:obsolete is shell text"\n')
+        text += f'vars:\n  OWNER:\n    sh: touch {markers[0]}; echo OWNER\n'
+        root.write_text(text)
+        check_candidate(self.candidate(self.root), self.root)
+        for path in markers:
+            self.assertFalse(path.exists(), path)
+
+    def test_deferred_owner_task_and_wildcard_references_cannot_escape_retirement_check(self):
+        from devcontainer_setup.__main__ import check_candidate
+        cases = (
+            ('  owner: {cmds: [{defer: {task: "devcontainer:obsolete"}}]}\n', 'obsolete'),
+            ('  owner:\n    cmds:\n      - defer:\n          task: devcontainer:obsolete\n', 'obsolete'),
+            ('  owner: {cmds: [{task: "devcontainer:obsolete:one"}]}\n', '"obsolete:*"'),
+        )
+        for owner, target in cases:
+            with self.subTest(owner=owner), tempfile.TemporaryDirectory(dir=self.root) as directory:
+                project = Path(directory)
+                self.delegate_fixture(project, owner, target=target)
+                self.assert_owner_runs(project)
+                files = self.candidate(project)
+                with self.assertRaisesRegex(ValueError, 'owner.*reference.*obsolete'):
+                    check_candidate(files, project)
+
+    def test_unsupported_multiline_alias_cannot_hide_a_retired_reference(self):
+        from devcontainer_setup.__main__ import check_candidate
+        self.delegate_fixture(self.root, '  owner: {deps: [devcontainer:old-alias]}\n')
+        path = self.root / '.devcontainer/Taskfile.yml'
+        path.write_text(path.read_text().replace('  obsolete:\n',
+            '  obsolete:\n    aliases:\n      - >-\n        old-alias\n'))
+        config = json.loads((self.root / '.devcontainer/devcontainer.json').read_bytes())
+        config['customizations']['devcontainerSetup']['managedFiles']['.devcontainer/Taskfile.yml'] = (
+            hashlib.sha256(path.read_bytes()).hexdigest())
+        (self.root / '.devcontainer/devcontainer.json').write_text(json.dumps(config))
+        self.assert_owner_runs(self.root)
+        with self.assertRaisesRegex(ValueError, 'reference.*aliases'):
+            check_candidate(self.candidate(self.root), self.root)
+
+    def test_implicit_include_default_alias_remains_a_protected_reference(self):
+        from devcontainer_setup.__main__ import check_candidate
+        self.delegate_fixture(self.root, '  owner: {cmds: [{task: devcontainer}]}\n', target='default')
+        self.assert_owner_runs(self.root)
+        with self.assertRaisesRegex(ValueError, 'owner.*reference.*devcontainer'):
+            check_candidate(self.candidate(self.root), self.root)
+
     def test_disable_and_reenable_retires_only_verified_aliases(self):
         from devcontainer_setup.__main__ import check_candidate, integrate_continuity, integrate_taskfile
         (self.root / 'Taskfile.yml').write_text(

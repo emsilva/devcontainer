@@ -127,3 +127,176 @@ def integrate_include(text):
         lines[block.start] += '\n'
     lines.insert(block.start + 1, entry)
     return ''.join(lines)
+
+
+def _flow_items(value, opening, closing):
+    """Split only literal Task DSL flow lists/maps, respecting nested quotes."""
+    value = value.strip()
+    if not value.startswith(opening) or not value.endswith(closing):
+        raise ValueError('unsupported Task reference flow layout')
+    body, items, start, stack, quote, index = value[1:-1], [], 0, [], '', 0
+    while index < len(body):
+        char = body[index]
+        if quote:
+            if char == '\\' and quote == '"':
+                index += 2
+                continue
+            if char == quote:
+                if quote == "'" and body[index:index+2] == "''":
+                    index += 2
+                    continue
+                quote = ''
+        elif char in "\"'":
+            quote = char
+        elif char in '[{':
+            stack.append(']' if char == '[' else '}')
+        elif char in ']}':
+            if not stack or stack.pop() != char:
+                raise ValueError('unsupported Task reference flow nesting')
+        elif char == '#':
+            raise ValueError('expand flow comments before Task reference retirement')
+        elif char == ',' and not stack:
+            items.append(body[start:index].strip())
+            start = index + 1
+        index += 1
+    if quote or stack:
+        raise ValueError('unsupported Task reference quoting or nesting')
+    if body[start:].strip():
+        items.append(body[start:].strip())
+    return items
+
+
+def _flow_fields(value):
+    fields = {}
+    for item in _flow_items(value, '{', '}'):
+        match = re.fullmatch(r'''("(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[^:\s]+)\s*:\s*(.*)''', item, re.S)
+        if not match:
+            raise ValueError('unsupported Task reference mapping')
+        key = scalar(match[1])
+        if key == '<<' or key in fields:
+            raise ValueError('expand merged/duplicate Task reference fields')
+        fields[key] = (match[2], [])
+    return fields
+
+
+def _block_fields(lines):
+    meaningful = [i for i, line in enumerate(lines) if significant(line)]
+    if not meaningful:
+        return {}
+    width = min(len(lines[i]) - len(lines[i].lstrip(' ')) for i in meaningful)
+    starts = [i for i in meaningful if len(lines[i]) - len(lines[i].lstrip(' ')) == width
+              and not lines[i].lstrip().startswith('-')]
+    if not starts:
+        raise ValueError('unsupported Task reference block fields')
+    fields = {}
+    for number, start in enumerate(starts):
+        _, key, value = key_line(lines[start])
+        if key in fields:
+            raise ValueError('duplicate Task reference fields')
+        end = starts[number + 1] if number + 1 < len(starts) else len(lines)
+        fields[key] = (value, lines[start+1:end])
+    return fields
+
+
+def _list_items(value, lines):
+    value = value.strip()
+    if value:
+        return [(item, []) for item in _flow_items(value, '[', ']')]
+    meaningful = [i for i, line in enumerate(lines) if significant(line)]
+    if not meaningful:
+        return []
+    width = min(len(lines[i]) - len(lines[i].lstrip(' ')) for i in meaningful)
+    starts = [i for i in meaningful if len(lines[i]) - len(lines[i].lstrip(' ')) == width]
+    result = []
+    for number, start in enumerate(starts):
+        match = re.fullmatch(r'\s*-\s+(.*)', lines[start].rstrip('\r\n'))
+        if not match:
+            raise ValueError('unsupported Task reference list item')
+        end = starts[number + 1] if number + 1 < len(starts) else len(lines)
+        # A list mapping's continuation keys align two columns after '-'.
+        # Keep their relative depth so vars.task cannot masquerade as a call.
+        result.append((match[1], [line[width+2:] for line in lines[start+1:end]]))
+    return result
+
+
+def task_stanzas(text):
+    """Expose scoped Task properties without interpreting shell command bodies."""
+    block = mapping(text, 'tasks', required=True)
+    items = list(block.entries.items())
+    for number, (name, (start, value)) in enumerate(items):
+        end = items[number + 1][1][0] if number + 1 < len(items) else block.end
+        if value.startswith('{'):
+            fields = _flow_fields(value)
+        elif value.startswith('['):
+            fields = {'cmds': (value, [])}
+        elif value and not value.startswith('#'):
+            # Task's string shorthand is a shell command, not a Task reference.
+            if value.startswith(('*', '&', '!')):
+                raise ValueError('expand anchored Task references before retirement: ' + name)
+            fields = {}
+        else:
+            fields = _block_fields(block.lines[start+1:end])
+        yield name, fields
+
+
+def task_aliases(fields):
+    aliases = []
+    for value, children in _list_items(*fields.get('aliases', ('', []))):
+        if children:
+            raise ValueError('unsupported Task reference aliases; expand multiline aliases before retirement')
+        aliases.append(scalar(value))
+    return aliases
+
+
+def task_references(fields):
+    """Read literal cmds/task and deps targets; refuse unprovable references."""
+    for field in ('cmds', 'deps'):
+        for value, children in _list_items(*fields.get(field, ('', []))):
+            value = value.strip()
+            if value.startswith(('*', '&', '!')):
+                raise ValueError('expand anchored Task reference before retirement')
+            if value.startswith('{'):
+                item = _flow_fields(value)
+            elif KEY.fullmatch(value):
+                item = _block_fields([value + '\n'] + children)
+            elif field == 'deps':
+                yield scalar(value)
+                continue
+            else:
+                continue  # Shell commands, including literal blocks, are opaque.
+            while 'defer' in item:
+                deferred, nested = item['defer']
+                if deferred.startswith('{'):
+                    item = _flow_fields(deferred)
+                elif not deferred:
+                    item = _block_fields(nested)
+                elif deferred.startswith(('*', '&', '!')):
+                    raise ValueError('expand anchored deferred Task reference before retirement')
+                else:
+                    item = {}  # A deferred shell command is also opaque.
+            if 'task' in item:
+                target, nested = item['task']
+                if nested or target.startswith(('|', '>')):
+                    raise ValueError('expand multiline Task reference before retirement')
+                yield scalar(target)
+
+
+def include_namespaces(text):
+    """Literal include namespaces, including aliases and flattening."""
+    paths = include_paths(text)
+    block = mapping(text, 'includes')
+    if block is None:
+        return
+    items = list(block.entries.items())
+    for number, (key, (start, value)) in enumerate(items):
+        namespaces = [key]
+        if not value or value.startswith('#'):
+            end = items[number + 1][1][0] if number + 1 < len(items) else block.end
+            fields = _block_fields(block.lines[start+1:end])
+            namespaces += task_aliases(fields)
+            flatten = fields.get('flatten', ('false', []))[0]
+            if flatten not in ('true', 'false'):
+                raise ValueError('expand dynamic Task include flattening before retirement')
+            if flatten == 'true':
+                namespaces = ['']
+        yield paths[key], namespaces
