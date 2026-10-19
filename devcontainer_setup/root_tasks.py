@@ -21,6 +21,11 @@ def integrate(text, enabled=True):
         if hashlib.sha256(match[3].encode()).hexdigest() != match[2]:
             raise ValueError('Edited managed work task block; review required')
         text = text[:match.start()] + text[match.end():]
+        owner = mapping(text, 'tasks', required=True)
+        start = sum(map(len, owner.lines[:owner.start+1]))
+        end = sum(map(len, owner.lines[:owner.end]))
+        if not start <= match.start() <= end or len(match[1]) != owner.indent:
+            raise ValueError('Malformed managed work task block placement; review required')
     block = mapping(text, 'tasks', required=True)
     indent = ' ' * block.indent
     body = ''.join(block.lines[block.start+1:block.end])
@@ -43,4 +48,7 @@ def integrate(text, enabled=True):
                       + indent + '      vars: {CLI_ARGS: "{{.CLI_ARGS}}"}\n')
     owned = (indent + '# '+LABEL+' begin sha256='+hashlib.sha256(additions.encode()).hexdigest()+'\n'
              + additions + indent + '# '+LABEL+' end\n') if additions else ''
-    return ''.join(block.lines[:block.start+1]) + owned + body + ''.join(block.lines[block.end:])
+    prefix = ''.join(block.lines[:block.start+1])
+    if owned and not prefix.endswith('\n'):
+        prefix += '\n'
+    return prefix + owned + body + ''.join(block.lines[block.end:])

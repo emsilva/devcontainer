@@ -157,6 +157,28 @@ class ContinuityIntegrationTests(unittest.TestCase):
         for name in ('VAR_EXECUTED', 'STATUS_EXECUTED', 'COMMAND_EXECUTED'):
             self.assertFalse((self.root / name).exists())
 
+    def test_candidate_cannot_hide_root_taskfile_deletion_by_restaging_old_file(self):
+        from devcontainer_setup.__main__ import check_candidate, integrate_taskfile
+        (self.root / 'Taskfile.yml').write_text('version: "3"\ntasks:\n  owner: {}\n')
+        files = render(self.root, SOURCE, self.selection, REF)
+        integrate_taskfile(self.root, files)
+        files['Taskfile.yml'] = None
+        with self.assertRaisesRegex(ValueError, 'Taskfile'):
+            check_candidate(files, self.root)
+
+    def test_candidate_refuses_include_context_through_external_directory_link(self):
+        from devcontainer_setup.__main__ import check_candidate, integrate_taskfile
+        outside = self.root.parent / 'outside'
+        outside.mkdir()
+        (outside / 'Taskfile.yml').write_text('version: "3"\ntasks:\n  external: {}\n')
+        (self.root / 'linked').symlink_to(outside, target_is_directory=True)
+        (self.root / 'Taskfile.yml').write_text(
+            'version: "3"\nincludes:\n  owner: linked/Taskfile.yml\ntasks:\n  owner: {}\n')
+        files = render(self.root, SOURCE, self.selection, REF)
+        integrate_taskfile(self.root, files)
+        with self.assertRaisesRegex(ValueError, 'include'):
+            check_candidate(files, self.root)
+
     def test_disable_and_reenable_retires_only_verified_aliases(self):
         from devcontainer_setup.__main__ import check_candidate, integrate_continuity, integrate_taskfile
         (self.root / 'Taskfile.yml').write_text(

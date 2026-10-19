@@ -140,6 +140,8 @@ def _stage_task_context(root: Path, project: Path, name: str, seen=None) -> None
     seen.add(name)
     target = root / name
     source = project / name
+    if not source.resolve().is_relative_to(project.resolve()):
+        raise ValueError('Taskfile include context escapes the reviewed project: ' + name)
     if not target.exists():
         if not source.is_file() or source.is_symlink():
             return  # Task enforces required/optional includes itself.
@@ -205,6 +207,9 @@ def _check_task_candidate(root: Path, project: Path | None) -> None:
 
 
 def check_candidate(files: dict[str, bytes], project: Path | None = None) -> None:
+    from .taskfile_mapping import NAMES
+    if any(name in files and files[name] is None for name in NAMES):
+        raise ValueError('Candidate cannot delete the owner Taskfile entrypoint')
     with tempfile.TemporaryDirectory(prefix='devcontainer-review-') as directory:
         root = Path(directory)
         if project:

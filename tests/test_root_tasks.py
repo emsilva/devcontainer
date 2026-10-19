@@ -70,3 +70,12 @@ class RootTasksTests(unittest.TestCase):
         self.assertEqual(disabled, integrate(disabled, enabled=False))
         with self.assertRaisesRegex(ValueError, 'Edited'):
             integrate(enabled.replace('devcontainer:work:status', 'devcontainer:other'), enabled=False)
+
+    def test_misplaced_managed_block_refused(self):
+        managed = integrate('tasks:\n')
+        block = managed.split('tasks:\n', 1)[1]
+        with self.assertRaisesRegex(ValueError, 'Malformed'):
+            integrate('tasks:\n  owner: {}\nvars:\n' + block)
+
+    def test_empty_mapping_without_final_newline_is_supported(self):
+        self.assertIn('tasks:\n  #', integrate('tasks:'))
