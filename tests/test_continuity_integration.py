@@ -84,6 +84,96 @@ class ContinuityIntegrationTests(unittest.TestCase):
         for name, data in repeated.items():
             self.assertEqual((self.root / name).read_bytes(), data, name)
 
+    def inventory(self):
+        result = subprocess.run(['task', '--list-all', '--json'], cwd=self.root,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return {entry['name'] for entry in json.loads(result.stdout)['tasks']}
+
+    def test_real_owner_semantics_and_include_context_survive_full_candidate(self):
+        from devcontainer_setup.__main__ import check_candidate, integrate_continuity, integrate_taskfile
+        for width in (2, 4):
+            with self.subTest(width=width):
+                indent = ' ' * width
+                (self.root / 'owner.yml').write_text(
+                    "version: '3'\ntasks:\n  extra:\n    cmds: [echo INCLUDED]\n")
+                owner = ("version: '3'\n# See .devcontainer/Taskfile.yml for generated helpers\n"
+                         "vars:\n  documentation: .devcontainer/Taskfile.yml\nincludes:\n"
+                         + indent + "'owner':\n" + indent * 2 + "taskfile: owner.yml\n"
+                         + "tasks:\n" + indent + "'owner':\n" + indent * 2
+                         + "preconditions: [test -f owner.yml]\n" + indent * 2
+                         + "cmds: [echo OWNER]\n" + indent + '\"work:cs\":\n'
+                         + indent * 2 + "cmds: [echo CUSTOM]\n")
+                (self.root / 'Taskfile.yml').write_text(owner)
+                before = self.inventory()
+                for task in ('owner', 'owner:extra', 'work:cs'):
+                    result = subprocess.run(['task', task], cwd=self.root, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                files = render(self.root, SOURCE, self.selection, REF)
+                integrate_taskfile(self.root, files)
+                integrate_continuity(self.root, files, True)
+                check_candidate(files, self.root)
+                self.install(files)
+                self.assertTrue(before <= self.inventory())
+                for task, output in [('owner', 'OWNER'), ('owner:extra', 'INCLUDED'), ('work:cs', 'CUSTOM')]:
+                    result = subprocess.run(['task', task], cwd=self.root, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(output, result.stdout)
+                self.assertIn('devcontainer:work:status', self.inventory())
+
+    def test_candidate_refuses_silently_lost_owner_without_running_commands(self):
+        from devcontainer_setup.__main__ import check_candidate, integrate_taskfile
+        original = "version: '3'\ntasks:\n  owner:\n    cmds: [touch SHOULD_NOT_RUN]\n"
+        (self.root / 'Taskfile.yml').write_text(original)
+        files = render(self.root, SOURCE, self.selection, REF)
+        integrate_taskfile(self.root, files)
+        files['Taskfile.yml'] = files['Taskfile.yml'].replace(b'  owner:', b'  lost:')
+        with self.assertRaisesRegex(ValueError, 'owner'):
+            check_candidate(files, self.root)
+        self.assertFalse((self.root / 'SHOULD_NOT_RUN').exists())
+
+    def test_candidate_rejects_dangling_managed_aliases(self):
+        from devcontainer_setup.__main__ import check_candidate, integrate_continuity, integrate_taskfile
+        files = render(self.root, SOURCE, self.selection, REF)
+        integrate_taskfile(self.root, files)
+        integrate_continuity(self.root, files, True)
+        files['Taskfile.yml'] = files['Taskfile.yml'].split(b'\nincludes:')[0] + b'\n'
+        with self.assertRaisesRegex(ValueError, 'delegate'):
+            check_candidate(files, self.root)
+
+    def test_candidate_inventory_does_not_run_status_vars_or_preconditions(self):
+        from devcontainer_setup.__main__ import check_candidate, integrate_continuity, integrate_taskfile
+        original = ('version: "3"\nvars:\n  OWNER:\n    sh: touch VAR_EXECUTED; echo OWNER\n'
+                    'tasks:\n  owner:\n    desc: "{{.OWNER}}"\n'
+                    '    preconditions: [test -f ABSENT]\n'
+                    '    status: [touch STATUS_EXECUTED]\n'
+                    '    cmds: [touch COMMAND_EXECUTED]\n')
+        (self.root / 'Taskfile.yml').write_text(original)
+        files = render(self.root, SOURCE, self.selection, REF)
+        integrate_taskfile(self.root, files)
+        integrate_continuity(self.root, files, True)
+        check_candidate(files, self.root)
+        self.assertEqual((self.root / 'Taskfile.yml').read_text(), original)
+        for name in ('VAR_EXECUTED', 'STATUS_EXECUTED', 'COMMAND_EXECUTED'):
+            self.assertFalse((self.root / name).exists())
+
+    def test_disable_and_reenable_retires_only_verified_aliases(self):
+        from devcontainer_setup.__main__ import check_candidate, integrate_continuity, integrate_taskfile
+        (self.root / 'Taskfile.yml').write_text(
+            "version: '3'\ntasks:\n    'work:cs':\n        cmds: [echo CUSTOM]\n")
+        for enabled in (True, False, True, False):
+            files = render(self.root, SOURCE, dict(self.selection, continuity=enabled), REF)
+            integrate_taskfile(self.root, files)
+            integrate_continuity(self.root, files, enabled)
+            check_candidate(files, self.root)
+            self.install(files)
+            names = self.inventory()
+            self.assertIn('work:cs', names)
+            self.assertEqual('work:status' in names, enabled)
+            result = subprocess.run(['task', 'work:cs'], cwd=self.root, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('CUSTOM', result.stdout)
+
     def test_git_add_all_tracks_markers_and_instructions_but_excludes_working_notes(self):
         from devcontainer_setup.__main__ import integrate_continuity, integrate_taskfile
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)

@@ -80,19 +80,11 @@ def integrate_taskfile(project: Path, files: dict[str, bytes]) -> None:
     text = path.read_text() if existing else "version: '3'\ntasks:\n" + ''.join(
         f"  {operation}:\n    cmds: [{{task: 'devcontainer:{operation}'}}]\n"
         for operation in ('up', 'down', 'status', 'build'))
-    target = '.devcontainer/Taskfile.yml'
-    if target not in text:
-        entry = '  devcontainer:\n    taskfile: .devcontainer/Taskfile.yml\n    optional: true\n'
-        match = re.search(r'^includes:[ \t]*(?:#.*)?$', text, re.M)
-        if match:
-            if re.search(r'^  devcontainer:', text[match.end():], re.M):
-                raise ValueError('The Taskfile already uses the devcontainer include namespace.')
-            text = text[:match.end()] + '\n' + entry.rstrip('\n') + text[match.end():]
-        elif re.search(r'^includes:', text, re.M):
-            raise ValueError('Expand the inline Taskfile includes mapping before setup; existing tasks were preserved.')
-        else:
-            text = text.rstrip() + '\n\nincludes:\n' + entry
-        files[name] = text.encode()
+    from .taskfile_mapping import integrate_include, mapping
+    mapping(text, 'tasks', required=True)
+    changed = integrate_include(text)
+    if changed != text or not existing:
+        files[name] = changed.encode()
     ignore = project / '.gitignore'
     ignored = ignore.read_text() if ignore.exists() else ''
     line = '/.devcontainer/devcontainer.env'
@@ -102,11 +94,10 @@ def integrate_taskfile(project: Path, files: dict[str, bytes]) -> None:
 
 def integrate_continuity(project: Path, files: dict[str, bytes], enabled: bool) -> None:
     """Review project guidance and optional root aliases in the same GitPlan."""
-    if not enabled:
-        return
     from .project_sync.notes import integrate_notes
     candidates = dict(files)
-    integrate_notes(project, candidates, True)
+    if enabled:
+        integrate_notes(project, candidates, True)
     names = ('Taskfile.yml', 'Taskfile.yaml', 'taskfile.yml', 'taskfile.yaml',
              'Taskfile.dist.yml', 'Taskfile.dist.yaml', 'taskfile.dist.yml', 'taskfile.dist.yaml')
     present = {path.name for path in project.iterdir()}
@@ -118,8 +109,99 @@ def integrate_continuity(project: Path, files: dict[str, bytes], enabled: bool) 
         raise ValueError('Project Taskfile is a symlink; review continuity integration manually')
     text = candidates[name].decode() if name in candidates else (project / name).read_text()
     from .root_tasks import integrate
-    candidates[name] = integrate(text).encode()
+    candidates[name] = integrate(text, enabled=enabled).encode()
     files.update(candidates)
+
+
+def _task_inventory(root: Path, name: str) -> set[str]:
+    # Listing parses Task's command graph; never dry-run/evaluate owner commands,
+    # preconditions or status checks (which may launch services or need live files).
+    if shutil.which('task') is None:
+        raise ValueError('go-task is required to validate the candidate Taskfile')
+    try:
+        result = subprocess.run(['task', '--taskfile', name, '--list-all', '--json'],
+                                cwd=root, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ValueError('Cannot inspect Taskfile inventory: ' + str(error)) from error
+    if result.returncode:
+        raise ValueError('Taskfile inventory failed: ' + result.stderr.strip())
+    try:
+        return {entry['name'] for entry in json.loads(result.stdout)['tasks']}
+    except (ValueError, KeyError, TypeError) as error:
+        raise ValueError('Invalid Taskfile inventory response') from error
+
+
+def _stage_task_context(root: Path, project: Path, name: str, seen=None) -> None:
+    """Copy only literal local Task includes, retaining their relative layout."""
+    from .taskfile_mapping import include_paths, NAMES
+    seen = set() if seen is None else seen
+    if name in seen:
+        return
+    seen.add(name)
+    target = root / name
+    source = project / name
+    if not target.exists():
+        if not source.is_file() or source.is_symlink():
+            return  # Task enforces required/optional includes itself.
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+    for location in include_paths(target.read_text()).values():
+        path = Path(name).parent / location
+        # Include context never reads outside the reviewed project or fetches URLs.
+        if Path(location).is_absolute() or '..' in path.parts or '://' in location:
+            raise ValueError('Taskfile validation needs a local project include: ' + location)
+        if (project / path).is_dir():
+            choices = [path / item for item in NAMES if (project / path / item).is_file()]
+            if not choices:
+                continue
+            path = choices[0]
+        _stage_task_context(root, project, path.as_posix(), seen)
+
+
+def _check_task_candidate(root: Path, project: Path | None) -> None:
+    from .taskfile_mapping import NAMES, mapping
+    present = {path.name for path in root.iterdir()}
+    if project:
+        present.update(path.name for path in project.iterdir())
+    names = [name for name in NAMES if name in present]
+    if not names:
+        return
+    if len(names) != 1:
+        raise ValueError('Taskfile candidate needs one active root entrypoint')
+    name = names[0]
+    if project:
+        _stage_task_context(root, project, name)
+    after = _task_inventory(root, name)
+    from .root_tasks import integrate
+    candidate = (root / name).read_text()
+    without_owned = integrate(candidate, enabled=False)
+    generated = (set(mapping(candidate, 'tasks', required=True).entries)
+                 - set(mapping(without_owned, 'tasks', required=True).entries))
+    dangling = {'devcontainer:' + alias for alias in generated} - after
+    if dangling:
+        raise ValueError('Candidate has missing managed Task delegates: ' + ', '.join(sorted(dangling)))
+    if project is None or not (project / name).is_file():
+        return
+    with tempfile.TemporaryDirectory(prefix='devcontainer-task-before-') as directory:
+        before_root = Path(directory)
+        _stage_task_context(before_root, project, name)
+        before = _task_inventory(before_root, name)
+        original = (project / name).read_text()
+        remaining = integrate(original, enabled=False)
+        retired = (set(mapping(original, 'tasks', required=True).entries)
+                   - set(mapping(remaining, 'tasks', required=True).entries))
+        # The generated include's inventory is retired only with byte ownership
+        # evidence. Owner includes and owner aliases remain protected.
+        config = project / '.devcontainer/devcontainer.json'
+        if config.is_file():
+            metadata = json.loads(config.read_text()).get('customizations', {}).get('devcontainerSetup', {})
+            old = project / '.devcontainer/Taskfile.yml'
+            digest = metadata.get('managedFiles', {}).get('.devcontainer/Taskfile.yml')
+            if old.is_file() and hashlib.sha256(old.read_bytes()).hexdigest() == digest:
+                retired.update(task for task in before if task.startswith('devcontainer:'))
+        missing = before - after - retired
+        if missing:
+            raise ValueError('Candidate lost owner Task commands: ' + ', '.join(sorted(missing)))
 
 
 def check_candidate(files: dict[str, bytes], project: Path | None = None) -> None:
@@ -139,6 +221,7 @@ def check_candidate(files: dict[str, bytes], project: Path | None = None) -> Non
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
+        _check_task_candidate(root, project)
         errors = validate(root)
         if errors:
             raise ValueError('Generated configuration did not validate:\n' + '\n'.join(errors))

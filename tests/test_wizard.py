@@ -108,6 +108,30 @@ class WizardCliTests(unittest.TestCase):
                 self.assertTrue({'up', 'test'} <= names, names)
                 self.assertEqual([path.name for path in root.glob('*') if 'taskfile' in path.name.lower()], [name])
 
+    def test_task_include_mapping_detection_and_atomic_refusal(self):
+        from devcontainer_setup.__main__ import integrate_taskfile
+        unsupported = (
+            "includes: {owner: owner.yml}\ntasks:\n  owner: {}\n",
+            "includes:\n  'devcontainer': other.yml\ntasks:\n  owner: {}\n",
+            "includes:\n  devcontainer: other.yml\n  'devcontainer': .devcontainer/Taskfile.yml\ntasks:\n",
+            "includes:\n  owner: owner.yml\nincludes:\n  other: other.yml\ntasks:\n",
+        )
+        for original in unsupported:
+            with self.subTest(original=original):
+                (self.root / 'Taskfile.yml').write_text(original)
+                files = {'sentinel': b'unchanged'}
+                with self.assertRaises(ValueError):
+                    integrate_taskfile(self.root, files)
+                self.assertEqual(files, {'sentinel': b'unchanged'})
+                self.assertEqual((self.root / 'Taskfile.yml').read_text(), original)
+        original = ('version: "3"\nincludes:\n    "devcontainer":\n'
+                    '        taskfile: ".devcontainer/Taskfile.yml"\n'
+                    '        optional: true\ntasks:\n    "owner": {cmds: [echo OWNER]}\n')
+        (self.root / 'Taskfile.yml').write_text(original)
+        files = {}
+        integrate_taskfile(self.root, files)
+        self.assertNotIn('Taskfile.yml', files)
+
     def test_package_manager_pin_survives_defaults_and_renders(self):
         from devcontainer_setup.__main__ import defaults
         from devcontainer_setup.discovery import scan
