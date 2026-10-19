@@ -444,6 +444,61 @@ class ContinuityIntegrationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'owner.*reference.*devcontainer'):
             check_candidate(self.candidate(self.root), self.root)
 
+    def test_trailing_task_list_trivia_preserves_reference_and_alias_semantics(self):
+        from devcontainer_setup.__main__ import check_candidate
+        for trivia in ('\n', '      # owner comment\n'):
+            forms = (
+                ('  owner:\n    cmds:\n      - task: devcontainer:obsolete\n' + trivia + '  next: {}\n', 'owner'),
+                ('  owner:\n    deps:\n      - task: devcontainer:obsolete\n' + trivia + '  next: {}\n', 'owner'),
+                ('  owner:\n    deps:\n      - devcontainer:obsolete\n' + trivia + '  next: {}\n', 'owner'),
+                ('  owner:\n    aliases:\n      - shortcut\n' + trivia
+                 + '    cmds: [{task: devcontainer:obsolete}]\n  next: {}\n', 'shortcut'),
+            )
+            for owner, invocation in forms:
+                with self.subTest(trivia=trivia, invocation=invocation, owner=owner), tempfile.TemporaryDirectory(dir=self.root) as directory:
+                    project = Path(directory)
+                    self.delegate_fixture(project, owner)
+                    self.assert_owner_runs(project, invocation)
+                    original = (project / 'Taskfile.yml').read_bytes()
+                    missing = self.candidate(project)
+                    retained = dict(missing)
+                    retained['.devcontainer/Taskfile.yml'] += b'  obsolete:\n    cmds: [echo OWNER_DELEGATE]\n'
+                    config = json.loads(retained['.devcontainer/devcontainer.json'])
+                    config['customizations']['devcontainerSetup']['managedFiles']['.devcontainer/Taskfile.yml'] = (
+                        hashlib.sha256(retained['.devcontainer/Taskfile.yml']).hexdigest())
+                    retained['.devcontainer/devcontainer.json'] = json.dumps(config).encode()
+                    snapshot = dict(retained)
+                    check_candidate(retained, project)
+                    self.assertEqual(retained, snapshot)
+                    self.assertEqual((project / 'Taskfile.yml').read_bytes(), original)
+                    snapshot = dict(missing)
+                    with self.assertRaisesRegex(ValueError, 'owner.*reference.*devcontainer:obsolete'):
+                        check_candidate(missing, project)
+                    self.assertEqual(missing, snapshot)
+                    self.assertEqual((project / 'Taskfile.yml').read_bytes(), original)
+                    for name, data in retained.items():
+                        path = project / name
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        if data is not None:
+                            path.write_bytes(data)
+                    self.assertIn(owner.encode(), (project / 'Taskfile.yml').read_bytes())
+                    self.assert_owner_runs(project, invocation)
+
+    def test_trivia_filter_does_not_accept_a_multiline_quoted_alias(self):
+        from devcontainer_setup.__main__ import check_candidate
+        owner = ("  owner:\n    aliases:\n      - 'short\n        #cut'\n"
+                 '    cmds: [{task: devcontainer:obsolete}]\n')
+        self.delegate_fixture(self.root, owner)
+        self.assert_owner_runs(self.root)
+        retained = self.candidate(self.root)
+        retained['.devcontainer/Taskfile.yml'] += b'  obsolete:\n    cmds: [echo OWNER_DELEGATE]\n'
+        config = json.loads(retained['.devcontainer/devcontainer.json'])
+        config['customizations']['devcontainerSetup']['managedFiles']['.devcontainer/Taskfile.yml'] = (
+            hashlib.sha256(retained['.devcontainer/Taskfile.yml']).hexdigest())
+        retained['.devcontainer/devcontainer.json'] = json.dumps(config).encode()
+        with self.assertRaisesRegex(ValueError, 'quoted Taskfile scalar'):
+            check_candidate(retained, self.root)
+
     def test_disable_and_reenable_retires_only_verified_aliases(self):
         from devcontainer_setup.__main__ import check_candidate, integrate_continuity, integrate_taskfile
         (self.root / 'Taskfile.yml').write_text(

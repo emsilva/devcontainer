@@ -19,7 +19,9 @@ def scalar(value):
             decoded = json.loads(value)
         except ValueError as error:
             raise ValueError('Unsupported quoted Taskfile scalar') from error
-    elif value.startswith("'") and value.endswith("'"):
+    elif value.startswith("'"):
+        if len(value) < 2 or not value.endswith("'"):
+            raise ValueError('Unsupported quoted Taskfile scalar')
         decoded = value[1:-1].replace("''", "'")
     elif not value or any(char in value for char in '{}[]&*!|>'):
         raise ValueError('Expand unsupported Taskfile scalar before setup')
@@ -215,7 +217,10 @@ def _list_items(value, lines):
         end = starts[number + 1] if number + 1 < len(starts) else len(lines)
         # A list mapping's continuation keys align two columns after '-'.
         # Keep their relative depth so vars.task cannot masquerade as a call.
-        result.append((match[1], [line[width+2:] for line in lines[start+1:end]]))
+        # Discard YAML trivia before dedenting: slicing a list-level comment
+        # could otherwise remove its '#' and manufacture scalar content.
+        result.append((match[1], [line[width+2:] for line in lines[start+1:end]
+                                  if significant(line)]))
     return result
 
 
