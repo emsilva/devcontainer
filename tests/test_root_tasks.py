@@ -51,3 +51,31 @@ class RootTasksTests(unittest.TestCase):
         custom = ('  agent:handoff:\n    cmds:\n      - task: devcontainer:agent:handoff\n'
                   '        vars: {CLI_ARGS: "{{.CLI_ARGS}}"}\n    env: {OWNER: yes}\n')
         self.assertIn(custom, integrate('tasks:\n' + custom))
+
+    def test_mapping_layouts_refused_before_rewrite(self):
+        for text in ('tasks: {owner: {cmds: [echo owner]}}\n',
+                     'tasks:\n  owner: {cmds: [echo owner]}\ntasks:\n',
+                     'tasks:\n  owner: {}\n    hidden: {}\n bad: {}\n',
+                     'tasks:\n  <<: *owner\n'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                integrate(text)
+
+    def test_disable_validates_and_preserves_custom_alias(self):
+        custom = '    "work:cs":\n        cmds: [echo CUSTOM]\n'
+        text = 'version: "3"\ntasks:\n' + custom
+        enabled = integrate(text)
+        disabled = integrate(enabled, enabled=False)
+        self.assertIn(custom, disabled)
+        self.assertNotIn('devcontainer:work:status', disabled)
+        self.assertEqual(disabled, integrate(disabled, enabled=False))
+        with self.assertRaisesRegex(ValueError, 'Edited'):
+            integrate(enabled.replace('devcontainer:work:status', 'devcontainer:other'), enabled=False)
+
+    def test_misplaced_managed_block_refused(self):
+        managed = integrate('tasks:\n')
+        block = managed.split('tasks:\n', 1)[1]
+        with self.assertRaisesRegex(ValueError, 'Malformed'):
+            integrate('tasks:\n  owner: {}\nvars:\n' + block)
+
+    def test_empty_mapping_without_final_newline_is_supported(self):
+        self.assertIn('tasks:\n  #', integrate('tasks:'))

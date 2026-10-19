@@ -187,6 +187,7 @@ class RemoteEndpoint:
         if len(raw) > LIMIT:
             raise ValueError('Checkpoint response exceeds bounded size')
         response = json.loads(raw)
-        if response.get('ok') is not True or not isinstance(response.get('result'), dict):
+        if (not isinstance(response, dict) or response.get('ok') is not True
+                or not isinstance(response.get('result'), dict)):
             raise ValueError('Remote conversation operation refused; previous receipts preserved')
         return response['result']

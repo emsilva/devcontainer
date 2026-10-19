@@ -19,6 +19,7 @@ import time
 
 from .state import atomic_write, discover_project, locked, read_json
 from . import state as project_state
+from . import scratch_tree, sync_cycle
 from .tools import MANIFEST, install_mutagen, mutagen_env
 from .transport import CodespaceConnection
 
@@ -59,17 +60,8 @@ def _scratch(root):
 
 
 def _validate_tree(path):
-    for directory, dirs, files in os.walk(path, followlinks=False):
-        folded = set()
-        for name in dirs + files:
-            item = Path(directory) / name
-            if item.is_symlink():
-                raise ValueError('Scratch symlinks are unsupported; preserve and resolve them explicitly.')
-            if name.casefold() in folded:
-                raise ValueError('Scratch case collisions are unsupported; preserve and resolve them explicitly.')
-            folded.add(name.casefold())
-            if not item.is_file() and not item.is_dir():
-                raise ValueError('Scratch contains an unsupported special file.')
+    for _ in scratch_tree.entries(path):
+        pass
 
 
 def _archive_path(state, label):
@@ -78,12 +70,12 @@ def _archive_path(state, label):
 
 
 def backup(root: Path, state: Path) -> Path:
-    """Include ignored payloads; snapshots never enter Git or the sync root."""
+    """Retain payloads and markers, excluding transient caches from private backups."""
     _private_location(root, state)
     source = _scratch(discover_project(Path(root)).root)
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode='w:gz', dereference=False) as archive:
-        archive.add(source, arcname='.scratch', recursive=True)
+        scratch_tree.add_backup(archive, source)
     path = _archive_path(state, 'local')
     atomic_write(path, buffer.getvalue(), mode=0o400)
     atomic_write(path.with_suffix(path.suffix + '.sha256'),
@@ -91,33 +83,36 @@ def backup(root: Path, state: Path) -> Path:
     return path
 
 
-def _remote(connection, remote_root, *, snapshot=False, allow_missing_scratch=False):
+def _remote(connection, remote_root, *, snapshot=False, allow_missing_scratch=False, prepare_identity=None):
     # Execute the canonical identity implementation on native remote Python.
     # Do not duplicate identity normalization or rely on directory basenames.
     # Identity probes must also accept older checkouts before scratch is seeded.
     source = Path(project_state.__file__).read_bytes()
+    tree_source = Path(scratch_tree.__file__).read_bytes()
     code = '''import base64,io,json,os,pathlib,sys,tarfile,types
 m=types.ModuleType("_project_sync_state");sys.modules[m.__name__]=m
 exec(compile(base64.b64decode(__SOURCE__),"project-state.py","exec"),m.__dict__)
+tree=types.ModuleType("_scratch_tree");sys.modules[tree.__name__]=tree
+exec(compile(base64.b64decode(__TREE_SOURCE__),"scratch-tree.py","exec"),tree.__dict__)
 p=m.discover_project(pathlib.Path(__ROOT__))
 s=p.root/".scratch"
+if __PREPARE_IDENTITY__ is not None:
+ if p.identity!=__PREPARE_IDENTITY__ or str(p.root)!=__ROOT__ or ".devcontainer-work" in p.root.parts:
+  raise ValueError("Scratch preparation requires the verified ordinary checkout identity/root")
+ with m._parent(s) as (parent,name):
+  try:os.mkdir(name,mode=0o700,dir_fd=parent)
+  except FileExistsError:pass
 if s.is_symlink():raise ValueError("Remote scratch symlink")
 if s.exists() and not s.is_dir():raise ValueError("Remote scratch is not a directory")
 if not s.is_dir() and (__SNAPSHOT__ or not __ALLOW_MISSING__):raise ValueError("Remote .scratch missing; configure project continuity remotely first")
-for parent,dirs,files in os.walk(s,followlinks=False):
- names=set()
- for name in dirs+files:
-  item=pathlib.Path(parent)/name
-  if item.is_symlink():raise ValueError("Remote scratch symlink")
-  if name.casefold() in names:raise ValueError("Remote scratch case collision")
-  names.add(name.casefold())
-  if not item.is_file() and not item.is_dir():raise ValueError("Remote scratch special file")
+if s.is_dir():
+ for _ in tree.entries(s):pass
 if __SNAPSHOT__:
  b=io.BytesIO()
- with tarfile.open(fileobj=b,mode="w:gz",dereference=False) as t:t.add(s,arcname=".scratch")
+ with tarfile.open(fileobj=b,mode="w:gz",dereference=False) as t:tree.add_backup(t,s)
  sys.stdout.buffer.write(b.getvalue())
 else:print(json.dumps({"identity":p.identity,"root":str(p.root)}))
-'''.replace('__SOURCE__', repr(base64.b64encode(source).decode())).replace('__ROOT__', repr(remote_root)).replace('__SNAPSHOT__', repr(snapshot)).replace('__ALLOW_MISSING__', repr(allow_missing_scratch))
+'''.replace('__SOURCE__', repr(base64.b64encode(source).decode())).replace('__TREE_SOURCE__', repr(base64.b64encode(tree_source).decode())).replace('__ROOT__', repr(remote_root)).replace('__SNAPSHOT__', repr(snapshot)).replace('__ALLOW_MISSING__', repr(allow_missing_scratch)).replace('__PREPARE_IDENTITY__', repr(prepare_identity))
     return connection.python(code, timeout=90)
 
 
@@ -194,12 +189,12 @@ def start(root: Path, state: Path) -> dict:
     _scratch(root)
     runtime_id = _runtime_id()
     current = status(state)
-    if current.get('running') and (current.get('checkpoint_version') != 2 or current.get('runtime_id') != runtime_id):
+    if current.get('running') and (current.get('checkpoint_version') != sync_cycle.SCHEMA or current.get('runtime_id') != runtime_id):
         stop(state)
     with locked(state / 'scratch-control.lock', blocking=True):
         current = status(state)
         if current['running']:
-            if current.get('checkpoint_version') == 2 and current.get('runtime_id') == runtime_id:
+            if current.get('checkpoint_version') == sync_cycle.SCHEMA and current.get('runtime_id') == runtime_id:
                 return current
             raise ValueError('Another worker started during the helper upgrade; retry task work:cs.')
         if current.get('phase') != 'stopped' and current.get('session'):
@@ -300,12 +295,14 @@ def inspect_sync(root, state):
     receipt = _saved_session(state, config)
     if receipt is None:
         return dict(phase='connecting', conflicts=[])
-    info = _session_info(install_mutagen(state, allow_download=False), state, receipt)
+    info = _session_info(install_mutagen(state, allow_download=False), state, dict(receipt), persist=False)
     return _reconciliation(info) if info else dict(phase='connecting', conflicts=[])
 
 
 def _pause_saved_session(binary, state, receipt):
-    info = _session_info(binary, state, receipt)
+    # Pausing for safety must not promote a planned receipt before the remote
+    # endpoint passes validation. Resume inspection owns that durable update.
+    info = _session_info(binary, state, dict(receipt), persist=False)
     if info is not None:
         _mutagen(binary, state, 'sync', 'pause', info['identifier'])
     return info
@@ -508,11 +505,16 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
         logger.setLevel(logging.INFO)
         logger.addHandler(handler)
         receipt = _saved_session(state, config)
+        previous = read_json(state / RUNTIME) if (state / RUNTIME).exists() else {}
+        retained = previous.get('retained_receipts', {}) if previous.get('binding', previous.get('prepared_binding')) == config else {}
         runtime = {'pid': os.getpid(), 'nonce': nonce, 'process_identity': _process_identity(os.getpid()),
                    'phase': 'starting', 'session': receipt['name'] if receipt else None,
-                   'checkpoint_version': 2, 'runtime_id': _runtime_id()}
+                   'checkpoint_version': sync_cycle.SCHEMA, 'runtime_id': _runtime_id(),
+                   'connection_prepared': False, 'binding': config, 'retained_receipts': retained}
         def update(phase, **values):
-            runtime.update(phase=phase, **values)
+            runtime.update(phase=phase, heartbeat_at=time.time(), **values)
+            if phase != 'syncing':
+                runtime['connection_prepared'] = False
             _write(state / RUNTIME, runtime)
         update('starting')
         binary = None
@@ -528,7 +530,10 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                     _scratch(root)
                     update('connecting')
                     with CodespaceConnection(config['codespace'], state=state) as connection:
-                        remote = json.loads(_remote(connection, config['remote_root']))
+                        # Only first setup may seed missing scratch. A retained
+                        # baseline requires its existing endpoint before resume.
+                        remote = json.loads(_remote(connection, config['remote_root'],
+                                                    prepare_identity=config['identity'] if receipt is None else None))
                         if remote.get('identity') != config['identity'] or remote.get('root') != config['remote_root']:
                             raise ValueError('Remote repository identity changed; refusing synchronization.')
                         connection.ssh_config(state / 'ssh-config')
@@ -545,13 +550,11 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                             remote_snapshot = _remote(connection, config['remote_root'], snapshot=True)
                             remote_backup = _archive_path(state, 'remote')
                             atomic_write(remote_backup, remote_snapshot, mode=0o400)
-                            ignores = ['/.gitignore', '/README.md', '.DS_Store', '__pycache__',
-                                       '.venv', 'node_modules', '.cache', '.project-sync', '.handoff', '.mutagen']
                             args = ['sync', 'create', str(root / '.scratch'),
                                     'project-sync:' + config['remote_root'] + '/.scratch',
                                     '--name=' + session, '--mode=two-way-safe', '--hash=sha256',
                                     '--symlink-mode=ignore', '--no-global-configuration', '--ignore-vcs', '--paused']
-                            args += ['--ignore=' + item for item in ignores]
+                            args += ['--ignore=' + item for item in scratch_tree.MUTAGEN_IGNORES]
                             # Record the owned name before create; partial creation
                             # can then be cleaned without touching another session.
                             update('creating', session=session)
@@ -560,27 +563,40 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                             if info is None:
                                 raise ValueError('Mutagen create returned without a session; retrying safely.')
                         _mutagen(binary, state, 'sync', 'resume', info['identifier'])
-                        update('syncing')
+                        update('syncing', connection_prepared=True, prepared_binding=config,
+                               prepared_at=time.time(), error=None)
                         backoff = 2
                         logger.info('Scratch connection established.')
                         def synchronize():
-                            from .replication import sync_project_data
+                            from .replication import sync_project_data, ConnectionVerificationError
+                            project = discover_project(root)
+                            def progress(result):
+                                for name, row in result['directions'].items():
+                                    if sync_cycle.receipt_matches(row.get('receipt'), row.get('snapshot_id')):
+                                        runtime['retained_receipts'][name] = row['receipt']
+                                failed = result['outcome'] in ('failed', 'degraded')
+                                phase = 'waiting' if result['outcome'] == 'failed' and result['stage'] == 'verify' else 'syncing'
+                                update(phase, conversations=result,
+                                       conversation_error='Conversation sync incomplete; inspect current cycle' if failed else None)
+                            # Reset evidence before registry reads or verification.
+                            update('syncing', conversations={}, conversation_error=None)
+                            registry_path = state / 'workspace.json'
+                            value = read_json(registry_path) if registry_path.exists() else {}
+                            old_roots = value.get('verified_remote_historical_roots', [])
                             try:
-                                registry_path = state / 'workspace.json'
-                                value = read_json(registry_path) if registry_path.exists() else {}
-                                old_roots = value.get('verified_remote_historical_roots', [])
-                                # Only remote-side roots which still verify can
-                                # authorize capture. Local historical scopes are
-                                # read separately from the local registry.
-                                from .workspace import _verify_roots
-                                historical = _verify_roots(connection, discover_project(root), old_roots)
-                                result = sync_project_data(connection, discover_project(root), state,
-                                                           config['remote_root'], historical_roots=historical)
-                                update('syncing', conversations=result, conversation_error=None)
-                            except Exception:
-                                # Conversation publication cannot stop scratch
-                                # reconciliation or overwrite its previous receipt.
-                                update('syncing', conversation_error='Conversation sync incomplete; previous receipts preserved')
+                                # The exchange verifies every authorized remote
+                                # scope; changed identities must fail, not vanish.
+                                result = sync_project_data(connection, project, state,
+                                                           config['remote_root'], historical_roots=old_roots,
+                                                           progress=progress)
+                                progress(result)
+                            except ConnectionVerificationError:
+                                raise
+                            except (OSError, ValueError, KeyError, TypeError):
+                                result = runtime['conversations'] or sync_cycle.begin(project, config['remote_root'])
+                                result.update(outcome='failed', completed_at=time.time(),
+                                              issues=[dict(reason='Conversation cycle incomplete; previous receipts preserved')])
+                                progress(result)
                         synchronize()
                         while not exiting.wait(5):
                             if connection.child.poll() is not None:

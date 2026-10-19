@@ -21,6 +21,7 @@ def parser():
     action.add_argument('--disconnect', action='store_true', help='Disconnect this project’s saved Codespace machine from Herdr')
     action.add_argument('--status', action='store_true')
     action.add_argument('--stop', action='store_true')
+    work.add_argument('--json', action='store_true', help='Full offline status detail as JSON')
     sync = groups.add_parser('scratch', help='Advanced scratch synchronization controls').add_subparsers(dest='action', required=True)
     configure = sync.add_parser('configure')
     configure.add_argument('--codespace', required=True)
@@ -42,7 +43,11 @@ def run(args):
     if args.group == 'work':
         from . import workspace
         if args.status:
-            _print(workspace.status(project, state))
+            value = workspace.status(project, state)
+            if args.json:
+                _print(value)
+            else:
+                print(workspace.status_text(value))
             return 0
         if args.stop:
             _print(scratch.stop(state))

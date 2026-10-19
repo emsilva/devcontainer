@@ -32,5 +32,18 @@ jobs:
           mkdir -p "$RUNNER_TEMP/task-bin"
           GOBIN="$RUNNER_TEMP/task-bin" go install github.com/go-task/task/v3/cmd/task@v3.54.0
           echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
+      - name: Install checksum-pinned Mutagen for mandatory boundary tests
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          from pathlib import Path
+          import subprocess
+          from devcontainer_setup.project_sync.tools import install_mutagen
+
+          binary = install_mutagen(Path(os.environ['RUNNER_TEMP']) / 'mutagen-boundary-tools')
+          subprocess.run([str(binary), 'version'], check=True, timeout=10)
+          with open(os.environ['GITHUB_ENV'], 'a') as environment:
+              environment.write('MUTAGEN_TEST_BINARY=' + str(binary) + '\n')
+          PYTHON
       - name: Wizard tests
         run: python3 -m unittest discover -s tests -v
