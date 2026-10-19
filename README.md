@@ -45,7 +45,8 @@ small helpers, and a Taskfile include. Personal preferences live in
 | `codex resume` / `claude --resume` | Choose a native conversation |
 | `task work:cs` | Connect Codespace Herdr and sync scratch and project conversations |
 | `task work:disconnect` | Disconnect this project's Codespace from the local Herdr UI |
-| `task work:status` / `task work:stop` | Inspect sync / stop this project’s worker |
+| `task work:status` / `task work:stop` | Read offline sync summary / stop this project’s worker |
+| `task work:status -- --json` | Inspect cycle, receipt and publication detail |
 | `task devcontainer:setup` | Review or change the setup |
 | `task devcontainer:setup -- --scan` | Show runtime and tool recommendations |
 | `task devcontainer:setup -- --dry-run` | Preview the recommended file changes |
@@ -98,6 +99,8 @@ Only scratch markers are tracked by Git.
 Supported completed conversation turns are verified and published into the other
 host's native session store with destination paths and new session IDs. Unchanged
 imports are deduplicated. Continue a given conversation on one host at a time.
+The worker exchanges each direction independently. Conversation publication
+failures are reported while prepared scratch/SSH connections can open Herdr.
 Unsupported native history formats are reported without altering their originals.
 
 Keep this Mac awake and connected while working remotely. If Codespaces becomes
@@ -105,8 +108,11 @@ unavailable, your received scratch files, notes, and imported conversations rema
 available locally. Code edits reach your Mac through Git, so commit and push the
 code you want to keep. Transcripts do not restore uncommitted source files.
 
-`task work:status` reports scratch conflicts, conversation sync and the last
-successful receipt. `task work:disconnect` disconnects this project's saved
+`task work:status` gives a short offline summary; `task work:status -- --json`
+includes cycle and per-direction receipt/publication evidence. Received bytes,
+verified native availability, pending and unsupported history are separate.
+Partial or stale cycles cannot inherit earlier healthy status. Previous verified
+receipts remain visible separately. `task work:disconnect` disconnects this project's saved
 Codespace machine from Herdr while sync keeps running. `task work:stop` stops the
 sync worker. Background reconnects cannot start a stopped Codespace; `task work:cs`
 is the explicit start command. Reconnects reuse the saved machine and workspace.

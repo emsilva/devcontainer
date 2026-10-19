@@ -56,7 +56,11 @@ class ProjectSyncCLITests(unittest.TestCase):
     def test_work_status_is_offline_and_does_not_create_state(self):
         result = self.run_cli('work', '--status')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIsNone(json.loads(result.stdout)['last_mac_checkpoint'])
+        self.assertIn('History:', result.stdout)
+        self.assertLess(len(result.stdout.splitlines()), 9)
+        detail = self.run_cli('work', '--status', '--json')
+        self.assertEqual(detail.returncode, 0, detail.stderr)
+        self.assertIsNone(json.loads(detail.stdout)['last_mac_checkpoint'])
         self.assertFalse(self.state.exists())
 
     def test_disconnect_is_project_scoped_idempotent_and_needs_no_terminal_or_pairing(self):

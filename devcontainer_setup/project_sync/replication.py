@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import time
 from pathlib import Path
 
 from .checkpoint_store import Store
@@ -47,7 +48,8 @@ def validate_manifest(manifest, identity, project_id=None):
         raise ValueError('Checkpoint project identity differs')
     conversations = manifest.get('conversations')
     if (not isinstance(conversations, dict) or not isinstance(conversations.get('entries'), list)
-            or not isinstance(conversations.get('issues'), list)):
+            or not isinstance(conversations.get('issues'), list)
+            or not all(isinstance(row, dict) for row in conversations['entries'] + conversations['issues'])):
         raise ValueError('Invalid conversation-only manifest')
     list(references(manifest))
 
@@ -192,25 +194,87 @@ def _memory(project, *, env=None):
     return []
 
 
-def sync_project_data(connection, project, state, remote_root, *, env=None, historical_roots=()):
-    """Publish each direction independently of scratch and retain verified receipts."""
+class ConnectionVerificationError(ValueError):
+    """Root or authenticated transport verification failed before exchange."""
+
+
+def sync_project_data(connection, project, state, remote_root, *, env=None, historical_roots=(), progress=None):
+    """Exchange independent directions; acknowledge custody before native publication."""
     from .conversations import publish_conversations
     from .rpc import RemoteEndpoint
+    from . import sync_cycle
+    from .workspace import _verify_roots
     state = Path(state)
     store = Store(state)
     endpoint = RemoteEndpoint(connection, remote_root, project.identity)
-    issues = _memory(project, env=env)
-    snapshot_id = capture(project, store, env=env)
     remote_store = RemoteStore(endpoint)
-    transfer(store, remote_store, snapshot_id, source='desktop', identity=project.identity)
-    remote_publication = endpoint.call('publish', snapshot_id=snapshot_id)
-    # One capture validates every historical root and authorizes their combined
-    # structural scope/ancestor closure. Its single receipt covers the complete
-    # remote inventory rather than only the final historical checkout.
-    captured = endpoint.call('capture', historical_roots=list(historical_roots))['snapshot_id']
-    receipt = transfer(remote_store, store, captured, source='codespace', identity=project.identity)
-    local_publication = publish_conversations(project, store, captured, state=state, env=env)
-    issues.extend(remote_publication.get('issues', []))
-    issues.extend(local_publication['issues'])
-    return dict(schema=2, receipt=receipt, local_publication=local_publication,
-                remote_publication=remote_publication, issues=issues)
+    cycle = sync_cycle.begin(project, remote_root)
+    def verify():
+        try:
+            # Identity/authentication is a connection failure, never an optional
+            # publication issue. Verify all authorized roots before any transfer.
+            with sync_cycle.stage(cycle, 'verify', progress):
+                _verify_roots(connection, project, [remote_root, *historical_roots])
+        except (OSError, ValueError) as error:
+            cycle.update(outcome='failed', completed_at=time.time(),
+                         issues=[dict(stage='verify', reason='Project connection verification failed')])
+            sync_cycle.emit(cycle, progress)
+            raise ConnectionVerificationError('Project connection verification failed; identity/authentication must be valid') from error
+    verify()
+    try:
+        with sync_cycle.stage(cycle, 'memory', progress):
+            cycle['issues'].extend(_memory(project, env=env))
+    except OSError:
+        cycle['issues'].append(dict(component='memory', reason='Memory preparation incomplete'))
+    for name in sync_cycle.DIRECTIONS:
+        row = cycle['directions'][name]
+        outbound = name == 'desktop_to_codespace'
+        source, destination = (store, remote_store) if outbound else (remote_store, store)
+        try:
+            row['stage'] = 'capture'
+            with sync_cycle.stage(cycle, name + ':capture', progress):
+                snapshot = (capture(project, store, env=env) if outbound else
+                            endpoint.call('capture', historical_roots=list(historical_roots))['snapshot_id'])
+                row['snapshot_id'] = snapshot
+                manifest = source.load(snapshot)
+                validate_manifest(manifest, project.identity, project.project_id)
+                row['capture_issues'] = sync_cycle.unique_issues(manifest['conversations']['issues'])
+                count = len({(entry.get('agent'), entry.get('session_id')) for entry in manifest['conversations']['entries']})
+                unsupported = {(issue.get('agent'), issue['session_id']) for issue in row['capture_issues']
+                               if issue.get('session_id') is not None}
+                row['counts'].update(captured=count, pending=count, unsupported=len(unsupported))
+            row['stage'] = 'transfer'
+            with sync_cycle.stage(cycle, name + ':transfer', progress):
+                receipt = transfer(source, destination, snapshot, source='desktop' if outbound else 'codespace',
+                                   identity=project.identity)
+                if not sync_cycle.receipt_matches(receipt, snapshot):
+                    raise ValueError('Receiver receipt differs from the source snapshot')
+                row['receipt'] = receipt
+                row['counts'].update(received=count, received_bytes=sum(len(store.read(d)) for d in set(references(manifest))))
+            row['stage'] = 'publication'
+            with sync_cycle.stage(cycle, name + ':publication', progress):
+                publication = (endpoint.call('publish', snapshot_id=snapshot) if outbound else
+                               publish_conversations(project, store, snapshot, state=state, env=env))
+                sync_cycle.publication_result(row, manifest, publication)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            # Keep any completed receipt and continue the opposite direction.
+            # Never expose arbitrary remote process output or request bodies.
+            row.update(outcome='failed', error=('Conversation stage timed out' if isinstance(error, TimeoutError)
+                                               else 'Conversation ' + row['stage'] + ' failed; previous receipts preserved'))
+        sync_cycle.emit(cycle, progress)
+    if any(row['error'] for row in cycle['directions'].values()):
+        # A directional refusal may be a transcript issue or a lost authenticated
+        # connection. Recheck the binding before reporting usable connectivity.
+        verify()
+    for name, row in cycle['directions'].items():
+        cycle['issues'].extend(dict(issue, direction=name) for issue in row['capture_issues'] + row['publication_issues'])
+        if row['error']:
+            cycle['issues'].append(dict(direction=name, stage=row['stage'], reason=row['error']))
+    cycle.update(outcome='degraded' if cycle['issues'] or any(row['outcome'] != 'complete' for row in cycle['directions'].values()) else 'complete',
+                 stage='complete', completed_at=time.time(), stage_deadline_at=None)
+    # Preserve the callable's existing receipt/publication accessors.
+    cycle.update(receipt=cycle['directions']['codespace_to_desktop']['receipt'],
+                 local_publication=cycle['directions']['codespace_to_desktop']['publication'],
+                 remote_publication=cycle['directions']['desktop_to_codespace']['publication'])
+    sync_cycle.emit(cycle, progress)
+    return cycle

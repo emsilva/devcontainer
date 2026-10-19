@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -517,6 +518,70 @@ class ScratchTests(unittest.TestCase):
         self.assertLess(calls.index(pause), calls.index(('daemon', 'stop')))
         self.assertFalse(any(call[:2] == ('sync', 'terminate') for call in calls))
 
+    def test_worker_publishes_current_cycle_progress_and_keeps_receipts_separate(self):
+        from types import SimpleNamespace
+        from devcontainer_setup.project_sync import sync_cycle
+        from devcontainer_setup.project_sync.state import discover_project
+        config = dict(identity='github.com/owner/repo', codespace='bound-name', root=str(self.root),
+                      remote_root='/workspaces/repo')
+        class Event:
+            def __init__(self): self.waits = iter([False, True])
+            def is_set(self): return getattr(self, 'stopped', False)
+            def set(self): self.stopped = True
+            def wait(self, timeout):
+                self.stopped = next(self.waits)
+                return self.stopped
+        class Connection:
+            def __init__(self, *args, **kwargs): self.child = SimpleNamespace(poll=lambda: None)
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def ssh_config(self, path): pass
+        name = 'scratch-' + 'e' * 48
+        receipt = dict(name=name, nonce='e' * 48, binding=config, established=True, identifier='sync_owned')
+        self.module._write(self.state / self.module.SESSION, receipt)
+        remote = json.dumps(dict(identity=config['identity'], root=config['remote_root'])).encode()
+        seen = []
+        saved_receipt = dict(snapshot_id='a' * 64, received_at='2026-10-18T00:00:00+00:00')
+        self.module._write(self.state / self.module.RUNTIME,
+                           dict(binding=config, phase='starting', retained_receipts={'desktop_to_codespace': saved_receipt}))
+        def exchange(connection, project, state, remote_root, **kwargs):
+            progress = kwargs.get('progress')
+            if progress is None:
+                return dict(schema=2, issues=[])  # old worker has no progress contract
+            cycle = sync_cycle.begin(project, remote_root)
+            progress(cycle)
+            seen.append(json.loads((self.state / self.module.RUNTIME).read_text()))
+            row = cycle['directions']['codespace_to_desktop']
+            row.update(snapshot_id='a' * 64, receipt=saved_receipt, outcome='complete')
+            cycle.update(outcome='degraded' if len(seen) == 1 else 'complete', completed_at=time.time())
+            cycle['issues'] = [dict(reason='first cycle publication failed')] if len(seen) == 1 else []
+            progress(cycle)
+            return cycle
+        def command(binary, state, *args, **kwargs):
+            if args[:2] == ('sync', 'list'):
+                return json.dumps([dict(name=name, identifier='sync_owned')])
+            return ''
+        with patch.object(self.module, '_config', return_value=config), \
+                patch.object(self.module, 'CodespaceConnection', Connection), \
+                patch.object(self.module, 'install_mutagen', return_value=Path('/fake/tool')), \
+                patch.object(self.module, '_remote', return_value=remote), \
+                patch.object(self.module.threading, 'Event', Event), patch.object(self.module.signal, 'signal'), \
+                patch.object(self.module, '_mutagen', side_effect=command), \
+                patch('devcontainer_setup.project_sync.replication.sync_project_data', side_effect=exchange):
+            self.module.supervise(self.root, self.state, 'e' * 48)
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[0]['retained_receipts']['desktop_to_codespace'], saved_receipt)
+        self.assertNotEqual(seen[0]['conversations']['cycle_id'], seen[1]['conversations']['cycle_id'])
+        self.assertTrue(all(item['conversations']['outcome'] == 'pending' for item in seen))
+        self.assertTrue(all(item['conversations']['completed_at'] is None for item in seen))
+        self.assertTrue(all(item['heartbeat_at'] > 0 and item['checkpoint_version'] == 3 for item in seen))
+        self.assertTrue(all(item['prepared_binding'] == config and item['connection_prepared'] for item in seen))
+        self.assertEqual(seen[1]['retained_receipts']['codespace_to_desktop'], saved_receipt)
+        self.assertIsNone(seen[1]['conversations']['directions']['codespace_to_desktop']['receipt'])
+        runtime = json.loads((self.state / self.module.RUNTIME).read_text())
+        self.assertIsNone(runtime['conversation_error'])
+        self.assertFalse(runtime['connection_prepared'])
+
     def test_stop_interrupts_owned_forward_startup(self):
         import time
         from devcontainer_setup.project_sync.state import discover_project, atomic_write
@@ -698,9 +763,11 @@ class ScratchTests(unittest.TestCase):
                         self.module._scratch(endpoint.parent)
                     link.unlink()
             finally:
-                if created:
-                    self.module._mutagen(binary, state, 'sync', 'terminate', name)
-                self.module._mutagen(binary, state, 'daemon', 'stop')
+                try:
+                    if created:
+                        self.module._mutagen(binary, state, 'sync', 'terminate', name)
+                finally:
+                    self.module._mutagen(binary, state, 'daemon', 'stop')
 
     @unittest.skipUnless(os.environ.get('CI') or os.environ.get('MUTAGEN_TEST_BINARY'), 'set MUTAGEN_TEST_BINARY to the pinned official binary for real restart gate')
     def test_actual_mutagen_offline_deletion_survives_controller_stop_restart(self):

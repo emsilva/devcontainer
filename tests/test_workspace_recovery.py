@@ -1,5 +1,6 @@
 """Existing-checkout connection and legacy migration never mutate repositories."""
 import json
+import time
 from pathlib import Path
 import shutil
 import subprocess
@@ -34,18 +35,18 @@ class ExistingCheckoutTests(unittest.TestCase):
 
     def test_remote_uses_verified_ordinary_checkout_and_never_capture_restore_or_git(self):
         self.registry()
-        with patch.object(workspace, '_choose_pairing', return_value=('space', self.original)), \
+        with patch.object(workspace, '_prerequisites'), patch.object(workspace, '_choose_pairing', return_value=('space', self.original)), \
                 patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection()), \
                 patch.object(workspace, '_verify_roots', return_value=[self.generated]), \
                 patch('devcontainer_setup.project_sync.replication.sync_project_data', return_value=dict(receipt={}, issues=[])) as sync, \
                 patch.object(scratch, 'retarget') as retarget, patch.object(scratch, 'start'), \
-                patch.object(workspace, '_ready'), patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), \
+                patch.object(workspace, '_ready', return_value={}), patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), \
                 patch('devcontainer_setup.project_sync.herdr.open_remote', return_value=0) as opened, \
                 patch('devcontainer_setup.project_sync.notes.configure_memory'):
             self.assertEqual(workspace.remote(self.project, self.state), 0)
         self.assertEqual(retarget.call_args.args[3], self.original)
         self.assertEqual(opened.call_args.args[2], self.original)
-        self.assertEqual(sync.call_args.kwargs['historical_roots'], [self.generated])
+        sync.assert_not_called()
         value = read_json(self.state / 'workspace.json')
         self.assertEqual(value['remote_active_root'], self.original)
         self.assertIn(self.generated, value['verified_historical_roots'])
@@ -90,7 +91,8 @@ class ExistingCheckoutTests(unittest.TestCase):
         connection.python.return_value = json.dumps(dict(root=self.generated, identity=self.project.identity)).encode()
         self.assertEqual(workspace._verify_roots(connection, self.project, [self.generated]), [self.generated])
         connection.python.return_value = json.dumps(dict(root=self.generated, identity='github.com/foreign/repo')).encode()
-        self.assertEqual(workspace._verify_roots(connection, self.project, [self.generated]), [])
+        with self.assertRaisesRegex(ValueError, 'identity'):
+            workspace._verify_roots(connection, self.project, [self.generated])
 
     def test_status_is_offline_and_legacy_checkpoint_never_counts_as_conversation_health(self):
         self.registry()
@@ -109,7 +111,7 @@ class ExistingCheckoutTests(unittest.TestCase):
         self.registry()
         with patch.object(scratch, 'status', return_value=dict(running=True, phase='syncing', checkpoint={'snapshot_id':'old'}, checkpoint_error=None)), \
                 patch.object(workspace.time, 'monotonic', side_effect=[0, 1, 121]), patch.object(workspace.time, 'sleep'):
-            with self.assertRaisesRegex(ValueError, 'conversation'):
+            with self.assertRaisesRegex(ValueError, 'scratch|Scratch'):
                 workspace._ready(self.project, self.state)
 
     def test_repeated_connection_retains_separate_verified_local_historical_roots(self):
@@ -117,7 +119,7 @@ class ExistingCheckoutTests(unittest.TestCase):
         shutil.copytree(self.root, recovered)
         self.registry(local_active_root=str(recovered))
         for attempt in range(2):
-            with patch.object(workspace, '_choose_pairing', return_value=('space', self.original)), patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection()), patch.object(workspace, '_verify_roots', return_value=[self.generated]) as verify, patch('devcontainer_setup.project_sync.replication.sync_project_data', return_value=dict(receipt={}, issues=[])), patch.object(scratch, 'retarget'), patch.object(scratch, 'start'), patch.object(workspace, '_ready'), patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), patch('devcontainer_setup.project_sync.herdr.open_remote', return_value=0), patch('devcontainer_setup.project_sync.notes.configure_memory'):
+            with patch.object(workspace, '_prerequisites'), patch.object(workspace, '_choose_pairing', return_value=('space', self.original)), patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection()), patch.object(workspace, '_verify_roots', return_value=[self.generated]) as verify, patch('devcontainer_setup.project_sync.replication.sync_project_data', return_value=dict(receipt={}, issues=[])), patch.object(scratch, 'retarget'), patch.object(scratch, 'start'), patch.object(workspace, '_ready', return_value={}), patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), patch('devcontainer_setup.project_sync.herdr.open_remote', return_value=0), patch('devcontainer_setup.project_sync.notes.configure_memory'):
                 workspace.remote(self.project, self.state)
             value = read_json(self.state / 'workspace.json')
             self.assertIn(str(recovered), value['verified_local_historical_roots'])
@@ -151,11 +153,87 @@ class ExistingCheckoutTests(unittest.TestCase):
         original = self.registry(remote_root=self.generated, remote_active_root=self.original,
                                  verified_local_historical_roots=[str(recovered)], verified_historical_roots=[self.generated])
         expected = json.loads(json.dumps(original))
-        with patch.object(workspace, '_choose_pairing', return_value=('space', self.original)), patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection()), patch.object(workspace, '_verify_roots', return_value=[self.generated]), patch('devcontainer_setup.project_sync.replication.sync_project_data', return_value=dict(receipt={}, issues=[])), patch.object(scratch, 'retarget'), patch.object(scratch, 'start'), patch.object(workspace, '_ready'), patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), patch('devcontainer_setup.project_sync.herdr.open_remote', return_value=0), patch('devcontainer_setup.project_sync.notes.configure_memory'):
+        with patch.object(workspace, '_prerequisites'), patch.object(workspace, '_choose_pairing', return_value=('space', self.original)), patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection()), patch.object(workspace, '_verify_roots', return_value=[self.generated]), patch('devcontainer_setup.project_sync.replication.sync_project_data', return_value=dict(receipt={}, issues=[])), patch.object(scratch, 'retarget'), patch.object(scratch, 'start'), patch.object(workspace, '_ready', return_value={}), patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), patch('devcontainer_setup.project_sync.herdr.open_remote', return_value=0), patch('devcontainer_setup.project_sync.notes.configure_memory'):
             workspace.remote(self.project, self.state)
         archives = list((self.state / 'workspace-history').glob('*.json'))
         self.assertEqual(len(archives), 1)
         self.assertEqual(read_json(archives[0]), expected)
+
+    def test_transcript_failure_does_not_block_prepared_scratch_or_herdr(self):
+        self.registry()
+        with patch.object(workspace, '_prerequisites'), patch.object(workspace, '_choose_pairing', return_value=('space', self.original)), \
+                patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection()), \
+                patch.object(workspace, '_verify_roots', return_value=[self.generated]), \
+                patch('devcontainer_setup.project_sync.replication.sync_project_data', side_effect=ValueError('publication refused')) as exchange, \
+                patch.object(scratch, 'retarget'), patch.object(scratch, 'start'), \
+                patch.object(workspace, '_ready', return_value={}), patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), \
+                patch('devcontainer_setup.project_sync.herdr.open_remote', return_value=0) as opened:
+            self.assertEqual(workspace.remote(self.project, self.state), 0)
+        exchange.assert_not_called()
+        opened.assert_called_once()
+
+    def test_ready_uses_current_scratch_binding_and_fresh_worker_not_transcript_receipt(self):
+        binding = dict(version=1, root=str(self.root), identity=self.project.identity,
+                       codespace='space', remote_root=self.original)
+        scratch._write(self.state / scratch.CONFIG, binding)
+        runtime = dict(running=True, phase='syncing', checkpoint_version=3, runtime_id=scratch._runtime_id(),
+                       heartbeat_at=time.time(), prepared_binding=binding, connection_prepared=True,
+                       conversations=dict(outcome='degraded'), conversation_error='publication refused')
+        with patch.object(scratch, 'status', return_value=runtime), \
+                patch.object(scratch, 'inspect_sync', return_value=dict(phase='synchronized')):
+            workspace._ready(self.project, self.state, timeout=.01)
+        for change, sync_phase in ((dict(heartbeat_at=0), 'synchronized'),
+                                   (dict(prepared_binding=dict(binding, codespace='old')), 'synchronized'),
+                                   (dict(runtime_id='old'), 'synchronized'), ({}, 'waiting')):
+            with self.subTest(change=change, sync_phase=sync_phase), \
+                    patch.object(scratch, 'status', return_value=dict(runtime, **change)), \
+                    patch.object(scratch, 'inspect_sync', return_value=dict(phase=sync_phase)), \
+                    patch.object(workspace.time, 'sleep'):
+                with self.assertRaisesRegex(ValueError, 'scratch|Scratch'):
+                    workspace._ready(self.project, self.state, timeout=.001)
+
+    def test_local_prerequisite_failure_happens_before_codespace_selection_or_start(self):
+        with patch('devcontainer_setup.project_sync.transport._check_gh', side_effect=ValueError('unsupported gh')), \
+                patch.object(workspace, '_choose_pairing') as choose:
+            with self.assertRaisesRegex(ValueError, 'gh'):
+                workspace.remote(self.project, self.state)
+        choose.assert_not_called()
+
+    def test_mixed_legacy_history_preserves_local_scope_without_remote_identity_bypass(self):
+        recovered = self.base / 'recovered'; shutil.copytree(self.root, recovered)
+        self.registry(verified_historical_roots=[str(recovered), self.generated])
+        def verify(connection, project, roots):
+            self.assertNotIn(str(recovered), roots)
+            return roots
+        with patch.object(workspace, '_prerequisites'), \
+                patch.object(workspace, '_choose_pairing', return_value=('space', self.original)), \
+                patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection()), \
+                patch.object(workspace, '_verify_roots', side_effect=verify), \
+                patch.object(scratch, 'retarget'), patch.object(scratch, 'start'), \
+                patch.object(workspace, '_ready', return_value={}), \
+                patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), \
+                patch('devcontainer_setup.project_sync.herdr.open_remote', return_value=0):
+            workspace.remote(self.project, self.state)
+        result = read_json(self.state / 'workspace.json')
+        self.assertIn(str(recovered), result['verified_local_historical_roots'])
+        self.assertIn(self.generated, result['verified_remote_historical_roots'])
+
+    def test_changed_verified_local_history_identity_refuses_connection(self):
+        recovered = self.base / 'recovered'; shutil.copytree(self.root, recovered)
+        subprocess.run(['git', '-C', str(recovered), 'remote', 'set-url', 'origin', 'https://github.com/foreign/repo'], check=True)
+        original = self.registry(verified_local_historical_roots=[str(recovered)])
+        with patch.object(workspace, '_prerequisites'), \
+                patch.object(workspace, '_choose_pairing', return_value=('space', self.original)), \
+                patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection()), \
+                patch.object(workspace, '_verify_roots', return_value=[self.generated]), \
+                patch.object(scratch, 'retarget') as retarget, patch.object(scratch, 'start'), \
+                patch.object(workspace, '_ready', return_value={}), \
+                patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), \
+                patch('devcontainer_setup.project_sync.herdr.open_remote', return_value=0):
+            with self.assertRaisesRegex(ValueError, 'identity'):
+                workspace.remote(self.project, self.state)
+        retarget.assert_not_called()
+        self.assertEqual(read_json(self.state / 'workspace.json'), original)
 
     def test_retired_local_recovery_and_agent_launch_apis_absent(self):
         for name in ('local', 'local_project', '_recover'):

@@ -22,14 +22,19 @@ create checkouts. Uncommitted code stays on the host where it was edited.
 | --- | --- |
 | `task work:cs` | Start/connect the paired Codespace, start sync, connect its saved Herdr machine |
 | `task work:disconnect` | Disconnect only this project's saved Codespace machine from local Herdr |
-| `task work:status` | Show scratch and conversation synchronization status |
+| `task work:status` | Show a short offline scratch and conversation summary |
+| `task work:status -- --json` | Show cycle, stage, receipt and publication detail as JSON |
 | `task work:stop` | Stop this project's owned sync worker |
 
 Run the connection tasks on your Mac. Inside Herdr, connection returns to your
 shell; select the Codespace group to work remotely. From another terminal, it
 opens local Herdr with that group available. Repeated entry reuses the existing
 project workspace. The controller verifies checkout identity and does not alter
-its branch or index.
+its branch or index. Local Python, tested GitHub CLI, selected credentials, SSH
+key and Herdr prerequisites are checked before starting a stopped Codespace.
+Herdr opens once the current verified scratch pairing is synchronized and SSH
+is prepared. Conversation exchange runs in the worker; pending or refused
+history is reported without blocking the connection.
 
 Disconnect leaves remote sessions, local Herdr and synchronization running. It
 needs no SSH or GitHub connection and is idempotent. Use `work:stop` separately to
@@ -69,7 +74,10 @@ first migration so the next session loads the copied index.
 The Mac worker captures verified stable prefixes ending at supported completed
 turns, including required native ancestors. It transfers content-addressed blobs
 and validates their hashes and project identity before publication. Interruption
-leaves the previous successful receipt and source histories intact.
+leaves the previous successful receipt and source histories intact. Each direction
+has its own capture, transfer and publication result. A failure in one direction
+still allows the other direction to acquire a receipt and publish history.
+Invalid checkout identity or authentication fails the connection verification.
 
 Native imports use new IDs in the destination host's ordinary agent home and
 checkout namespace. Native Codex metadata operations prepare imported history without a
@@ -94,10 +102,27 @@ all conversations have been published.
 
 ## Availability and migration
 
-A sleeping, disconnected or powered-off Mac receives nothing. The last successful
-conversation receipt and actual scratch status determine what is locally
-available. The polling delay is not a recovery interval guarantee: capture,
-validation and transfer take additional time.
+A sleeping, disconnected or powered-off Mac receives nothing. Status separates
+received bytes from verified native availability. Received history has a
+snapshot-bound receiver receipt; available history has a matching successful
+native publication result. Received history awaiting publication is pending.
+Capture-refused histories count once as unsupported, with their capture issues
+listed separately from publication failures. Inventory errors without a session
+ID are reported as issues, rather than counted as histories.
+
+Counts describe the current cycle's unique source conversations, rather than a
+lifetime total or everything in an old manifest. Full JSON includes each
+snapshot, receiver receipt, publication result, cycle ID and timestamps. Previous
+verified receipts remain visible separately. A new, partial, failed or stale
+cycle never inherits a previous healthy result. Old native imports remain on
+disk, but stale status cannot assert their current availability.
+
+The worker updates its heartbeat at progress and connection checks. Idle progress
+expires after 30 seconds; an active conversation stage is bounded at 240 seconds,
+and completed results expire after 300 seconds. Each remote RPC has its own
+180-second limit. These are failure/freshness bounds, not recovery guarantees:
+capture, validation and transfer add to the polling delay. Waiting or conflicting
+scratch state never reports a ready connection or healthy synchronization.
 
 When Codespaces is unavailable, use your existing Mac checkout and the ordinary
 native agents. Imported conversations and received scratch files remain available.

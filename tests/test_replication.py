@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from unittest.mock import patch
@@ -102,7 +103,9 @@ class ReplicationTests(unittest.TestCase):
     def test_new_transfer_rejects_unknown_surface_and_wrong_project(self):
         snapshot = self.snapshot()
         manifest = self.store.load(snapshot)
-        for extra in ({'files': {}}, {'settings': {}}, {'schema': 1}):
+        for extra in ({'files': {}}, {'settings': {}}, {'schema': 1},
+                      {'conversations': dict(entries=['invalid'], issues=[])},
+                      {'conversations': dict(entries=[], issues=['invalid'])}):
             with self.subTest(extra=extra), self.assertRaises(ValueError):
                 rpc.LocalEndpoint(self.project, self.base / 'rpc').call('save', manifest=dict(manifest, **extra))
         with self.assertRaisesRegex(ValueError, 'identity'):
@@ -183,9 +186,9 @@ class ReplicationTests(unittest.TestCase):
                                                env=self.local_env, historical_roots=[str(legacy)])
         self.assertEqual(result['issues'], [])
         self.assertEqual([item['source_session_id'] for item in result['local_publication']['imported']], [remote_sid])
-        with patch.object(workspace.scratch, 'status', return_value=dict(running=True, phase='syncing', conversations=result)), patch.object(workspace.scratch, 'inspect_sync', return_value={}):
+        with patch.object(workspace.scratch, 'status', return_value=dict(running=True, phase='syncing', checkpoint_version=3, runtime_id=workspace.scratch._runtime_id(), heartbeat_at=time.time(), conversations=result)), patch.object(workspace.scratch, 'inspect_sync', return_value=dict(phase='synchronized')):
             status = workspace.status(self.project, self.store.state)
-        self.assertEqual(status['conversations']['protected'], 1)
+        self.assertEqual(status['conversations']['directions']['codespace_to_desktop']['counts']['available'], 1)
         self.assertTrue(status['conversations']['healthy'])
         self.assertEqual(self.store.load(result['receipt']['snapshot_id'])['project']['root'], str(self.root))
         self.assertEqual(len(self.store.load(result['receipt']['snapshot_id'])['conversations']['entries']), 1)
@@ -211,6 +214,180 @@ class ReplicationTests(unittest.TestCase):
         self.assertIn('memory', str(result['issues']).lower())
         self.assertEqual(len(result['local_publication']['imported']), 1)
         self.assertEqual(settings.read_text(), '{"autoMemoryDirectory":"/owner/memory"}')
+
+    def test_real_rpc_outbound_fault_preserves_inbound_custody_and_dirty_checkout(self):
+        for failed_operation in ('publish', 'put_blobs'):
+            with self.subTest(failed_operation=failed_operation):
+                self.conversation(self.local_env, text='LOCAL-' + failed_operation)
+                remote_sid, _ = self.conversation(self.connection.env, text='REMOTE-' + failed_operation)
+                (self.root / 'source').write_text('staged'); self.git('add', 'source')
+                (self.root / 'source').write_text('unstaged')
+                before = self.receipt()
+                actual = self.connection.python
+                def refuse(code, payload=b'', timeout=60):
+                    if payload and json.loads(payload)['request']['operation'] == failed_operation:
+                        return b'{"ok":false,"error":"injected refusal"}'
+                    return actual(code, payload, timeout)
+                with patch.object(self.connection, 'python', side_effect=refuse):
+                    result = replication.sync_project_data(self.connection, self.project, self.store.state,
+                                                           str(self.root), env=self.local_env)
+                inbound = result['directions']['codespace_to_desktop']
+                outbound = result['directions']['desktop_to_codespace']
+                self.assertEqual(result['outcome'], 'degraded')
+                self.assertEqual(outbound['outcome'], 'failed')
+                self.assertEqual(outbound['stage'], 'publication' if failed_operation == 'publish' else 'transfer')
+                self.assertEqual(inbound['outcome'], 'complete')
+                self.assertEqual(inbound['receipt'], self.store.latest('codespace'))
+                self.assertIn(remote_sid, [row['source_session_id'] for row in inbound['publication']['imported']])
+                self.assertGreater(inbound['counts']['available'], 0)
+                self.assertEqual(outbound['counts']['available'], 0)
+                self.assertEqual(before, self.receipt())
+
+    def test_real_rpc_inbound_fault_preserves_outbound_publication_and_previous_receipt(self):
+        self.conversation(self.connection.env)
+        previous = replication.sync_project_data(self.connection, self.project, self.store.state,
+                                                str(self.root), env=self.local_env)['receipt']
+        local_sid, _ = self.conversation(self.local_env)
+        (self.root / 'source').write_text('staged'); self.git('add', 'source')
+        (self.root / 'source').write_text('unstaged'); before = self.receipt()
+        actual = self.connection.python
+        def refuse(code, payload=b'', timeout=60):
+            if payload and json.loads(payload)['request']['operation'] == 'get_blobs':
+                return b'{"ok":false,"error":"injected refusal"}'
+            return actual(code, payload, timeout)
+        self.conversation(self.connection.env, text='FRESH REMOTE')
+        with patch.object(self.connection, 'python', side_effect=refuse):
+            result = replication.sync_project_data(self.connection, self.project, self.store.state,
+                                                  str(self.root), env=self.local_env)
+        outbound = result['directions']['desktop_to_codespace']
+        self.assertEqual(outbound['outcome'], 'complete')
+        self.assertEqual(outbound['publication']['imported'][0]['source_session_id'], local_sid)
+        self.assertEqual(outbound['receipt'], self.remote_store.latest('desktop'))
+        self.assertEqual(result['directions']['codespace_to_desktop']['outcome'], 'failed')
+        self.assertEqual(self.store.latest('codespace'), previous)
+        self.assertEqual(before, self.receipt())
+
+    def test_cycle_progress_is_fresh_and_receipt_bound_with_failed_publication_pending(self):
+        self.conversation(self.connection.env)
+        progress = []
+        with patch('devcontainer_setup.project_sync.conversations.publish_conversations',
+                   return_value=dict(imported=[], unchanged=[], issues=[dict(reason='publication refused')])):
+            result = replication.sync_project_data(self.connection, self.project, self.store.state,
+                                                  str(self.root), env=self.local_env, progress=progress.append)
+        inbound = result['directions']['codespace_to_desktop']
+        self.assertEqual(inbound['counts']['received'], 1)
+        self.assertEqual(inbound['counts']['available'], 0)
+        self.assertEqual(inbound['counts']['pending'], 1)
+        self.assertEqual(result['outcome'], 'degraded')
+        self.assertEqual(progress[0]['outcome'], 'pending')
+        self.assertIsNone(progress[0]['completed_at'])
+        self.assertIsNone(progress[0]['directions']['codespace_to_desktop']['receipt'])
+        self.assertEqual(progress[-1], result)
+        self.assertEqual(inbound['snapshot_id'], inbound['receipt']['snapshot_id'])
+        self.assertTrue(all(step['cycle_id'] == result['cycle_id'] for step in progress))
+        again = replication.sync_project_data(self.connection, self.project, self.store.state,
+                                             str(self.root), env=self.local_env)
+        self.assertNotEqual(result['cycle_id'], again['cycle_id'])
+        self.assertEqual(again['directions']['codespace_to_desktop']['counts']['pending'], 0)
+        self.assertEqual(again['directions']['codespace_to_desktop']['publication_issues'], [])
+
+    def test_capture_issues_are_not_double_counted_as_publication_failures(self):
+        sid, source = self.conversation(self.connection.env)
+        source.write_bytes(source.read_bytes().replace(b'2.1.302', b'9.9.999'))
+        result = replication.sync_project_data(self.connection, self.project, self.store.state,
+                                              str(self.root), env=self.local_env)
+        inbound = result['directions']['codespace_to_desktop']
+        self.assertEqual(inbound['counts']['unsupported'], 1)
+        self.assertEqual(len(inbound['capture_issues']), 1)
+        self.assertEqual(inbound['publication_issues'], [])
+        self.assertEqual(inbound['counts']['available'], 0)
+        self.assertEqual(inbound['counts']['pending'], 0)
+        self.assertEqual(result['outcome'], 'degraded')
+
+    def test_status_does_not_reuse_previous_health_for_partial_stale_or_failed_cycle(self):
+        import copy
+        import time
+        from devcontainer_setup.project_sync import workspace, scratch
+        self.conversation(self.connection.env)
+        result = replication.sync_project_data(self.connection, self.project, self.store.state,
+                                              str(self.root), env=self.local_env)
+        runtime = dict(running=True, phase='syncing', checkpoint_version=3, runtime_id=scratch._runtime_id(),
+                       heartbeat_at=time.time(), conversations=result)
+        for case in ('current', 'partial', 'stale', 'failed', 'wrong_receipt', 'old_worker', 'waiting_scratch'):
+            changed = copy.deepcopy(runtime)
+            cycle = changed['conversations']
+            if case == 'partial': cycle.update(outcome='pending', completed_at=None)
+            if case == 'stale': cycle['completed_at'] = 0
+            if case == 'failed': cycle.update(outcome='degraded', issues=[dict(reason='failure')])
+            if case == 'wrong_receipt': cycle['directions']['codespace_to_desktop']['snapshot_id'] = 'f' * 64
+            if case == 'old_worker': changed['runtime_id'] = 'old'
+            with self.subTest(case=case), patch.object(scratch, 'status', return_value=changed), \
+                    patch.object(scratch, 'inspect_sync', return_value=dict(phase='waiting' if case == 'waiting_scratch' else 'synchronized')):
+                status = workspace.status(self.project, self.store.state)['conversations']
+            self.assertEqual(status['healthy'], case == 'current')
+            if case == 'wrong_receipt':
+                self.assertEqual(status['directions']['codespace_to_desktop']['counts']['received'], 0)
+            self.assertNotIn('protected', status)
+            self.assertEqual(status['retained_receipts']['codespace_to_desktop'], self.store.latest('codespace'))
+            if case in ('stale', 'wrong_receipt', 'old_worker'):
+                self.assertEqual(status['directions']['codespace_to_desktop']['counts']['available'], 0)
+            if case == 'stale':
+                self.assertTrue(status['directions']['codespace_to_desktop']['stale'])
+                self.assertEqual(status['directions']['codespace_to_desktop']['counts']['pending'], 0)
+
+    def test_authentication_loss_after_transfer_is_a_failed_connection(self):
+        from devcontainer_setup.project_sync import workspace
+        self.conversation(self.local_env)
+        actual = self.connection.python
+        lost = False
+        def disconnect(code, payload=b'', timeout=60):
+            nonlocal lost
+            if payload and json.loads(payload)['request']['operation'] == 'publish':
+                lost = True
+            if lost:
+                raise ValueError('SSH authentication failed')
+            return actual(code, payload, timeout)
+        progress = []
+        with patch.object(self.connection, 'python', side_effect=disconnect):
+            with self.assertRaisesRegex(ValueError, 'verification|authentication'):
+                replication.sync_project_data(self.connection, self.project, self.store.state,
+                                              str(self.root), env=self.local_env, progress=progress.append)
+        self.assertEqual(progress[-1]['outcome'], 'failed')
+        self.assertEqual(progress[-1]['stage'], 'verify')
+        self.assertIsNotNone(progress[-1]['directions']['desktop_to_codespace']['receipt'])
+
+    def test_malformed_publication_result_does_not_suppress_opposite_direction(self):
+        self.conversation(self.connection.env)
+        actual = self.connection.python
+        def malformed(code, payload=b'', timeout=60):
+            if payload and json.loads(payload)['request']['operation'] == 'publish':
+                return b'{"ok":true,"result":{"imported":["invalid"],"unchanged":[],"issues":[]}}'
+            return actual(code, payload, timeout)
+        with patch.object(self.connection, 'python', side_effect=malformed):
+            result = replication.sync_project_data(self.connection, self.project, self.store.state,
+                                                  str(self.root), env=self.local_env)
+        self.assertEqual(result['directions']['desktop_to_codespace']['outcome'], 'failed')
+        self.assertEqual(result['directions']['codespace_to_desktop']['outcome'], 'complete')
+        self.assertEqual(result['directions']['codespace_to_desktop']['counts']['available'], 1)
+
+    def test_stage_timeout_interrupts_work_and_restores_signal_handler(self):
+        import signal
+        import threading
+        from devcontainer_setup.project_sync import sync_cycle
+        before = signal.getsignal(signal.SIGALRM)
+        cycle = sync_cycle.begin(self.project, str(self.root))
+        progress = []
+        with patch.object(sync_cycle, 'STAGE_TIMEOUT', .02):
+            with self.assertRaisesRegex(TimeoutError, 'timed out'):
+                with sync_cycle.stage(cycle, 'publication', progress.append):
+                    try:
+                        threading.Event().wait(1)
+                    except OSError:
+                        pass  # Native per-session error handling must not swallow the stage deadline.
+        self.assertEqual(signal.getsignal(signal.SIGALRM), before)
+        self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0., 0.))
+        self.assertEqual(progress[0]['stage'], 'publication')
+        self.assertLess(progress[0]['stage_deadline_at'] - progress[0]['stage_started_at'], .03)
 
     def test_batch_transport_and_retry_only_send_missing_verified_objects(self):
         snapshot = self.snapshot(count=100)
