@@ -148,6 +148,10 @@ class ContinuityIntegrationTests(unittest.TestCase):
                     '    preconditions: [test -f ABSENT]\n'
                     '    status: [touch STATUS_EXECUTED]\n'
                     '    cmds: [touch COMMAND_EXECUTED]\n')
+        # Absolute markers catch execution in either temporary inventory tree,
+        # as well as an accidental invocation in the owner checkout.
+        for name in ('VAR_EXECUTED', 'STATUS_EXECUTED', 'COMMAND_EXECUTED'):
+            original = original.replace('touch ' + name, 'touch ' + str(self.root / name))
         (self.root / 'Taskfile.yml').write_text(original)
         files = render(self.root, SOURCE, self.selection, REF)
         integrate_taskfile(self.root, files)
