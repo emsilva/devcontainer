@@ -208,5 +208,46 @@ request_path = "request.wav"
         self.assertFalse(any('create' in call.args[0] for call in run.call_args_list))
 
 
+    def remote_with_home_workspace(self, home_pane):
+        rows = {'result': {'workspaces': [{'workspace_id': 'w1', 'label': '~', 'worktree': None,
+                                           'tab_count': 1, 'pane_count': 1}]}}
+        def native(args, **kwargs):
+            if args[3:5] == ['workspace', 'list']: return completed(rows)
+            if args[3:5] == ['pane', 'list']: return completed({'result': {'panes': [home_pane]}})
+            if args[3:5] == ['workspace', 'create']:
+                return completed({'result': {'workspace': {'workspace_id': 'w2'}}})
+            return completed({'result': {}})
+        with mock.patch.object(herdr.subprocess, 'run', side_effect=native) as run:
+            herdr._workspace(self.project, '/workspaces/repo', ['--machine', 'opaque-machine'])
+        return [call.args[0] for call in run.call_args_list]
+
+    def test_codespace_default_home_workspace_is_closed_when_idle(self):
+        calls = self.remote_with_home_workspace({'workspace_id': 'w1', 'cwd': '/home/vscode',
+                                                 'agent': None, 'foreground_process': None})
+        self.assertIn(['herdr', '--machine', 'opaque-machine', 'workspace', 'close', 'w1'], calls)
+        self.assertEqual(calls[-1], ['herdr', '--machine', 'opaque-machine', 'workspace', 'focus', 'w2'])
+
+    def test_codespace_home_workspace_in_use_is_kept(self):
+        for busy in ({'agent': 'claude'}, {'foreground_process': 'vim'}):
+            with self.subTest(busy=busy):
+                calls = self.remote_with_home_workspace(dict({'workspace_id': 'w1', 'cwd': '/home/vscode',
+                                                              'agent': None, 'foreground_process': None}, **busy))
+                self.assertFalse(any('close' in call for call in calls))
+
+    def test_local_home_workspace_is_never_closed(self):
+        rows = {'result': {'workspaces': [{'workspace_id': 'w1', 'label': '~', 'worktree': None,
+                                           'tab_count': 1, 'pane_count': 1}]}}
+        def native(args, **kwargs):
+            if args[1:3] == ['workspace', 'list']: return completed(rows)
+            if args[1:3] == ['pane', 'list']:
+                return completed({'result': {'panes': [{'workspace_id': 'w1', 'cwd': str(self.home)}]}})
+            if args[1:3] == ['workspace', 'create']:
+                return completed({'result': {'workspace': {'workspace_id': 'w2'}}})
+            return completed({'result': {}})
+        with mock.patch.object(herdr.subprocess, 'run', side_effect=native) as run:
+            herdr._workspace(self.project, str(self.project.root), [])
+        self.assertFalse(any('close' in call.args[0] for call in run.call_args_list))
+
+
 if __name__ == '__main__':
     unittest.main()

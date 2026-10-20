@@ -116,7 +116,26 @@ def _workspace(project, root: str, prefix: list[str]):
             raise ValueError('Herdr did not return its new workspace ID') from None
     if not isinstance(workspace_id, str) or not workspace_id or workspace_id.startswith('-'):
         raise ValueError('Herdr returned an invalid workspace ID')
+    if prefix[:1] == ['--machine']:
+        _close_idle_home_workspaces(rows, workspace_id, prefix)
     _json([*prefix, 'workspace', 'focus', workspace_id])
+
+
+def _close_idle_home_workspaces(rows, keep: str, prefix: list[str]) -> None:
+    # A Codespace's Herdr server starts with a home workspace beside the project
+    # one. Close it only while it is a single idle shell; never touch the Mac's.
+    for row in rows:
+        candidate = row.get('workspace_id')
+        if (candidate == keep or row.get('worktree') or row.get('label') != '~'
+                or row.get('tab_count') != 1 or row.get('pane_count') != 1
+                or not isinstance(candidate, str) or not candidate or candidate.startswith('-')):
+            continue
+        try:
+            panes = _json([*prefix, 'pane', 'list', '--workspace', candidate])['result']['panes']
+        except (KeyError, TypeError):
+            continue
+        if all(pane.get('agent') is None and pane.get('foreground_process') is None for pane in panes):
+            _json([*prefix, 'workspace', 'close', candidate])
 
 
 def _matching_machines(alias, session):
