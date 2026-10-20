@@ -478,11 +478,15 @@ def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
     return chosen
 
 
+LAUNCH_BROWSER = 'Push and open a Codespace in the browser'
+LAUNCH_VSCODE = 'Push and open a Codespace in VS Code'
+COMMIT_ONLY = 'Commit only, no Codespace'
+
+
 def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume: str | None) -> dict | None:
-    action = ui.choose('After setup', ['Commit only', 'Commit, push and open in browser',
-                                     'Commit, push and open in VS Code'],
-                       'Commit, push and open in browser' if resume else 'Commit only')
-    if action == 'Commit only':
+    action = ui.choose('After setup', [LAUNCH_BROWSER, LAUNCH_VSCODE, COMMIT_ONLY],
+                       LAUNCH_BROWSER if resume or _github_repository(project) else COMMIT_ONLY)
+    if action == COMMIT_ONLY:
         return None
     try:
         repo = _repository(project)
@@ -533,7 +537,11 @@ def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume
 def setup_continuity(project: Path, ui, codespace: str | None) -> None:
     """Finish the approved setup using its selected Codespace; Git is durable."""
     if not codespace:
-        print('Run task work:cs on your Mac to open Codespace Herdr and start project sync.', flush=True)
+        if os.environ.get('CODESPACES') == 'true':
+            print('Run task work:cs on your Mac to connect scratch and conversation sync for this Codespace.', flush=True)
+        else:
+            print('No Codespace was opened. To create one, run task devcontainer:setup again and choose a Codespace; '
+                  'if this project already has one, run task work:cs to connect it.', flush=True)
         return
     from .project_sync.state import discover_project, state_dir
     from .project_sync.codespaces import Codespaces as ProjectCodespaces

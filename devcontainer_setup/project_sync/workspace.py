@@ -65,7 +65,7 @@ def _choose_pairing(project, state, value):
     else:
         spaces = service.spaces()
         if not spaces:
-            raise ValueError('No Codespace for this repository; create one in setup first')
+            raise ValueError('No Codespace for this repository. Run task devcontainer:setup and choose a Codespace to create one')
         labels = [r['name'] + ' (' + r.get('state', 'unknown') + ')' for r in spaces]
         row = spaces[0] if len(spaces) == 1 else spaces[labels.index(Gum().choose('Codespace', labels))]
         name = row['name']

@@ -73,7 +73,7 @@ class WizardCliTests(unittest.TestCase):
         case = self
         class UI:
             def choose(self, title, options, selected=None):
-                return 'Commit, push and open in browser' if title == 'After setup' else selected or options[0]
+                return 'Push and open a Codespace in the browser' if title == 'After setup' else selected or options[0]
 
             def confirm(self, title, default=True):
                 case.assertNotEqual(title, 'Continue with commit only?',
@@ -295,7 +295,7 @@ class WizardCliTests(unittest.TestCase):
                     return subprocess.CompletedProcess(args, 0, json.dumps(payload), '')
                 class UI:
                     def choose(self, title, options, selected=None):
-                        if title == 'After setup': return 'Commit, push and open in browser'
+                        if title == 'After setup': return 'Push and open a Codespace in the browser'
                         if title == 'Existing codespaces for this branch': return 'Reuse existing-space'
                         raise AssertionError(f'Unexpected creation prompt: {title}')
                     def confirm(self, title, default=True): return True
@@ -349,7 +349,7 @@ class WizardCliTests(unittest.TestCase):
                         return subprocess.CompletedProcess(args, 1, '', 'No Codespaces permission (HTTP 403)')
                     class UI:
                         def choose(self, title, options, selected=None):
-                            if title == 'After setup': return 'Commit, push and open in browser'
+                            if title == 'After setup': return 'Push and open a Codespace in the browser'
                             raise AssertionError(f'Unexpected launch prompt: {title}')
                         def confirm(self, title, default=True):
                             prompts.append(title)
@@ -376,7 +376,7 @@ class WizardCliTests(unittest.TestCase):
         prompts = []
         class UI:
             def choose(self, title, options, selected=None):
-                return 'Commit, push and open in browser'
+                return 'Push and open a Codespace in the browser'
             def confirm(self, title, default=True):
                 prompts.append(title)
                 return True
@@ -387,6 +387,38 @@ class WizardCliTests(unittest.TestCase):
             self.assertIsNone(_launch_options(UI(), Codespaces(run=github), self.root, 'main', None))
         self.assertEqual(prompts, ['Continue with commit only?'])
         self.assertIn('git remote add origin', error_output.getvalue())
+
+    def test_after_setup_choice_leads_with_the_codespace_and_defaults_to_it(self):
+        from devcontainer_setup.__main__ import _launch_options
+        from devcontainer_setup.codespaces import Codespaces
+        menus = []
+        class UI:
+            def choose(self, title, options, selected=None):
+                menus.append((options, selected))
+                return next(option for option in options if option.startswith('Commit'))
+        def github(args, **kwargs):
+            raise AssertionError(f'Commit only makes no GitHub call: {args}')
+        self.assertIsNone(_launch_options(UI(), Codespaces(run=github), self.root, 'main', None))
+        self.git('remote', 'add', 'origin', 'https://github.com/owner/project.git')
+        self.assertIsNone(_launch_options(UI(), Codespaces(run=github), self.root, 'main', None))
+        (options, without_origin), (_, with_origin) = menus
+        self.assertEqual([option for option in options if option.startswith('Commit')], ['Commit only, no Codespace'])
+        self.assertTrue(all('Codespace' in option for option in options))
+        self.assertEqual(without_origin, 'Commit only, no Codespace')
+        self.assertEqual(with_origin, 'Push and open a Codespace in the browser')
+
+    def test_commit_only_ending_says_how_to_get_a_codespace(self):
+        import contextlib
+        import io
+        from devcontainer_setup.__main__ import setup_continuity
+        for inside, expected in (('', 'task devcontainer:setup'), ('true', 'task work:cs on your Mac')):
+            with self.subTest(inside=inside):
+                output = io.StringIO()
+                with patch.dict(os.environ, CODESPACES=inside), contextlib.redirect_stdout(output):
+                    setup_continuity(self.root, None, None)
+                self.assertIn(expected, output.getvalue())
+                if not inside:
+                    self.assertIn('No Codespace was opened', output.getvalue())
 
     def test_github_repository_reads_only_a_github_origin(self):
         from devcontainer_setup.__main__ import _github_repository
@@ -421,7 +453,7 @@ class WizardCliTests(unittest.TestCase):
         prompts = []
         class UI:
             def choose(self, title, options, selected=None):
-                return 'Commit, push and open in browser'
+                return 'Push and open a Codespace in the browser'
             def confirm(self, title, default=True):
                 prompts.append(title)
                 return False
