@@ -432,6 +432,34 @@ class RenderTests(unittest.TestCase):
                     self.assertEqual(log.read_text().splitlines(), [expected])
                 self.assertFalse((self.project / 'owned').exists())
 
+    def test_dotfiles_with_a_zshrc_make_zsh_the_login_shell(self):
+        import shutil
+        script = Path(__file__).resolve().parents[1] / 'templates/scripts/apply-dotfiles.sh'
+        for brings_zshrc, current, switches in ((True, '/bin/bash', True), (False, '/bin/bash', False),
+                                                (True, 'ZSH', False)):
+            with self.subTest(brings_zshrc=brings_zshrc, current=current), tempfile.TemporaryDirectory() as home:
+                tools, log = Path(home) / 'tools', Path(home) / 'calls.log'
+                tools.mkdir()
+                zsh = tools / 'zsh'
+                def tool(name, body):
+                    (tools / name).write_text('#!/bin/sh\n' + body + '\n')
+                    (tools / name).chmod(0o755)
+                tool('zsh', 'exit 0')
+                tool('chezmoi', 'touch "$HOME/.zshrc"' if brings_zshrc else 'exit 0')
+                tool('getent', f'echo "tester:x:1000:1000::$HOME:{zsh if current == "ZSH" else current}"')
+                tool('sudo', 'echo "sudo $*" >> "$TEST_LOG"')
+                if not shutil.which('sha256sum'):
+                    tool('sha256sum', 'shasum -a 256')
+                env = dict(os.environ, HOME=home, PATH=f'{tools}:{os.environ["PATH"]}', TEST_LOG=str(log))
+                env.pop('XDG_STATE_HOME', None)
+                for _ in range(2):  # The second run takes the already-applied path.
+                    log.unlink(missing_ok=True)
+                    result = subprocess.run(['bash', str(script), 'owner/dotfiles'], env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    calls = log.read_text().splitlines() if log.exists() else []
+                    user = subprocess.check_output(['id', '-un'], text=True).strip()
+                    self.assertEqual(calls, [f'sudo -n chsh -s {zsh} {user}'] if switches else [])
+
     def test_duplicate_local_dotfiles_assignments_are_rejected(self):
         self.install(self.render(dotfiles=True))
         (self.project / '.devcontainer/scripts/validate-selected.sh').write_text('exit 0\n')
