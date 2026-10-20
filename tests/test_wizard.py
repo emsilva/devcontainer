@@ -402,10 +402,17 @@ class WizardCliTests(unittest.TestCase):
         self.git('remote', 'add', 'origin', 'https://github.com/owner/project.git')
         self.assertIsNone(_launch_options(UI(), Codespaces(run=github), self.root, 'main', None))
         (options, without_origin), (_, with_origin) = menus
-        self.assertEqual([option for option in options if option.startswith('Commit')], ['Commit only, no Codespace'])
+        self.assertEqual([option for option in options if option.startswith('Commit')], ['Commit only (no Codespace)'])
         self.assertTrue(all('Codespace' in option for option in options))
-        self.assertEqual(without_origin, 'Commit only, no Codespace')
+        self.assertEqual(without_origin, 'Commit only (no Codespace)')
         self.assertEqual(with_origin, 'Push and open a Codespace in the browser')
+
+    def test_gum_refuses_a_default_it_would_split_at_commas(self):
+        from devcontainer_setup.ui import Gum
+        gum = Gum.__new__(Gum)
+        gum.binary = '/usr/bin/false'
+        with self.assertRaisesRegex(ValueError, 'comma'):
+            gum.choose('After setup', ['Commit only, no Codespace', 'Other'], 'Commit only, no Codespace')
 
     def test_commit_only_ending_says_how_to_get_a_codespace(self):
         import contextlib

@@ -77,6 +77,9 @@ class Gum:
 
     def choose(self, title: str, options: list[str], selected: str | None = None) -> str:
         args = ['choose', '--header', title, '--height', '12']
+        if selected and ',' in selected:
+            # gum splits --selected at commas, so such a default would silently not apply.
+            raise ValueError(f'Gum cannot preselect an option containing a comma: {selected}')
         if selected in options:
             args += ['--selected', selected]
         return self._run([*args, '--', *options])

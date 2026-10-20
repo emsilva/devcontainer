@@ -480,7 +480,7 @@ def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
 
 LAUNCH_BROWSER = 'Push and open a Codespace in the browser'
 LAUNCH_VSCODE = 'Push and open a Codespace in VS Code'
-COMMIT_ONLY = 'Commit only, no Codespace'
+COMMIT_ONLY = 'Commit only (no Codespace)'
 
 
 def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume: str | None) -> dict | None:
