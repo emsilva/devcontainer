@@ -16,9 +16,10 @@ class Codespaces:
     def __init__(self, run=subprocess.run):
         self.run = run
 
-    def command(self, *args: str, json_output: bool = False, timeout: float | None = None):
+    def command(self, *args: str, json_output: bool = False, timeout: float | None = None, input: str | None = None):
         try:
-            result = self.run(['gh', *args], capture_output=True, text=True, timeout=timeout)
+            extra = {} if input is None else {'input': input}
+            result = self.run(['gh', *args], capture_output=True, text=True, timeout=timeout, **extra)
         except FileNotFoundError as error:
             raise ValueError('GitHub CLI is required: install gh and run gh auth login.') from error
         if result.returncode:
@@ -109,7 +110,13 @@ class Codespaces:
             time.sleep(3)
         raise ValueError(f'Codespace {name} is still provisioning; resume rather than create another.')
 
-    def personalize(self, name: str, repo: str) -> None:
+    def personalize(self, name: str, repo: str, profile: dict | None = None) -> None:
+        if profile:
+            # The dotfiles read identity and Claude settings from an unmanaged per-machine
+            # profile, which a new codespace lacks. Seed it once; never replace one.
+            self.command('codespace', 'ssh', '--codespace', name, '--',
+                         'umask 077 && mkdir -p ~/.config/chezmoi && { test -e ~/.config/chezmoi/machine.json'
+                         ' || cat > ~/.config/chezmoi/machine.json; }', input=json.dumps(profile, indent=2) + '\n')
         self.command('codespace', 'ssh', '--codespace', name, '--', shlex.join(['load-dotfiles', repo]))
 
     def open(self, name: str, client: str) -> None:
@@ -169,7 +176,8 @@ class Codespaces:
     def launch(self, plan, repo: str, machine: str | None, idle_timeout: str | None,
                client: str, dotfiles_repo: str | None, receipt: Path,
                *, resume: str | None = None, location: str | None = None,
-               retention: str | None = None, workspace: str | None = None) -> str:
+               retention: str | None = None, workspace: str | None = None,
+               machine_profile: dict | None = None) -> str:
         self._repository(repo)
         self._preflight_receipt(receipt)
         sha = plan.push()
@@ -263,7 +271,7 @@ class Codespaces:
             record['rebuild_pending'] = False
             self._save_receipt(receipt, record)
             if dotfiles_repo:
-                self.personalize(name, dotfiles_repo)
+                self.personalize(name, dotfiles_repo, machine_profile)
             self.open(name, client)
         except (ValueError, OSError, subprocess.TimeoutExpired) as error:
             if not name:

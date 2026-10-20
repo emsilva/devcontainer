@@ -427,6 +427,32 @@ class WizardCliTests(unittest.TestCase):
                 if not inside:
                     self.assertIn('No Codespace was opened', output.getvalue())
 
+    def test_machine_profile_is_the_macs_minus_mac_only_parts(self):
+        from devcontainer_setup.__main__ import _machine_profile
+        home = Path(self.tmp.name) / 'home'
+        profile = home / '.config/chezmoi/machine.json'
+        with patch.dict(os.environ, HOME=str(home)):
+            self.assertEqual(_machine_profile(self.root), {'git': {'name': 'Test User', 'email': 'test@example.com'}})
+            profile.parent.mkdir(parents=True)
+            profile.write_text(json.dumps({
+                'codespace': 'mac-side-name',
+                'git': {'name': 'Mac Name', 'email': 'mac@example.com', 'workEmail': 'work@example.com'},
+                'claudeSettings': {'permissions': {'defaultMode': 'bypassPermissions'}, 'hooks': {
+                    'SessionStart': [{'hooks': [{'type': 'command', 'command': f'{home}/bin/mac-only.sh'}]}],
+                    'Stop': [{'hooks': [{'type': 'command', 'command': '~/bin/portable.sh'},
+                                        {'type': 'command', 'command': f'bash {home}/bin/other.sh'}]}]}}}))
+            self.assertEqual(_machine_profile(self.root), {
+                'git': {'name': 'Mac Name', 'email': 'mac@example.com', 'workEmail': 'work@example.com'},
+                'claudeSettings': {'permissions': {'defaultMode': 'bypassPermissions'}, 'hooks': {
+                    'Stop': [{'hooks': [{'type': 'command', 'command': '~/bin/portable.sh'}]}]}}})
+
+    def test_git_identity_is_the_projects_effective_identity(self):
+        from devcontainer_setup.__main__ import _git_identity
+        self.assertEqual(_git_identity(self.root), ('Test User', 'test@example.com'))
+        self.git('config', '--unset', 'user.email')
+        with patch.dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1'):
+            self.assertIsNone(_git_identity(self.root))
+
     def test_github_repository_reads_only_a_github_origin(self):
         from devcontainer_setup.__main__ import _github_repository
         self.assertIsNone(_github_repository(self.root))

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -16,6 +17,7 @@ MACHINE = {'name': 'standardLinux32gb', 'display_name': '4 cores, 16 GB RAM',
 class FakeGitHub:
     def __init__(self):
         self.calls = []
+        self.inputs = []
         self.resource = {"machine": dict(MACHINE), "idle_timeout_minutes": 30,
                          "retention_period_minutes": 10080, "location": "EastUs"}
         self.fail_personalization = False
@@ -32,6 +34,7 @@ class FakeGitHub:
 
     def __call__(self, args, **kwargs):
         self.calls.append(args)
+        self.inputs.append(kwargs.get('input'))
         output = ''
         if args[1:3] == ['codespace', 'create']:
             output = 'new-space\n'
@@ -162,6 +165,23 @@ class CodespacesTests(unittest.TestCase):
         self.api.personalize('new-space', repo)
         remote = self.runner.calls[-1][-1]
         self.assertEqual(shlex.split(remote), ['load-dotfiles', repo])
+
+    def test_personalization_seeds_a_missing_machine_profile_before_dotfiles(self):
+        profile = {'git': {'name': 'Mannu Silva', 'email': 'mannu@example.com'},
+                   'claudeSettings': {'permissions': {'defaultMode': 'bypassPermissions'}}}
+        self.api.personalize('new-space', 'emsilva/dotfiles', profile)
+        (seed, dotfiles), (sent, _) = self.runner.calls[-2:], self.runner.inputs[-2:]
+        self.assertEqual(shlex.split(dotfiles[-1]), ['load-dotfiles', 'emsilva/dotfiles'])
+        self.assertNotIn('Mannu', seed[-1], 'The profile travels on stdin, not the command line')
+        with tempfile.TemporaryDirectory() as home:
+            env = dict(os.environ, HOME=home)
+            subprocess.run(['bash', '-c', seed[-1]], input=sent, env=env, check=True, text=True)
+            written = Path(home) / '.config/chezmoi/machine.json'
+            self.assertEqual(json.loads(written.read_text()), profile)
+            self.assertEqual(written.stat().st_mode & 0o777, 0o600)
+            written.write_text('{"git": {"name": "Kept"}}')
+            subprocess.run(['bash', '-c', seed[-1]], input=sent, env=env, check=True, text=True)
+            self.assertEqual(json.loads(written.read_text()), {'git': {'name': 'Kept'}})
 
     def test_failed_personalization_keeps_receipt_and_includes_resume(self):
         self.runner.fail_personalization = True

@@ -352,6 +352,35 @@ def _github_repository(project: Path) -> str | None:
     return match[1] if match else None
 
 
+def _git_identity(project: Path) -> tuple[str, str] | None:
+    name = git(project, 'config', 'user.name', check=False)
+    email = git(project, 'config', 'user.email', check=False)
+    return (name, email) if name and email else None
+
+
+def _machine_profile(project: Path) -> dict | None:
+    """This Mac's chezmoi machine profile for a codespace, minus what only works here."""
+    path = Path.home() / '.config/chezmoi/machine.json'
+    try:
+        profile = json.loads(path.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        identity = _git_identity(project)
+        return {'git': {'name': identity[0], 'email': identity[1]}} if identity else None
+    if not isinstance(profile, dict):
+        raise ValueError(f'{path} must contain a JSON object.')
+    profile.pop('codespace', None)  # Names a codespace from the Mac side.
+    home = str(Path.home())
+    hooks = profile.get('claudeSettings', {}).get('hooks', {})
+    for event in list(hooks):
+        # A hook command under this Mac's home directory cannot run in a codespace.
+        groups = [dict(group, hooks=[hook for hook in group.get('hooks', []) if home not in str(hook.get('command', ''))])
+                  for group in hooks[event]]
+        hooks[event] = [group for group in groups if group['hooks']]
+        if not hooks[event]:
+            del hooks[event]
+    return profile
+
+
 def _repository(project: Path) -> str:
     repo = _github_repository(project)
     if not repo:
@@ -636,7 +665,8 @@ def interactive(project: Path, found: dict, metadata: dict, ref: str, resume: st
             receipt = state / 'devcontainer-setup' / (hashlib.sha256(f'{repo}:{plan.branch}'.encode()).hexdigest()[:16] + '.json')
             config = json.loads(files['.devcontainer/devcontainer.json'])
             name = api.launch(plan, repo, dotfiles_repo=preferences['dotfiles_repo'] if chosen['dotfiles'] else None,
-                              receipt=receipt, workspace=config.get('workspaceFolder'), **launch)
+                              receipt=receipt, workspace=config.get('workspaceFolder'),
+                              machine_profile=_machine_profile(project) if chosen['dotfiles'] else None, **launch)
         else:
             name = None
         if chosen.get('continuity'):
