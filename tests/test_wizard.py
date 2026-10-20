@@ -368,6 +368,51 @@ class WizardCliTests(unittest.TestCase):
                     self.assertIn('Launch unavailable:', error_output.getvalue())
         self.assertEqual(self.git('status', '--porcelain'), '')
 
+    def test_missing_github_origin_offers_commit_only_fallback(self):
+        import contextlib
+        import io
+        from devcontainer_setup.__main__ import _launch_options
+        from devcontainer_setup.codespaces import Codespaces
+        prompts = []
+        class UI:
+            def choose(self, title, options, selected=None):
+                return 'Commit, push and open in browser'
+            def confirm(self, title, default=True):
+                prompts.append(title)
+                return True
+        def github(args, **kwargs):
+            raise AssertionError(f'No GitHub call without an origin: {args}')
+        error_output = io.StringIO()
+        with contextlib.redirect_stderr(error_output):
+            self.assertIsNone(_launch_options(UI(), Codespaces(run=github), self.root, 'main', None))
+        self.assertEqual(prompts, ['Continue with commit only?'])
+        self.assertIn('git remote add origin', error_output.getvalue())
+
+    def test_github_repository_reads_only_a_github_origin(self):
+        from devcontainer_setup.__main__ import _github_repository
+        self.assertIsNone(_github_repository(self.root))
+        self.git('remote', 'add', 'origin', 'https://gitlab.com/owner/project.git')
+        self.assertIsNone(_github_repository(self.root))
+        self.git('remote', 'set-url', 'origin', 'git@github.com:owner/project.git')
+        self.assertEqual(_github_repository(self.root), 'owner/project')
+
+    def test_wizard_names_a_missing_origin_before_the_first_question(self):
+        import contextlib
+        import io
+        from devcontainer_setup.__main__ import interactive
+        from devcontainer_setup.discovery import scan
+        from devcontainer_setup.ui import Cancelled
+        class FirstQuestionCancels:
+            def __getattr__(self, name):
+                raise Cancelled()
+        error_output = io.StringIO()
+        with patch.dict(os.environ, XDG_CONFIG_HOME=str(Path(self.tmp.name) / 'config')), \
+                patch('devcontainer_setup.__main__.Gum', FirstQuestionCancels), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(error_output), \
+                self.assertRaises(Cancelled):
+            interactive(self.root, scan(self.root), {}, 'ref', None)
+        self.assertIn('git remote add origin', error_output.getvalue())
+
     def test_launch_reuse_cancellation_does_not_offer_error_fallback(self):
         from devcontainer_setup.__main__ import _launch_options
         from devcontainer_setup.codespaces import Codespaces

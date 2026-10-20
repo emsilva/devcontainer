@@ -342,12 +342,21 @@ def _ensure_runner(ref: str) -> None:
     fetch_release(repository, ref, cache_home() / 'devcontainer-setup/releases')
 
 
-def _repository(project: Path) -> str:
-    remote = git(project, 'remote', 'get-url', 'origin')
+NO_GITHUB_ORIGIN = ('Codespaces launch requires a GitHub origin remote. Add one with '
+                    '`git remote add origin https://github.com/OWNER/REPO.git`, push, and run setup again.')
+
+
+def _github_repository(project: Path) -> str | None:
+    remote = git(project, 'remote', 'get-url', 'origin', check=False)
     match = re.fullmatch(r'(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+/[^/]+?)(?:\.git)?/?', remote)
-    if not match:
-        raise ValueError('Codespaces launch requires a GitHub origin remote.')
-    return match[1]
+    return match[1] if match else None
+
+
+def _repository(project: Path) -> str:
+    repo = _github_repository(project)
+    if not repo:
+        raise ValueError(NO_GITHUB_ORIGIN)
+    return repo
 
 
 def _preferences_after_commit(project: Path, preferences: dict) -> None:
@@ -475,8 +484,8 @@ def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume
                        'Commit, push and open in browser' if resume else 'Commit only')
     if action == 'Commit only':
         return None
-    repo = _repository(project)
     try:
+        repo = _repository(project)
         if not resume:
             spaces = api.existing(repo, branch)
             if spaces:
@@ -555,6 +564,8 @@ def interactive(project: Path, found: dict, metadata: dict, ref: str, resume: st
     ui, api = Gum(), Codespaces()
     preferences = load_preferences()
     chosen = defaults(found, preferences, metadata)
+    if not _github_repository(project):
+        print(f'Note: {NO_GITHUB_ORIGIN} Commit-only setup works without it.', file=sys.stderr, flush=True)
     while True:
         chosen = _select(ui, found, chosen, preferences)
         branch = proposed_branch(project)
