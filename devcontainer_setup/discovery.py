@@ -168,7 +168,8 @@ def scan(project: Path) -> dict:
         if any(part.is_symlink() for part in (full, *full.parents)):
             continue
         base = path.name
-        container_file = base.startswith('Dockerfile') or bool(re.fullmatch(r'(?:docker-compose|compose)(?:[.-][\w-]+)?\.ya?ml', base))
+        compose_file = bool(re.fullmatch(r'(?:docker-compose|compose)(?:[.-][\w-]+)?\.ya?ml', base))
+        container_file = base.startswith('Dockerfile') or compose_file
         suffix_runtime = {'.py': 'python', '.rb': 'ruby', '.go': 'go', '.js': 'node', '.jsx': 'node', '.ts': 'node', '.tsx': 'node', '.rs': 'rust'}.get(path.suffix)
         if suffix_runtime:
             sources[suffix_runtime].append(relative)
@@ -287,8 +288,13 @@ def scan(project: Path) -> dict:
         for name, pattern in patterns.items():
             if re.search(pattern, active, re.M): tool(name, relative, 'declared workflow command/action')
         if container_file: tool('docker', relative, 'container workflow')
-        for pattern in (r'^\s*EXPOSE\s+(\d+)', r'\blsof\b[^\n]*?\btcp:(\d+)', r'(?<![\w-])(?:[A-Z_]*PORT)\s*[:=]\s*[\'"]?(\d+)', r'--port(?:=|\s+)(\d+)'):
-            for value in re.findall(pattern, active, re.M):
+        port_patterns = [(pattern, active) for pattern in (r'^\s*EXPOSE\s+(\d+)', r'\blsof\b[^\n]*?(?i:tcp):(\d+)', r'(?<![\w-])(?:[A-Z_]*PORT)\s*[:=]\s*[\'"]?(\d+)', r'--port(?:=|\s+)(\d+)')]
+        if compose_file:
+            # Published host ports, read before the printed-help filter unquotes list scalars:
+            # short syntax [ip:]host:container, or long syntax published:.
+            port_patterns += [(r'^\s*-\s*[\'"]?(?:[\d.]+:)?(\d+):\d+', text), (r'^\s*published:\s*[\'"]?(\d+)', text)]
+        for pattern, source in port_patterns:
+            for value in re.findall(pattern, source, re.M):
                 port = int(value)
                 if 0 < port < 65536: ports.add(port)
     for name in RUNTIMES:

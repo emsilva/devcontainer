@@ -69,6 +69,13 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(found['ports'], [3570, 8787])
         self.assertEqual(found['package_managers']['node']['selected'], 'pnpm')
 
+    def test_uppercase_lsof_and_compose_published_host_ports(self):
+        self.put('Taskfile.yml', "cmds:\n - lsof -nP -iTCP:3100 -sTCP:LISTEN -t\n - lsof -ti tcp:8788\n - echo 'report: 3'\n - 1:2\n")
+        self.put('infra/docker-compose.yml', "services:\n  db:\n    ports:\n      - '5544:5432'\n"
+                 "      - \"127.0.0.1:19432:5432\"\n      - 8080:80/udp\n      - '9000'\n"
+                 "      - target: 80\n        published: \"6000\"\n")
+        self.assertEqual(scan(self.root)['ports'], [3100, 5544, 6000, 8080, 8788, 19432])
+
     def test_generic_ignores_ignored_scratch_and_discounted_trees(self):
         self.put('.gitignore', '.venv/\nnode_modules/\n.bundle/\nscratch/\n')
         self.put('scratch/package.json', '{"engines":{"node":"99"}}')
