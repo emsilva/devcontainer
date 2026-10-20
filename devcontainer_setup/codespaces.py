@@ -12,6 +12,15 @@ import tempfile
 import time
 
 
+def _with_github(command: str) -> str:
+    """Run a remote command that reaches GitHub in a login shell.
+
+    A codespace sets GITHUB_TOKEN for login shells only; a one-off SSH command
+    without it cannot fetch or clone (emsilva/devcontainer#35).
+    """
+    return shlex.join(['bash', '-lc', command])
+
+
 class Codespaces:
     def __init__(self, run=subprocess.run):
         self.run = run
@@ -117,7 +126,7 @@ class Codespaces:
             self.command('codespace', 'ssh', '--codespace', name, '--',
                          'umask 077 && mkdir -p ~/.config/chezmoi && { test -e ~/.config/chezmoi/machine.json'
                          ' || cat > ~/.config/chezmoi/machine.json; }', input=json.dumps(profile, indent=2) + '\n')
-        self.command('codespace', 'ssh', '--codespace', name, '--', shlex.join(['load-dotfiles', repo]))
+        self.command('codespace', 'ssh', '--codespace', name, '--', _with_github(shlex.join(['load-dotfiles', repo])))
 
     def open(self, name: str, client: str) -> None:
         args = ['codespace', 'code', '--codespace', name]
@@ -258,7 +267,7 @@ class Codespaces:
                            f'test -z "$(git status --porcelain)" && '
                            f'git fetch origin {shlex.quote(plan.branch)} && '
                            f'git merge-base --is-ancestor HEAD {shlex.quote(sha)} && git merge --ff-only {shlex.quote(sha)}')
-                self.command('codespace', 'ssh', '--codespace', name, '--', command)
+                self.command('codespace', 'ssh', '--codespace', name, '--', _with_github(command))
             if resume and record['rebuild_pending']:
                 previous_container = self._container_identity(name)
                 self.command('codespace', 'rebuild', '--codespace', name)

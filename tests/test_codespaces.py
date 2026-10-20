@@ -69,7 +69,7 @@ class FakeGitHub:
                 output = f'11111111-1111-1111-1111-111111111111:{generation}'
             if 'git merge --ff-only' in args[-1]:
                 self.remote_sha = 'a' * 40
-            if self.fail_personalization and args[-1].startswith('load-dotfiles '):
+            if self.fail_personalization and 'load-dotfiles ' in args[-1]:
                 return subprocess.CompletedProcess(args, 1, '', 'private dotfiles access denied')
             if self.fail_validation and 'scripts/validate-selected.sh' in args[-1]:
                 return subprocess.CompletedProcess(args, 1, '', 'Missing selected tool: uv')
@@ -164,14 +164,14 @@ class CodespacesTests(unittest.TestCase):
         repo = "owner/dotfiles'; touch /tmp/should-not-exist; '"
         self.api.personalize('new-space', repo)
         remote = self.runner.calls[-1][-1]
-        self.assertEqual(shlex.split(remote), ['load-dotfiles', repo])
+        self.assertEqual(shlex.split(remote), ['bash', '-lc', shlex.join(['load-dotfiles', repo])])
 
     def test_personalization_seeds_a_missing_machine_profile_before_dotfiles(self):
         profile = {'git': {'name': 'Mannu Silva', 'email': 'mannu@example.com'},
                    'claudeSettings': {'permissions': {'defaultMode': 'bypassPermissions'}}}
         self.api.personalize('new-space', 'emsilva/dotfiles', profile)
         (seed, dotfiles), (sent, _) = self.runner.calls[-2:], self.runner.inputs[-2:]
-        self.assertEqual(shlex.split(dotfiles[-1]), ['load-dotfiles', 'emsilva/dotfiles'])
+        self.assertEqual(shlex.split(dotfiles[-1]), ['bash', '-lc', 'load-dotfiles emsilva/dotfiles'])
         self.assertNotIn('Mannu', seed[-1], 'The profile travels on stdin, not the command line')
         with tempfile.TemporaryDirectory() as home:
             env = dict(os.environ, HOME=home)
@@ -225,6 +225,23 @@ class CodespacesTests(unittest.TestCase):
                         None, self.receipt, resume='new-space')
         self.assertIn(['gh', 'codespace', 'rebuild', '--codespace', 'new-space'], self.runner.calls)
         self.assertFalse(any(c[1:3] == ['codespace', 'create'] for c in self.runner.calls))
+
+    def test_remote_commands_that_reach_github_run_in_a_login_shell(self):
+        # A non-login codespace SSH shell has no GITHUB_TOKEN, so git fetch and
+        # a dotfiles clone cannot authenticate there.
+        self.runner.remote_sha = 'b' * 40
+        class Plan:
+            branch = 'setup/devcontainer'
+            def push(self):
+                return 'a' * 40
+        self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+                        'emsilva/dotfiles', self.receipt, resume='new-space')
+        remote = [c[-1] for c in self.runner.calls if c[1:3] == ['codespace', 'ssh']]
+        fetch = next(command for command in remote if 'git fetch' in command)
+        dotfiles = next(command for command in remote if 'load-dotfiles' in command)
+        for command in (fetch, dotfiles):
+            self.assertEqual(shlex.split(command)[:2], ['bash', '-lc'], command)
+        self.assertEqual(shlex.split(shlex.split(dotfiles)[2]), ['load-dotfiles', 'emsilva/dotfiles'])
 
     def test_retry_of_current_codespace_skips_rebuild(self):
         self.api._save_receipt(self.receipt, {'codespace': 'new-space', 'repository': 'owner/project',
