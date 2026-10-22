@@ -189,12 +189,14 @@ def run(args):
             try:
                 stopped = keeper.stop(state)
                 summary, failure = {'running': stopped['running'], 'phase': stopped.get('phase')}, None
-            except (OSError, ValueError) as error:
-                # A keeper that cannot be stopped never leaves the worker running.
-                summary, failure = {'running': None, 'error': str(error)}, error
+            except Exception as error:
+                # Whatever the keeper step raises (a hung ps included), the worker still stops.
+                failure = str(error) if isinstance(error, ValueError) else type(error).__name__
+                summary = {'running': None, 'error': failure}
             _print(dict(scratch.stop(state), keeper=summary))
             if failure is not None:
-                raise ValueError('The worker is stopped, but the keeper was not: ' + str(failure)) from None
+                raise ValueError('The worker is stopped, but the keeper was not (' + failure
+                                 + '); inspect task work:status, then retry task work:stop.')
             return 0
         if args.disconnect:
             from .herdr import disconnect_remote

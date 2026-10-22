@@ -1,4 +1,5 @@
 """Exercise the distributed command entrypoint, including isolated execution."""
+import contextlib
 import io
 import json
 import os
@@ -193,8 +194,17 @@ class ProjectSyncCLITests(unittest.TestCase):
                                                                          'inspect task work:status before retrying'))
         corrupt = mock.patch.object(keeper, 'RUNTIME', 'corrupt-keeper-runtime.json')
         atomic_write(state / 'corrupt-keeper-runtime.json', b'{not json')
-        for name, failure in (('hung', hung), ('corrupt', corrupt)):
-            with self.subTest(name), failure, \
+        # A ps that outlives its 5 s timeout while the keeper's ownership is checked.
+        tools = self.root.parent / 'slow-ps'
+        tools.mkdir()
+        (tools / 'ps').write_text('#!/bin/sh\nexec sleep 30\n')
+        (tools / 'ps').chmod(0o700)
+        atomic_write(state / 'slow-keeper-runtime.json',
+                     json.dumps({'pid': 4242, 'nonce': 'n' * 48, 'process_identity': 'x'}).encode())
+        slow_ps = mock.patch.dict(os.environ, {'PATH': str(tools) + os.pathsep + os.environ['PATH']})
+        slow_runtime = mock.patch.object(keeper, 'RUNTIME', 'slow-keeper-runtime.json')
+        for name, failure in (('hung', hung), ('corrupt', corrupt), ('ps times out', slow_ps)):
+            with self.subTest(name), failure, slow_runtime if name == 'ps times out' else contextlib.nullcontext(), \
                     mock.patch.dict(os.environ, {'XDG_STATE_HOME': self.env['XDG_STATE_HOME']}), \
                     mock.patch.object(scratch, 'stop', return_value={'running': False, 'phase': 'stopped'}) as worker_stop, \
                     mock.patch('sys.stdout', new_callable=io.StringIO) as out, \
@@ -203,6 +213,7 @@ class ProjectSyncCLITests(unittest.TestCase):
             worker_stop.assert_called_once_with(state)
             self.assertFalse(json.loads(out.getvalue())['running'])
             self.assertIn('the keeper was not', err.getvalue())
+            self.assertNotIn('Traceback', err.getvalue())
 
     def test_disarm_and_stop_also_stop_the_keeper(self):
         from unittest import mock
