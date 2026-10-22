@@ -18,7 +18,7 @@ import sys
 import time
 
 from . import arming, lifecycle, notify
-from .keepalive import KeepAlive, end_left_behind
+from .keepalive import KeepAlive, end_left_behind, recorded_child
 from .scratch import CONFIG
 from .state import (atomic_write, launch_detached, locked, log_formatter, owned_process, process_identity,
                     read_json, runtime_id, wait_gone)
@@ -98,11 +98,16 @@ def _end_left_behind(state):
     try:
         runtime = read_json(Path(state) / RUNTIME)
     except (OSError, ValueError):
-        return None
-    pid = end_left_behind(runtime.get('keepalive'), runtime.get('codespace'))
-    if pid:
+        return None, None
+    record = runtime.get('keepalive')
+    outcome = end_left_behind(record, runtime.get('codespace'))
+    pid = record.get('pid') if isinstance(record, dict) else None
+    if outcome == 'ended':
         _LOG.info('Ended the keep-alive child %s a previous keeper left', pid)
-    return pid
+    elif outcome == 'survived':
+        _LOG.info('The keep-alive child %s a previous keeper left survived SIGKILL; it may still hold the '
+                  'Codespace', pid)
+    return outcome, pid
 
 
 def stop(state: Path) -> dict:
@@ -110,7 +115,10 @@ def stop(state: Path) -> dict:
     state = Path(state).absolute()
     with locked(state / 'keeper-control.lock', blocking=True):
         result = _stop(state, status(state))
-        _end_left_behind(state)
+        outcome, pid = _end_left_behind(state)
+        if outcome == 'survived':
+            raise ValueError(f'The keep-alive child {pid} a previous keeper left survived SIGKILL; '
+                             f'inspect it with ps -p {pid}')
         return result
 
 
@@ -151,7 +159,8 @@ def foreign_processes(state: Path, codespace: str, *, run=subprocess.run) -> lis
     if listing is None or listing.returncode:
         raise ValueError('Cannot list processes to check for other gh connections; retry task work:cs:armed')
     try:
-        keepalive = (read_json(Path(state) / RUNTIME).get('keepalive') or {}).get('pid')
+        # Exempt by fact (pid, start time, argv), never a recorded pid alone (R14).
+        keepalive = recorded_child(read_json(Path(state) / RUNTIME).get('keepalive'), codespace)
     except FileNotFoundError:
         keepalive = None
     found = []

@@ -14,6 +14,11 @@ from devcontainer_setup.project_sync import arming, keeper, lifecycle
 from devcontainer_setup.project_sync.lifecycle import Reading
 from devcontainer_setup.project_sync.state import atomic_write, process_identity, read_json
 
+try:
+    from process_fixtures import keepalive_decoy
+except ModuleNotFoundError:  # run as tests.<module> rather than through discover
+    from tests.process_fixtures import keepalive_decoy
+
 T0 = 1_000_000.0
 LIFE = lifecycle.LIFETIME
 AUTH_ERROR = 'GitHub authentication unavailable'
@@ -446,6 +451,17 @@ class KeeperStepTests(unittest.TestCase):
         bare.rest()
         self.assertEqual(slept, [7])
 
+    def test_a_left_child_that_outlives_sigkill_is_logged_and_named_by_stop(self):
+        atomic_write(self.state / keeper.RUNTIME,
+                     json.dumps({'codespace': 'cs-1', 'keepalive': {'pid': 4242, 'process_identity': 'x'}}).encode())
+        with patch.object(keeper, 'end_left_behind', return_value='survived'):
+            with self.assertLogs(keeper._LOG, 'INFO') as logs:
+                self.assertEqual(keeper._end_left_behind(self.state), ('survived', 4242))
+            self.assertIn('keep-alive child 4242 a previous keeper left survived SIGKILL', logs.output[0])
+            with patch.object(keeper, '_owned', return_value=False), \
+                    self.assertRaisesRegex(ValueError, 'survived SIGKILL; inspect it with ps -p 4242'):
+                keeper.stop(self.state)
+
     def test_arm_wait_holds_for_the_keep_alive_child_while_available(self):
         # R4: an Available reading without a child yet keeps the arm waiting, within its timeout.
         now = time.time()
@@ -470,11 +486,12 @@ class ForeignProcessTests(unittest.TestCase):
     def test_only_foreign_gh_processes_for_this_codespace_are_named(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp).resolve()
-            atomic_write(state / keeper.RUNTIME, json.dumps({'keepalive': {'pid': 303}}).encode())
+            child, record = keepalive_decoy(self, state)
+            atomic_write(state / keeper.RUNTIME, json.dumps({'keepalive': record}).encode())
             listing = '\n'.join([
                 '  101 gh codespace ports forward 2222:50123 -c cs-1',
                 '  202 /opt/homebrew/bin/gh codespace ssh -c cs-1 --stdio -- -i /Users/me/.ssh/codespaces.auto',
-                "  303 gh codespace ssh -c cs-1 -- -i key -o ServerAliveInterval=30 exec sleep infinity",
+                f'  {child.pid} gh codespace ssh -c cs-1 -- -i key -o ServerAliveInterval=30 exec sleep infinity',
                 '  404 gh codespace ssh -c cs-1 -- -N -L 13570:localhost:3570',
                 '  505 gh codespace ssh -c cs-other -- -N -L 13570:localhost:3570',
                 '  606 grep gh codespace cs-1',
@@ -486,6 +503,10 @@ class ForeignProcessTests(unittest.TestCase):
             ])
             run = lambda *a, **k: subprocess.CompletedProcess(a, 0, listing + '\n', '')
             self.assertEqual(keeper.foreign_processes(state, 'cs-1', run=run), [404, 707, 808, 909])
+            # Exempt by fact only: a record whose start time differs (a reused pid) exempts nothing.
+            recycled = dict(record, process_identity='X' + record['process_identity'][1:])
+            atomic_write(state / keeper.RUNTIME, json.dumps({'keepalive': recycled}).encode())
+            self.assertEqual(keeper.foreign_processes(state, 'cs-1', run=run), [child.pid, 404, 707, 808, 909])
             with self.assertRaisesRegex(ValueError, 'retry'):
                 keeper.foreign_processes(state, 'cs-1', run=lambda *a, **k: subprocess.CompletedProcess(a, 1, '', ''))
 
@@ -635,21 +656,8 @@ class KeeperProcessTests(unittest.TestCase):
         self.assertIn('Another keeper holds keeper.lock', (self.state / keeper.LOG).read_text())
         self.assertEqual(self.keepers(), [])
 
-    def decoy(self, name='cs-1'):
-        """A process shaped like a keep-alive child for `name`, and its runtime record."""
-        ready = self.state / ('decoy-ready-' + name)
-        child = subprocess.Popen([sys.executable, '-c', 'import pathlib, sys, time; pathlib.Path(sys.argv[1]).touch(); '
-                                  'time.sleep(60)', str(ready), 'codespace', 'ssh', '-c', name, '--', '-i', 'key',
-                                  'exec sleep infinity'], start_new_session=True)
-        self.addCleanup(child.wait)
-        self.addCleanup(child.kill)
-        deadline = time.monotonic() + 5
-        while not ready.exists() and time.monotonic() < deadline:
-            time.sleep(.02)
-        return child, {'pid': child.pid, 'process_identity': process_identity(child.pid), 'ports_up': []}
-
     def test_a_replacement_keeper_ends_the_child_a_killed_keeper_left(self):
-        child, record = self.decoy()
+        child, record = keepalive_decoy(self, self.state)
         atomic_write(self.state / keeper.RUNTIME, json.dumps({'codespace': 'cs-1', 'keepalive': record}).encode())
         started = keeper.start(self.root, self.state)
         self.assertIsNotNone(child.wait(timeout=10))
@@ -659,7 +667,7 @@ class KeeperProcessTests(unittest.TestCase):
                       (self.state / keeper.LOG).read_text())
 
     def test_stop_ends_a_child_left_behind_but_never_a_recycled_pid(self):
-        child, record = self.decoy()
+        child, record = keepalive_decoy(self, self.state)
         recycled = dict(record, process_identity='X' + record['process_identity'][1:])
         for value in (recycled, dict(record, pid=None)):
             atomic_write(self.state / keeper.RUNTIME, json.dumps({'codespace': 'cs-1', 'keepalive': value}).encode())
@@ -673,7 +681,7 @@ class KeeperProcessTests(unittest.TestCase):
     def test_an_adopted_keeper_keeps_its_child(self):
         # Spec 6.1 step 7: a repeat arm adopts the keeper and leaves its keep-alive child alone.
         from devcontainer_setup.project_sync.state import runtime_id
-        child, record = self.decoy()
+        child, record = keepalive_decoy(self, self.state)
         atomic_write(self.state / keeper.RUNTIME, json.dumps({'codespace': 'cs-1', 'keepalive': record}).encode())
         owned = {'running': True, 'pid': 4121, 'nonce': 'n' * 48, 'process_identity': 'x', 'heartbeat_age': 10,
                  'runtime_id': runtime_id(), 'codespace': 'cs-1', 'gh_user': 'octo', 'keepalive': record}

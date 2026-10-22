@@ -17,12 +17,17 @@ from devcontainer_setup.project_sync import arming, keepalive, keeper
 from devcontainer_setup.project_sync.lifecycle import Reading
 from devcontainer_setup.project_sync.state import atomic_write, process_identity, read_json
 
+try:
+    from process_fixtures import keepalive_decoy
+except ModuleNotFoundError:  # run as tests.<module> rather than through discover
+    from tests.process_fixtures import keepalive_decoy
+
 TOKEN = 'gho_sentinel_real_token'
 
-# Answers `auth token` from a file; any other call records itself and holds, exits
-# or holds with a grandchild, as the mode file says. A held child ends by itself.
+# Answers `auth token` from a file; any other call records itself and holds, exits, holds
+# with a grandchild or holds ignoring SIGTERM, as the mode file says. A held child ends by itself.
 FAKE_GH = '''#!{python}
-import json, os, pathlib, subprocess, sys, time
+import json, os, pathlib, signal, subprocess, sys, time
 base = pathlib.Path({base!r})
 args = sys.argv[1:]
 if args[:2] == ['auth', 'token']:
@@ -34,6 +39,8 @@ if args[:2] == ['auth', 'token']:
     print(token.read_text().strip())
     sys.exit(0)
 mode = (base / 'mode').read_text().strip() if (base / 'mode').exists() else 'hold'
+if mode == 'stubborn':
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 row = {{'pid': os.getpid(), 'args': args, 'env': dict(os.environ)}}
 if mode == 'grandchild':
     row['grandchild'] = subprocess.Popen(['sleep', '60']).pid
@@ -390,6 +397,63 @@ class KeeperDrivesTests(Fakes):
         self.assertEqual(len(self.children), 1)
         self.assertEqual(records[0]['process_identity'], process_identity(records[0]['pid']))
 
+    def supervise(self, readings, *, popen=None, rest):
+        """Run the keeper's supervise in this process against `readings`; return its last runtime."""
+        handlers = {number: signal.getsignal(number) for number in (signal.SIGTERM, signal.SIGINT)}
+        self.addCleanup(lambda: [signal.signal(number, handler) for number, handler in handlers.items()])
+        made = keepalive.KeepAlive if popen is None else (
+            lambda *args, **kwargs: keepalive.KeepAlive(*args, popen=popen, **kwargs))
+        with patch.object(keeper.lifecycle, 'LifecycleAPI', return_value=Readings(readings)), \
+                patch.object(keeper.notify, 'notify', return_value=True), \
+                patch.object(keeper, '_caffeinate', return_value=None), \
+                patch.object(keeper, 'KeepAlive', made), \
+                patch.object(keeper.Keeper, 'rest', side_effect=rest):
+            keeper.supervise(self.base, self.state, 'n' * 48)
+        return read_json(self.state / keeper.RUNTIME)
+
+    def test_a_stop_signal_right_after_launch_still_ends_the_child(self):
+        # R14: a SIGTERM between popen and recording the child waits until it is recorded,
+        # so the keeper's finally finds and stops it.
+        def launch(*args, **kwargs):
+            child = self.spawn(*args, **kwargs)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return child
+        now = time.time()
+        runtime = self.supervise([Reading(now, True, 'Available', False, now - 60)], popen=launch,
+                                 rest=keeper._Shutdown)
+        child, = self.children
+        self.assertIsNotNone(child.poll())
+        self.assertEqual(runtime['phase'], 'stopped')
+        self.assertIsNone(runtime['keepalive']['pid'])
+        self.assertIn(f'Keep-alive stopped (pid {child.pid})', (self.state / keeper.LOG).read_text())
+
+    def test_a_stop_signal_during_a_stop_still_ends_the_child(self):
+        # R14: a SIGTERM that cuts ensure(False)'s wait short leaves the child recorded;
+        # the keeper's finally signals it again and kills it.
+        self.mode('stubborn')
+
+        class Interrupted(subprocess.Popen):
+            interrupted = False
+
+            def wait(self, timeout=None):
+                if timeout is not None and not self.interrupted:
+                    self.interrupted = True
+                    os.kill(os.getpid(), signal.SIGTERM)
+                return super().wait(timeout)
+
+        def launch(*args, **kwargs):
+            self.children.append(Interrupted(*args, **kwargs))
+            return self.children[-1]
+        now = time.time()
+        readings = [Reading(now, True, 'Available', False, now - 60), Reading(now + 60, True, 'Shutdown', False, None)]
+        with patch.object(keepalive, 'TERMINATE_WAIT', .5):
+            runtime = self.supervise(readings, popen=launch, rest=lambda: self.rows(count=1) and None)
+        child, = self.children
+        self.assertTrue(child.interrupted)
+        self.assertEqual(child.returncode, -signal.SIGKILL)
+        self.assertEqual(runtime['phase'], 'stopped')
+        self.assertIsNone(runtime['keepalive']['pid'])
+
     def test_supervise_ends_its_child_on_the_way_out(self):
         # R14: the keeper's finally stops the child, so a stopped keeper bills nothing.
         now = time.time()
@@ -416,24 +480,14 @@ class KeeperDrivesTests(Fakes):
 
 
 class LeftBehindTests(Fakes):
-    def decoy(self, name='cs-1'):
-        ready = self.base / 'decoy-ready'
-        child = self.spawn([sys.executable, '-c', 'import pathlib, sys, time; pathlib.Path(sys.argv[1]).touch(); '
-                            'time.sleep(60)', str(ready), 'codespace', 'ssh', '-c', name, '--', '-i', str(self.key),
-                            'exec sleep infinity'], start_new_session=True)
-        deadline = time.monotonic() + 5
-        while not ready.exists() and time.monotonic() < deadline:
-            time.sleep(.02)
-        return child, {'pid': child.pid, 'process_identity': process_identity(child.pid)}
-
     def test_a_child_left_behind_is_ended_by_fact(self):
-        child, record = self.decoy()
-        self.assertEqual(keepalive.end_left_behind(record, 'cs-1'), child.pid)
+        child, record = keepalive_decoy(self, self.base)
+        self.assertEqual(keepalive.end_left_behind(record, 'cs-1'), 'ended')
         self.assertIsNotNone(child.wait(5))
         self.assertIsNone(keepalive.end_left_behind(record, 'cs-1'))
 
     def test_a_recycled_pid_or_another_codespace_is_never_signalled(self):
-        child, record = self.decoy()
+        child, record = keepalive_decoy(self, self.base)
         identity = record['process_identity']
         for changed, name in ((dict(record, process_identity='X' + identity[1:]), 'cs-1'),
                               (record, 'cs-10'), (record, 'cs'), (dict(record, process_identity=None), 'cs-1'),
@@ -441,25 +495,25 @@ class LeftBehindTests(Fakes):
                               (None, 'cs-1'), ({}, None)):
             with self.subTest(record=changed, name=name):
                 self.assertIsNone(keepalive.end_left_behind(changed, name))
+                self.assertIsNone(keepalive.recorded_child(changed, name))
                 time.sleep(.1)
                 self.assertIsNone(child.poll())
-        other, other_record = self.decoy('cs-2')
+        self.assertEqual(keepalive.recorded_child(record, 'cs-1'), child.pid)
+        other, other_record = keepalive_decoy(self, self.base, 'cs-2')
         self.assertIsNone(keepalive.end_left_behind(other_record, 'cs-1'))
         self.assertIsNone(other.poll())
 
     def test_a_child_that_ignores_sigterm_is_killed(self):
-        ready = self.base / 'stubborn-ready'
-        child = self.spawn([sys.executable, '-c', 'import pathlib, signal, sys, time; '
-                            'signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path(sys.argv[1]).touch(); '
-                            'time.sleep(60)', str(ready), 'codespace', 'ssh', '-c', 'cs-1', '--', 'exec sleep infinity'],
-                           start_new_session=True)
-        deadline = time.monotonic() + 5
-        while not ready.exists() and time.monotonic() < deadline:
-            time.sleep(.02)
-        record = {'pid': child.pid, 'process_identity': process_identity(child.pid)}
+        child, record = keepalive_decoy(self, self.base, ignore_term=True)
         with patch.object(keepalive, 'TERMINATE_WAIT', .5):
-            self.assertEqual(keepalive.end_left_behind(record, 'cs-1'), child.pid)
+            self.assertEqual(keepalive.end_left_behind(record, 'cs-1'), 'ended')
         self.assertEqual(child.wait(5), -signal.SIGKILL)
+
+    def test_a_child_that_outlives_sigkill_is_reported_as_such(self):
+        child, record = keepalive_decoy(self, self.base)
+        with patch.object(keepalive, '_signal'), patch.object(keepalive, 'TERMINATE_WAIT', .2):
+            self.assertEqual(keepalive.end_left_behind(record, 'cs-1'), 'survived')
+        self.assertIsNone(child.poll())
 
 
 if __name__ == '__main__':

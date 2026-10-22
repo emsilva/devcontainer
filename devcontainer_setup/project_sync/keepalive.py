@@ -5,12 +5,14 @@ only to a ReadOnlyAPI capability, so it can never start a stopped Codespace.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import logging
 import os
 from pathlib import Path
 import signal
 import socket
 import subprocess
+import threading
 import time
 
 from .state import process_identity
@@ -88,15 +90,32 @@ def _signal(pid, number):
         pass
 
 
-def end_left_behind(record, name) -> int | None:
+def _recorded(record):
+    if not isinstance(record, dict):
+        return None, None
+    pid = record.get('pid')
+    if not (isinstance(pid, int) and not isinstance(pid, bool) and pid > 1):
+        return None, None
+    return pid, record.get('process_identity')
+
+
+def recorded_child(record, name) -> int | None:
+    """The pid of the live keep-alive child a runtime record names, proven by fact; else None."""
+    pid, identity = _recorded(record)
+    try:
+        return pid if pid is not None and _ours(pid, identity, name) else None
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def end_left_behind(record, name) -> str | None:
     """End a keep-alive child that a killed keeper left running; never by pid alone.
 
-    Returns its pid once it is gone, or None when the record names no such process.
+    'ended' once it is gone, 'survived' when it outlives SIGKILL, None when the record
+    names no such process.
     """
-    if not isinstance(record, dict):
-        return None
-    pid, identity = record.get('pid'), record.get('process_identity')
-    if not (isinstance(pid, int) and not isinstance(pid, bool) and pid > 1):
+    pid, identity = _recorded(record)
+    if pid is None:
         return None
     try:
         if not _ours(pid, identity, name):
@@ -106,13 +125,35 @@ def end_left_behind(record, name) -> int | None:
             deadline = time.monotonic() + TERMINATE_WAIT
             while time.monotonic() < deadline:
                 if not _ours(pid, identity, name):
-                    return pid
+                    return 'ended'
                 time.sleep(.1)
             if not _ours(pid, identity, name):
-                return pid
+                return 'ended'
     except subprocess.TimeoutExpired:
         return None
-    return None
+    return 'survived'
+
+
+@contextmanager
+def _signals_held():
+    """Hold SIGTERM and SIGINT through the block, then deliver the first that came (R14).
+
+    Held by handler, not by signal mask: a launched child inherits a blocked mask, and
+    an ssh started with SIGTERM blocked ignores it (measured).
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield  # Python runs signal handlers on the main thread only
+        return
+    caught = []
+    held = {number: signal.signal(number, lambda number, _: caught.append(number))
+            for number in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        yield
+    finally:
+        for number, handler in held.items():
+            signal.signal(number, signal.SIG_DFL if handler is None else handler)
+        if caught:
+            signal.raise_signal(caught[0])
 
 
 class KeepAlive:
@@ -163,19 +204,19 @@ class KeepAlive:
         return after if after != before else None
 
     def stop(self) -> None:
-        child, self.child = self.child, None
-        try:
-            # Unreaped, so its pid (and group) cannot have been reused.
-            if child is not None and child.poll() is None:
-                _signal(child.pid, signal.SIGTERM)
-                try:
-                    child.wait(timeout=TERMINATE_WAIT)
-                except subprocess.TimeoutExpired:
-                    _signal(child.pid, signal.SIGKILL)
-                    child.wait(timeout=TERMINATE_WAIT)
-                _LOG.info('Keep-alive stopped (pid %s)', child.pid)
-        finally:
-            self._close()
+        child = self.child
+        # Unreaped, so its pid (and group) cannot have been reused.
+        if child is not None and child.poll() is None:
+            _signal(child.pid, signal.SIGTERM)
+            try:
+                child.wait(timeout=TERMINATE_WAIT)
+            except subprocess.TimeoutExpired:
+                _signal(child.pid, signal.SIGKILL)
+                child.wait(timeout=TERMINATE_WAIT)
+            _LOG.info('Keep-alive stopped (pid %s)', child.pid)
+        # Only once it is reaped: a stop that a signal cuts short still names it for the next (R14).
+        self.child = None
+        self._close()
 
     def _close(self):
         api, self.api = self.api, None
@@ -229,21 +270,23 @@ class KeepAlive:
                 raise ValueError('the paired SSH key ~/' + KEY + ' is missing')
             token = self._read_token()
             up, skipped = free_ports(self.ports)
-            try:
-                api = ReadOnlyAPI(self.name, token).__enter__()
-            except OSError:
-                raise ValueError('the read-only GitHub adapter could not be opened') from None
-            try:
-                child = self.popen(argv(self.name, key, up), env=api.child_env(), stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-            except OSError:
-                api.__exit__(None, None, None)
-                raise ValueError('gh could not be started') from None
+            # A stop signal waits until the child is recorded, so the keeper's finally finds it (R14).
+            with _signals_held():
+                try:
+                    api = ReadOnlyAPI(self.name, token).__enter__()
+                except OSError:
+                    raise ValueError('the read-only GitHub adapter could not be opened') from None
+                try:
+                    child = self.popen(argv(self.name, key, up), env=api.child_env(), stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                except OSError:
+                    api.__exit__(None, None, None)
+                    raise ValueError('gh could not be started') from None
+                self.child, self.api, self.ports_up, self.ports_skipped = child, api, up, skipped
         except ValueError as error:
             self.error = str(error)
             _LOG.info('Keep-alive not started: %s; retrying in %s s', self.error, self._defer(self.now()))
             return
-        self.child, self.api, self.ports_up, self.ports_skipped = child, api, up, skipped
         self.started_at, self.due, self.error = self.now(), None, None
         if self.exited:
             self.restarts += 1
