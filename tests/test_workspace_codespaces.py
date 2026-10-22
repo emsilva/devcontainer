@@ -216,10 +216,17 @@ class RecoveryStatusTests(unittest.TestCase):
         from devcontainer_setup.project_sync.state import atomic_write
         atomic_write(self.state / 'arming.json', b'{"schema": 2}')
         lines = self.lines()
-        self.assertIn('arming.json cannot be read', lines[0])
-        self.assertIn('task work:cs:armed', lines[0])
-        self.assertNotIn('not armed', lines[0])
+        self.assertEqual(lines[0], 'Recovery     arming.json cannot be read (Unsupported arming.json schema); move '
+                         + str(self.state / 'arming.json') + ' aside, then run task work:cs:armed to arm again')
         self.assertEqual([line.split()[0] for line in lines], ['Recovery', 'Keeper', 'Codespace', 'Keep-alive', 'Last'])
+
+    def test_the_gh_auth_hint_needs_an_auth_error(self):
+        other = self.lines(phase='waiting', error='RuntimeError: unexpected error', reading=None)
+        self.assertEqual(other[2], 'Codespace    not read yet')
+        locked = self.lines(phase='waiting', reading=None, error='ValueError: Reading the GitHub token for octo '
+                            'timed out; unlock the Mac and its login keychain, then retry.')
+        self.assertIn('unlock the Mac', locked[2])
+        self.assertNotIn('gh auth status', locked[2])
 
     def test_unarmed_project_gets_one_line(self):
         from devcontainer_setup.project_sync import arming

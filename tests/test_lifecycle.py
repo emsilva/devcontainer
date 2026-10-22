@@ -328,6 +328,18 @@ class LifecycleAPITests(unittest.TestCase):
             self.assertIn('gh auth login', text)
             self.assertNotIn('GH_TOKEN', text)
 
+    def test_a_token_read_that_times_out_says_so_and_suggests_unlocking(self):
+        import subprocess
+        api = lifecycle.LifecycleAPI(self.NAME, 'octo', upstream=lambda *a: self.fail('no request'))
+        with patch.dict('os.environ', {'GH_TOKEN': ''}), \
+                patch('subprocess.run', side_effect=subprocess.TimeoutExpired(['gh'], 20)):
+            with self.assertRaises(ValueError) as caught:
+                api.read()
+        text = str(caught.exception)
+        self.assertIn('token for octo timed out', text)
+        self.assertIn('unlock', text)
+        self.assertNotIn('gh auth login', text)
+
     def test_a_request_that_cannot_be_built_never_echoes_it(self):
         def upstream(*args):
             raise ValueError("Invalid header value b'Bearer tok-secret\\n'")

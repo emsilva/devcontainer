@@ -66,6 +66,10 @@ def clean_env(env=None):
             and not key.startswith('GIT_')}
 
 
+class TokenTimeout(ValueError):
+    """gh did not hand over a token in time, as with a locked login keychain."""
+
+
 def github_token(env=None):
     source = os.environ if env is None else env
     if source.get('GH_TOKEN'):
@@ -76,7 +80,7 @@ def github_token(env=None):
     try:
         result = subprocess.run(args, env=clean_env(source), capture_output=True, text=True, timeout=20)
     except subprocess.TimeoutExpired:
-        raise ValueError('GitHub authentication timed out; check GitHub CLI authentication and retry.') from None
+        raise TokenTimeout('GitHub authentication timed out; check GitHub CLI authentication and retry.') from None
     if result.returncode or not result.stdout.strip():
         raise ValueError('GitHub authentication unavailable; set GH_TOKEN or DEVCONTAINER_GH_USER.')
     return result.stdout.strip()

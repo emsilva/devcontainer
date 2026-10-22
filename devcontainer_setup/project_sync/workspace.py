@@ -238,7 +238,8 @@ def recovery(state):
     try:
         config = arming.read(state)
     except (OSError, ValueError) as error:
-        config = {'armed': None, 'issue': str(error)}
+        # Only the reason; the status line carries the fix.
+        config = {'armed': None, 'issue': str(error).split(';')[0], 'path': str(Path(state) / arming.ARMING)}
     try:
         runtime = keeper.status(state)
     except (OSError, ValueError) as error:
@@ -254,6 +255,17 @@ def _ports(ports):
     return ' '.join(str(port + 10000) for port in ports) or 'none'
 
 
+def _token_hint(runtime):
+    # Only a token error has a known fix; other waits say nothing more.
+    from . import lifecycle
+    error = str(runtime.get('error') or '')
+    if lifecycle.TOKEN_TIMEOUT in error:
+        return '; unlock the Mac and its login keychain'
+    if lifecycle.NO_TOKEN in error or lifecycle.BAD_REQUEST in error:
+        return '; run gh auth status --hostname github.com'
+    return ''
+
+
 def recovery_lines(value):
     """Spec 6.8's Recovery block; each line that is not fine names the command to run."""
     from .arming import format_time
@@ -261,8 +273,8 @@ def recovery_lines(value):
     config, runtime, now = value['arming'], value['keeper'], value['now']
     if config.get('issue'):
         # Unknown, not unarmed: a keeper may still be running, so its lines follow.
-        lines = ['Recovery     arming.json cannot be read (' + config['issue']
-                 + '); fix or remove it, then run task work:cs:armed']
+        lines = ['Recovery     arming.json cannot be read (' + config['issue'] + '); move '
+                 + config['path'] + ' aside, then run task work:cs:armed to arm again']
     elif not config.get('armed'):
         return ['Recovery     not armed; task work:cs:armed arms it']
     else:
@@ -288,9 +300,7 @@ def recovery_lines(value):
         lines.append(text)
     reading, anchor, watch = runtime.get('reading') or {}, runtime.get('anchor'), runtime.get('down') or {}
     if not running or not reading:
-        hint = ('; run task work:cs:armed' if not running else
-                '; run gh auth status --hostname github.com' if runtime.get('phase') == 'waiting' else '')
-        lines.append('Codespace    not read yet' + hint)
+        lines.append('Codespace    not read yet' + ('; run task work:cs:armed' if not running else _token_hint(runtime)))
     elif not reading.get('ok'):
         lines.append('Codespace    unreadable at ' + format_time(reading['at'])
                      + '; check gh auth status --hostname github.com and the network')

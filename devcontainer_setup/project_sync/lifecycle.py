@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener
 
 from .state import _parent
-from .transport import _NoRedirect, _name, github_token
+from .transport import TokenTimeout, _NoRedirect, _name, github_token
 
 LIFETIME = 12 * 3600
 WINDOW = 15 * 60
@@ -28,6 +28,10 @@ POLL = 10
 RETRY_GAP = 30
 UNREADABLE_NOTICE = 3
 TERMINAL = ('Failed', 'Unavailable', 'Deleted', 'Archived')
+# How the token errors begin; status matches on them to name the fix.
+NO_TOKEN = 'GitHub authentication unavailable'
+TOKEN_TIMEOUT = 'Reading the GitHub token'
+BAD_REQUEST = 'The GitHub request could not be built'
 _BASE = 'https://api.github.com/user/codespaces/'
 
 
@@ -125,21 +129,25 @@ class LifecycleAPI:
         # (spec D10); a reader that never worked raises its fixed-text error.
         try:
             self._token = self._reader() or self._token
-        except ValueError:
+        except ValueError as error:
             if not self._token:
                 if self._gh_user:
-                    raise self._no_token() from None
+                    raise self._no_token(timed_out=isinstance(error, TokenTimeout)) from None
                 raise
         if not self._token:
             raise self._no_token()
         return self._token
 
-    def _no_token(self):
-        # A selected account (the keeper's) can only be fixed through gh itself.
+    def _no_token(self, timed_out=False):
+        # A selected account (the keeper's) can only be fixed through gh itself. A read
+        # that timed out usually waits on a locked keychain; logging in again will not help.
+        if self._gh_user and timed_out:
+            return ValueError(f'{TOKEN_TIMEOUT} for {self._gh_user} timed out; unlock the Mac and its login '
+                              'keychain, then retry.')
         if self._gh_user:
-            return ValueError(f'GitHub authentication unavailable for {self._gh_user}; run gh auth status '
-                              '--hostname github.com, and gh auth login --hostname github.com if it is missing.')
-        return ValueError('GitHub authentication unavailable; set GH_TOKEN or DEVCONTAINER_GH_USER.')
+            return ValueError(f'{NO_TOKEN} for {self._gh_user}; run gh auth status --hostname github.com, '
+                              'and gh auth login --hostname github.com if it is missing.')
+        return ValueError(NO_TOKEN + '; set GH_TOKEN or DEVCONTAINER_GH_USER.')
 
     def _call(self, method, suffix=''):
         token = self._fetch()
@@ -149,8 +157,7 @@ class LifecycleAPI:
             return 0, b''
         except ValueError:
             # http.client's text can echo a header value, the token included.
-            raise ValueError('The GitHub request could not be built; check the token with '
-                             'gh auth status --hostname github.com.') from None
+            raise ValueError(BAD_REQUEST + '; check the token with gh auth status --hostname github.com.') from None
 
     def read(self):
         at = time.time()
