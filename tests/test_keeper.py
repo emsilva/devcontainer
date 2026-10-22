@@ -428,12 +428,13 @@ class KeeperStepTests(unittest.TestCase):
         self.assertNotIn('ghp_secret', json.dumps(runtime))
 
     def test_rest_restarts_an_exited_child_between_readings_without_reading(self):
-        held, slept = FakeKeepAlive(), []
+        held, slept, ticks = FakeKeepAlive(), [], [0.0]
 
         def sleep(seconds):
             slept.append(seconds)
             self.clock += seconds
-        k = self.keeper([up(T0, last_used_at=T0)], keepalive=held, sleep=sleep)
+            ticks[0] += seconds
+        k = self.keeper([up(T0, last_used_at=T0)], keepalive=held, sleep=sleep, clock=lambda: ticks[0])
         self.run_steps(k, [T0])
         held.tends = [None, dict(held.record(), pid=None, error='the connection exited with status 255'), None,
                       dict(held.record(), pid=5403)]
@@ -446,10 +447,26 @@ class KeeperStepTests(unittest.TestCase):
         self.assertEqual(runtime['heartbeat_at'], T0 + 4 * keeper.TEND)
         # Without a keep-alive the rest is one plain sleep.
         slept.clear()
-        bare = self.keeper([up(T0, last_used_at=T0)], sleep=sleep)
+        bare = self.keeper([up(T0, last_used_at=T0)], sleep=sleep, clock=lambda: ticks[0])
         bare.delay = 7
         bare.rest()
         self.assertEqual(slept, [7])
+
+    def test_rest_keeps_its_length_when_the_wall_clock_steps_back(self):
+        # The rest runs on a monotonic clock: an NTP step back cannot stretch it.
+        slept, ticks = [], [0.0]
+
+        def sleep(seconds):
+            if len(slept) > 2 * keeper.POLL:
+                raise AssertionError('the rest outlived its delay')
+            slept.append(seconds)
+            ticks[0] += seconds
+            self.clock -= 3600
+        k = self.keeper([up(T0, last_used_at=T0)], keepalive=FakeKeepAlive(), sleep=sleep, clock=lambda: ticks[0])
+        self.run_steps(k, [T0])
+        k.rest()
+        self.assertAlmostEqual(sum(slept), keeper.POLL)
+        self.assertEqual(len(slept), keeper.POLL // keeper.TEND)
 
     def test_a_left_child_that_outlives_sigkill_is_logged_and_named_by_stop(self):
         atomic_write(self.state / keeper.RUNTIME,

@@ -236,14 +236,12 @@ class KeepAlive:
         self.child = None
         self._close()
         self.error = f'the connection exited with status {code}'
-        if self.wanted:
-            # 2 s doubling to 60 s while children die young; one that held a minute starts afresh.
-            if now - self.started_at >= BACKOFF_MAX:
-                self.backoff = BACKOFF
-            self.exited = True
-            _LOG.info('Keep-alive exited with status %s; restarting in %s s', code, self._defer(now))
-        else:
-            _LOG.info('Keep-alive exited with status %s', code)
+        # 2 s doubling to 60 s while children die young; one that held a minute starts afresh.
+        # Whatever the reading was, so the next start after any exit waits and counts.
+        if now - self.started_at >= BACKOFF_MAX:
+            self.backoff = BACKOFF
+        self.exited = True
+        _LOG.info('Keep-alive exited with status %s; a restart waits %s s', code, self._defer(now))
 
     def _defer(self, now):
         wait, self.backoff = self.backoff, min(self.backoff * 2, BACKOFF_MAX)

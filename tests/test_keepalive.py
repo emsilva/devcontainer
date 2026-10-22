@@ -319,6 +319,19 @@ class KeepAliveTests(Fakes):
             self.assertIsNone(held.tend())
         self.assertEqual(len(self.children), 1)
 
+    def test_a_child_that_exits_during_an_unknown_reading_waits_its_backoff(self):
+        # Every exit counts: the next Available restart waits its backoff and is a restart.
+        held = self.holder()
+        self.assertTrue(held.ensure(True)['pid'])
+        self.children[0].kill()
+        self.children[0].wait(5)
+        self.assertIsNone(held.ensure(None)['pid'])
+        self.assertIsNone(held.ensure(True)['pid'])
+        self.clock += 2
+        record = held.ensure(True)
+        self.assertTrue(record['pid'])
+        self.assertEqual(record['restarts'], 1)
+
     def test_stop_ends_the_child_with_its_ssh_and_closes_the_adapter(self):
         self.mode('grandchild')
         held = self.holder()

@@ -191,9 +191,10 @@ class Keeper:
     state stops it, and no good reading leaves it as it is (R13).
     """
 
-    def __init__(self, state, *, api, notifier, keepalive=None, herdr=None, now=time.time, sleep=time.sleep):
+    def __init__(self, state, *, api, notifier, keepalive=None, herdr=None, now=time.time, sleep=time.sleep,
+                 clock=time.monotonic):
         self.state, self.api, self.notifier = Path(state), api, notifier
-        self.keepalive, self.herdr, self.now, self.sleep = keepalive, herdr, now, sleep
+        self.keepalive, self.herdr, self.now, self.sleep, self.clock = keepalive, herdr, now, sleep, clock
         self.ledger = lifecycle.Ledger(self.state / LEDGER, now=now)
         self.project = api.name
         self.previous = None, None  # (state, time) of the last successful reading
@@ -267,8 +268,8 @@ class Keeper:
 
         Nothing is read: the restart rests on the last reading, and the child cannot start a Codespace.
         """
-        end = self.now() + self.delay
-        while (left := end - self.now()) > 0:
+        end = self.clock() + self.delay  # monotonic: a wall-clock step cannot stretch it
+        while (left := end - self.clock()) > 0:
             if self.keepalive is None:
                 self.sleep(left)
                 return
