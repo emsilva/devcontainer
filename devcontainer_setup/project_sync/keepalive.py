@@ -43,17 +43,26 @@ def _holder(port):
 
 
 def free_ports(ports: list[int]) -> tuple[list[tuple[int, int]], list[tuple[int, int | None]]]:
-    """([(local, remote) bindable], [(local, holder pid or None) in use]); local = remote + 10000."""
+    """([(local, remote) forwarded], [(local, holder pid or None) in use]); local = remote + 10000.
+
+    A port any TCP listener holds, on any address, is in use (R19): beside a 0.0.0.0 or ::
+    listener ssh's own 127.0.0.1 bind succeeds and shadows that service. lsof sees only this
+    user's listeners, so a 127.0.0.1 test bind must pass too.
+    """
     up, skipped = [], []
     for remote in ports:
         local = remote + OFFSET
+        holder = _holder(local)
+        if holder is not None:
+            skipped.append((local, holder))
+            continue
         try:
             with socket.socket() as sock:
                 # As ssh binds its forwards, so a TIME_WAIT leftover is not "in use".
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 sock.bind(('127.0.0.1', local))
         except OSError:
-            skipped.append((local, _holder(local)))
+            skipped.append((local, None))
         else:
             up.append((local, remote))
     return up, skipped

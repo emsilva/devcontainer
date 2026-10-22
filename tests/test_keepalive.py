@@ -44,15 +44,18 @@ if mode == 'exit':
 time.sleep(60)
 '''
 
+# Answers a holder for a port listed in the holders file ("port pid" lines), else finds none.
 FAKE_LSOF = '''#!{python}
 import json, pathlib, sys
 base = pathlib.Path({base!r})
 with open(base / 'lsof-calls.jsonl', 'a') as out:
     out.write(json.dumps(sys.argv[1:]) + '\\n')
-holder = base / 'holder'
-if not holder.exists():
+port = next((arg[len('-iTCP:'):] for arg in sys.argv[1:] if arg.startswith('-iTCP:')), None)
+holders = base / 'holders'
+found = dict(line.split() for line in holders.read_text().splitlines()) if holders.exists() else {{}}
+if port not in found:
     sys.exit(1)
-print(holder.read_text().strip())
+print(found[port])
 '''
 
 
@@ -152,14 +155,23 @@ class FreePortTests(Fakes):
             probe.bind(('127.0.0.1', 0))
             free = probe.getsockname()[1]
             probe.close()
-            (self.base / 'holder').write_text('4242\n')
+            (self.base / 'holders').write_text(f'{busy} 4242\n')
             up, skipped = keepalive.free_ports([free - 10000, busy - 10000])
             self.assertEqual(up, [(free, free - 10000)])
             self.assertEqual(skipped, [(busy, 4242)])
-            self.assertEqual(self.rows('lsof-calls.jsonl'), [['-nP', '-t', f'-iTCP:{busy}', '-sTCP:LISTEN']])
-            # lsof finds no holder (another user's listener, or it exited meanwhile).
-            (self.base / 'holder').unlink()
+            self.assertEqual(self.rows('lsof-calls.jsonl'), [['-nP', '-t', f'-iTCP:{port}', '-sTCP:LISTEN']
+                                                             for port in (free, busy)])
+            # lsof finds no holder (another user's listener, or it exited meanwhile): the bind decides.
+            (self.base / 'holders').unlink()
             self.assertEqual(keepalive.free_ports([busy - 10000]), ([], [(busy, None)]))
+
+    def test_a_port_lsof_names_is_skipped_even_when_it_binds(self):
+        # R19: lsof sees a holder the 127.0.0.1 test bind cannot, such as another address's listener.
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            free = probe.getsockname()[1]
+        (self.base / 'holders').write_text(f'{free} 5150\n')
+        self.assertEqual(keepalive.free_ports([free - 10000]), ([], [(free, 5150)]))
 
     def test_skipped_port_does_not_stop_the_child(self):
         with socket.socket() as held:
@@ -171,6 +183,36 @@ class FreePortTests(Fakes):
         self.assertEqual(record['ports_up'], [])
         self.assertEqual(record['ports_skipped'], [[busy, None]])
         self.assertNotIn('-L', self.rows(count=1)[0]['args'])
+
+
+class AnyListenerTests(unittest.TestCase):
+    """R19 through free_ports itself, with the real lsof (local only), as the reviewer's probe_bind.py.
+
+    On macOS ssh's -L bind on 127.0.0.1 succeeds beside a 0.0.0.0 or :: listener and then
+    shadows that service for 127.0.0.1 clients, so such a port is skipped too.
+    """
+
+    def assert_skipped_by_us(self, family, address):
+        with socket.socket(family) as held:
+            if family == socket.AF_INET6:
+                held.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            try:
+                held.bind((address, 0))
+            except OSError:
+                self.skipTest(address + ' cannot be bound on this host')
+            held.listen()
+            port = held.getsockname()[1]
+            self.assertEqual(keepalive.free_ports([port - 10000]), ([], [(port, os.getpid())]))
+
+    def test_a_loopback_listener_is_skipped(self):
+        self.assert_skipped_by_us(socket.AF_INET, '127.0.0.1')
+
+    def test_a_wildcard_listener_is_skipped(self):
+        self.assert_skipped_by_us(socket.AF_INET, '0.0.0.0')
+
+    @unittest.skipUnless(socket.has_ipv6, 'requires IPv6')
+    def test_a_dual_stack_listener_is_skipped(self):
+        self.assert_skipped_by_us(socket.AF_INET6, '::')
 
 
 class KeepAliveTests(Fakes):
