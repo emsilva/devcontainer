@@ -1,3 +1,4 @@
+import http.client
 import json
 import tempfile
 import unittest
@@ -262,6 +263,14 @@ class LifecycleAPITests(unittest.TestCase):
         api = lifecycle.LifecycleAPI(self.NAME, upstream=upstream, token_reader=lambda: 't')
         self.assertEqual(api.post_start(), 0)
         self.assertFalse(api.read().ok)
+
+    def test_http_protocol_errors_are_status_zero(self):
+        for error in (http.client.IncompleteRead(b''), http.client.BadStatusLine('x')):
+            def upstream(*args, error=error):
+                raise error
+            api = lifecycle.LifecycleAPI(self.NAME, upstream=upstream, token_reader=lambda: 't')
+            self.assertEqual(api.post_start(), 0)
+            self.assertFalse(api.read().ok)
 
     def test_failing_token_reader_falls_back_to_the_last_good_token(self):
         tokens, used = iter(['good']), []

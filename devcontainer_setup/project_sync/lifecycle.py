@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import http.client
 import json
 import os
 from pathlib import Path
@@ -132,7 +133,7 @@ class LifecycleAPI:
         token = self._fetch()
         try:
             return self._upstream(method, _BASE + self.name + suffix, token)
-        except (URLError, OSError, TimeoutError):
+        except (URLError, OSError, TimeoutError, http.client.HTTPException):
             return 0, b''
 
     def read(self):
