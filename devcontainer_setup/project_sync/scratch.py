@@ -29,8 +29,9 @@ SESSION = 'scratch-session.json'
 # A failure reads the Codespace state at most once a minute. verify() reads it on its own
 # failures, once per attempt, and those attempts back off from 2 s to 60 s (R23).
 STATE_READ_GAP = 60
-KEEPER_CHECK = 60  # the keeper watch reads local files at most once a minute
-# Over a re-arm's keeper start (<=120 s _ready + one 60 s check), under the 6-min kill notice (<=60 s + 240 s + a check).
+KEEPER_CHECK = 60  # the keeper watch reads local files once a minute while the keeper is healthy
+# Over a re-arm's keeper start without a consent prompt (~208 s: _ready 120 s, account 50 s, Codespace row
+# 30 s, keeper start 8 s); a kill is told within KEEPER_CHECK + 240 s + two ticks, 6 min up to 30 s ticks.
 KEEPER_DOWN = 240
 _runtime_id = project_state.runtime_id
 
@@ -339,6 +340,10 @@ class _Notices:
     def save(self):
         _write(self.state / RUNTIME, self.runtime)
 
+    def connected(self):
+        # A working connection makes an old stop reading stale; the stop itself ends at verify() (R23).
+        self.known = None
+
     def verified(self):
         # Only a cycle that passes verify() shows the Codespace is back (R23): that ends the
         # stop, so the next one notifies again. A connection alone can still fail verify().
@@ -370,11 +375,17 @@ class _Notices:
         """Notify once an armed project's keeper has read dead or hung for KEEPER_DOWN; local files only."""
         from . import keeper
         now = self.clock()
-        if self.checked_at is not None and now - self.checked_at < KEEPER_CHECK:
+        # A reading a minute while healthy or already told; every tick while a notice is due (R27).
+        if ((self.unhealthy_at is None or self.runtime.get('notified_keeper'))
+                and self.checked_at is not None and now - self.checked_at < KEEPER_CHECK):
             return
         self.checked_at = now
-        if self._armed() is not True:
+        armed = self._armed()
+        if armed is not True:
             self.unhealthy_at = None
+            if armed is False and self.runtime.get('notified_keeper'):
+                self.runtime['notified_keeper'] = False  # disarmed: a re-armed keeper is watched afresh
+                self.save()
             return  # unarmed, disarmed or unknown: nothing to watch
         try:
             current = keeper.status(self.state)
@@ -624,6 +635,7 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                             if info is None:
                                 raise ValueError('Mutagen create returned without a session; retrying safely.')
                         _mutagen(binary, state, 'sync', 'resume', info['identifier'])
+                        notices.connected()
                         update('syncing', connection_prepared=True, prepared_binding=config,
                                prepared_at=time.time(), error=None)
                         logger.info('Scratch connection established.')

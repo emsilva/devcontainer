@@ -1286,7 +1286,7 @@ class ScratchTests(unittest.TestCase):
         self.assertEqual(watched.call_count, 10)
         self.assertEqual(self.notes, [self.KEEPER_NOTE, self.KEEPER_NOTE])
         self.assertEqual(sent, [6, 0])  # after the 4th reading (400 s) and the 10th (880 s)
-        self.assertTrue(runtime['notified_keeper'])
+        self.assertFalse(runtime['notified_keeper'])  # the disarm cleared it
 
     def test_a_stop_through_a_reconnect_that_fails_verify_notifies_once(self):
         # The stop is first seen at the forward; a brief reconnect then fails verify(): one stop, one notice.
@@ -1372,25 +1372,26 @@ class ScratchTests(unittest.TestCase):
                 self.assertEqual(self.notes, [self.KEEPER_NOTE] * expected)
 
     def test_a_killed_keeper_is_reported_within_six_minutes(self):
-        # Spec slice D: `kill -9` of the keeper gives the worker's notice within 6 min. The keeper dies
-        # just after a healthy check; the syncing loop calls the watch every tick (a 5 s wait plus the cycle).
+        # Spec slice D: `kill -9` of the keeper gives the worker's notice within 6 min (R27), for every
+        # steady syncing tick up to 30 s (the loop's 5 s wait plus its cycle) and wherever the death
+        # falls between two checks.
         self._arm()
         dead, healthy = {'running': False, 'heartbeat_age': None}, {'running': True, 'heartbeat_age': 5}
-        death = .5
-        for tick in (5, 7, 11):
-            with self.subTest(tick=tick):
-                self.notes.clear()
-                now = [1000.0]
-                notices, told = self._notices(now), None
+        worst = {}
+        for tick in range(5, 31):
+            for phase in range(0, 80, 4):
+                death, now, told = 120.5 + phase, [0.0], []
+                notices = self._notices(now)
                 with patch('devcontainer_setup.project_sync.keeper.status',
-                           side_effect=lambda state: healthy if now[0] - 1000.0 < death else dead):
-                    for at in range(0, 600, tick):
-                        now[0] = 1000.0 + at
+                           side_effect=lambda state: healthy if now[0] < death else dead), \
+                        patch('devcontainer_setup.project_sync.notify.notify',
+                              side_effect=lambda title, text: told.append(now[0]) or True):
+                    while not told and now[0] < 2000:
                         notices.watch_keeper()
-                        if self.notes and told is None:
-                            told = at
-                self.assertEqual(self.notes, [self.KEEPER_NOTE])
-                self.assertLessEqual(told - death, 360)
+                        now[0] += tick
+                self.assertTrue(told, (tick, phase))
+                worst[tick] = max(worst.get(tick, 0), told[0] - death)
+        self.assertEqual({tick: late for tick, late in worst.items() if late > 360}, {})
 
     def test_a_disarm_ends_the_keeper_watch_and_a_re_arm_starts_it_over(self):
         self._arm()
@@ -1409,24 +1410,57 @@ class ScratchTests(unittest.TestCase):
         self.assertEqual(status.call_count, 3)
         self.assertEqual(self.notes, [])
 
-    def test_keeper_watch_never_reads_twice_within_a_check(self):
+    def test_keeper_watch_reads_once_a_check_while_healthy_and_every_tick_while_not(self):
+        self._arm()
+        dead, healthy = {'running': False, 'heartbeat_age': None}, {'running': True, 'heartbeat_age': 5}
+        now, current, readings = [1000.0], [healthy], []
+        notices = self._notices(now)
+        def status(state):
+            readings.append(now[0] - 1000.0)
+            return current[0]
+        def watch(*times):
+            for at in times:
+                now[0] = 1000.0 + at
+                notices.watch_keeper()
+        with patch('devcontainer_setup.project_sync.keeper.status', side_effect=status):
+            watch(0, 30, 59, 60)  # healthy: a reading a minute
+            self.assertEqual(readings, [0, 60])
+            current[0] = dead
+            watch(65, 119, 120, 125, 130)  # the next check finds it dead; from then on every tick reads
+            self.assertEqual(readings, [0, 60, 120, 125, 130])
+            watch(*range(135, 360, 5))
+            self.assertEqual(self.notes, [])
+            watch(360)  # 240 s after the first unhealthy reading
+            self.assertEqual(self.notes, [self.KEEPER_NOTE])
+            del readings[:]
+            watch(365, 370, 420)  # told: back to a reading a minute
+            self.assertEqual(readings, [420])
+        self.assertEqual(self.notes, [self.KEEPER_NOTE])
+
+    def test_a_disarm_clears_the_keeper_notice_so_a_re_armed_keeper_is_watched(self):
+        from devcontainer_setup.project_sync.state import atomic_write
         self._arm()
         now = [1000.0]
         notices = self._notices(now)
         with patch('devcontainer_setup.project_sync.keeper.status',
-                   return_value={'running': False, 'heartbeat_age': None}) as status:
-            for step in (0, 30, 29):  # 0 s, 30 s and 59 s: one reading
-                now[0] += step
+                   return_value={'running': False, 'heartbeat_age': None}):
+            for at in (0, 240):  # dead for 240 s: told
+                now[0] = 1000.0 + at
                 notices.watch_keeper()
-            self.assertEqual(status.call_count, 1)
-            now[0] += 1  # 60 s after the first reading: the second
-            notices.watch_keeper()
-            self.assertEqual(status.call_count, 2)
-            self.assertEqual(self.notes, [])
-            now[0] = 1240.0  # 240 s after the first unhealthy reading: the notice
-            notices.watch_keeper()
-        self.assertEqual(status.call_count, 3)
-        self.assertEqual(self.notes, [self.KEEPER_NOTE])
+            self.assertEqual(self.notes, [self.KEEPER_NOTE])
+            atomic_write(self.state / 'arming.json', b'{"schema": 2}\n')
+            now[0] = 1300.0
+            notices.watch_keeper()  # unreadable: not a disarm, so the notice stands
+            self.assertTrue(notices.runtime['notified_keeper'])
+            self._arm(False)
+            now[0] = 1360.0
+            notices.watch_keeper()  # disarmed: the notice is cleared
+            self.assertFalse(notices.runtime['notified_keeper'])
+            self._arm()
+            for at in (420, 660):  # re-armed, and that keeper dead for 240 s: told again
+                now[0] = 1000.0 + at
+                notices.watch_keeper()
+        self.assertEqual(self.notes, [self.KEEPER_NOTE] * 2)
 
     def test_unreadable_arming_sends_no_notice_and_logs_once(self):
         from devcontainer_setup.project_sync.state import atomic_write
@@ -1442,15 +1476,41 @@ class ScratchTests(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertIn('task work:status', lines[0])
 
+    def test_a_good_connection_drops_an_old_stop_reading(self):
+        # The stop stays open until a cycle passes verify() (R23), but once a connection works the old
+        # reading no longer names the next failure: a local fault keeps its own text.
+        self.replies.append((200, json.dumps({'name': 'bound-name', 'state': 'Shutdown'}).encode()))
+        with patch.object(self.module, 'discover_project', side_effect=ValueError('fixture local fault after connecting')):
+            runtime, log = self._work([self.FORWARD_DOWN, 'ok'])
+        self.assertEqual(runtime['error'], 'fixture local fault after connecting')
+        self.assertIn('Scratch waiting: fixture local fault after connecting', log)
+        self.assertEqual(len(self.reads), 1)
+        self.assertEqual(self.notes, [self.STOP_NOTE])
+        self.assertTrue(runtime['notified_stop'])
+
     def test_restarted_worker_keeps_the_notices_it_sent(self):
+        import functools
         config = dict(identity='github.com/owner/repo', codespace='bound-name', root=str(self.root),
                       remote_root='/workspaces/repo')
-        self.module._write(self.state / self.module.RUNTIME,
-                           dict(binding=config, phase='waiting', notified_stop=True, notified_keeper=True))
+        def restart_after(**sent):
+            self.module._write(self.state / self.module.RUNTIME, dict(binding=config, phase='waiting', **sent))
+        # Unarmed, the same stop still read: no second stop notice.
+        restart_after(notified_stop=True)
         self.replies.append((200, json.dumps({'name': 'bound-name', 'state': 'Shutdown'}).encode()))
         runtime, _ = self._work([self.FORWARD_DOWN])
         self.assertEqual(self.notes, [])
         self.assertTrue(runtime['notified_stop'])
+        # Armed, the same keeper still dead well past KEEPER_DOWN: no second keeper notice.
+        self._arm()
+        restart_after(notified_keeper=True)
+        ticks = iter(range(80, 10000, 80))
+        stepped = functools.partial(self.module._Notices, clock=lambda: next(ticks))
+        with patch.object(self.module, '_Notices', stepped), \
+                patch('devcontainer_setup.project_sync.keeper.status',
+                      return_value={'running': False, 'heartbeat_age': None}) as status:
+            runtime, _ = self._work([self.FORWARD_DOWN] * 4)  # watched at 160, 320, 480 and 640 s
+        self.assertEqual(status.call_count, 4)
+        self.assertEqual(self.notes, [])
         self.assertTrue(runtime['notified_keeper'])
 
     def test_only_planned_session_absence_is_retryable_and_inventory_failure_is_not_absence(self):
