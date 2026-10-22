@@ -30,6 +30,8 @@ SESSION = 'scratch-session.json'
 # failures, once per attempt, and those attempts back off from 2 s to 60 s (R23).
 STATE_READ_GAP = 60
 KEEPER_CHECK = 60  # the keeper watch reads local files at most once a minute
+# Over a re-arm's keeper start (<=120 s _ready + one 60 s check), under the 6-min kill notice (<=60 s + 240 s + a check).
+KEEPER_DOWN = 240
 _runtime_id = project_state.runtime_id
 
 
@@ -365,7 +367,7 @@ class _Notices:
         self._send(f"{self.project}'s Codespace stopped ({self.known}); run task work:cs to bring it back")
 
     def watch_keeper(self):
-        """Notify once an armed project's keeper has read dead or hung for 5 minutes; local files only."""
+        """Notify once an armed project's keeper has read dead or hung for KEEPER_DOWN; local files only."""
         from . import keeper
         now = self.clock()
         if self.checked_at is not None and now - self.checked_at < KEEPER_CHECK:
@@ -389,9 +391,9 @@ class _Notices:
                 self.save()
         elif self.unhealthy_at is None:
             # An arm can start its keeper minutes after the worker, as on a re-arm (D1), so wait
-            # out the same 5 minutes that make a heartbeat stale before notifying (R25).
+            # out KEEPER_DOWN before notifying (R25, R26).
             self.unhealthy_at = now
-        elif now - self.unhealthy_at >= keeper.HEARTBEAT_STALE and not self.runtime.get('notified_keeper'):
+        elif now - self.unhealthy_at >= KEEPER_DOWN and not self.runtime.get('notified_keeper'):
             self.runtime['notified_keeper'] = True
             self.save()
             self._send(f'Recovery for {self.project} is not running; run task work:cs:armed')

@@ -1263,15 +1263,15 @@ class ScratchTests(unittest.TestCase):
         self._arm()
         dead, hung, healthy = ({'running': False, 'heartbeat_age': None}, {'running': True, 'heartbeat_age': 301},
                                {'running': True, 'heartbeat_age': 5})
-        # One clock reading per check here, 100 s apart: unhealthy from 200 s, notified at 500 s,
-        # healthy at 600 s, unhealthy again from 700 s, notified again at 1000 s.
-        readings = [dead, hung, dead, dead, healthy, dead, dead, dead, dead]
+        # One clock reading per check here, 80 s apart: unhealthy from 160 s, notified at 400 s,
+        # healthy at 560 s, unhealthy again from 640 s, notified again at 880 s.
+        readings = [dead, hung, dead, dead, dead, healthy, dead, dead, dead, dead]
         def status(state):
             reading = readings.pop(0)
             if not readings:
                 self._arm(False)  # disarmed: the next check ends the watch without a notice
             return reading
-        ticks = iter(range(100, 10000, 100))
+        ticks = iter(range(80, 10000, 80))
         stepped = functools.partial(self.module._Notices, clock=lambda: next(ticks))
         sent = []  # how many readings were left when each notice went out
         def notify(title, text):
@@ -1282,10 +1282,10 @@ class ScratchTests(unittest.TestCase):
                 patch('devcontainer_setup.project_sync.notify.notify', side_effect=notify), \
                 patch('devcontainer_setup.project_sync.keeper.status', side_effect=status) as watched:
             # The keeper is checked while waiting, then on each syncing tick.
-            runtime, _ = self._work([self.FORWARD_DOWN, 'ok'], ['ok'] * 10)
-        self.assertEqual(watched.call_count, 9)
+            runtime, _ = self._work([self.FORWARD_DOWN, 'ok'], ['ok'] * 11)
+        self.assertEqual(watched.call_count, 10)
         self.assertEqual(self.notes, [self.KEEPER_NOTE, self.KEEPER_NOTE])
-        self.assertEqual(sent, [5, 0])  # after the 4th reading (500 s) and the 9th (1000 s)
+        self.assertEqual(sent, [6, 0])  # after the 4th reading (400 s) and the 10th (880 s)
         self.assertTrue(runtime['notified_keeper'])
 
     def test_a_stop_through_a_reconnect_that_fails_verify_notifies_once(self):
@@ -1348,16 +1348,16 @@ class ScratchTests(unittest.TestCase):
         return self.module._Notices(self.state, config, {}, logging.getLogger('fixture-notices'),
                                     clock=lambda: now[0])
 
-    def test_keeper_watch_notifies_after_the_keeper_is_unhealthy_for_five_minutes(self):
-        # R25: an arm can start its keeper minutes after the worker (D1), so a notice waits out
-        # keeper.HEARTBEAT_STALE (300 s) of unhealthy readings; a healthy reading starts it over.
+    def test_keeper_watch_notifies_once_the_keeper_is_down_for_four_minutes(self):
+        # R25, R26: an arm can start its keeper minutes after the worker (D1), so a notice waits out
+        # 240 s of unhealthy readings; a healthy reading starts it over.
         self._arm()
         dead, healthy = {'running': False, 'heartbeat_age': None}, {'running': True, 'heartbeat_age': 5}
         for name, sequence, expected in (
-                ('unhealthy for 299 s', [(0, dead), (100, dead), (200, dead), (299, dead)], 0),
-                ('unhealthy for 300 s', [(0, dead), (100, dead), (200, dead), (300, dead)], 1),
-                ('still unhealthy later', [(0, dead), (100, dead), (200, dead), (300, dead), (400, dead), (500, dead)], 1),
-                ('a healthy reading starts it over', [(0, dead), (200, dead), (260, healthy), (320, dead), (600, dead)], 0),
+                ('unhealthy for 239 s', [(0, dead), (80, dead), (160, dead), (239, dead)], 0),
+                ('unhealthy for 240 s', [(0, dead), (80, dead), (160, dead), (240, dead)], 1),
+                ('still unhealthy later', [(0, dead), (80, dead), (160, dead), (240, dead), (320, dead), (400, dead)], 1),
+                ('a healthy reading starts it over', [(0, dead), (160, dead), (220, healthy), (280, dead), (500, dead)], 0),
                 ('a re-arm starting its keeper 180 s later (D1)',
                  [(0, dead), (60, dead), (120, dead), (180, dead), (240, healthy), (300, healthy)], 0)):
             with self.subTest(name):
@@ -1370,6 +1370,27 @@ class ScratchTests(unittest.TestCase):
                         notices.watch_keeper()
                 self.assertEqual(readings, [])  # every reading was taken, none skipped by the check gate
                 self.assertEqual(self.notes, [self.KEEPER_NOTE] * expected)
+
+    def test_a_killed_keeper_is_reported_within_six_minutes(self):
+        # Spec slice D: `kill -9` of the keeper gives the worker's notice within 6 min. The keeper dies
+        # just after a healthy check; the syncing loop calls the watch every tick (a 5 s wait plus the cycle).
+        self._arm()
+        dead, healthy = {'running': False, 'heartbeat_age': None}, {'running': True, 'heartbeat_age': 5}
+        death = .5
+        for tick in (5, 7, 11):
+            with self.subTest(tick=tick):
+                self.notes.clear()
+                now = [1000.0]
+                notices, told = self._notices(now), None
+                with patch('devcontainer_setup.project_sync.keeper.status',
+                           side_effect=lambda state: healthy if now[0] - 1000.0 < death else dead):
+                    for at in range(0, 600, tick):
+                        now[0] = 1000.0 + at
+                        notices.watch_keeper()
+                        if self.notes and told is None:
+                            told = at
+                self.assertEqual(self.notes, [self.KEEPER_NOTE])
+                self.assertLessEqual(told - death, 360)
 
     def test_a_disarm_ends_the_keeper_watch_and_a_re_arm_starts_it_over(self):
         self._arm()
@@ -1402,7 +1423,7 @@ class ScratchTests(unittest.TestCase):
             notices.watch_keeper()
             self.assertEqual(status.call_count, 2)
             self.assertEqual(self.notes, [])
-            now[0] = 1300.0  # 300 s after the first unhealthy reading: the notice
+            now[0] = 1240.0  # 240 s after the first unhealthy reading: the notice
             notices.watch_keeper()
         self.assertEqual(status.call_count, 3)
         self.assertEqual(self.notes, [self.KEEPER_NOTE])
