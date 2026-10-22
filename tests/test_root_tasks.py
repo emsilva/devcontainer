@@ -17,6 +17,24 @@ class RootTasksTests(unittest.TestCase):
         self.assertIn('cmds: [echo owner]', changed)
         self.assertEqual(integrate(changed), changed)
 
+    def test_new_work_tasks_render_and_alias(self):
+        from pathlib import Path
+        from devcontainer_setup.root_tasks import ALIASES
+        new = ('work:cs:armed', 'work:disarm', 'work:hold', 'work:cs:stop', 'work:cs:restart', 'work:logs')
+        template = (Path(__file__).resolve().parents[1] / 'templates/continuity-tasks.yml').read_text()
+        generator = (Path(__file__).resolve().parents[1] / 'Taskfile.yml').read_text()
+        changed = integrate("version: '3'\ntasks:\n")
+        for name in new:
+            self.assertIn(name, ALIASES)
+            self.assertIn('  ' + name + ':\n', template)
+            self.assertIn('  ' + name + ':\n', generator)
+            self.assertIn('task: devcontainer:' + name + '\n', changed)
+        for name in ('work:cs:armed', 'work:cs:stop', 'work:cs:restart'):
+            self.assertIn('  ' + name + ':\n    interactive: true\n', changed)
+        for name in ('work:disarm', 'work:hold', 'work:logs'):
+            self.assertNotIn('  ' + name + ':\n    interactive', changed)
+        self.assertEqual(integrate(changed), changed)
+
     def test_edited_owned_block_refused(self):
         text = integrate("version: '3'\ntasks:\n")
         with self.assertRaisesRegex(ValueError, 'Edited'):

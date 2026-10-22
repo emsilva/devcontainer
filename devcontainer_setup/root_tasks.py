@@ -4,7 +4,9 @@ import re
 from .taskfile_mapping import mapping
 
 ALIASES = ('work:cs', 'work:disconnect', 'work:status', 'work:stop',
+           'work:cs:armed', 'work:disarm', 'work:hold', 'work:cs:stop', 'work:cs:restart', 'work:logs',
            'scratch:configure', 'scratch:start', 'scratch:stop', 'scratch:status', 'scratch:logs', 'scratch:backup')
+INTERACTIVE = ('work:cs', 'work:cs:armed', 'work:cs:stop', 'work:cs:restart')
 LEGACY = ('work', 'work:codex', 'work:claude', 'work:codex:cs', 'work:claude:cs',
           'agent:codex', 'agent:claude', 'agent:sessions', 'agent:handoff', 'agent:recover',
           'scratch:configure', 'scratch:start', 'scratch:stop', 'scratch:status', 'scratch:logs', 'scratch:backup')
@@ -43,7 +45,7 @@ def integrate(text, enabled=True):
         if alias in existing:
             continue
         additions += (indent + alias + ':\n'
-                      + (indent + '  interactive: true\n' if alias == 'work:cs' else '')
+                      + (indent + '  interactive: true\n' if alias in INTERACTIVE else '')
                       + indent + '  cmds:\n' + indent + f'    - task: devcontainer:{alias}\n'
                       + indent + '      vars: {CLI_ARGS: "{{.CLI_ARGS}}"}\n')
     owned = (indent + '# '+LABEL+' begin sha256='+hashlib.sha256(additions.encode()).hexdigest()+'\n'

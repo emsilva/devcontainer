@@ -34,6 +34,37 @@ class ProjectSyncCLITests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)['phase'], 'stopped')
         self.assertFalse(self.state.exists())
 
+    def test_armed_requires_a_terminal(self):
+        result = self.run_cli('work', '--armed')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Work entrypoints require a terminal', result.stderr)
+
+    def test_hold_and_disarm_edit_arming_state(self):
+        result = self.run_cli('work', '--hold', '09:30')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('not armed', result.stderr)
+        files = list(self.state.rglob('arming.json'))
+        self.assertEqual(files, [])
+        result = self.run_cli('work', '--disarm')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_hold_is_stored_for_an_armed_project(self):
+        from devcontainer_setup.project_sync import arming
+        from devcontainer_setup.project_sync.state import discover_project, state_dir
+        state = state_dir(discover_project(self.root), self.env)
+        arming.arm(state, gh_user='octo', consent='x', billable_owner='octo', ports=[], now=1.0)
+        self.assertEqual(self.run_cli('work', '--hold', '09:30').returncode, 0)
+        self.assertIsNotNone(arming.read(state)['hold_until'])
+        self.assertEqual(self.run_cli('work', '--hold', 'off').returncode, 0)
+        self.assertIsNone(arming.read(state)['hold_until'])
+        self.assertEqual(self.run_cli('work', '--disarm').returncode, 0)
+        self.assertFalse(arming.read(state)['armed'])
+
+    def test_unbuilt_actions_fail_with_fixed_text(self):
+        result = self.run_cli('work', '--logs')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('not available yet', result.stderr)
+
     def test_missing_pairing_has_actionable_error_without_traceback(self):
         result = self.run_cli('scratch', 'start')
         self.assertEqual(result.returncode, 1)

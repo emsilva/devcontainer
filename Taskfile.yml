@@ -18,6 +18,33 @@ tasks:
     desc: Stop this project scratch and conversation sync worker
     cmds:
       - bash scripts/project-sync.sh work --stop {{.CLI_ARGS}}
+  work:cs:armed:
+    desc: Connect the Codespace and arm automatic restart after the 12-hour stop
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh work --armed {{.CLI_ARGS}}
+  work:disarm:
+    desc: Disarm automatic Codespace restart for this project
+    cmds:
+      - bash scripts/project-sync.sh work --disarm {{.CLI_ARGS}}
+  work:hold:
+    desc: Hold restarts until a local time, or off (task work:hold -- 09:30)
+    cmds:
+      - bash scripts/project-sync.sh work --hold {{.CLI_ARGS}}
+  work:cs:stop:
+    desc: Stop this project Codespace and keep it stopped
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh work --codespace-stop {{.CLI_ARGS}}
+  work:cs:restart:
+    desc: Restart this project Codespace now and bring Herdr back
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh work --codespace-restart {{.CLI_ARGS}}
+  work:logs:
+    desc: Show recent keeper and sync worker logs (task work:logs -- --follow)
+    cmds:
+      - bash scripts/project-sync.sh work --logs {{.CLI_ARGS}}
   setup:
     desc: Configure a project with the interactive wizard (task setup -- --project PATH)
     interactive: true

@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 from . import scratch
 from .state import discover_project, state_dir
@@ -21,6 +23,15 @@ def parser():
     action.add_argument('--disconnect', action='store_true', help='Disconnect this project’s saved Codespace machine from Herdr')
     action.add_argument('--status', action='store_true')
     action.add_argument('--stop', action='store_true')
+    action.add_argument('--armed', action='store_true', help='Arm automatic Codespace restart after the 12-hour stop')
+    action.add_argument('--disarm', action='store_true', help='Disarm automatic Codespace restart')
+    action.add_argument('--hold', metavar='VALUE', help='No restarts until a local time like 09:30, or off')
+    action.add_argument('--codespace-stop', action='store_true', help='Stop the Codespace and keep it stopped')
+    action.add_argument('--codespace-restart', action='store_true', help='Restart the Codespace now')
+    action.add_argument('--logs', action='store_true', help='Show recent keeper and worker logs')
+    work.add_argument('--follow', action='store_true')
+    work.add_argument('--port', type=int, action='append', default=[], help=argparse.SUPPRESS)
+    work.add_argument('--no-port', type=int, action='append', default=[], help=argparse.SUPPRESS)
     work.add_argument('--json', action='store_true', help='Full offline status detail as JSON')
     sync = groups.add_parser('scratch', help='Advanced scratch synchronization controls').add_subparsers(dest='action', required=True)
     configure = sync.add_parser('configure')
@@ -35,6 +46,52 @@ def parser():
 
 def _print(value):
     print(json.dumps(value, indent=2, sort_keys=True))
+
+
+def _arm(project, state, args):
+    # Arming only records state here; the keeper that acts on it starts elsewhere.
+    from . import arming
+    from .codespaces import Codespaces
+    from .state import locked
+    with locked(state / 'workspace-control.lock', blocking=True):
+        current = arming.read(state)
+        user = arming.account(os.environ)
+        if current.get('armed') and current.get('gh_user') == user:
+            print('Already armed as ' + user)
+            return 0
+        row = Codespaces(project, state).space()
+        if not row:
+            raise ValueError('Pair a Codespace first: run task work:cs')
+        owner = (row.get('billable_owner') or {}).get('login')
+        if not owner:
+            raise ValueError('The Codespace does not name a billing owner; check it in GitHub')
+        text = arming.consent_text(project.root.name, row['name'], owner)
+        print(text)
+        if input('> ').strip() != 'arm':
+            raise ValueError('Not armed: the confirmation was not "arm"')
+        ports = arming.resolve_ports(arming.default_ports(project.root), args.port, args.no_port)
+        arming.arm(state, gh_user=user, consent=text, billable_owner=owner, ports=ports, now=time.time())
+    print('Armed as ' + user + '; ports ' + (' '.join(map(str, ports)) or 'none'))
+    return 0
+
+
+def _arming_edit(args, state):
+    from . import arming
+    from .state import locked
+    with locked(state / 'workspace-control.lock', blocking=True):
+        value = arming.read(state)
+        if args.hold is not None:
+            if not value.get('armed'):
+                raise ValueError('This project is not armed; run task work:cs:armed first')
+            until = arming.hold_until(args.hold, time.time())
+            arming.write(state, dict(value, hold_until=until))
+            print('Hold off' if until is None else 'Holding restarts until ' + time.strftime('%H:%M', time.localtime(until)))
+        elif value.get('armed'):
+            arming.write(state, dict(value, armed=False))
+            print('Disarmed')
+        else:
+            print('Not armed')
+    return 0
 
 
 def run(args):
@@ -55,8 +112,16 @@ def run(args):
         if args.disconnect:
             from .herdr import disconnect_remote
             return disconnect_remote(project)
+        if args.disarm or args.hold is not None:
+            return _arming_edit(args, state)
+        if args.logs:
+            raise ValueError('task work:logs is not available yet')
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise ValueError('Work entrypoints require a terminal; use task work:status for scripts')
+        if args.armed:
+            return _arm(project, state, args)
+        if args.codespace_stop or args.codespace_restart:
+            raise ValueError('Stopping and restarting the Codespace from a task is not available yet')
         if args.codespace:
             return workspace.remote(project, state)
     if args.action == 'configure':
