@@ -7,11 +7,13 @@ from dataclasses import dataclass
 import fcntl
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
 import stat
 import subprocess
+import time
 from urllib.parse import urlsplit
 import uuid
 
@@ -268,3 +270,29 @@ def locked(path: Path, blocking: bool = False):
                 fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
+
+
+def process_identity(pid):
+    """Start time and argv of a live process, or None; it pins a pid against reuse."""
+    if not isinstance(pid, int) or pid <= 1:
+        return None
+    result = subprocess.run(['ps', '-p', str(pid), '-o', 'lstart=', '-o', 'args='],
+                            capture_output=True, text=True, timeout=5)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def owned_process(runtime: dict, state: Path, *, flag: str, module: str) -> bool:
+    """True only for the live process a runtime record launched: pid, start time, argv and nonce."""
+    identity = process_identity(runtime.get('pid'))
+    nonce = runtime.get('nonce')
+    return bool(identity and isinstance(nonce, str) and len(nonce) == 48
+                and flag in identity and module in identity
+                and str(Path(state)) in identity and nonce in identity
+                and identity == runtime.get('process_identity'))
+
+
+def log_formatter() -> logging.Formatter:
+    """UTC time and pid on every line, so logs from several processes merge by time."""
+    formatter = logging.Formatter('%(asctime)sZ %(process)d %(message)s')
+    formatter.converter = time.gmtime
+    return formatter

@@ -154,21 +154,8 @@ def configure(root: Path, state: Path, codespace: str, remote_root: str) -> dict
     return candidate
 
 
-def _process_identity(pid):
-    if not isinstance(pid, int) or pid <= 1:
-        return None
-    result = subprocess.run(['ps', '-p', str(pid), '-o', 'lstart=', '-o', 'args='],
-                            capture_output=True, text=True, timeout=5)
-    return result.stdout.strip() if result.returncode == 0 else None
-
-
 def _owned(runtime, state):
-    identity = _process_identity(runtime.get('pid'))
-    nonce = runtime.get('nonce')
-    return bool(identity and isinstance(nonce, str) and len(nonce) == 48
-                and '--supervise' in identity and '.scratch' in identity
-                and str(Path(state)) in identity and nonce in identity
-                and identity == runtime.get('process_identity'))
+    return project_state.owned_process(runtime, state, flag='--supervise', module='.scratch')
 
 
 def status(state: Path) -> dict:
@@ -500,6 +487,7 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
         if log_path.is_symlink():
             raise ValueError('Scratch log must not be a symlink.')
         handler = RotatingFileHandler(log_path, maxBytes=256 * 1024, backupCount=2)
+        handler.setFormatter(project_state.log_formatter())
         os.chmod(log_path, 0o600)
         logger = logging.getLogger('project-sync-' + nonce)
         logger.setLevel(logging.INFO)
@@ -507,7 +495,7 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
         receipt = _saved_session(state, config)
         previous = read_json(state / RUNTIME) if (state / RUNTIME).exists() else {}
         retained = previous.get('retained_receipts', {}) if previous.get('binding', previous.get('prepared_binding')) == config else {}
-        runtime = {'pid': os.getpid(), 'nonce': nonce, 'process_identity': _process_identity(os.getpid()),
+        runtime = {'pid': os.getpid(), 'nonce': nonce, 'process_identity': project_state.process_identity(os.getpid()),
                    'phase': 'starting', 'session': receipt['name'] if receipt else None,
                    'checkpoint_version': sync_cycle.SCHEMA, 'runtime_id': _runtime_id(),
                    'connection_prepared': False, 'binding': config, 'retained_receipts': retained}

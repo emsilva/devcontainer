@@ -235,7 +235,7 @@ class ScratchTests(unittest.TestCase):
                         patch('devcontainer_setup.project_sync.transport.CodespaceConnection', Connection), \
                         patch.object(m, 'install_mutagen', return_value=binary), \
                         patch.object(m, '_mutagen', side_effect=mutagen), \
-                        patch.object(m, '_process_identity', side_effect=lambda pid: 'project_sync.scratch --supervise ' + str(state) + ' ' + nonce if worker.is_alive() else None), \
+                        patch('devcontainer_setup.project_sync.state.process_identity', side_effect=lambda pid: 'project_sync.scratch --supervise ' + str(state) + ' ' + nonce if worker.is_alive() else None), \
                         patch.object(m.signal, 'signal'), patch.object(m.threading, 'Event', return_value=exiting), \
                         patch.object(m, 'start', side_effect=start), \
                         patch.object(workspace, '_prerequisites'), \
@@ -597,6 +597,11 @@ class ScratchTests(unittest.TestCase):
         finally:
             self.module.stop(self.state)
         self.assertLess((self.state / 'scratch.log').stat().st_size, 256 * 1024)
+        lines = (self.state / 'scratch.log').read_text().splitlines()
+        self.assertTrue(lines)
+        for line in lines:
+            # UTC time and pid on every line, so work:logs can merge it with keeper.log.
+            self.assertRegex(line, r'^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3}Z \d+ \S')
 
     def test_case_collision_is_visible(self):
         (self.scratch / 'case').write_bytes(b'a')
