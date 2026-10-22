@@ -20,26 +20,13 @@ import time
 from .state import atomic_write, discover_project, locked, read_json
 from . import state as project_state
 from . import scratch_tree, sync_cycle
-from .tools import MANIFEST, install_mutagen, mutagen_env
+from .tools import install_mutagen, mutagen_env
 from .transport import CodespaceConnection
 
 CONFIG = 'scratch.json'
 RUNTIME = 'scratch-runtime.json'
 SESSION = 'scratch-session.json'
-_CHILDREN = {}
-
-
-def _runtime_id():
-    digest = hashlib.sha256()
-    # The alias bootstrap embeds these inputs, so identical source bytes from
-    # another checkout/interpreter are not the same running producer.
-    for value in (str(Path(__file__).parent.resolve()), __package__, sys.executable):
-        digest.update(value.encode() + b'\0')
-    for path in sorted(Path(__file__).parent.glob('*.py')):
-        digest.update(path.name.encode() + b'\0')
-        digest.update(hashlib.sha256(path.read_bytes()).digest())
-    digest.update(hashlib.sha256(MANIFEST.read_bytes()).digest())
-    return digest.hexdigest()
+_runtime_id = project_state.runtime_id
 
 
 def _private_location(root, state):
@@ -188,29 +175,10 @@ def start(root: Path, state: Path) -> dict:
             _recover_session(state, current)
         # Installation failures happen synchronously and clearly to the caller.
         install_mutagen(state)
-        nonce = secrets.token_hex(24)
-        package = __package__
-        package_parent = Path(__file__).resolve().parents[len(package.split('.'))]
-        env = dict(os.environ)
-        bootstrap = ('import sys,runpy; sys.path.insert(0,' + repr(str(package_parent))
-                     + '); runpy.run_module(' + repr(package + '.scratch') + ',run_name="__main__")')
-        child = subprocess.Popen([sys.executable, '-I', '-B', '-c', bootstrap, '--supervise',
-                                  str(root), str(state), nonce], cwd=root, env=env,
-                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
-        _CHILDREN[child.pid] = child
-        deadline = time.monotonic() + 8
-        while time.monotonic() < deadline:
-            current = status(state)
-            if current.get('nonce') == nonce and current['running']:
-                return current
-            if child.poll() is not None:
-                raise ValueError('Scratch supervisor exited during startup; inspect scratch.log.')
-            time.sleep(.1)
-        # We own this Popen handle, so startup timeout can safely terminate it.
-        child.terminate()
-        child.wait(timeout=5)
-        raise ValueError('Scratch supervisor startup timed out.')
+        return project_state.launch_detached(
+            'scratch', '--supervise', root, state, env=dict(os.environ), status=status,
+            exited='Scratch supervisor exited during startup; inspect scratch.log.',
+            timed_out='Scratch supervisor startup timed out.')
 
 
 def _saved_session(state, config=None):
@@ -319,14 +287,8 @@ def stop(state: Path) -> dict:
         # A nonce in argv plus a fresh process creation identity protects PID reuse.
         if _owned(current, state):
             os.kill(current['pid'], signal.SIGTERM)
-        deadline = time.monotonic() + 12
-        while time.monotonic() < deadline:
-            if not status(state)['running']:
-                child = _CHILDREN.pop(current['pid'], None)
-                if child is not None:
-                    child.wait(timeout=5)
-                return status(state)
-            time.sleep(.1)
+        if project_state.wait_gone(current, 12):
+            return status(state)
         raise ValueError('Scratch supervisor is still shutting down; inspect status before retrying.')
 
 

@@ -11,8 +11,10 @@ import logging
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
 import subprocess
+import sys
 import time
 from urllib.parse import urlsplit
 import uuid
@@ -278,6 +280,70 @@ def locked(path: Path, blocking: bool = False):
                 fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
+
+
+_CHILDREN = {}
+
+
+def runtime_id() -> str:
+    """The running producer: this package's code and tool pins, its location and interpreter."""
+    from .tools import MANIFEST
+    digest = hashlib.sha256()
+    # The alias bootstrap embeds these inputs, so identical source bytes from
+    # another checkout/interpreter are not the same running producer.
+    for value in (str(Path(__file__).parent.resolve()), __package__, sys.executable):
+        digest.update(value.encode() + b'\0')
+    for path in sorted(Path(__file__).parent.glob('*.py')):
+        digest.update(path.name.encode() + b'\0')
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    digest.update(hashlib.sha256(MANIFEST.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+def launch_detached(name: str, flag: str, root: Path, state: Path, *, env: dict, status,
+                    exited: str, timed_out: str) -> dict:
+    """Start this package's `name` module as `flag ROOT STATE NONCE` in its own session.
+
+    Returns status(state) once the runtime it writes names the new nonce and is owned.
+    """
+    nonce = secrets.token_hex(24)
+    package = __package__
+    package_parent = Path(__file__).resolve().parents[len(package.split('.'))]
+    bootstrap = ('import sys,runpy; sys.path.insert(0,' + repr(str(package_parent))
+                 + '); runpy.run_module(' + repr(package + '.' + name) + ',run_name="__main__")')
+    child = subprocess.Popen([sys.executable, '-I', '-B', '-c', bootstrap, flag,
+                              str(root), str(state), nonce], cwd=root, env=env,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    _CHILDREN[child.pid] = child
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        current = status(state)
+        if current.get('nonce') == nonce and current['running']:
+            return current
+        if child.poll() is not None:
+            raise ValueError(exited)
+        time.sleep(.1)
+    # We own this Popen handle, so startup timeout can safely terminate it.
+    child.terminate()
+    child.wait(timeout=5)
+    raise ValueError(timed_out)
+
+
+def wait_gone(runtime: dict, timeout: float) -> bool:
+    """True once the process a runtime record names (same start time and argv) has exited.
+
+    A child this process launched is reaped, so it leaves no zombie behind.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process_identity(runtime.get('pid')) != runtime.get('process_identity'):
+            child = _CHILDREN.pop(runtime.get('pid'), None)
+            if child is not None:
+                child.wait(timeout=5)
+            return True
+        time.sleep(.1)
+    return False
 
 
 def process_identity(pid):

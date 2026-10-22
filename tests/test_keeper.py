@@ -396,7 +396,7 @@ class KeeperProcessTests(unittest.TestCase):
 
     def test_new_runtime_replaces_old_keeper(self):
         first = keeper.start(self.root, self.state)
-        with patch.object(keeper, '_runtime_id', return_value='an upgraded package'):
+        with patch.object(keeper, 'runtime_id', return_value='an upgraded package'):
             second = keeper.start(self.root, self.state)
         self.assertNotEqual(second['pid'], first['pid'])
         self.assertNotEqual(process_identity(first['pid']), first['process_identity'])

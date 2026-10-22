@@ -11,15 +11,15 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
-import secrets
 import signal
 import subprocess
 import sys
 import time
 
 from . import arming, lifecycle, notify
-from .scratch import CONFIG, _runtime_id
-from .state import atomic_write, locked, log_formatter, owned_process, process_identity, read_json
+from .scratch import CONFIG
+from .state import (atomic_write, launch_detached, locked, log_formatter, owned_process, process_identity,
+                    read_json, runtime_id, wait_gone)
 from .transport import _terminate
 
 RUNTIME = 'keeper-runtime.json'
@@ -32,7 +32,6 @@ DOWN = ('ShuttingDown', 'Shutdown')
 TITLE = 'Codespace recovery'
 NOTICE_DAYS = 7
 _LOG = logging.getLogger('project-sync-keeper')
-_CHILDREN = {}
 
 
 def _owned(runtime, state):
@@ -62,34 +61,16 @@ def start(root: Path, state: Path) -> dict:
     value = arming.read(state)
     if not (value.get('armed') and value.get('gh_user') and value.get('codespace')):
         raise ValueError('This project is not armed; run task work:cs:armed')
-    wanted = {'runtime_id': _runtime_id(), 'codespace': value['codespace'], 'gh_user': value['gh_user']}
+    wanted = {'runtime_id': runtime_id(), 'codespace': value['codespace'], 'gh_user': value['gh_user']}
     with locked(state / 'keeper-control.lock', blocking=True):
         current = status(state)
         if current['running']:
             if all(current.get(key) == item for key, item in wanted.items()):
                 return current
             _stop(state, current)
-        nonce = secrets.token_hex(24)
-        package = __package__
-        package_parent = Path(__file__).resolve().parents[len(package.split('.'))]
-        bootstrap = ('import sys,runpy; sys.path.insert(0,' + repr(str(package_parent))
-                     + '); runpy.run_module(' + repr(package + '.keeper') + ',run_name="__main__")')
-        child = subprocess.Popen([sys.executable, '-I', '-B', '-c', bootstrap, '--keep',
-                                  str(root), str(state), nonce], cwd=root, env=_env(value),
-                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
-        _CHILDREN[child.pid] = child
-        deadline = time.monotonic() + 8
-        while time.monotonic() < deadline:
-            current = status(state)
-            if current.get('nonce') == nonce and current['running']:
-                return current
-            if child.poll() is not None:
-                raise ValueError('The keeper exited during startup; inspect task work:logs')
-            time.sleep(.1)
-        # We own this Popen handle, so a startup timeout can safely end it.
-        _terminate(child)
-        raise ValueError('The keeper did not start within 8 seconds; inspect task work:logs')
+        return launch_detached('keeper', '--keep', root, state, env=_env(value), status=status,
+                               exited='The keeper exited during startup; inspect task work:logs',
+                               timed_out='The keeper did not start within 8 seconds; inspect task work:logs')
 
 
 def _stop(state, current):
@@ -100,14 +81,8 @@ def _stop(state, current):
     except ProcessLookupError:
         pass
     # Done when that exact process (start time and argv) is gone, so its locks are free.
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if process_identity(current['pid']) != current['process_identity']:
-            child = _CHILDREN.pop(current['pid'], None)
-            if child is not None:
-                child.wait(timeout=5)
-            return status(state)
-        time.sleep(.1)
+    if wait_gone(current, 15):
+        return status(state)
     raise ValueError('The keeper is still shutting down; inspect task work:status before retrying')
 
 
@@ -387,7 +362,7 @@ def supervise(root: Path, state: Path, nonce: str) -> None:
             current = Keeper(state, api=api, notifier=notify.notify)
             caffeinate = _caffeinate()
             current.runtime.update(pid=os.getpid(), nonce=nonce, process_identity=process_identity(os.getpid()),
-                                   runtime_id=_runtime_id(), gh_user=value.get('gh_user'), error=None,
+                                   runtime_id=runtime_id(), gh_user=value.get('gh_user'), error=None,
                                    caffeinate=caffeinate.pid if caffeinate else None)
             current.beat('starting')
             _LOG.info('Keeper started for %s as %s', api.name, value.get('gh_user'))
