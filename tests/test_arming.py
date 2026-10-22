@@ -64,7 +64,7 @@ class ArmingTests(unittest.TestCase):
     def test_consent_is_stored_as_hash(self):
         text = arming.consent_text('proj', 'cs-1', 'octo')
         self.assertIn('Type arm to confirm', text)
-        arming.arm(self.dir, gh_user='octo', consent=text, billable_owner='octo', ports=[3570], now=1000.0)
+        arming.arm(self.dir, gh_user='octo', codespace='cs-1', consent=text, billable_owner='octo', ports=[3570], now=1000.0)
         raw = (self.dir / arming.ARMING).read_text()
         value = json.loads(raw)
         self.assertEqual(len(value['consent_sha256']), 64)
@@ -72,6 +72,37 @@ class ArmingTests(unittest.TestCase):
         self.assertTrue(value['armed'])
         self.assertEqual(value['ports'], [3570])
         self.assertEqual(stat.S_IMODE((self.dir / arming.ARMING).stat().st_mode), 0o600)
+
+    def test_rearm_clears_stale_hold_and_owner_stop(self):
+        arming.write(self.dir, {'schema': 1, 'armed': False, 'hold_until': 99.0, 'owner_stop_at': 50.0})
+        value = arming.arm(self.dir, gh_user='o', codespace='c', consent='t', billable_owner='o', ports=[], now=1.0)
+        self.assertIsNone(value['hold_until'])
+        self.assertNotIn('owner_stop_at', arming.read(self.dir))
+
+    def test_default_ports_reads_jsonc(self):
+        (self.dir / '.devcontainer').mkdir()
+        path = self.dir / '.devcontainer/devcontainer.json'
+        path.write_text('{ "name": "a // not a comment", /* block */\n "forwardPorts": [3570, 2222, 8787,], // tail\n}\n')
+        self.assertEqual(arming.default_ports(self.dir), [3570, 8787])
+        for bad in ('[1, 2]', '{"forwardPorts": [1,', '{"forwardPorts": 5}'):
+            path.write_text(bad)
+            with self.assertRaisesRegex(ValueError, 'devcontainer.json'):
+                arming.default_ports(self.dir)
+
+    def test_consent_text_uses_policy_constants(self):
+        self.assertIn('at most 2 times in 24 hours, 30 minutes apart', arming.consent_text('p', 'c', 'o'))
+
+    def test_account_distinguishes_failure_and_missing_gh(self):
+        env = self.fake_env('codespace')
+        (self.dir / 'bin/gh').write_text('#!/usr/bin/env bash\n[ "$1" = auth ] && { echo t; exit 0; }\nexit 1\n')
+        with self.assertRaisesRegex(ValueError, 'rejected'):
+            arming.account(env)
+        with self.assertRaisesRegex(ValueError, 'not installed'):
+            arming.account(dict(env, PATH='/nonexistent'))
+
+    def test_format_time_shows_date_local_and_utc(self):
+        text = arming.format_time(0.0)
+        self.assertRegex(text, r'^\d{4}-\d\d-\d\d \d\d:\d\d \(UTC 1970-01-01 00:00\)$')
 
     def test_hold_until_next_local_occurrence(self):
         now = datetime.datetime(2026, 10, 21, 23, 0).timestamp()

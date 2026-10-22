@@ -7,7 +7,72 @@ import sys
 import tempfile
 import unittest
 
+from devcontainer_setup.project_sync.__main__ import parser
+
 SOURCE = Path(__file__).resolve().parents[1]
+
+
+class ArmFlowTests(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.state = Path(self.temp.name).resolve() / 'state'
+        root = Path(self.temp.name).resolve() / 'proj'
+        (root / '.devcontainer').mkdir(parents=True)
+        (root / '.devcontainer/devcontainer.json').write_text('{"forwardPorts": [2222, 3570, 8787]}')
+        self.project = mock.Mock(root=root)
+        self.row = {'name': 'cs-1', 'billable_owner': {'login': 'octo'}}
+        self.mock = mock
+        self.args = mock.Mock(port=[], no_port=[])
+
+    def arm(self, answer='arm', row='default', **flags):
+        from devcontainer_setup.project_sync import __main__ as cli
+        mock = self.mock
+        self.args.port, self.args.no_port = flags.get('port', []), flags.get('no_port', [])
+        row = self.row if row == 'default' else row
+        with mock.patch('devcontainer_setup.project_sync.arming.account', return_value='octo'), \
+                mock.patch('devcontainer_setup.project_sync.codespaces.Codespaces') as spaces, \
+                mock.patch('builtins.input', side_effect=answer if isinstance(answer, BaseException) else [answer]) as ask:
+            spaces.return_value.space.return_value = row
+            result = cli._arm(self.project, self.state, self.args)
+        return result, ask
+
+    def test_confirmation_arms_with_default_ports_and_flags(self):
+        from devcontainer_setup.project_sync import arming
+        self.arm(port=[3571], no_port=[8787])
+        value = arming.read(self.state)
+        self.assertTrue(value['armed'])
+        self.assertEqual(value['ports'], [3570, 3571])
+        self.assertEqual(value['codespace'], 'cs-1')
+
+    def test_wrong_answer_cancel_pairing_and_owner_refuse(self):
+        from devcontainer_setup.project_sync import arming
+        with self.assertRaisesRegex(ValueError, 'Not armed'):
+            self.arm(answer='yes')
+        with self.assertRaisesRegex(ValueError, 'Arming cancelled'):
+            self.arm(answer=EOFError())
+        with self.assertRaisesRegex(ValueError, 'Pair a Codespace'):
+            self.arm(row=None)
+        with self.assertRaisesRegex(ValueError, 'billing owner'):
+            self.arm(row={'name': 'cs-1'})
+        self.assertFalse(arming.read(self.state)['armed'])
+
+    def test_already_armed_skips_prompt_and_updates_ports(self):
+        from devcontainer_setup.project_sync import arming
+        self.arm()
+        result, ask = self.arm(answer='unused', port=[4000])
+        ask.assert_not_called()
+        self.assertEqual(arming.read(self.state)['ports'], [3570, 4000, 8787])
+
+    def test_changed_codespace_asks_again(self):
+        self.arm()
+        _, ask = self.arm(row={'name': 'cs-2', 'billable_owner': {'login': 'octo'}})
+        ask.assert_called_once()
+
+    def test_port_range(self):
+        with self.assertRaises(SystemExit):
+            parser().parse_args(['work', '--armed', '--port', '60000'])
 
 
 class ProjectSyncCLITests(unittest.TestCase):
@@ -52,7 +117,7 @@ class ProjectSyncCLITests(unittest.TestCase):
         from devcontainer_setup.project_sync import arming
         from devcontainer_setup.project_sync.state import discover_project, state_dir
         state = state_dir(discover_project(self.root), self.env)
-        arming.arm(state, gh_user='octo', consent='x', billable_owner='octo', ports=[], now=1.0)
+        arming.arm(state, gh_user='octo', codespace='c', consent='x', billable_owner='octo', ports=[], now=1.0)
         self.assertEqual(self.run_cli('work', '--hold', '09:30').returncode, 0)
         self.assertIsNotNone(arming.read(state)['hold_until'])
         self.assertEqual(self.run_cli('work', '--hold', 'off').returncode, 0)

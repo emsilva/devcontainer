@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
 import re
 import subprocess
 
+from . import lifecycle
 from .state import atomic_write, read_json
 from .transport import clean_env
 
@@ -30,16 +31,41 @@ def write(state: Path, value: dict) -> None:
     atomic_write(Path(state) / ARMING, json.dumps(value, sort_keys=True).encode() + b'\n')
 
 
+def strip_jsonc(text: str) -> str:
+    """Drop comments outside strings and trailing commas, so json.loads can parse the rest."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == '\\' else 1
+            out.append(text[i:j + 1])
+            i = j + 1
+        elif text.startswith('//', i):
+            while i < n and text[i] != '\n':
+                i += 1
+        elif text.startswith('/*', i):
+            end = text.find('*/', i + 2)
+            i = n if end < 0 else end + 2
+        else:
+            out.append(c)
+            i += 1
+    return re.sub(r',(\s*[\]}])', r'\1', ''.join(out))
+
+
 def default_ports(root: Path) -> list[int]:
+    path = Path(root) / '.devcontainer/devcontainer.json'
     try:
-        text = (Path(root) / '.devcontainer/devcontainer.json').read_text()
+        text = path.read_text()
     except OSError:
         return []
     try:
-        config = json.loads(text)
-    except ValueError:
-        config = json.loads(re.sub(r'^\s*//.*$', '', text, flags=re.M))
-    return sorted({p for p in config.get('forwardPorts', []) if isinstance(p, int) and p != 2222})
+        config = json.loads(strip_jsonc(text))
+        ports = config.get('forwardPorts', [])
+        return sorted({p for p in ports if isinstance(p, int) and p != 2222})
+    except (ValueError, AttributeError, TypeError):
+        raise ValueError('Cannot read forwardPorts from .devcontainer/devcontainer.json; fix the file or pass --port') from None
 
 
 def resolve_ports(defaults: list[int], add: list[int], remove: list[int]) -> list[int]:
@@ -48,7 +74,8 @@ def resolve_ports(defaults: list[int], add: list[int], remove: list[int]) -> lis
 
 def consent_text(project_name: str, codespace: str, billable_owner: str) -> str:
     return (f'Arm {project_name}: keep {codespace} running while this Mac is up, and start it again '
-            "after GitHub's 12-hour stop (at most 2 times in 24 hours, 30 minutes apart). "
+            f"after GitHub's 12-hour stop (at most {lifecycle.MAX_RESTARTS} times in "
+            f'{lifecycle.RESTART_PERIOD // 3600} hours, {lifecycle.MIN_GAP // 60} minutes apart). '
             f'Usage is billed to {billable_owner}. Type arm to confirm.')
 
 
@@ -66,13 +93,15 @@ def account(env: Mapping) -> str:
         reply = subprocess.run(['gh', 'api', '-i', '--hostname', 'github.com', 'user'],
                                env=dict(clean, GH_TOKEN=token.stdout.strip()),
                                capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        raise ValueError('The GitHub CLI (gh) is not installed or not on PATH.') from None
     except subprocess.TimeoutExpired:
         raise ValueError('GitHub authentication timed out; check GitHub CLI authentication and retry.') from None
     head, _, body = reply.stdout.replace('\r\n', '\n').partition('\n\n')
+    if reply.returncode:
+        raise ValueError('GitHub rejected the account check; the token may be expired or the network down. Retry after gh auth status.')
     scopes = re.search(r'^x-oauth-scopes:(.*)$', head, re.I | re.M)
-    if reply.returncode or not scopes:
-        raise ValueError(SCOPE_ERROR)
-    if 'codespace' not in {s.strip() for s in scopes[1].split(',')}:
+    if not scopes or 'codespace' not in {x.strip() for x in scopes[1].split(',')}:
         raise ValueError(SCOPE_ERROR)
     if user:
         return user
@@ -85,14 +114,21 @@ def account(env: Mapping) -> str:
     return login
 
 
-def arm(state: Path, *, gh_user: str, consent: str, billable_owner: str, ports: list[int], now: float) -> dict:
-    """Record arming; only the hash of the consent text is kept."""
-    value = dict(read(state), schema=1, armed=True, armed_at=now, gh_user=gh_user,
-                 consent_sha256=hashlib.sha256(consent.encode()).hexdigest(), consented_at=now,
-                 billable_owner=billable_owner, ports=sorted(ports))
-    value.setdefault('hold_until', None)
+def arm(state: Path, *, gh_user: str, codespace: str, consent: str, billable_owner: str,
+        ports: list[int], now: float) -> dict:
+    """Record fresh consent; only its hash is kept, and any old hold or owner stop is cleared."""
+    value = {'schema': 1, 'armed': True, 'armed_at': now, 'gh_user': gh_user, 'codespace': codespace,
+             'consent_sha256': hashlib.sha256(consent.encode()).hexdigest(), 'consented_at': now,
+             'billable_owner': billable_owner, 'ports': sorted(ports), 'hold_until': None}
     write(state, value)
     return value
+
+
+def format_time(when: float) -> str:
+    """A time for people: the Mac's local zone, then UTC."""
+    local = datetime.fromtimestamp(when).strftime('%Y-%m-%d %H:%M')
+    utc = datetime.fromtimestamp(when, timezone.utc).strftime('%Y-%m-%d %H:%M')
+    return f'{local} (UTC {utc})'
 
 
 def hold_until(value: str, now: float) -> float | None:

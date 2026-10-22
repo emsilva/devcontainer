@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,13 @@ import time
 
 from . import scratch
 from .state import discover_project, state_dir
+
+
+def _port(value):
+    port = int(value)
+    if not 1 <= port <= 55535:
+        raise argparse.ArgumentTypeError('port must be 1-55535')
+    return port
 
 
 def parser():
@@ -30,8 +38,8 @@ def parser():
     action.add_argument('--codespace-restart', action='store_true', help='Restart the Codespace now')
     action.add_argument('--logs', action='store_true', help='Show recent keeper and worker logs')
     work.add_argument('--follow', action='store_true')
-    work.add_argument('--port', type=int, action='append', default=[], help=argparse.SUPPRESS)
-    work.add_argument('--no-port', type=int, action='append', default=[], help=argparse.SUPPRESS)
+    work.add_argument('--port', type=_port, action='append', default=[], help=argparse.SUPPRESS)
+    work.add_argument('--no-port', type=_port, action='append', default=[], help=argparse.SUPPRESS)
     work.add_argument('--json', action='store_true', help='Full offline status detail as JSON')
     sync = groups.add_parser('scratch', help='Advanced scratch synchronization controls').add_subparsers(dest='action', required=True)
     configure = sync.add_parser('configure')
@@ -50,27 +58,42 @@ def _print(value):
 
 def _arm(project, state, args):
     # Arming only records state here; the keeper that acts on it starts elsewhere.
+    # Network calls and the prompt run unlocked; the lock covers only the read and write.
     from . import arming
     from .codespaces import Codespaces
     from .state import locked
-    with locked(state / 'workspace-control.lock', blocking=True):
-        current = arming.read(state)
-        user = arming.account(os.environ)
-        if current.get('armed') and current.get('gh_user') == user:
+    user = arming.account(os.environ)
+    row = Codespaces(project, state).space()
+    if not row:
+        raise ValueError('Pair a Codespace first: run task work:cs')
+    owner = (row.get('billable_owner') or {}).get('login')
+    if not owner:
+        raise ValueError('The Codespace does not name a billing owner; check it in GitHub')
+    text = arming.consent_text(project.root.name, row['name'], owner)
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    current = arming.read(state)
+    if (current.get('armed') and current.get('consent_sha256') == digest
+            and current.get('codespace') == row['name'] and current.get('gh_user') == user):
+        if args.port or args.no_port:
+            with locked(state / 'workspace-control.lock', blocking=True):
+                latest = arming.read(state)
+                ports = arming.resolve_ports(latest.get('ports', []), args.port, args.no_port)
+                arming.write(state, dict(latest, ports=ports))
+            print('Already armed as ' + user + '; ports ' + (' '.join(map(str, ports)) or 'none'))
+        else:
             print('Already armed as ' + user)
-            return 0
-        row = Codespaces(project, state).space()
-        if not row:
-            raise ValueError('Pair a Codespace first: run task work:cs')
-        owner = (row.get('billable_owner') or {}).get('login')
-        if not owner:
-            raise ValueError('The Codespace does not name a billing owner; check it in GitHub')
-        text = arming.consent_text(project.root.name, row['name'], owner)
-        print(text)
-        if input('> ').strip() != 'arm':
-            raise ValueError('Not armed: the confirmation was not "arm"')
-        ports = arming.resolve_ports(arming.default_ports(project.root), args.port, args.no_port)
-        arming.arm(state, gh_user=user, consent=text, billable_owner=owner, ports=ports, now=time.time())
+        return 0
+    print(text)
+    try:
+        answer = input('> ')
+    except (EOFError, KeyboardInterrupt):
+        raise ValueError('Arming cancelled') from None
+    if answer.strip() != 'arm':
+        raise ValueError('Not armed: the confirmation was not "arm"')
+    ports = arming.resolve_ports(arming.default_ports(project.root), args.port, args.no_port)
+    with locked(state / 'workspace-control.lock', blocking=True):
+        arming.arm(state, gh_user=user, codespace=row['name'], consent=text, billable_owner=owner,
+                   ports=ports, now=time.time())
     print('Armed as ' + user + '; ports ' + (' '.join(map(str, ports)) or 'none'))
     return 0
 
@@ -85,7 +108,7 @@ def _arming_edit(args, state):
                 raise ValueError('This project is not armed; run task work:cs:armed first')
             until = arming.hold_until(args.hold, time.time())
             arming.write(state, dict(value, hold_until=until))
-            print('Hold off' if until is None else 'Holding restarts until ' + time.strftime('%H:%M', time.localtime(until)))
+            print('Hold off' if until is None else 'Holding restarts until ' + arming.format_time(until))
         elif value.get('armed'):
             arming.write(state, dict(value, armed=False))
             print('Disarmed')
