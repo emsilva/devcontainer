@@ -186,7 +186,8 @@ class RecoveryStatusTests(unittest.TestCase):
         self.assertEqual([line.split()[0] for line in lines], ['Recovery', 'Keeper', 'Codespace', 'Keep-alive', 'Last'])
         self.assertIn('armed since ' + arming.format_time(self.now - 7200) + ' as octo, no hold', lines[0])
         self.assertIn('restarts 0 of 2 in 24 h', lines[0])
-        self.assertIn('running (pid 4121), heartbeat 12 s, caffeinate held', lines[1])
+        # The heartbeat is 12 s old at setUp; a loaded machine may add a second or two.
+        self.assertRegex(lines[1], r'running \(pid 4121\), heartbeat 1[2-5] s, caffeinate held')
         due = arming.format_time(anchor + lifecycle.LIFETIME)
         self.assertRegex(due, r'^\d{4}-\d\d-\d\d \d\d:\d\d \(UTC \d{4}-\d\d-\d\d \d\d:\d\d\)$')
         self.assertIn('Available since ' + arming.format_time(anchor) + ', anchor observed; 12-hour stop due ~' + due,

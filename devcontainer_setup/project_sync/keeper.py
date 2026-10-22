@@ -5,6 +5,7 @@ In this version a 12-hour stop only notifies "would restart"; nothing is posted.
 """
 from __future__ import annotations
 
+from contextlib import ExitStack
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -366,7 +367,15 @@ def supervise(root: Path, state: Path, nonce: str) -> None:
         raise _Shutdown()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, shutdown)
-    with locked(state / 'keeper.lock'):
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(locked(state / 'keeper.lock'))
+        except BlockingIOError:
+            handler = _log_to(state)
+            _LOG.info('Another keeper holds keeper.lock; this one exits')
+            handler.close()
+            _LOG.removeHandler(handler)
+            return
         handler = _log_to(state)
         caffeinate = current = None
         try:

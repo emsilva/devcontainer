@@ -360,12 +360,14 @@ class KeeperProcessTests(unittest.TestCase):
 
     def test_stop_by_fact_ignores_a_reused_pid(self):
         nonce = 'a' * 48
-        decoy = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)',
-                                  '--keep', 'project_sync.keeper', str(self.state), nonce])
+        ready = self.state / 'decoy-ready'
+        decoy = subprocess.Popen([sys.executable, '-c', 'import pathlib, sys, time; pathlib.Path(sys.argv[5]).touch(); '
+                                  'time.sleep(60)', '--keep', 'project_sync.keeper', str(self.state), nonce, str(ready)])
         self.addCleanup(decoy.wait)
         self.addCleanup(decoy.kill)
+        # Read its identity only once its Python code runs, after any interpreter re-exec.
         deadline = time.monotonic() + 5
-        while 'project_sync.keeper' not in (process_identity(decoy.pid) or '') and time.monotonic() < deadline:
+        while not ready.exists() and time.monotonic() < deadline:
             time.sleep(.02)
         identity = process_identity(decoy.pid)
         # Same pid, argv and nonce, but another start time: a reused pid.
@@ -392,6 +394,14 @@ class KeeperProcessTests(unittest.TestCase):
         self.assertIn('DEVCONTAINER_GH_USER', env)
         allowed = set(keeper.ENV) | {'DEVCONTAINER_GH_USER', '__CF_USER_TEXT_ENCODING'}
         self.assertLessEqual(env, allowed)
+
+    def test_a_second_keeper_on_a_held_lock_says_so_in_the_log(self):
+        from devcontainer_setup.project_sync.state import locked
+        with locked(self.state / 'keeper.lock'):
+            with self.assertRaisesRegex(ValueError, 'task work:logs'):
+                keeper.start(self.root, self.state)
+        self.assertIn('Another keeper holds keeper.lock', (self.state / keeper.LOG).read_text())
+        self.assertEqual(self.keepers(), [])
 
     def test_start_refuses_an_unarmed_project(self):
         arming.write(self.state, dict(arming.read(self.state), armed=False))
