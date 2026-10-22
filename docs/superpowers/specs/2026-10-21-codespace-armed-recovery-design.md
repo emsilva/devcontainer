@@ -41,7 +41,8 @@ The goal is that none of this needs the owner.
 5. **Keep-alive: an armed project gets the K4 child** (2026-10-21, "lets follow your recommendation"). That is `gh codespace ssh … 'exec sleep infinity'` under the read-only API. It also carries the port forwards and replaces `cs:ports`. Recovery after the 12-hour stop is still needed, because keep-alive does not prevent that stop.
 6. **A project's Codespace must be on main** (2026-10-21). Setup reaches main through a PR merged with the admin bypass (owner: "can we do 1 with --admin?"). The setup branch is cut from the current main. Then the Codespace is created on main.
 7. **Existing Codespaces: innovate now, mainstage later** (2026-10-21). innovate moved to main that day (consult-sm-innovate PR #3). Mainstage moves at a moment the owner picks, after its lead's `docs/model-resilience-design` work merges.
-8. **Standing rules** (brief):
+8. **Mainstage is armed only after #45 is fixed** (2026-10-22). Arming runs today's connect path, which starts the sync worker, and mainstage's worker stays off until #45 is fixed. No arming path without sync is built. Until then, mainstage is restarted by hand after each 12-hour stop.
+9. **Standing rules** (brief):
    - Never change mainstage's Codespace without the owner's go-ahead.
    - Never switch the active gh account (mannu_kyndryl).
    - Never print a secret.
@@ -314,14 +315,14 @@ This applies to every setup run that commits setup files: first setup and `task 
   2. `task work:cs:armed`.
   3. Run every slice's DoD on it (section 9).
   4. Its innovate receipt names `setup/devcontainer`; that is the case in 6.10 step 5.
-- **mainstage, only on the owner's go-ahead, at a moment the owner picks** (rulings 7 and 8). The order is fixed:
-  1. The lead's `docs/model-resilience-design` work merges.
+- **mainstage, only on the owner's go-ahead, at a moment the owner picks** (rulings 7, 8 and 9). The order is fixed:
+  1. #45 is fixed, and the lead's `docs/model-resilience-design` work merges.
   2. Move the Codespace and the Mac checkout to main, as was done for innovate.
   3. `task devcontainer:upgrade:self`.
   4. The owner stops `cs:ports` and `mirror.sh` (the brief's standing rule leaves them running until then). Run `task work:cs:armed` right away, because arming refuses while `cs:ports` holds the link (6.1 step 2).
   5. Verify 13570-13572 and 18787 listen.
 
-  Mainstage's sync worker stays stopped until #45 is fixed. The keeper does not need it.
+  Arming starts mainstage's sync worker again (6.1 step 1), which is why #45 comes first.
 
 ## 8. Constraints
 
@@ -381,7 +382,7 @@ A and B are independent of the rest and can go first and in parallel. D needs C.
 
     Only after item 4 is mainstage offered for arming.
 
-**The work is done when** step 4 of slice F has run green on innovate, and mainstage has been armed on the owner's go-ahead and has come back from one 12-hour stop by itself.
+**The work is done when** step 4 of slice F has run green on innovate. Mainstage follows once #45 is fixed and the owner gives the go-ahead (ruling 8). It is proven when it has come back from one 12-hour stop by itself.
 
 ## 10. Still unknown, and how each is settled
 
