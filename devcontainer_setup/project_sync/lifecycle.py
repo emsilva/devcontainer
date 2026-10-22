@@ -7,9 +7,10 @@ import json
 import os
 from pathlib import Path
 import time
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener
 
+from .state import _parent
 from .transport import _NoRedirect, _name, github_token
 
 LIFETIME = 12 * 3600
@@ -23,6 +24,8 @@ REPOST_AFTER = 120
 MAX_POSTS = 3
 AVAILABLE_WAIT = 45 * 60
 POLL = 10
+RETRY_GAP = 30
+UNREADABLE_NOTICE = 3
 TERMINAL = ('Failed', 'Unavailable', 'Deleted', 'Archived')
 _BASE = 'https://api.github.com/user/codespaces/'
 
@@ -56,19 +59,22 @@ def new_rid(now):
 class Ledger:
     """Append-only JSONL of start intents and results; never holds a token or a body."""
 
-    def __init__(self, path):
-        self.path = Path(path)
+    def __init__(self, path, now=time.time):
+        self.path, self._now = Path(path), now
 
     def rows(self):
         try:
-            lines = self.path.read_text().splitlines()
+            with _parent(self.path, private=True) as (parent, name):
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                with os.fdopen(fd, 'rb') as source:
+                    data = source.read()
         except FileNotFoundError:
             return []
         rows = []
-        for line in lines:
+        for line in data.splitlines():
             try:
-                row = json.loads(line)
-            except ValueError:
+                row = json.loads(line.decode())
+            except ValueError:  # includes UnicodeDecodeError
                 continue
             if isinstance(row, dict):
                 rows.append(row)
@@ -77,15 +83,16 @@ class Ledger:
     def append(self, kind, rid, **fields):
         if kind not in ('intent', 'result'):
             raise ValueError('Ledger kind must be intent or result.')
-        row = dict(fields, kind=kind, rid=rid, at=time.time())
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        try:
-            os.fchmod(fd, 0o600)
-            os.write(fd, (json.dumps(row, sort_keys=True) + '\n').encode())
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        row = dict(fields, kind=kind, rid=rid, at=self._now())
+        with _parent(self.path, create=True, private=True) as (parent, name):
+            fd = os.open(name, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         0o600, dir_fd=parent)
+            try:
+                os.fchmod(fd, 0o600)
+                os.write(fd, (json.dumps(row, sort_keys=True) + '\n').encode())
+                os.fsync(fd)
+            finally:
+                os.close(fd)
 
 
 def _request(method, url, token):
@@ -110,20 +117,22 @@ class LifecycleAPI:
         self._token = None
 
     def _fetch(self):
-        # Read per call; the last good token only covers a failing reader (spec D10).
+        # Read per call. The last good token only covers a reader that fails later
+        # (spec D10); a reader that never worked raises its fixed-text error.
         try:
             self._token = self._reader() or self._token
-        except Exception:
-            pass
+        except ValueError:
+            if not self._token:
+                raise
+        if not self._token:
+            raise ValueError('GitHub authentication unavailable; set GH_TOKEN or DEVCONTAINER_GH_USER.')
         return self._token
 
     def _call(self, method, suffix=''):
         token = self._fetch()
-        if not token:
-            return 0, b''
         try:
             return self._upstream(method, _BASE + self.name + suffix, token)
-        except Exception:
+        except (URLError, OSError, TimeoutError):
             return 0, b''
 
     def read(self):
@@ -153,11 +162,12 @@ def start(client, *, ledger=None, rid=None, now=time.time, sleep=time.sleep, say
     """Spec 6.4 step 5: POST start only from Shutdown with nothing pending.
 
     Waits for a clean Shutdown (20 min), posts, re-posts once if still Shutdown 2 min
-    after an accepted post, retries 409/5xx within MAX_POSTS, then waits for Available (45 min).
+    after an accepted post, retries 409/5xx within MAX_POSTS (a 409 retry needs a clean
+    Shutdown reading RETRY_GAP later), then waits for Available (45 min).
     """
     rid = rid or new_rid(now())
     posts, posted_at, accepted_at, last_state, status = 0, None, None, None, None
-    reposted, phase = False, 'post'
+    reposted, waiting, extended, unreadable, not_before = False, False, False, 0, 0
     deadline = now() + SHUTDOWN_WAIT
 
     def result(outcome):
@@ -169,7 +179,12 @@ def start(client, *, ledger=None, rid=None, now=time.time, sleep=time.sleep, say
         if tick:
             tick()
         t = now()
-        if reading.ok:
+        if not reading.ok:
+            unreadable += 1
+            if unreadable == UNREADABLE_NOTICE and say:
+                say('Codespace state unreadable; check GitHub authentication and network')
+        else:
+            unreadable = 0
             if reading.state != last_state and say:
                 say('Codespace state: ' + str(reading.state))
             last_state = reading.state
@@ -177,14 +192,14 @@ def start(client, *, ledger=None, rid=None, now=time.time, sleep=time.sleep, say
                 return result('available')
             if last_state in TERMINAL:
                 return result('failed')
-            down = last_state in ('Shutdown', 'ShuttingDown')
-            if phase == 'post' and not down:
-                # Someone else's start is under way; do not add a request.
-                phase, deadline = 'wait', t + AVAILABLE_WAIT
-            elif phase == 'wait' and last_state == 'Shutdown' and accepted_at is not None \
-                    and not reposted and t - accepted_at >= REPOST_AFTER and reading.pending is not True:
-                reposted, phase, deadline = True, 'post', t + SHUTDOWN_WAIT
-            if phase == 'post' and last_state == 'Shutdown' and reading.pending is not True:
+            clean = last_state == 'Shutdown' and reading.pending is not True
+            if not waiting:
+                if last_state not in ('Shutdown', 'ShuttingDown') and not extended:
+                    # Another start may be under way; allow it the full Available wait once.
+                    extended, deadline = True, max(deadline, t + AVAILABLE_WAIT)
+            elif clean and not reposted and posts < MAX_POSTS and t - accepted_at >= REPOST_AFTER:
+                reposted, waiting, deadline = True, False, t + SHUTDOWN_WAIT
+            if not waiting and clean and t >= not_before:
                 if posts >= MAX_POSTS:
                     return result('failed')
                 posts += 1
@@ -196,11 +211,13 @@ def start(client, *, ledger=None, rid=None, now=time.time, sleep=time.sleep, say
                 t = now()
                 if 200 <= status < 300:
                     posted_at = accepted_at = t
-                    phase, deadline = 'wait', t + AVAILABLE_WAIT
+                    waiting, deadline = True, t + AVAILABLE_WAIT
                 elif status == 409 or status >= 500 or status == 0:
                     if posts >= MAX_POSTS:
                         return result('failed')
                     deadline = t + SHUTDOWN_WAIT
+                    if status == 409:
+                        not_before = t + RETRY_GAP
                 else:
                     return result('failed')
         if t >= deadline:

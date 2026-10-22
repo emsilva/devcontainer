@@ -76,10 +76,39 @@ class StartTests(unittest.TestCase):
         self.assertEqual((client.posts, result['outcome'], result['posted_at']), (0, 'available', None))
 
     def test_409_waits_for_shutdown_and_posts_again(self):
-        states = [reading('Shutdown'), reading('ShuttingDown'), reading('Shutdown'), reading('Available')]
+        states = [reading('Shutdown'), reading('ShuttingDown'), reading('Shutdown'), reading('Shutdown'),
+                  reading('Shutdown'), reading('Available')]
         client, _, result = self.run_start(states, (409, 200))
         self.assertEqual(client.posts, 2)
         self.assertEqual(result['outcome'], 'available')
+        # Reads at +10 (ShuttingDown) and +20 (Shutdown) are too early; +30 is the first clean one allowed.
+        self.assertEqual(client.post_times[1] - client.post_times[0], lifecycle.RETRY_GAP)
+
+    def test_409_retry_needs_clean_shutdown_not_pending(self):
+        states = [reading('Shutdown')] + [reading('Shutdown', True)] * 6 + [reading('Shutdown'), reading('Available')]
+        client, _, _ = self.run_start(states, (409, 200))
+        self.assertEqual(client.post_times[1] - client.post_times[0], 70)  # first clean reading at +70
+
+    def test_409_409_200_then_shutdown_forever_waits_out_the_budget(self):
+        client, clock, result = self.run_start([reading('Shutdown')], (409, 409, 200))
+        self.assertEqual((client.posts, result['outcome'], result['status']), (3, 'timeout', 200))
+        self.assertGreaterEqual(clock.t - client.post_times[2], lifecycle.AVAILABLE_WAIT)
+
+    def test_foreign_start_before_any_post_does_not_latch(self):
+        states = [reading('Starting'), reading('Starting'), reading('Shutdown'), reading('Available')]
+        client, _, result = self.run_start(states)
+        self.assertEqual((client.posts, result['outcome']), (1, 'available'))
+        self.assertEqual(client.post_times[0], T0 + 20)
+
+    def test_foreign_start_extends_the_deadline_only_once(self):
+        client, clock, result = self.run_start([reading('Starting')])
+        self.assertEqual((client.posts, result['outcome']), (0, 'timeout'))
+        self.assertLess(clock.t - T0, lifecycle.AVAILABLE_WAIT + 20)
+
+    def test_repeated_unreadable_readings_are_announced_once(self):
+        said = []
+        self.run_start([reading(None, None, ok=False)] * 5 + [reading('Available')], say=said.append)
+        self.assertEqual([t for t in said if 'unreadable' in t], ['Codespace state unreadable; check GitHub authentication and network'])
 
     def test_still_shutdown_two_minutes_after_accepted_post_reposts_once(self):
         client, clock, result = self.run_start([reading('Shutdown')] * 14 + [reading('Available')])
@@ -123,6 +152,7 @@ class StartTests(unittest.TestCase):
         client, clock, result = self.run_start([reading('Shutdown', True)])
         self.assertEqual((client.posts, result['outcome']), (0, 'timeout'))
         self.assertGreaterEqual(clock.t - T0, lifecycle.SHUTDOWN_WAIT)
+        self.assertLess(clock.t - T0, lifecycle.SHUTDOWN_WAIT + lifecycle.POLL)
 
     def test_say_on_state_changes_and_tick_on_each_poll(self):
         said, ticks = [], []
@@ -133,8 +163,8 @@ class StartTests(unittest.TestCase):
 
     def test_ledger_gets_intent_before_and_result_after_each_post(self):
         with tempfile.TemporaryDirectory() as tmp:
-            ledger = lifecycle.Ledger(Path(tmp) / 'keeper-ledger.jsonl')
             clock = Clock()
+            ledger = lifecycle.Ledger(Path(tmp).resolve() / 'keeper-ledger.jsonl', now=clock.now)
             seen = []
 
             class Probe(FakeClient):
@@ -146,7 +176,9 @@ class StartTests(unittest.TestCase):
             kinds = [row['kind'] for row in ledger.rows()]
             self.assertEqual(kinds, ['intent', 'result'])
             self.assertEqual(seen, [['intent']])
-            self.assertNotIn('token', json.dumps(ledger.rows()))
+            allowed = {'kind', 'rid', 'at', 'post', 'state', 'status'}
+            for row in ledger.rows():
+                self.assertLessEqual(set(row), allowed)
             self.assertEqual(ledger.rows()[1]['status'], 200)
             self.assertEqual(oct(ledger.path.stat().st_mode & 0o777), '0o600')
 
@@ -162,12 +194,40 @@ class StartTests(unittest.TestCase):
 
     def test_ledger_skips_unparsable_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
-            ledger = lifecycle.Ledger(Path(tmp) / 'l.jsonl')
+            ledger = lifecycle.Ledger(Path(tmp).resolve() / 'l.jsonl')
             ledger.append('intent', 'r-1')
             with ledger.path.open('a') as f:
                 f.write('{broken\n[1]\n')
             ledger.append('result', 'r-1', status=200)
             self.assertEqual([row['kind'] for row in ledger.rows()], ['intent', 'result'])
+
+    def test_ledger_stamps_with_the_injected_clock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = lifecycle.Ledger(Path(tmp).resolve() / 'l.jsonl', now=lambda: 42.0)
+            ledger.append('intent', 'r-1')
+            self.assertEqual(ledger.rows()[0]['at'], 42.0)
+
+    def test_ledger_skips_undecodable_lines_and_refuses_symlinks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp).resolve() / 'l.jsonl'
+            ledger = lifecycle.Ledger(path)
+            ledger.append('intent', 'r-1')
+            with path.open('ab') as f:
+                f.write(b'\xff\xfe not utf8\n')
+            self.assertEqual(len(ledger.rows()), 1)
+            link = Path(tmp).resolve() / 'link.jsonl'
+            link.symlink_to(path)
+            with self.assertRaises(OSError):
+                lifecycle.Ledger(link).rows()
+            with self.assertRaises(OSError):
+                lifecycle.Ledger(link).append('intent', 'r-2')
+            self.assertEqual(len(ledger.rows()), 1)
+
+    def test_ledger_creates_private_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp).resolve() / 'a' / 'l.jsonl'
+            lifecycle.Ledger(path).append('intent', 'r-1')
+            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
 
 
 class LifecycleAPITests(unittest.TestCase):
@@ -224,8 +284,16 @@ class LifecycleAPITests(unittest.TestCase):
         def reader():
             raise ValueError('no auth')
         api = lifecycle.LifecycleAPI(self.NAME, upstream=lambda *a: self.fail('no request'), token_reader=reader)
-        self.assertFalse(api.read().ok)
-        self.assertEqual(api.post_start(), 0)
+        for call in (api.read, api.post_start, api.post_stop):
+            with self.assertRaisesRegex(ValueError, 'no auth'):
+                call()
+
+    def test_only_network_errors_become_status_zero(self):
+        def upstream(*args):
+            raise RuntimeError('bug')
+        api = lifecycle.LifecycleAPI(self.NAME, upstream=upstream, token_reader=lambda: 't')
+        with self.assertRaises(RuntimeError):
+            api.post_start()
 
     def test_default_reader_honors_the_selected_account(self):
         with patch.dict('os.environ', {'DEVCONTAINER_GH_USER': 'wrong', 'GH_TOKEN': ''}, clear=False), \

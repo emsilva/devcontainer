@@ -53,9 +53,10 @@ class CodespaceAPITests(unittest.TestCase):
         self.assertEqual(client.reads, 6)
 
     def test_start_409_waits_and_posts_again_instead_of_blaming_authentication(self):
-        client, error = self.start([('Shutdown',), ('ShuttingDown',), ('Shutdown',), ('Available',)], (409, 200))
+        client, error = self.start([('Shutdown',), ('ShuttingDown',), ('Shutdown',), ('Shutdown',), ('Available',)], (409, 200))
         self.assertIsNone(error)
         self.assertEqual(len(client.posts), 2)
+        self.assertEqual(client.posts[1] - client.posts[0], lifecycle.RETRY_GAP)
 
     def test_start_already_available_does_not_post(self):
         client, error = self.start([('Available',)])
@@ -65,12 +66,32 @@ class CodespaceAPITests(unittest.TestCase):
     def test_start_remaining_shutdown_times_out_with_last_state(self):
         client, error = self.start([('Shutdown',)])
         self.assertRegex(str(error), 'timed out.*Shutdown')
-        self.assertLessEqual(len(client.posts), 2)
+        self.assertEqual(len(client.posts), 2)
 
     def test_start_refused_names_status_without_blaming_a_token(self):
         client, error = self.start([('Shutdown',)], (403,))
         self.assertRegex(str(error), 'HTTP 403')
         self.assertEqual(len(client.posts), 1)
+
+    def test_start_without_any_token_fails_at_once(self):
+        with patch('devcontainer_setup.project_sync.lifecycle.github_token',
+                   side_effect=ValueError('GitHub authentication unavailable; set GH_TOKEN or DEVCONTAINER_GH_USER.')), \
+                patch('devcontainer_setup.project_sync.lifecycle.time.sleep', side_effect=AssertionError('no wait')):
+            with self.assertRaisesRegex(ValueError, 'authentication unavailable'):
+                self.service().start_codespace('example')
+
+    def test_token_only_spaces_strips_host_and_pins_hostname(self):
+        service = self.service()
+        with patch.dict('os.environ', {'GH_TOKEN': 'secret', 'GH_HOST': 'evil'}, clear=True), \
+                patch('devcontainer_setup.project_sync.codespaces.subprocess.run',
+                      return_value=Mock(returncode=0, stdout='[{"codespaces": []}]')) as run, \
+                patch('subprocess.check_output', return_value='main\n'):
+            self.assertEqual(service.spaces(), [])
+        call = run.call_args
+        self.assertEqual(call.kwargs['env']['GH_TOKEN'], 'secret')
+        self.assertNotIn('GH_HOST', call.kwargs['env'])
+        self.assertIn('--hostname', call.args[0])
+        self.assertIn('github.com', call.args[0])
 
     def test_discovery_uses_the_selected_account(self):
         service = self.service()
