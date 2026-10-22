@@ -446,6 +446,25 @@ class KeeperStepTests(unittest.TestCase):
         bare.rest()
         self.assertEqual(slept, [7])
 
+    def test_arm_wait_holds_for_the_keep_alive_child_while_available(self):
+        # R4: an Available reading without a child yet keeps the arm waiting, within its timeout.
+        now = time.time()
+        base = {'pid': 4121, 'nonce': 'n' * 48, 'phase': 'watching', 'heartbeat_at': now,
+                'reading': {'at': now, 'ok': True, 'state': 'Available', 'pending': False}}
+        shutdown = {'at': now, 'ok': True, 'state': 'Shutdown', 'pending': False}
+        cases = (({}, True), ({'keepalive': {'pid': None, 'error': None}}, True),
+                 ({'keepalive': {'pid': 5402, 'error': None}}, False),
+                 ({'keepalive': {'pid': None, 'error': 'the connection exited with status 255'}}, False),
+                 ({'reading': shutdown}, False), ({'reading': dict(shutdown, ok=False, state=None)}, False),
+                 ({'phase': 'starting', 'keepalive': {'pid': 5402}}, True))
+        with patch.object(keeper, '_owned', return_value=True):
+            for extra, waits in cases:
+                with self.subTest(extra=extra):
+                    atomic_write(self.state / keeper.RUNTIME, json.dumps(dict(base, **extra)).encode())
+                    started = time.monotonic()
+                    keeper.wait_ready(self.state, 'n' * 48, timeout=.5)
+                    self.assertEqual(time.monotonic() - started >= .5, waits)
+
 
 class ForeignProcessTests(unittest.TestCase):
     def test_only_foreign_gh_processes_for_this_codespace_are_named(self):

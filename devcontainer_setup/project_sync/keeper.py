@@ -114,12 +114,23 @@ def stop(state: Path) -> dict:
         return result
 
 
+def _child_pending(runtime):
+    # Available, and the keep-alive child has neither started nor said why not.
+    reading, held = runtime.get('reading') or {}, runtime.get('keepalive') or {}
+    return bool(reading.get('ok') and reading.get('state') == 'Available'
+                and not held.get('pid') and not held.get('error'))
+
+
 def wait_ready(state: Path, nonce: str, timeout: float = 60) -> dict:
-    """Wait for the keeper's first full pass, its first heartbeat after startup."""
+    """Wait for the keeper's first full pass, its first heartbeat after startup.
+
+    While the Codespace reads Available, also wait for the keep-alive child (R4).
+    """
     deadline = time.monotonic() + timeout
     while True:
         current = status(state)
-        if (current.get('nonce') == nonce and current.get('phase') != 'starting') or not current['running']:
+        if not current['running'] or (current.get('nonce') == nonce and current.get('phase') != 'starting'
+                                       and not _child_pending(current)):
             return current
         if time.monotonic() >= deadline:
             return current
