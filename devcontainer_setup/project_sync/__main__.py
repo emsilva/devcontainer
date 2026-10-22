@@ -100,14 +100,18 @@ def _arm(project, state, args):
 
 def _armed(project, state, args):
     """Spec 6.1 steps 2-7, run by workspace.remote once the worker is ready and before Herdr."""
-    from . import keeper, workspace
+    from . import arming, keeper, workspace
     from .state import read_json
     name = read_json(state / scratch.CONFIG)['codespace']
     pids = keeper.foreign_processes(state, name)
     if pids:
         raise ValueError('Another gh process holds ' + name + ' (pid ' + ', '.join(map(str, pids))
                          + '); stop it before arming, because gh can start the Codespace and it holds the ports.')
+    before = arming.read(state)
     _arm(project, state, args)
+    if before.get('armed') and arming.read(state).get('ports') != before.get('ports'):
+        # R20: the running keep-alive child carries the old ports; a new keeper starts one with the new list.
+        keeper.stop(state)
     started = keeper.start(project.root, state)
     if keeper.wait_ready(state, started['nonce']).get('phase') == 'starting':
         print('The keeper has not reported within 60 seconds; inspect task work:logs.')

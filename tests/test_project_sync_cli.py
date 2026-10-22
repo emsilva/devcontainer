@@ -72,23 +72,46 @@ class ArmFlowTests(unittest.TestCase):
         _, ask = self.arm(row={'name': 'cs-2', 'billable_owner': {'login': 'octo'}})
         ask.assert_called_once()
 
-    def armed_step(self, foreign=()):
+    def armed_step(self, foreign=(), port=(), no_port=()):
         from devcontainer_setup.project_sync import __main__ as cli, keeper
         from devcontainer_setup.project_sync.state import atomic_write
         mock = self.mock
+        self.args.port, self.args.no_port = list(port), list(no_port)
         atomic_write(self.state / 'scratch.json', json.dumps({'codespace': 'cs-1', 'root': str(self.project.root)}).encode())
         started = {'pid': 4121, 'nonce': 'n' * 48, 'phase': 'starting'}
         with mock.patch.object(keeper, 'foreign_processes', return_value=list(foreign)) as scan, \
                 mock.patch.object(keeper, 'start', return_value=started) as start, \
+                mock.patch.object(keeper, 'stop') as stop, \
                 mock.patch.object(keeper, 'wait_ready', return_value=dict(started, phase='waiting')) as ready, \
                 mock.patch('devcontainer_setup.project_sync.arming.account', return_value='octo'), \
                 mock.patch('devcontainer_setup.project_sync.codespaces.Codespaces') as spaces, \
                 mock.patch('builtins.input', return_value='arm') as ask, \
                 mock.patch('sys.stdout', new_callable=io.StringIO) as out:
             spaces.return_value.space.return_value = self.row
+            order = mock.Mock()
+            order.attach_mock(stop, 'stop')
+            order.attach_mock(start, 'start')
             cli._armed(self.project, self.state, self.args)
         scan.assert_called_once_with(self.state, 'cs-1')
+        self.order = [name for name, *_ in order.mock_calls]
         return start, ready, ask, out.getvalue()
+
+    def test_a_port_change_on_an_armed_project_restarts_the_keeper(self):
+        # R20: the running keep-alive child carries the old ports; a new keeper starts one with the new list.
+        from devcontainer_setup.project_sync import arming
+        self.armed_step()
+        self.assertEqual(self.order, ['start'])
+        for unchanged in ((), (3570,)):
+            with self.subTest(port=unchanged):
+                # A repeat arm without a change is a no-op: the same keeper is adopted, with its child.
+                self.armed_step(port=unchanged)
+                self.assertEqual(self.order, ['start'])
+        self.armed_step(port=[4000])
+        self.assertEqual(self.order, ['stop', 'start'])
+        self.assertEqual(arming.read(self.state)['ports'], [3570, 4000, 8787])
+        self.armed_step(no_port=[4000])
+        self.assertEqual(self.order, ['stop', 'start'])
+        self.assertEqual(arming.read(self.state)['ports'], [3570, 8787])
 
     def test_armed_step_refuses_a_foreign_gh_process_before_consent(self):
         from devcontainer_setup.project_sync import arming
