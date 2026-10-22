@@ -313,6 +313,33 @@ class LifecycleAPITests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'no auth'):
                 call()
 
+    def test_no_token_for_a_selected_account_names_it_and_the_gh_commands(self):
+        # The keeper always has an account and never a GH_TOKEN, so "set GH_TOKEN" cannot help it.
+        def failing():
+            raise ValueError('GitHub authentication unavailable; set GH_TOKEN or DEVCONTAINER_GH_USER.')
+        for reader in (failing, lambda: ''):
+            api = lifecycle.LifecycleAPI(self.NAME, 'octo', upstream=lambda *a: self.fail('no request'),
+                                         token_reader=reader)
+            with self.assertRaises(ValueError) as caught:
+                api.read()
+            text = str(caught.exception)
+            self.assertIn('for octo', text)
+            self.assertIn('gh auth status --hostname github.com', text)
+            self.assertIn('gh auth login', text)
+            self.assertNotIn('GH_TOKEN', text)
+
+    def test_a_request_that_cannot_be_built_never_echoes_it(self):
+        def upstream(*args):
+            raise ValueError("Invalid header value b'Bearer tok-secret\\n'")
+        api = lifecycle.LifecycleAPI(self.NAME, upstream=upstream, token_reader=lambda: 'tok-secret')
+        for call in (api.read, api.post_start):
+            with self.assertRaises(ValueError) as caught:
+                call()
+            self.assertNotIn('tok-secret', str(caught.exception))
+            self.assertIn('gh auth status', str(caught.exception))
+            self.assertIsNone(caught.exception.__cause__)
+            self.assertTrue(caught.exception.__suppress_context__)
+
     def test_only_network_errors_become_status_zero(self):
         def upstream(*args):
             raise RuntimeError('bug')

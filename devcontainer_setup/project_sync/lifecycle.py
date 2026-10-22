@@ -114,7 +114,7 @@ class LifecycleAPI:
     """Direct-HTTPS client for exactly three routes: GET, POST start, POST stop."""
 
     def __init__(self, name, gh_user=None, *, upstream=None, token_reader=None):
-        self.name = _name(name)
+        self.name, self._gh_user = _name(name), gh_user
         self._upstream = upstream or _request
         self._reader = token_reader or (lambda: github_token(
             dict(os.environ, **({'DEVCONTAINER_GH_USER': gh_user} if gh_user else {}))))
@@ -127,10 +127,19 @@ class LifecycleAPI:
             self._token = self._reader() or self._token
         except ValueError:
             if not self._token:
+                if self._gh_user:
+                    raise self._no_token() from None
                 raise
         if not self._token:
-            raise ValueError('GitHub authentication unavailable; set GH_TOKEN or DEVCONTAINER_GH_USER.')
+            raise self._no_token()
         return self._token
+
+    def _no_token(self):
+        # A selected account (the keeper's) can only be fixed through gh itself.
+        if self._gh_user:
+            return ValueError(f'GitHub authentication unavailable for {self._gh_user}; run gh auth status '
+                              '--hostname github.com, and gh auth login --hostname github.com if it is missing.')
+        return ValueError('GitHub authentication unavailable; set GH_TOKEN or DEVCONTAINER_GH_USER.')
 
     def _call(self, method, suffix=''):
         token = self._fetch()
@@ -138,6 +147,10 @@ class LifecycleAPI:
             return self._upstream(method, _BASE + self.name + suffix, token)
         except (URLError, OSError, TimeoutError, http.client.HTTPException):
             return 0, b''
+        except ValueError:
+            # http.client's text can echo a header value, the token included.
+            raise ValueError('The GitHub request could not be built; check the token with '
+                             'gh auth status --hostname github.com.') from None
 
     def read(self):
         at = time.time()
