@@ -157,3 +157,57 @@ class CodespaceAPITests(unittest.TestCase):
         client, error = self.start([('Shutdown',), ('Failed',)])
         self.assertRegex(str(error), 'Failed')
         self.assertEqual(len(client.posts), 1)
+
+
+class RecoveryStatusTests(unittest.TestCase):
+    def setUp(self):
+        import time
+        from devcontainer_setup.project_sync import arming
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name).resolve() / 'state'
+        self.now = time.time()
+        arming.arm(self.state, gh_user='octo', codespace='cs-1', consent='x', billable_owner='octo',
+                   ports=[3570, 8787], now=self.now - 7200)
+
+    def lines(self, running=True, **runtime):
+        from devcontainer_setup.project_sync import keeper, workspace
+        from devcontainer_setup.project_sync.state import atomic_write
+        value = dict({'pid': 4121, 'nonce': 'n', 'phase': 'watching', 'heartbeat_at': self.now - 12,
+                      'caffeinate': 4122, 'reading': {'at': self.now - 12, 'ok': True, 'state': 'Available',
+                                                      'pending': False}}, **runtime)
+        atomic_write(self.state / keeper.RUNTIME, json.dumps(value).encode())
+        with patch.object(keeper, '_owned', return_value=running):
+            return workspace.recovery_lines(workspace.recovery(self.state))
+
+    def test_status_block_shows_due_time_in_both_zones(self):
+        from devcontainer_setup.project_sync import arming
+        anchor = self.now - 3600
+        lines = self.lines(anchor={'at': anchor, 'source': 'observed'})
+        self.assertEqual([line.split()[0] for line in lines], ['Recovery', 'Keeper', 'Codespace', 'Keep-alive', 'Last'])
+        self.assertIn('armed since ' + arming.format_time(self.now - 7200) + ' as octo, no hold', lines[0])
+        self.assertIn('restarts 0 of 2 in 24 h', lines[0])
+        self.assertIn('running (pid 4121), heartbeat 12 s, caffeinate held', lines[1])
+        due = arming.format_time(anchor + lifecycle.LIFETIME)
+        self.assertRegex(due, r'^\d{4}-\d\d-\d\d \d\d:\d\d \(UTC \d{4}-\d\d-\d\d \d\d:\d\d\)$')
+        self.assertIn('Available since ' + arming.format_time(anchor) + ', anchor observed; 12-hour stop due ~' + due,
+                      lines[2])
+        self.assertIn('13570 18787', lines[3])
+        self.assertTrue(lines[4].startswith('Last restart'))
+
+    def test_lines_that_are_not_fine_name_the_command(self):
+        stopped = self.lines(running=False)
+        self.assertIn('not running; run task work:cs:armed', stopped[1])
+        stale = self.lines(heartbeat_at=self.now - 400)
+        self.assertIn('task work:cs:armed', stale[1])
+        other = self.lines(reading={'at': self.now, 'ok': True, 'state': 'Shutdown', 'pending': False},
+                           down={'count': 4, 'first_at': self.now - 240, 'kind': 'OTHER'})
+        self.assertIn('run task work:cs to start it', other[2])
+        unreadable = self.lines(reading={'at': self.now, 'ok': False, 'state': None, 'pending': None})
+        self.assertIn('gh auth status', unreadable[2])
+
+    def test_unarmed_project_gets_one_line(self):
+        from devcontainer_setup.project_sync import arming
+        arming.write(self.state, dict(arming.read(self.state), armed=False))
+        lines = self.lines(running=False)
+        self.assertEqual(len(lines), 1)
+        self.assertIn('not armed', lines[0])

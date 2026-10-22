@@ -57,8 +57,8 @@ def _print(value):
 
 
 def _arm(project, state, args):
-    # Arming only records state here; the keeper that acts on it starts elsewhere.
-    # Network calls and the prompt run unlocked; the lock covers only the read and write.
+    # Records consent; _armed then starts the keeper. Network calls and the
+    # prompt run unlocked; the lock covers only the read and write.
     from . import arming
     from .codespaces import Codespaces
     from .state import locked
@@ -98,8 +98,24 @@ def _arm(project, state, args):
     return 0
 
 
+def _armed(project, state, args):
+    """Spec 6.1 steps 2-7, run by workspace.remote once the worker is ready and before Herdr."""
+    from . import keeper, workspace
+    from .state import read_json
+    name = read_json(state / scratch.CONFIG)['codespace']
+    pids = keeper.foreign_processes(state, name)
+    if pids:
+        raise ValueError('Another gh process holds ' + name + ' (pid ' + ', '.join(map(str, pids))
+                         + '); stop it before arming, because gh can start the Codespace and it holds the ports.')
+    _arm(project, state, args)
+    started = keeper.start(project.root, state)
+    if keeper.wait_ready(state, started['nonce']).get('phase') == 'starting':
+        print('The keeper has not reported within 60 seconds; inspect task work:logs.')
+    print('\n'.join(workspace.recovery_lines(workspace.recovery(state))))
+
+
 def _arming_edit(args, state):
-    from . import arming
+    from . import arming, keeper
     from .state import locked
     with locked(state / 'workspace-control.lock', blocking=True):
         value = arming.read(state)
@@ -109,11 +125,50 @@ def _arming_edit(args, state):
             until = arming.hold_until(args.hold, time.time())
             arming.write(state, dict(value, hold_until=until))
             print('Hold off' if until is None else 'Holding restarts until ' + arming.format_time(until))
-        elif value.get('armed'):
+            return 0
+        if value.get('armed'):
             arming.write(state, dict(value, armed=False))
-            print('Disarmed')
-        else:
-            print('Not armed')
+    # By fact, whatever arming.json said: a keeper left running is stopped too.
+    running = keeper.status(state)['running']
+    keeper.stop(state)
+    print(('Disarmed' if value.get('armed') else 'Not armed') + ('; keeper stopped' if running else ''))
+    return 0
+
+
+def _log_lines(path, count=80):
+    # The last lines of one log, each keyed by its leading UTC time; an older line
+    # without one keeps the key of the line before it.
+    try:
+        if path.is_symlink():
+            return []
+        with path.open('rb') as source:
+            source.seek(0, os.SEEK_END)
+            source.seek(max(0, source.tell() - 256 * 1024))
+            text = source.read().decode(errors='replace')
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    lines, key = [], ''
+    for line in text.splitlines()[-count:]:
+        stamp = line[:24]
+        if len(stamp) == 24 and stamp.endswith('Z') and stamp[:4].isdigit() and stamp[4] == '-':
+            key = stamp
+        lines.append((key, line))
+    return lines
+
+
+def _logs(state, follow):
+    from . import keeper
+    sources = (('keeper', state / keeper.LOG), ('worker', state / 'scratch.log'))
+    merged = sorted(((key, label + ' ' + line) for label, path in sources for key, line in _log_lines(path)),
+                    key=lambda row: row[0])
+    if not merged and not follow:
+        print('No keeper or worker log yet. Run task work:cs on your Mac to connect.')
+        return 0
+    for _, line in merged:
+        print(line)
+    if follow:
+        sys.stdout.flush()
+        return subprocess.call(['tail', '-n', '0', '-F'] + [str(path) for _, path in sources])
     return 0
 
 
@@ -130,7 +185,9 @@ def run(args):
                 print(workspace.status_text(value))
             return 0
         if args.stop:
-            _print(scratch.stop(state))
+            from . import keeper
+            stopped = keeper.stop(state)
+            _print(dict(scratch.stop(state), keeper={'running': stopped['running'], 'phase': stopped.get('phase')}))
             return 0
         if args.disconnect:
             from .herdr import disconnect_remote
@@ -138,11 +195,11 @@ def run(args):
         if args.disarm or args.hold is not None:
             return _arming_edit(args, state)
         if args.logs:
-            raise ValueError('task work:logs is not available yet')
+            return _logs(state, args.follow)
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise ValueError('Work entrypoints require a terminal; use task work:status for scripts')
         if args.armed:
-            return _arm(project, state, args)
+            return workspace.remote(project, state, armed=lambda primary: _armed(primary, state, args))
         if args.codespace_stop or args.codespace_restart:
             raise ValueError('Stopping and restarting the Codespace from a task is not available yet')
         if args.codespace:

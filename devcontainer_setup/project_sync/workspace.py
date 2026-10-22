@@ -148,7 +148,8 @@ def _ready(project, state, timeout=120):
     raise ValueError('Waiting for current scratch connection timed out; inspect task work:status and scratch:logs')
 
 
-def remote(project, state):
+def remote(project, state, armed=None):
+    """Connect the project; `armed(primary)` runs once the worker is ready, before Herdr opens."""
     if os.environ.get('CODESPACES') == 'true':
         raise ValueError('Run task work:cs on your Mac to connect the project')
     from .herdr import open_remote
@@ -202,6 +203,10 @@ def remote(project, state):
     history = (runtime or {}).get('conversations', {}).get('outcome', 'pending')
     if history != 'complete':
         print('Conversation history is ' + history + '; inspect task work:status.')
+    if armed is not None:
+        # Outside workspace-control.lock, which arming takes for its own write,
+        # and before Herdr, whose TUI would otherwise hold the step back.
+        armed(primary)
     return open_remote(primary, state, remote_root)
 
 
@@ -222,7 +227,94 @@ def status(project, state):
     history = sync_cycle.summary(cycle, current=current, local_receipt=latest)
     history['retained_receipts'] = dict(runtime.get('retained_receipts', {}), codespace_to_desktop=latest)
     return dict(workspace=value, worker=runtime, scratch=sync, last_mac_checkpoint=latest,
-                conversations=history, synchronization='Scratch and project conversations only; Git is managed manually')
+                conversations=history, recovery=recovery(state),
+                synchronization='Scratch and project conversations only; Git is managed manually')
+
+
+def recovery(state):
+    """Offline view of arming, the keeper and the restart budget; never creates state."""
+    from . import arming, keeper, lifecycle
+    now = time.time()
+    try:
+        config = arming.read(state)
+    except (OSError, ValueError) as error:
+        config = {'armed': False, 'issue': str(error)}
+    try:
+        runtime = keeper.status(state)
+    except (OSError, ValueError) as error:
+        runtime = {'running': False, 'phase': 'unknown', 'heartbeat_age': None, 'error': str(error)}
+    try:
+        rows = lifecycle.Ledger(Path(state) / keeper.LEDGER).rows()
+    except OSError:
+        rows = []
+    return dict(arming=config, keeper=runtime, restarts=len(lifecycle.restart_rids(rows, now)), now=now)
+
+
+def _ports(ports):
+    return ' '.join(str(port + 10000) for port in ports) or 'none'
+
+
+def recovery_lines(value):
+    """Spec 6.8's Recovery block; each line that is not fine names the command to run."""
+    from .arming import format_time
+    from . import keeper, lifecycle
+    config, runtime, now = value['arming'], value['keeper'], value['now']
+    if not config.get('armed'):
+        issue = config.get('issue')
+        return ['Recovery     not armed' + ('; ' + issue if issue else '; task work:cs:armed arms it')]
+    hold = config.get('hold_until')
+    held = ('on hold until ' + format_time(hold) + ' (task work:hold -- off ends it)'
+            if isinstance(hold, (int, float)) and hold > now else 'no hold')
+    lines = ['Recovery     armed since ' + format_time(config.get('armed_at') or now) + ' as '
+             + str(config.get('gh_user')) + ', ' + held + '; restarts ' + str(value['restarts'])
+             + ' of ' + str(lifecycle.MAX_RESTARTS) + ' in 24 h']
+    running, age = runtime.get('running'), runtime.get('heartbeat_age')
+    if not running:
+        lines.append('Keeper       not running; run task work:cs:armed')
+    elif runtime.get('phase') == 'refused':
+        lines.append('Keeper       refused: ' + str(runtime.get('error')))
+    elif age is None or age > keeper.HEARTBEAT_STALE:
+        lines.append(f'Keeper       running (pid {runtime.get("pid")}) but its heartbeat is '
+                     + ('missing' if age is None else f'{int(age)} s old') + '; run task work:cs:armed')
+    else:
+        text = (f'Keeper       running (pid {runtime.get("pid")}), heartbeat {int(age)} s, caffeinate '
+                + ('held' if runtime.get('caffeinate') else 'not held'))
+        if runtime.get('phase') == 'waiting':
+            text += '; waiting: ' + str(runtime.get('error'))
+        lines.append(text)
+    reading, anchor, watch = runtime.get('reading') or {}, runtime.get('anchor'), runtime.get('down') or {}
+    if not running or not reading:
+        lines.append('Codespace    not read yet' + ('' if running else '; run task work:cs:armed'))
+    elif not reading.get('ok'):
+        lines.append('Codespace    unreadable at ' + format_time(reading['at'])
+                     + '; check gh auth status --hostname github.com and the network')
+    elif reading.get('state') == 'Available':
+        text = 'Codespace    Available'
+        if anchor:
+            text += (' since ' + format_time(anchor['at']) + ', anchor ' + str(anchor.get('source'))
+                     + '; 12-hour stop due ~' + format_time(anchor['at'] + lifecycle.LIFETIME))
+        else:
+            text += ', no anchor yet'
+        lines.append(text)
+    else:
+        text = 'Codespace    ' + str(reading.get('state')) + ' since ' + format_time(watch.get('first_at') or reading['at'])
+        reason = {'OWNER': 'stopped by you', 'OTHER': 'not the 12-hour stop',
+                  'LIFETIME': "GitHub's 12-hour stop"}.get(watch.get('kind'))
+        lines.append(text + (' (' + reason + ')' if reason else '') + '; run task work:cs to start it')
+    keepalive = runtime.get('keepalive') or {}
+    if running and keepalive.get('pid'):
+        lines.append(f'Keep-alive   holding (pid {keepalive["pid"]}); ports '
+                     + _ports([remote for _, remote in keepalive.get('ports_up', [])]))
+    else:
+        lines.append('Keep-alive   not holding; ports ' + _ports(config.get('ports', []))
+                     + ('' if running else '; run task work:cs:armed'))
+    last = runtime.get('last_restart')
+    if isinstance(last, dict) and isinstance(last.get('at'), (int, float)):
+        lines.append('Last restart ' + str(last.get('rid')) + ' ' + format_time(last['at']) + ': '
+                     + str(last.get('outcome', 'unknown')))
+    else:
+        lines.append('Last restart none')
+    return lines
 
 
 def status_text(value):
@@ -239,4 +331,6 @@ def status_text(value):
         lines.append('Previous verified receipts retained; availability reflects the current cycle.')
     if history['issues'] or worker.get('error') or scratch_status.get('issue'):
         lines.append('Details: task work:status -- --json; logs: task scratch:logs')
+    if value.get('recovery'):
+        lines += recovery_lines(value['recovery'])
     return '\n'.join(lines)

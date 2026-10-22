@@ -1,4 +1,5 @@
 """Exercise the distributed command entrypoint, including isolated execution."""
+import io
 import json
 import os
 from pathlib import Path
@@ -70,6 +71,41 @@ class ArmFlowTests(unittest.TestCase):
         _, ask = self.arm(row={'name': 'cs-2', 'billable_owner': {'login': 'octo'}})
         ask.assert_called_once()
 
+    def armed_step(self, foreign=()):
+        from devcontainer_setup.project_sync import __main__ as cli, keeper
+        from devcontainer_setup.project_sync.state import atomic_write
+        mock = self.mock
+        atomic_write(self.state / 'scratch.json', json.dumps({'codespace': 'cs-1', 'root': str(self.project.root)}).encode())
+        started = {'pid': 4121, 'nonce': 'n' * 48, 'phase': 'starting'}
+        with mock.patch.object(keeper, 'foreign_processes', return_value=list(foreign)) as scan, \
+                mock.patch.object(keeper, 'start', return_value=started) as start, \
+                mock.patch.object(keeper, 'wait_ready', return_value=dict(started, phase='waiting')) as ready, \
+                mock.patch('devcontainer_setup.project_sync.arming.account', return_value='octo'), \
+                mock.patch('devcontainer_setup.project_sync.codespaces.Codespaces') as spaces, \
+                mock.patch('builtins.input', return_value='arm') as ask, \
+                mock.patch('sys.stdout', new_callable=io.StringIO) as out:
+            spaces.return_value.space.return_value = self.row
+            cli._armed(self.project, self.state, self.args)
+        scan.assert_called_once_with(self.state, 'cs-1')
+        return start, ready, ask, out.getvalue()
+
+    def test_armed_step_refuses_a_foreign_gh_process_before_consent(self):
+        from devcontainer_setup.project_sync import arming
+        with self.assertRaisesRegex(ValueError, 'pid 404'):
+            self.armed_step(foreign=[404])
+        self.assertFalse(arming.read(self.state)['armed'])
+
+    def test_armed_step_consents_starts_the_keeper_and_prints_status(self):
+        from devcontainer_setup.project_sync import arming
+        start, ready, ask, out = self.armed_step()
+        ask.assert_called_once()
+        self.assertTrue(arming.read(self.state)['armed'])
+        start.assert_called_once_with(self.project.root, self.state)
+        ready.assert_called_once_with(self.state, 'n' * 48)
+        self.assertIn('Armed as octo', out)
+        self.assertIn('Recovery     armed since', out)
+        self.assertIn('Keeper ', out)
+
     def test_port_range(self):
         with self.assertRaises(SystemExit):
             parser().parse_args(['work', '--armed', '--port', '60000'])
@@ -125,10 +161,46 @@ class ProjectSyncCLITests(unittest.TestCase):
         self.assertEqual(self.run_cli('work', '--disarm').returncode, 0)
         self.assertFalse(arming.read(state)['armed'])
 
-    def test_unbuilt_actions_fail_with_fixed_text(self):
+    def test_logs_without_logs_say_so_and_create_nothing(self):
         result = self.run_cli('work', '--logs')
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('not available yet', result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('No keeper or worker log yet', result.stdout)
+        self.assertFalse(self.state.exists())
+
+    def test_logs_merge_keeper_and_worker_lines_by_time(self):
+        from devcontainer_setup.project_sync.state import atomic_write, discover_project, state_dir
+        state = state_dir(discover_project(self.root), self.env)
+        atomic_write(state / 'keeper.log', b'2026-10-22 01:00:00,000Z 11 Keeper started\n'
+                                           b'2026-10-22 01:02:00,000Z 11 Codespace Shutdown\n')
+        old = ''.join('Old worker line %d\n' % i for i in range(100))
+        atomic_write(state / 'scratch.log', old.encode() + b'2026-10-22 01:01:00,000Z 22 Scratch connection established.\n')
+        result = self.run_cli('work', '--logs')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 82)  # the last 80 worker lines and both keeper lines
+        self.assertEqual(lines[-3:], ['keeper 2026-10-22 01:00:00,000Z 11 Keeper started',
+                                      'worker 2026-10-22 01:01:00,000Z 22 Scratch connection established.',
+                                      'keeper 2026-10-22 01:02:00,000Z 11 Codespace Shutdown'])
+        self.assertEqual(lines[0], 'worker Old worker line 21')
+
+    def test_disarm_and_stop_also_stop_the_keeper(self):
+        from unittest import mock
+        from devcontainer_setup.project_sync import arming, keeper, scratch
+        from devcontainer_setup.project_sync.__main__ import main
+        from devcontainer_setup.project_sync.state import discover_project, state_dir
+        state = state_dir(discover_project(self.root), self.env)
+        arming.arm(state, gh_user='octo', codespace='c', consent='x', billable_owner='octo', ports=[], now=1.0)
+        stopped = {'running': False, 'phase': 'stopped'}
+        with mock.patch.dict(os.environ, {'XDG_STATE_HOME': self.env['XDG_STATE_HOME']}), \
+                mock.patch.object(keeper, 'stop', return_value=stopped) as keeper_stop, \
+                mock.patch.object(scratch, 'stop', return_value=stopped) as worker_stop, \
+                mock.patch('sys.stdout'):
+            self.assertEqual(main(['--project', str(self.root), 'work', '--disarm']), 0)
+            keeper_stop.assert_called_once_with(state)
+            self.assertFalse(arming.read(state)['armed'])
+            self.assertEqual(main(['--project', str(self.root), 'work', '--stop']), 0)
+            self.assertEqual(keeper_stop.call_count, 2)
+            worker_stop.assert_called_once_with(state)
 
     def test_missing_pairing_has_actionable_error_without_traceback(self):
         result = self.run_cli('scratch', 'start')

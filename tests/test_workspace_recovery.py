@@ -52,6 +52,25 @@ class ExistingCheckoutTests(unittest.TestCase):
         self.assertIn(self.generated, value['verified_historical_roots'])
         self.assertTrue(list((self.state / 'workspace-history').glob('*.json')))
 
+    def test_armed_step_runs_after_ssh_and_before_herdr_outside_the_lock(self):
+        from devcontainer_setup.project_sync.state import locked
+        self.registry()
+        order = []
+        def armed(primary):
+            self.assertEqual(primary.root, self.root)
+            # The consent prompt takes workspace-control.lock itself; it must be free here.
+            with locked(self.state / 'workspace-control.lock'):
+                order.append('armed')
+        with patch.object(workspace, '_prerequisites'), patch.object(workspace, '_choose_pairing', return_value=('space', self.original)), \
+                patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection()), \
+                patch.object(workspace, '_verify_roots', return_value=[self.generated]), \
+                patch.object(scratch, 'retarget'), patch.object(scratch, 'start', side_effect=lambda *_: order.append('worker')), \
+                patch.object(workspace, '_ready', return_value={}), \
+                patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh', side_effect=lambda *_: order.append('ssh')), \
+                patch('devcontainer_setup.project_sync.herdr.open_remote', side_effect=lambda *_: order.append('herdr') or 0):
+            self.assertEqual(workspace.remote(self.project, self.state, armed=armed), 0)
+        self.assertEqual(order, ['worker', 'ssh', 'armed', 'herdr'])
+
     def test_choose_pairing_discovers_original_when_registry_root_was_overwritten(self):
         value = self.registry(remote_root=self.generated)
         scratch._write(self.state / scratch.CONFIG, dict(version=1, identity=self.project.identity,
