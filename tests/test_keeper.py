@@ -51,6 +51,33 @@ def failed(at):
     return Reading(at, False, None, None, None)
 
 
+class FakeKeepAlive:
+    """Records each verdict; True holds pid 5402, False drops it, None leaves it."""
+
+    def __init__(self, raises=None):
+        self.calls, self.tends, self.raises, self.pid = [], [], raises, None
+
+    def record(self):
+        return {'pid': self.pid, 'process_identity': None, 'ports_up': [], 'ports_skipped': [], 'restarts': 0,
+                'error': None}
+
+    def ensure(self, available):
+        self.calls.append(available)
+        if self.raises:
+            raise self.raises
+        if available is True:
+            self.pid = 5402
+        elif available is False:
+            self.pid = None
+        return self.record()
+
+    def tend(self):
+        return self.tends.pop(0) if self.tends else None
+
+    def stop(self):
+        self.pid = None
+
+
 class KeeperStepTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -66,10 +93,10 @@ class KeeperStepTests(unittest.TestCase):
         atomic_write(self.state / 'scratch.json',
                      json.dumps({'codespace': codespace, 'root': '/work/proj'}).encode())
 
-    def keeper(self, readings):
+    def keeper(self, readings, **extra):
         self.api = FakeAPI(readings)
         return keeper.Keeper(self.state, api=self.api, notifier=lambda title, text: self.notes.append(text) or True,
-                             now=lambda: self.clock)
+                             now=lambda: self.clock, **extra)
 
     def run_steps(self, k, times):
         for at in times:
@@ -357,6 +384,69 @@ class KeeperStepTests(unittest.TestCase):
         self.assertEqual(self.runtime()['anchor'], {'at': T0 + 30, 'source': 'api'})
 
 
+    def test_keep_alive_follows_each_reading(self):
+        # R13: Available holds the child, another state stops it, an unknown reading leaves it.
+        held = FakeKeepAlive()
+        k = self.keeper([up(T0, last_used_at=T0), failed(T0 + 60), RuntimeError('boom'),
+                         down(T0 + 180, 'ShuttingDown'), down(T0 + 240), up(T0 + 300, last_used_at=T0 + 250)],
+                        keepalive=held)
+        pids = []
+        for at in (T0, T0 + 60, T0 + 120, T0 + 180, T0 + 240, T0 + 300):
+            self.run_steps(k, [at])
+            pids.append(self.runtime()['keepalive']['pid'])
+        self.assertEqual(held.calls, [True, None, None, False, False, True])
+        self.assertEqual(pids, [5402, 5402, 5402, None, None, 5402])
+
+    def test_refused_or_disarmed_keeper_stops_the_child(self):
+        for change in ('refused', 'disarmed'):
+            with self.subTest(change=change):
+                held = FakeKeepAlive()
+                k = self.keeper([up(T0, last_used_at=T0)], keepalive=held)
+                self.run_steps(k, [T0])
+                if change == 'refused':
+                    self.bind('cs-2')
+                else:
+                    arming.write(self.state, dict(arming.read(self.state), armed=False))
+                self.run_steps(k, [T0 + 60])
+                self.assertEqual(held.calls, [True, False])
+                self.assertIsNone(self.runtime()['keepalive']['pid'])
+                self.bind('cs-1')
+                arming.write(self.state, dict(arming.read(self.state), armed=True))
+
+    def test_a_keep_alive_that_raises_never_stops_the_heartbeat(self):
+        k = self.keeper([up(T0, last_used_at=T0)], keepalive=FakeKeepAlive(raises=RuntimeError('ghp_secret')))
+        self.run_steps(k, [T0])
+        runtime = self.runtime()
+        self.assertEqual(runtime['heartbeat_at'], T0)
+        self.assertEqual(runtime['phase'], 'watching')
+        self.assertNotIn('keepalive', runtime)
+        self.assertNotIn('ghp_secret', json.dumps(runtime))
+
+    def test_rest_restarts_an_exited_child_between_readings_without_reading(self):
+        held, slept = FakeKeepAlive(), []
+
+        def sleep(seconds):
+            slept.append(seconds)
+            self.clock += seconds
+        k = self.keeper([up(T0, last_used_at=T0)], keepalive=held, sleep=sleep)
+        self.run_steps(k, [T0])
+        held.tends = [None, dict(held.record(), pid=None, error='the connection exited with status 255'), None,
+                      dict(held.record(), pid=5403)]
+        k.rest()
+        self.assertEqual(self.api.reads, 1)
+        self.assertAlmostEqual(sum(slept), keeper.POLL)
+        self.assertTrue(all(0 < seconds <= keeper.TEND for seconds in slept))
+        runtime = self.runtime()
+        self.assertEqual(runtime['keepalive']['pid'], 5403)
+        self.assertEqual(runtime['heartbeat_at'], T0 + 4 * keeper.TEND)
+        # Without a keep-alive the rest is one plain sleep.
+        slept.clear()
+        bare = self.keeper([up(T0, last_used_at=T0)], sleep=sleep)
+        bare.delay = 7
+        bare.rest()
+        self.assertEqual(slept, [7])
+
+
 class ForeignProcessTests(unittest.TestCase):
     def test_only_foreign_gh_processes_for_this_codespace_are_named(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -525,6 +615,56 @@ class KeeperProcessTests(unittest.TestCase):
                 keeper.start(self.root, self.state)
         self.assertIn('Another keeper holds keeper.lock', (self.state / keeper.LOG).read_text())
         self.assertEqual(self.keepers(), [])
+
+    def decoy(self, name='cs-1'):
+        """A process shaped like a keep-alive child for `name`, and its runtime record."""
+        ready = self.state / ('decoy-ready-' + name)
+        child = subprocess.Popen([sys.executable, '-c', 'import pathlib, sys, time; pathlib.Path(sys.argv[1]).touch(); '
+                                  'time.sleep(60)', str(ready), 'codespace', 'ssh', '-c', name, '--', '-i', 'key',
+                                  'exec sleep infinity'], start_new_session=True)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        return child, {'pid': child.pid, 'process_identity': process_identity(child.pid), 'ports_up': []}
+
+    def test_a_replacement_keeper_ends_the_child_a_killed_keeper_left(self):
+        child, record = self.decoy()
+        atomic_write(self.state / keeper.RUNTIME, json.dumps({'codespace': 'cs-1', 'keepalive': record}).encode())
+        started = keeper.start(self.root, self.state)
+        self.assertIsNotNone(child.wait(timeout=10))
+        self.assert_watching_offline(started['nonce'])
+        self.assertIsNone(read_json(self.state / keeper.RUNTIME)['keepalive']['pid'])
+        self.assertIn(f'Ended the keep-alive child {child.pid} a previous keeper left',
+                      (self.state / keeper.LOG).read_text())
+
+    def test_stop_ends_a_child_left_behind_but_never_a_recycled_pid(self):
+        child, record = self.decoy()
+        recycled = dict(record, process_identity='X' + record['process_identity'][1:])
+        for value in (recycled, dict(record, pid=None)):
+            atomic_write(self.state / keeper.RUNTIME, json.dumps({'codespace': 'cs-1', 'keepalive': value}).encode())
+            self.assertFalse(keeper.stop(self.state)['running'])
+            time.sleep(.2)
+            self.assertIsNone(child.poll())
+        atomic_write(self.state / keeper.RUNTIME, json.dumps({'codespace': 'cs-1', 'keepalive': record}).encode())
+        keeper.stop(self.state)
+        self.assertIsNotNone(child.wait(timeout=5))
+
+    def test_an_adopted_keeper_keeps_its_child(self):
+        # Spec 6.1 step 7: a repeat arm adopts the keeper and leaves its keep-alive child alone.
+        from devcontainer_setup.project_sync.state import runtime_id
+        child, record = self.decoy()
+        atomic_write(self.state / keeper.RUNTIME, json.dumps({'codespace': 'cs-1', 'keepalive': record}).encode())
+        owned = {'running': True, 'pid': 4121, 'nonce': 'n' * 48, 'process_identity': 'x', 'heartbeat_age': 10,
+                 'runtime_id': runtime_id(), 'codespace': 'cs-1', 'gh_user': 'octo', 'keepalive': record}
+        with patch.object(keeper, 'status', return_value=owned), patch.object(keeper, 'launch_detached') as launch, \
+                patch.object(keeper, '_stop') as stop:
+            self.assertEqual(keeper.start(self.root, self.state)['keepalive'], record)
+        launch.assert_not_called()
+        stop.assert_not_called()
+        time.sleep(.2)
+        self.assertIsNone(child.poll())
 
     def test_start_refuses_an_unarmed_project(self):
         arming.write(self.state, dict(arming.read(self.state), armed=False))

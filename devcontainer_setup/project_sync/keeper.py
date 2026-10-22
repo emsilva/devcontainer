@@ -1,6 +1,7 @@
 """The per-project keeper: one detached process that watches an armed Codespace.
 
-It reads the Codespace once a minute over direct HTTPS and classifies each stop.
+It reads the Codespace once a minute over direct HTTPS and classifies each stop,
+and holds the read-only keep-alive child while the Codespace is Available.
 In this version a 12-hour stop only notifies "would restart"; nothing is posted.
 """
 from __future__ import annotations
@@ -17,6 +18,7 @@ import sys
 import time
 
 from . import arming, lifecycle, notify
+from .keepalive import KeepAlive, end_left_behind
 from .scratch import CONFIG
 from .state import (atomic_write, launch_detached, locked, log_formatter, owned_process, process_identity,
                     read_json, runtime_id, wait_gone)
@@ -26,6 +28,7 @@ RUNTIME = 'keeper-runtime.json'
 LOG = 'keeper.log'
 LEDGER = 'keeper-ledger.jsonl'
 POLL = 60
+TEND = 1
 HEARTBEAT_STALE = 300
 ENV = ('HOME', 'PATH', 'LANG', 'TMPDIR', 'USER', 'LOGNAME')
 DOWN = ('ShuttingDown', 'Shutdown')
@@ -89,11 +92,26 @@ def _stop(state, current):
     raise ValueError('The keeper is still shutting down; inspect task work:status before retrying')
 
 
+def _end_left_behind(state):
+    # A keeper killed outright (SIGKILL, a crash) skips its finally, so its keep-alive child
+    # would hold the Codespace up and billed; end it by fact (R14).
+    try:
+        runtime = read_json(Path(state) / RUNTIME)
+    except (OSError, ValueError):
+        return None
+    pid = end_left_behind(runtime.get('keepalive'), runtime.get('codespace'))
+    if pid:
+        _LOG.info('Ended the keep-alive child %s a previous keeper left', pid)
+    return pid
+
+
 def stop(state: Path) -> dict:
     """Stop by fact: only the process the runtime record proves is ours; safe when none runs."""
     state = Path(state).absolute()
     with locked(state / 'keeper-control.lock', blocking=True):
-        return _stop(state, status(state))
+        result = _stop(state, status(state))
+        _end_left_behind(state)
+        return result
 
 
 def wait_ready(state: Path, nonce: str, timeout: float = 60) -> dict:
@@ -147,7 +165,11 @@ def _utc(when):
 
 
 class Keeper:
-    """One pass reads the Codespace once; every pass writes the heartbeat and never raises."""
+    """One pass reads the Codespace once; every pass writes the heartbeat and never raises.
+
+    Each pass hands its reading to the keep-alive child: Available holds it, another
+    state stops it, and no good reading leaves it as it is (R13).
+    """
 
     def __init__(self, state, *, api, notifier, keepalive=None, herdr=None, now=time.time, sleep=time.sleep):
         self.state, self.api, self.notifier = Path(state), api, notifier
@@ -195,8 +217,9 @@ class Keeper:
         return runtime
 
     def step(self) -> None:
+        available = None
         try:
-            self._pass()
+            available = self._pass()
             self.delay, self._backoff = POLL, 2
         except Exception as error:
             # Only fixed ValueError texts are kept; anything else is named by its type.
@@ -205,10 +228,38 @@ class Keeper:
             self.runtime['down']['count'] = 0
             self.runtime.update(phase='waiting', error=type(error).__name__ + ': ' + text)
             self.delay, self._backoff = self._backoff, min(self._backoff * 2, POLL)
+        self._keep(available)
         try:
             self.beat()
         except Exception as error:
             _LOG.info('Keeper heartbeat not written: %s', type(error).__name__)
+
+    def _keep(self, available):
+        if self.keepalive is None:
+            return
+        try:
+            self.runtime['keepalive'] = self.keepalive.ensure(available)
+        except Exception as error:
+            _LOG.info('Keep-alive check failed: %s', type(error).__name__)
+
+    def rest(self) -> None:
+        """Wait out the delay; meanwhile restart an exited keep-alive child once its backoff allows.
+
+        Nothing is read: the restart rests on the last reading, and the child cannot start a Codespace.
+        """
+        end = self.now() + self.delay
+        while (left := end - self.now()) > 0:
+            if self.keepalive is None:
+                self.sleep(left)
+                return
+            self.sleep(min(left, TEND))
+            try:
+                record = self.keepalive.tend()
+                if record is not None:
+                    self.runtime['keepalive'] = record
+                    self.beat()
+            except Exception as error:
+                _LOG.info('Keep-alive check failed: %s', type(error).__name__)
 
     def beat(self, phase=None):
         if phase:
@@ -223,7 +274,7 @@ class Keeper:
             _LOG.info('Project disarmed; the keeper stops')
             self.done = True
             self.runtime.update(phase='disarmed', error=None)
-            return
+            return False
         refusal = self._refusal(value)
         if refusal:
             if self.runtime.get('phase') != 'refused':
@@ -231,7 +282,7 @@ class Keeper:
             self.runtime.update(phase='refused', error=refusal)
             self._notify('refused-' + repr(value.get('consented_at')),
                          f'Recovery for {self.project} is refused: {refusal}.')
-            return
+            return False  # never hold a Codespace the pairing has moved away from
         reading = self.api.read()
         self.runtime['reading'] = {'at': reading.at, 'ok': reading.ok, 'state': reading.state,
                                    'pending': reading.pending}
@@ -239,7 +290,7 @@ class Keeper:
         if not reading.ok:
             watch['count'] = 0
             self.runtime.update(phase='waiting', error='Codespace state unreadable; check gh auth status and the network')
-            return
+            return None
         if reading.state != self.previous[0]:
             _LOG.info('Codespace %s at %s', reading.state, _utc(reading.at))
         self.runtime.update(phase='watching', error=None)
@@ -256,6 +307,7 @@ class Keeper:
                 watch['count'] = 0
         self.previous = reading.state, reading.at
         self.runtime['last_ok'] = {'at': reading.at, 'state': reading.state}
+        return reading.state == 'Available'
 
     def _refusal(self, value):
         try:
@@ -371,7 +423,9 @@ def supervise(root: Path, state: Path, nonce: str) -> None:
         try:
             value = arming.read(state)
             api = lifecycle.LifecycleAPI(value.get('codespace'), value.get('gh_user'))
-            current = Keeper(state, api=api, notifier=notify.notify)
+            _end_left_behind(state)  # before this keeper starts its own
+            current = Keeper(state, api=api, notifier=notify.notify,
+                             keepalive=KeepAlive(api.name, state, value.get('gh_user'), value.get('ports') or []))
             caffeinate = _caffeinate()
             current.runtime.update(pid=os.getpid(), nonce=nonce, process_identity=process_identity(os.getpid()),
                                    runtime_id=runtime_id(), gh_user=value.get('gh_user'), error=None,
@@ -381,7 +435,7 @@ def supervise(root: Path, state: Path, nonce: str) -> None:
             while not current.done:
                 current.step()
                 if not current.done:
-                    time.sleep(current.delay)
+                    current.rest()
         except _Shutdown:
             pass
         except Exception as error:
@@ -391,6 +445,13 @@ def supervise(root: Path, state: Path, nonce: str) -> None:
             # A second stop request must not interrupt cleanup.
             for sig in (signal.SIGTERM, signal.SIGINT):
                 signal.signal(sig, lambda *_: None)
+            if current is not None and current.keepalive is not None:
+                # The child first: it is what holds the Codespace up and billed.
+                try:
+                    current.keepalive.stop()
+                    current.runtime['keepalive'] = current.keepalive.record()
+                except Exception as error:
+                    _LOG.info('Keep-alive not stopped: %s', type(error).__name__)
             _terminate(caffeinate)
             if current is not None:
                 current.runtime.update(process_identity=None, caffeinate=None)

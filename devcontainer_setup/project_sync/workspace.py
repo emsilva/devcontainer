@@ -317,13 +317,24 @@ def recovery_lines(value):
         reason = {'OWNER': 'stopped by you', 'OTHER': 'not the 12-hour stop',
                   'LIFETIME': "GitHub's 12-hour stop"}.get(watch.get('kind'))
         lines.append(text + (' (' + reason + ')' if reason else '') + '; run task work:cs to start it')
-    keepalive = runtime.get('keepalive') or {}
+    keepalive, ports = runtime.get('keepalive') or {}, _ports(config.get('ports', []))
     if running and keepalive.get('pid'):
+        # A port in use was skipped at launch; the child holds the Codespace without it.
+        skipped = ', '.join(f'{local} in use' + (f' by pid {pid}' if pid else '')
+                            for local, pid in keepalive.get('ports_skipped') or [])
         lines.append(f'Keep-alive   holding (pid {keepalive["pid"]}); ports '
-                     + _ports([remote for _, remote in keepalive.get('ports_up', [])]))
+                     + _ports([remote for _, remote in keepalive.get('ports_up', [])])
+                     + ('; ' + skipped if skipped else ''))
+    elif not running:
+        lines.append('Keep-alive   not holding; ports ' + ports + '; run task work:cs:armed')
+    elif reading.get('ok') and reading.get('state') != 'Available':
+        # As designed; the Codespace line names what to run.
+        lines.append('Keep-alive   not holding while the Codespace is ' + str(reading.get('state'))
+                     + '; ports ' + ports)
     else:
-        lines.append('Keep-alive   not holding; ports ' + _ports(config.get('ports', []))
-                     + ('' if running else '; run task work:cs:armed'))
+        error = keepalive.get('error')
+        lines.append('Keep-alive   not holding' + (f' ({error})' if error else '') + '; ports ' + ports
+                     + '; run task work:logs for the reason')
     last = runtime.get('last_restart')
     if isinstance(last, dict) and isinstance(last.get('at'), (int, float)):
         lines.append('Last restart ' + str(last.get('rid')) + ' ' + format_time(last['at']) + ': '

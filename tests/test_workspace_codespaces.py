@@ -195,6 +195,22 @@ class RecoveryStatusTests(unittest.TestCase):
         self.assertIn('13570 18787', lines[3])
         self.assertTrue(lines[4].startswith('Last restart'))
 
+    def test_keep_alive_line_shows_skipped_ports_and_what_to_run(self):
+        holding = self.lines(keepalive={'pid': 5402, 'ports_up': [[13570, 3570]],
+                                        'ports_skipped': [[18787, 812], [13571, None]]})
+        self.assertEqual(holding[3], 'Keep-alive   holding (pid 5402); ports 13570; 18787 in use by pid 812, '
+                                     '13571 in use')
+        failing = self.lines(keepalive={'pid': None, 'error': 'the connection exited with status 255'})
+        self.assertEqual(failing[3], 'Keep-alive   not holding (the connection exited with status 255); '
+                                     'ports 13570 18787; run task work:logs for the reason')
+        unknown = self.lines(reading={'at': self.now, 'ok': False, 'state': None, 'pending': None})
+        self.assertEqual(unknown[3], 'Keep-alive   not holding; ports 13570 18787; run task work:logs for the reason')
+        down = self.lines(reading={'at': self.now, 'ok': True, 'state': 'Shutdown', 'pending': False},
+                          keepalive={'pid': None, 'error': None})
+        self.assertEqual(down[3], 'Keep-alive   not holding while the Codespace is Shutdown; ports 13570 18787')
+        stopped = self.lines(running=False, keepalive={'pid': 5402, 'ports_up': [[13570, 3570]]})
+        self.assertEqual(stopped[3], 'Keep-alive   not holding; ports 13570 18787; run task work:cs:armed')
+
     def test_lines_that_are_not_fine_name_the_command(self):
         stopped = self.lines(running=False)
         self.assertIn('not running; run task work:cs:armed', stopped[1])

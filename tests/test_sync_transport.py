@@ -60,6 +60,24 @@ class TransportTests(unittest.TestCase):
                 self.assertNotIn(b'real-secret', result.stdout + result.stderr)
                 self.assertTrue(any(method == 'POST' for method, _ in api.denied))
 
+    @unittest.skipUnless(shutil.which('gh'), 'requires actual gh offline compatibility gate')
+    def test_actual_gh_keepalive_argv_never_posts_start(self):
+        keepalive = importlib.import_module('devcontainer_setup.project_sync.keepalive')
+        with tempfile.TemporaryDirectory() as gh_home, self.api(['Shutdown']) as api:
+            key = Path(gh_home) / 'codespaces.auto'
+            key.write_text('fixture key')
+            # A dead proxy keeps any request gh makes beyond the loopback adapter on this Mac.
+            env = api.child_env({'PATH': os.environ['PATH'], 'HOME': gh_home, 'GH_TOKEN': 'real-secret',
+                                 'HTTPS_PROXY': 'http://127.0.0.1:9', 'HTTP_PROXY': 'http://127.0.0.1:9'})
+            self.assertNotIn('real-secret', repr(env))
+            result = subprocess.run(keepalive.argv('bound-name', key, [(13570, 3570)]), env=env,
+                                    stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(self.calls)
+            self.assertTrue(all('/start' not in call[0] for call in self.calls))
+            self.assertTrue(any(method == 'POST' and path.endswith('/start') for method, path in api.denied))
+            self.assertNotIn(b'real-secret', result.stdout + result.stderr)
+
     def test_mismatched_remote_name_is_refused(self):
         module = importlib.import_module('devcontainer_setup.project_sync.transport')
         with module.ReadOnlyAPI('bound-name', 'secret', upstream=lambda *_: (200, b'{"name":"other","state":"Available"}')) as api:
