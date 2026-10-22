@@ -77,7 +77,10 @@ class Ledger:
                 row = json.loads(line.decode())
             except ValueError:  # includes UnicodeDecodeError
                 continue
-            if isinstance(row, dict):
+            # A malformed row is dropped, so one corrupt line cannot make the gate raise.
+            if (isinstance(row, dict) and row.get('kind') in ('intent', 'result')
+                    and isinstance(row.get('rid'), str) and isinstance(row.get('at'), (int, float))
+                    and not isinstance(row.get('at'), bool)):
                 rows.append(row)
         return rows
 

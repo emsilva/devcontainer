@@ -203,6 +203,21 @@ class StartTests(unittest.TestCase):
             ledger.append('result', 'r-1', status=200)
             self.assertEqual([row['kind'] for row in ledger.rows()], ['intent', 'result'])
 
+    def test_ledger_drops_malformed_rows_so_the_gate_still_answers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = lifecycle.Ledger(Path(tmp).resolve() / 'l.jsonl', now=lambda: T0)
+            ledger.append('intent', 'r-1')
+            with ledger.path.open('a') as f:
+                for row in ({'kind': 'intent', 'at': T0}, {'kind': 'intent', 'rid': 'r-2', 'at': 'soon'},
+                            {'kind': 'intent', 'rid': 7, 'at': T0}, {'kind': 'other', 'rid': 'r-3', 'at': T0},
+                            {'kind': 'intent', 'rid': 'r-4', 'at': True}, {'rid': 'r-5', 'at': T0}):
+                    f.write(json.dumps(row) + '\n')
+            rows = ledger.rows()
+            self.assertEqual([row['rid'] for row in rows], ['r-1'])
+            self.assertEqual(lifecycle.restart_rids(rows, T0), ['r-1'])
+            armed = {'armed': True, 'hold_until': None}
+            self.assertEqual(lifecycle.gate(arming=armed, rows=rows, now=T0 + 3600), None)
+
     def test_ledger_stamps_with_the_injected_clock(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = lifecycle.Ledger(Path(tmp).resolve() / 'l.jsonl', now=lambda: 42.0)
