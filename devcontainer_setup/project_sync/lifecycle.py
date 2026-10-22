@@ -159,6 +159,48 @@ class LifecycleAPI:
         return self._call('POST', '/stop')[0]
 
 
+def classify(*, last_up_at, first_down_at, anchor_at, owner_stop_at):
+    """Spec 6.4 step 3: 'OWNER', 'LIFETIME' or 'OTHER' for a stop first seen at first_down_at.
+
+    The possible stop interval is [last_up_at, first_down_at], so a stop seen late
+    (Mac asleep) still counts when it could have fallen inside the lifetime window.
+    """
+    if (owner_stop_at is not None and (anchor_at is None or owner_stop_at >= anchor_at)
+            and owner_stop_at <= first_down_at):
+        return 'OWNER'
+    if anchor_at is not None:
+        start_at = first_down_at if last_up_at is None else last_up_at
+        if start_at <= anchor_at + LIFETIME + WINDOW and first_down_at >= anchor_at + LIFETIME - WINDOW:
+            return 'LIFETIME'
+    return 'OTHER'
+
+
+def restart_rids(rows, now):
+    """Distinct rids with an intent row inside RESTART_PERIOD, oldest first."""
+    found = []
+    for row in rows:
+        if (row.get('kind') == 'intent' and now - row['at'] <= RESTART_PERIOD
+                and row['rid'] not in found):
+            found.append(row['rid'])
+    return found
+
+
+def gate(*, arming, rows, now):
+    """Spec 6.4 step 4: None when a restart is allowed, else the reason it is not."""
+    from .arming import format_time  # arming imports this module
+    if not arming.get('armed'):
+        return 'not armed'
+    hold = arming.get('hold_until')
+    if hold is not None and hold > now:
+        return 'on hold until ' + format_time(hold)
+    if len(restart_rids(rows, now)) >= MAX_RESTARTS:
+        return f'{MAX_RESTARTS} restarts already in 24 hours'
+    intents = [row['at'] for row in rows if row.get('kind') == 'intent']
+    if intents and now - max(intents) < MIN_GAP:
+        return 'last restart was less than 30 minutes ago'
+    return None
+
+
 def start(client, *, ledger=None, rid=None, now=time.time, sleep=time.sleep, say=None, tick=None):
     """Spec 6.4 step 5: POST start only from Shutdown with nothing pending.
 

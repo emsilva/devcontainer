@@ -1,3 +1,4 @@
+from datetime import datetime
 import http.client
 import json
 import tempfile
@@ -313,6 +314,109 @@ class LifecycleAPITests(unittest.TestCase):
     def test_invalid_name_is_refused(self):
         with self.assertRaises(ValueError):
             lifecycle.LifecycleAPI('../x')
+
+
+def _utc(day, clock):
+    return datetime.fromisoformat(f'2026-10-{day:02d}T{clock}+00:00').timestamp()
+
+
+class ClassifyTests(unittest.TestCase):
+    def test_measured_lifetime_stops_classify_as_lifetime(self):
+        for anchor, down in (((21, '01:37:32'), (21, '13:37:44')),
+                             ((21, '02:21:51'), (21, '14:22:12')),
+                             ((20, '22:08:24'), (21, '10:08:53'))):
+            a, d = _utc(*anchor), _utc(*down)
+            with self.subTest(anchor=anchor):
+                self.assertEqual(lifecycle.classify(last_up_at=d - 60, first_down_at=d, anchor_at=a,
+                                                    owner_stop_at=None), 'LIFETIME')
+
+    def test_stop_at_six_hours_is_other(self):
+        a = _utc(21, '01:00:00')
+        self.assertEqual(lifecycle.classify(last_up_at=a + 6 * 3600 - 60, first_down_at=a + 6 * 3600,
+                                            anchor_at=a, owner_stop_at=None), 'OTHER')
+
+    def test_owner_stop_after_anchor_is_owner(self):
+        a = 1000.0
+        for stop, anchor in ((a + 100, a), (a, a), (a + 100, None)):
+            with self.subTest(stop=stop, anchor=anchor):
+                self.assertEqual(lifecycle.classify(last_up_at=a, first_down_at=a + 200,
+                                                    anchor_at=anchor, owner_stop_at=stop), 'OWNER')
+        # a stop before the anchor, or after the first down reading, is not this stop
+        for stop in (a - 1, a + 201):
+            with self.subTest(stop=stop):
+                self.assertEqual(lifecycle.classify(last_up_at=a, first_down_at=a + 200,
+                                                    anchor_at=a, owner_stop_at=stop), 'OTHER')
+
+    def test_owner_wins_over_lifetime(self):
+        a = 0.0
+        self.assertEqual(lifecycle.classify(last_up_at=a + LIFE - 60, first_down_at=a + LIFE,
+                                            anchor_at=a, owner_stop_at=a + LIFE - 30), 'OWNER')
+
+    def test_late_detection_overlapping_window_is_lifetime(self):
+        a = 0.0
+        self.assertEqual(lifecycle.classify(last_up_at=a + 11 * 3600 + 50 * 60, first_down_at=a + 14 * 3600 + 55 * 60,
+                                            anchor_at=a, owner_stop_at=None), 'LIFETIME')
+
+    def test_gap_outside_window_is_other(self):
+        a = 0.0
+        self.assertEqual(lifecycle.classify(last_up_at=a + 12 * 3600 + 20 * 60, first_down_at=a + 15 * 3600,
+                                            anchor_at=a, owner_stop_at=None), 'OTHER')
+        self.assertEqual(lifecycle.classify(last_up_at=a + 10 * 3600, first_down_at=a + 11 * 3600 + 44 * 60,
+                                            anchor_at=a, owner_stop_at=None), 'OTHER')
+
+    def test_window_edges_are_inclusive(self):
+        a = 0.0
+        self.assertEqual(lifecycle.classify(last_up_at=None, first_down_at=a + LIFE - 900,
+                                            anchor_at=a, owner_stop_at=None), 'LIFETIME')
+        self.assertEqual(lifecycle.classify(last_up_at=None, first_down_at=a + LIFE + 900,
+                                            anchor_at=a, owner_stop_at=None), 'LIFETIME')
+        self.assertEqual(lifecycle.classify(last_up_at=None, first_down_at=a + LIFE + 901,
+                                            anchor_at=a, owner_stop_at=None), 'OTHER')
+
+    def test_no_anchor_is_other(self):
+        self.assertEqual(lifecycle.classify(last_up_at=1.0, first_down_at=LIFE, anchor_at=None,
+                                            owner_stop_at=None), 'OTHER')
+
+
+LIFE = lifecycle.LIFETIME
+
+
+class GateTests(unittest.TestCase):
+    NOW = 1_000_000.0
+
+    def row(self, kind, rid, ago):
+        return {'kind': kind, 'rid': rid, 'at': self.NOW - ago}
+
+    def test_gate_reasons_in_order(self):
+        armed = {'armed': True, 'hold_until': None}
+        held = {'armed': True, 'hold_until': self.NOW + 60}
+        two = [self.row('intent', 'r-1', 7200), self.row('intent', 'r-2', 3600)]
+        recent = [self.row('intent', 'r-1', 600)]
+        cases = (('not armed', {'armed': False, 'hold_until': self.NOW + 60}, two),
+                 ('on hold until', held, two),
+                 ('2 restarts already in 24 hours', armed, two),
+                 ('last restart was less than 30 minutes ago', armed, recent))
+        for text, arming, rows in cases:
+            with self.subTest(text=text):
+                reason = lifecycle.gate(arming=arming, rows=rows, now=self.NOW)
+                self.assertTrue(reason.startswith(text), reason)
+        self.assertIsNone(lifecycle.gate(arming=armed, rows=[], now=self.NOW))
+        self.assertIsNone(lifecycle.gate(arming={'armed': True, 'hold_until': self.NOW - 1},
+                                         rows=[self.row('intent', 'r-1', 2000)], now=self.NOW))
+
+    def test_hold_reason_shows_local_and_utc(self):
+        reason = lifecycle.gate(arming={'armed': True, 'hold_until': self.NOW + 60}, rows=[], now=self.NOW)
+        self.assertIn('UTC 1970-01-12', reason)
+
+    def test_old_restarts_leave_the_budget(self):
+        rows = [self.row('intent', 'r-1', 25 * 3600), self.row('intent', 'r-2', 3 * 3600)]
+        self.assertIsNone(lifecycle.gate(arming={'armed': True}, rows=rows, now=self.NOW))
+
+    def test_budget_counts_rids_not_posts(self):
+        rows = [self.row('intent', 'r-1', 7200 + n) for n in range(3)]
+        rows.append(self.row('result', 'r-9', 100))
+        self.assertEqual(lifecycle.restart_rids(rows, self.NOW), ['r-1'])
+        self.assertIsNone(lifecycle.gate(arming={'armed': True}, rows=rows, now=self.NOW))
 
 
 if __name__ == '__main__':
