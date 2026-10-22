@@ -176,7 +176,7 @@ class Keeper:
         self.keepalive, self.herdr, self.now, self.sleep = keepalive, herdr, now, sleep
         self.ledger = lifecycle.Ledger(self.state / LEDGER, now=now)
         self.project = api.name
-        self.previous = None  # state of the last good reading this keeper saw
+        self.previous = None  # state of the last good reading this process saw; None before its first
         self.delay, self._backoff, self.done = 0, 2, False
         self.runtime = self._load()
 
@@ -189,26 +189,26 @@ class Keeper:
                    'notified': {}}
         if old.get('codespace') != self.api.name:
             return runtime  # a new pairing starts a clean watch
-        anchor, notified = old.get('anchor'), old.get('notified')
-        if isinstance(anchor, dict) and isinstance(anchor.get('at'), (int, float)):
-            runtime['anchor'] = anchor
+        notified = old.get('notified')
         if isinstance(notified, dict):
             runtime['notified'] = notified
         if isinstance(old.get('last_restart'), dict):
             runtime['last_restart'] = old['last_restart']
-        beat, watch = old.get('heartbeat_at'), old.get('down')
-        if (isinstance(beat, (int, float)) and self.now() - beat <= HEARTBEAT_STALE and isinstance(watch, dict)
-                and isinstance(watch.get('count'), int) and 'first_at' in watch
+        beat = old.get('heartbeat_at')
+        if not (isinstance(beat, (int, float)) and self.now() - beat <= HEARTBEAT_STALE):
+            # After a longer gap the old anchor and readings say nothing about this run.
+            return runtime
+        # A replacement within minutes (an upgrade) continues the same watch.
+        anchor, watch = old.get('anchor'), old.get('down')
+        if isinstance(anchor, dict) and isinstance(anchor.get('at'), (int, float)):
+            runtime['anchor'] = anchor
+        if (isinstance(watch, dict) and isinstance(watch.get('count'), int) and 'first_at' in watch
                 and isinstance(watch['first_at'], (int, float, type(None)))):
-            # A replacement within minutes (an upgrade) continues the same watch.
-            # After a longer gap the old readings say nothing about this stop.
             runtime['down'] = {'count': watch['count'], 'first_at': watch['first_at']}
             if watch.get('kind') in ('OWNER', 'LIFETIME', 'OTHER'):
                 runtime['down']['kind'] = watch['kind']
             if isinstance(old.get('last_up_at'), (int, float)):
                 runtime['last_up_at'] = old['last_up_at']
-            reading = old.get('reading') or {}
-            self.previous = reading.get('state') if reading.get('ok') else None
         return runtime
 
     def step(self) -> None:
@@ -289,8 +289,10 @@ class Keeper:
         if self.previous is not None and self.previous != 'Available':
             anchor = {'at': reading.at, 'source': 'observed'}
         elif reading.last_used_at is not None and (
-                anchor is None or reading.at > anchor['at'] + lifecycle.LIFETIME + lifecycle.WINDOW):
-            # No anchor yet, or one from a run that GitHub has certainly stopped since.
+                anchor is None or reading.at > anchor['at'] + lifecycle.LIFETIME + lifecycle.WINDOW
+                or (self.previous is None and reading.last_used_at > anchor['at'])):
+            # No anchor yet; one from a run GitHub has certainly stopped since; or, on this
+            # process's first reading, a later start request that it could not have seen.
             anchor = {'at': reading.last_used_at, 'source': 'api'}
         if anchor != self.runtime.get('anchor'):
             _LOG.info('Anchor %s from %s', _utc(anchor['at']), anchor['source'])
@@ -300,7 +302,6 @@ class Keeper:
         anchor = self.runtime.get('anchor') or {}
         kind = lifecycle.classify(last_up_at=self.runtime.get('last_up_at'), first_down_at=watch['first_at'],
                                   anchor_at=anchor.get('at'), owner_stop_at=value.get('owner_stop_at'))
-        watch['kind'] = kind
         _LOG.info('Stop first seen %s classified %s (anchor %s)', _utc(watch['first_at']), kind,
                   anchor.get('source', 'none'))
         key = 'stop-' + repr(watch['first_at'])
@@ -319,6 +320,8 @@ class Keeper:
                                   'Run task work:cs to start it.')
             else:
                 self._notify(key, f'Would not restart {self.project}: {reason}. Run task work:cs to start it.')
+        # Only now: a raise above leaves the stop unclassified, so the next readings retry it.
+        watch['kind'] = kind
 
     def _notify(self, key, text):
         notified, now = self.runtime['notified'], self.now()

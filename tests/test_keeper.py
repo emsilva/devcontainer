@@ -214,6 +214,52 @@ class KeeperStepTests(unittest.TestCase):
         self.assertEqual(len(self.notes), 1)
         self.assertEqual(self.runtime()['anchor'], {'at': T0 - 60, 'source': 'api'})
 
+    def test_a_stale_reload_drops_the_anchor_and_anchors_from_last_used_at(self):
+        saved = {'codespace': 'cs-1', 'heartbeat_at': T0 - keeper.HEARTBEAT_STALE - 100,
+                 'anchor': {'at': T0 - 1000, 'source': 'observed'}}
+        atomic_write(self.state / keeper.RUNTIME, json.dumps(saved).encode())
+        k = self.keeper([up(T0, last_used_at=T0 - 1100)])
+        self.run_steps(k, [T0])
+        self.assertEqual(self.runtime()['anchor'], {'at': T0 - 1100, 'source': 'api'})
+
+    def test_a_start_the_keeper_never_saw_is_anchored_from_last_used_at(self):
+        # Reviewer's case: anchor A, the keeper is gone, the Codespace is started
+        # again at S = A + 6 h, then idles out at A + 12 h: not the 12-hour stop.
+        a, s = T0, T0 + 6 * 3600
+        k = self.keeper([up(a + 60, last_used_at=a)])
+        self.run_steps(k, [a + 60])
+        later = self.keeper([up(s + 60, last_used_at=s), up(s + 120, last_used_at=s)]
+                            + [down(a + LIFE + 60 * i) for i in range(3)])
+        self.run_steps(later, [s + 60, s + 120] + [a + LIFE + 60 * i for i in range(3)])
+        self.assertEqual(self.runtime()['anchor'], {'at': s, 'source': 'api'})
+        self.assertEqual(self.runtime()['down']['kind'], 'OTHER')
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn('other than the 12-hour limit', self.notes[0])
+
+    def test_a_stale_reload_starts_a_fresh_watch(self):
+        saved = {'codespace': 'cs-1', 'heartbeat_at': T0 - keeper.HEARTBEAT_STALE - 1,
+                 'down': {'count': 2, 'first_at': T0 - 300}, 'last_up_at': T0 - 1000}
+        atomic_write(self.state / keeper.RUNTIME, json.dumps(saved).encode())
+        k = self.keeper([down(T0)])
+        self.run_steps(k, [T0])
+        runtime = self.runtime()
+        self.assertEqual(runtime['down'], {'count': 1, 'first_at': T0})
+        self.assertNotIn('last_up_at', runtime)
+        self.assertEqual(self.notes, [])
+
+    def test_a_classification_that_raises_is_retried_on_the_next_readings(self):
+        anchor = T0 - 3600
+        stops = [anchor + LIFE + 30 + 60 * i for i in range(6)]
+        k = self.keeper([up(T0, last_used_at=anchor)] + [down(at) for at in stops])
+        with patch.object(lifecycle, 'gate', side_effect=[RuntimeError('ledger trouble'), None]):
+            self.run_steps(k, [T0] + stops[:3])
+            self.assertNotIn('kind', self.runtime()['down'])
+            self.assertEqual(self.notes, [])
+            self.run_steps(k, stops[3:])
+        self.assertEqual(self.runtime()['down']['kind'], 'LIFETIME')
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn('would restart', self.notes[0].lower())
+
     def test_a_malformed_saved_watch_starts_clean(self):
         saved = {'codespace': 'cs-1', 'heartbeat_at': T0, 'down': {'count': 2}, 'last_up_at': 'soon',
                  'anchor': {'source': 'api'}}
