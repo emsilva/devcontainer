@@ -183,6 +183,27 @@ class ProjectSyncCLITests(unittest.TestCase):
                                       'keeper 2026-10-22 01:02:00,000Z 11 Codespace Shutdown'])
         self.assertEqual(lines[0], 'worker Old worker line 21')
 
+    def test_stop_stops_the_worker_even_when_the_keeper_cannot_be_stopped(self):
+        from unittest import mock
+        from devcontainer_setup.project_sync import keeper, scratch
+        from devcontainer_setup.project_sync.__main__ import main
+        from devcontainer_setup.project_sync.state import atomic_write, discover_project, state_dir
+        state = state_dir(discover_project(self.root), self.env)
+        hung = mock.patch.object(keeper, 'stop', side_effect=ValueError('The keeper is still shutting down; '
+                                                                         'inspect task work:status before retrying'))
+        corrupt = mock.patch.object(keeper, 'RUNTIME', 'corrupt-keeper-runtime.json')
+        atomic_write(state / 'corrupt-keeper-runtime.json', b'{not json')
+        for name, failure in (('hung', hung), ('corrupt', corrupt)):
+            with self.subTest(name), failure, \
+                    mock.patch.dict(os.environ, {'XDG_STATE_HOME': self.env['XDG_STATE_HOME']}), \
+                    mock.patch.object(scratch, 'stop', return_value={'running': False, 'phase': 'stopped'}) as worker_stop, \
+                    mock.patch('sys.stdout', new_callable=io.StringIO) as out, \
+                    mock.patch('sys.stderr', new_callable=io.StringIO) as err:
+                self.assertEqual(main(['--project', str(self.root), 'work', '--stop']), 1)
+            worker_stop.assert_called_once_with(state)
+            self.assertFalse(json.loads(out.getvalue())['running'])
+            self.assertIn('the keeper was not', err.getvalue())
+
     def test_disarm_and_stop_also_stop_the_keeper(self):
         from unittest import mock
         from devcontainer_setup.project_sync import arming, keeper, scratch

@@ -186,8 +186,15 @@ def run(args):
             return 0
         if args.stop:
             from . import keeper
-            stopped = keeper.stop(state)
-            _print(dict(scratch.stop(state), keeper={'running': stopped['running'], 'phase': stopped.get('phase')}))
+            try:
+                stopped = keeper.stop(state)
+                summary, failure = {'running': stopped['running'], 'phase': stopped.get('phase')}, None
+            except (OSError, ValueError) as error:
+                # A keeper that cannot be stopped never leaves the worker running.
+                summary, failure = {'running': None, 'error': str(error)}, error
+            _print(dict(scratch.stop(state), keeper=summary))
+            if failure is not None:
+                raise ValueError('The worker is stopped, but the keeper was not: ' + str(failure)) from None
             return 0
         if args.disconnect:
             from .herdr import disconnect_remote

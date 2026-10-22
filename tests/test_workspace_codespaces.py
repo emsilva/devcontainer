@@ -206,6 +206,21 @@ class RecoveryStatusTests(unittest.TestCase):
         unreadable = self.lines(reading={'at': self.now, 'ok': False, 'state': None, 'pending': None})
         self.assertIn('gh auth status', unreadable[2])
 
+    def test_a_waiting_keeper_without_a_reading_names_gh_auth_status(self):
+        lines = self.lines(phase='waiting', error='ValueError: GitHub authentication unavailable for octo',
+                           reading=None)
+        self.assertIn('not read yet', lines[2])
+        self.assertIn('gh auth status --hostname github.com', lines[2])
+
+    def test_an_unreadable_arming_file_is_named_and_the_keeper_still_shown(self):
+        from devcontainer_setup.project_sync.state import atomic_write
+        atomic_write(self.state / 'arming.json', b'{"schema": 2}')
+        lines = self.lines()
+        self.assertIn('arming.json cannot be read', lines[0])
+        self.assertIn('task work:cs:armed', lines[0])
+        self.assertNotIn('not armed', lines[0])
+        self.assertEqual([line.split()[0] for line in lines], ['Recovery', 'Keeper', 'Codespace', 'Keep-alive', 'Last'])
+
     def test_unarmed_project_gets_one_line(self):
         from devcontainer_setup.project_sync import arming
         arming.write(self.state, dict(arming.read(self.state), armed=False))

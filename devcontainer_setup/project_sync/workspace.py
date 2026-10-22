@@ -238,7 +238,7 @@ def recovery(state):
     try:
         config = arming.read(state)
     except (OSError, ValueError) as error:
-        config = {'armed': False, 'issue': str(error)}
+        config = {'armed': None, 'issue': str(error)}
     try:
         runtime = keeper.status(state)
     except (OSError, ValueError) as error:
@@ -259,15 +259,19 @@ def recovery_lines(value):
     from .arming import format_time
     from . import keeper, lifecycle
     config, runtime, now = value['arming'], value['keeper'], value['now']
-    if not config.get('armed'):
-        issue = config.get('issue')
-        return ['Recovery     not armed' + ('; ' + issue if issue else '; task work:cs:armed arms it')]
-    hold = config.get('hold_until')
-    held = ('on hold until ' + format_time(hold) + ' (task work:hold -- off ends it)'
-            if isinstance(hold, (int, float)) and hold > now else 'no hold')
-    lines = ['Recovery     armed since ' + format_time(config.get('armed_at') or now) + ' as '
-             + str(config.get('gh_user')) + ', ' + held + '; restarts ' + str(value['restarts'])
-             + ' of ' + str(lifecycle.MAX_RESTARTS) + ' in 24 h']
+    if config.get('issue'):
+        # Unknown, not unarmed: a keeper may still be running, so its lines follow.
+        lines = ['Recovery     arming.json cannot be read (' + config['issue']
+                 + '); fix or remove it, then run task work:cs:armed']
+    elif not config.get('armed'):
+        return ['Recovery     not armed; task work:cs:armed arms it']
+    else:
+        hold = config.get('hold_until')
+        held = ('on hold until ' + format_time(hold) + ' (task work:hold -- off ends it)'
+                if isinstance(hold, (int, float)) and hold > now else 'no hold')
+        lines = ['Recovery     armed since ' + format_time(config.get('armed_at') or now) + ' as '
+                 + str(config.get('gh_user')) + ', ' + held + '; restarts ' + str(value['restarts'])
+                 + ' of ' + str(lifecycle.MAX_RESTARTS) + ' in 24 h']
     running, age = runtime.get('running'), runtime.get('heartbeat_age')
     if not running:
         lines.append('Keeper       not running; run task work:cs:armed')
@@ -284,7 +288,9 @@ def recovery_lines(value):
         lines.append(text)
     reading, anchor, watch = runtime.get('reading') or {}, runtime.get('anchor'), runtime.get('down') or {}
     if not running or not reading:
-        lines.append('Codespace    not read yet' + ('' if running else '; run task work:cs:armed'))
+        hint = ('; run task work:cs:armed' if not running else
+                '; run gh auth status --hostname github.com' if runtime.get('phase') == 'waiting' else '')
+        lines.append('Codespace    not read yet' + hint)
     elif not reading.get('ok'):
         lines.append('Codespace    unreadable at ' + format_time(reading['at'])
                      + '; check gh auth status --hostname github.com and the network')
