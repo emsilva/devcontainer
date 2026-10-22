@@ -116,7 +116,11 @@ What runs on the Mac for an armed project: the Herdr TUI and its per-machine pro
 1. Run today's `workspace.remote` path: pair, connect, start the worker and open Herdr. It still returns without holding a pane (ruling 4). It still needs a terminal the first time, for pairing.
 2. **Refuse to arm while a foreign process holds this Codespace's link**, and name its pid. A foreign process is any `gh codespace ssh`/`ports forward` for this Codespace that this package did not start, such as mainstage's `cs:ports` or `mirror.sh`. Plain gh can start a stopped Codespace, and it would also hold the ports the K4 child needs.
 3. **Consent, asked once and recorded.** The text is: "Arm \<project\>: keep \<codespace\> running while this Mac is up, and start it again after GitHub's 12-hour stop (at most 2 times in 24 hours, 30 minutes apart). Usage is billed to \<billable_owner.login\>. Type arm to confirm." The billing owner comes from the Codespace's API row.
-4. **Record the account.** Store the gh account whose token the keeper will use (`gh_user`): the account `github_token()` resolves at arm time. It must have the `codespace` scope. The keeper reads that token per call with `gh auth token --user <gh_user>`, so a later `gh auth switch` cannot move it.
+4. **Record the account.**
+   - Arming refuses while `GH_TOKEN` or `GITHUB_TOKEN` is set in the environment, because the consent must name a real gh account.
+   - Store the gh account whose token the keeper will use (`gh_user`): the active account (or `DEVCONTAINER_GH_USER`) at arm time. It must have the `codespace` scope.
+   - The keeper reads that token per call with `gh auth token --user <gh_user>`, so a later `gh auth switch` cannot move it.
+   - If a read fails, the keeper uses the last token it read successfully. That token is held in memory only, never on disk (design call D10). Measured 2026-10-22: gh keeps both accounts in the keyring, and the login keychain is `no-timeout` (`security show-keychain-info`), so it does not lock by itself. Slice D measures a read with the screen locked.
 5. **Ports.**
    - The default list is the project's `.devcontainer/devcontainer.json` `forwardPorts` minus 2222. Each remote port N maps to local 127.0.0.1:N+10000.
    - `task work:cs:armed -- --port 3571` adds one, and `--no-port 8787` removes one.
@@ -281,19 +285,27 @@ A start during ShuttingDown is ignored (section 3), so `work:cs` run during a st
 
 ### 6.10 Codespaces on main (#47)
 
+This applies to every setup run that commits setup files: first setup and `task devcontainer:upgrade:self` alike (design call D8).
+
 1. **Branch.**
    - `proposed_branch` (`git_ops.py:25`) always returns a new `setup/devcontainer[-N]`, cut from a freshly fetched `origin/<default>`. This overrides the setup-wizard design's "on a default branch, propose a setup branch".
-   - The setup commit is made in a temporary worktree under the state dir. The owner's checkout, its branch and its uncommitted work are not touched (design call D8).
+   - The setup commit is made in a temporary worktree under the state dir, and the files are rendered from that worktree's tree, never from the owner's current branch. So what reaches main is computed from main.
+   - The owner's checkout, its branch and its uncommitted work are not touched.
+   - "Commit only" keeps today's meaning: the commit stays on the local setup branch, with no push and no PR.
+   - A repository with no GitHub origin gets "Commit only" and no Codespace.
 2. **PR.** Push the setup branch, then open a PR into the default branch with the reviewed summary as its body. The body has no AI attribution.
-3. **Merge**, after one confirmation: "Merge PR #\<n\> into \<default\> as \<user\>, bypassing the required review?"
-   - The setup merges only when the ruleset says the account may bypass (`current_user_can_bypass` is `always`), or when no review is required.
+3. **Merge**, after one confirmation: "Merge PR #\<n\> into \<default\> as \<user\>? Required reviews are bypassed if your account is allowed to."
    - It merges through `PUT /repos/{owner}/{repo}/pulls/{n}/merge` with `merge_method=merge` and a verbatim commit title and message. That avoids gh's co-author stub.
-   - Otherwise it stops: "PR #\<n\> is open. Merge it, then run task devcontainer:setup again to create the Codespace." A rerun resumes from the open or merged PR.
+   - GitHub decides whether the merge is allowed. The setup does not predict it from bypass fields, because repo rulesets, org rulesets (`always`, `pull_requests_only`, `exempt`) and classic protection each grant it differently (design call D11).
+   - While required status checks are pending, it waits up to 15 min, showing progress.
+   - If GitHub refuses, it prints GitHub's reason and stops: "PR #\<n\> is open. Merge it, then run task devcontainer:setup again to create the Codespace." A rerun resumes from the open or merged PR.
 4. **Create** the Codespace on the default branch only after the merge, and verify the remote head contains the setup commit.
 5. **Receipts and reuse** are keyed on the repository and the default branch (`codespaces.py:95-99, 199-202, 230, 251-253`; `__main__.py:665`).
    - An existing receipt for a retired setup branch whose Codespace now reports ref `main` is rewritten. The old receipt is kept beside it.
    - A Codespace on any other branch is refused with what to do: "Move \<codespace\> to main first." The setup never silently creates a second Codespace.
-6. **The owner's checkout.** After the merge, the setup prints that the checkout still lacks the setup files until the owner merges or pulls the default branch. It never switches the owner's branch.
+6. **The owner's checkout.**
+   - After the merge, if the checkout is on the default branch, has no uncommitted changes and can fast-forward, the setup fast-forwards it (`git merge --ff-only`). That brings the new vendored `project_sync`, which the keeper and the Herdr proxy run from.
+   - Otherwise it prints that the checkout lacks the new setup files until the owner merges or pulls the default branch. It never switches the owner's branch, never merges into a feature branch and never rebases.
 
 ## 7. Adopting the existing projects
 
@@ -380,7 +392,7 @@ A and B are independent of the rest and can go first and in parallel. D needs C.
 | Why the stale master ignored `ServerAliveInterval 15` / `CountMax 4` | Not needed once A lands. Recorded in #46. |
 | osascript from a detached process outside launchd | Slice C |
 | Whether a Codex worker comes back with its sandbox, model and effort | Likely not (upstream #965). The resume text warns the lead. Checked on the first restart with a Codex worker. |
-| The keychain token read with the screen locked | Not needed: the keeper is not a LaunchAgent (D1). It becomes relevant if D1 changes. |
+| The keychain token read with the screen locked | The login keychain is `no-timeout`. Slice D logs token reads (success and length only) while the owner locks the screen for 10 min. The in-memory fallback (D10) covers a failed read. |
 | Whether a live client stretches ShuttingDown | Covered: step 5.1 waits up to 20 min for Shutdown |
 
 ## 11. Design calls for the owner to check
@@ -395,7 +407,9 @@ A and B are independent of the rest and can go first and in parallel. D needs C.
 - **D5 Hold.** A stop that happens during a hold is not restarted when the hold ends. You get a notification at the stop.
 - **D6 `work:cs:restart`.** Added for planned restarts like tonight's, outside the budget, with resume. It can be cut without affecting the rest.
 - **D7 The worker watches the keeper.** If an armed project's keeper dies, the worker notifies once.
-- **D8 The setup commit in a temporary worktree.** Your checkout and branch are never switched. After the merge, your checkout needs a pull or a merge of main to get the setup files.
+- **D8 Every setup run goes through main**, upgrades included. The commit is made in a temporary worktree rendered from `origin/<default>`, and your branch is never switched. After the merge, a clean checkout on main is fast-forwarded; any other checkout needs a pull or merge by you.
+- **D10 Token fallback.** If a token read fails, the keeper uses the last token it read, held in memory only. Arming refuses while `GH_TOKEN` or `GITHUB_TOKEN` is set.
+- **D11 GitHub decides the merge.** The setup asks once, then tries the merge, waiting up to 15 min for required checks. It reports GitHub's reason if refused, instead of predicting bypass rights.
 - **D9 Recovery ships with the POST on after slice F's DoD.** The clock is settled on 3 of 3 Codespaces, so there is no notify-only night. Slice D's "would restart" notifications are the dry run.
 
 ## 12. Left to the builder
