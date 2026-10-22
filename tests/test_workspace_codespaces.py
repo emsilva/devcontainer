@@ -1,10 +1,14 @@
+import contextlib
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 from devcontainer_setup.project_sync.state import Project
+from devcontainer_setup.project_sync import lifecycle
 from devcontainer_setup.project_sync.codespaces import Codespaces
+from devcontainer_setup.project_sync.lifecycle import Reading
 
 class CodespaceAPITests(unittest.TestCase):
     def setUp(self):
@@ -13,48 +17,62 @@ class CodespaceAPITests(unittest.TestCase):
         self.project = Project(self.root, 'git@github.com:o/r.git', 'github.com/o/r', 'a'*24)
     def service(self):
         return Codespaces(self.project, self.root/'private')
-    def test_start_waits_through_initial_shutdown_without_repeating_post(self):
-        service = self.service()
-        states = iter(('Shutdown', 'Shutdown', 'Starting', 'Available'))
-        calls = []
-        def api(method, route, env, **kwargs):
-            calls.append(method)
-            return {} if method == 'POST' else {'state': next(states)}
-        with patch.object(service, '_api_env', return_value={}), \
-                patch.object(service, '_api', side_effect=api), \
-                patch('devcontainer_setup.project_sync.codespaces.time.sleep'):
-            service.start_codespace('example')
-        self.assertEqual(calls, ['POST', 'GET', 'GET', 'GET', 'GET'])
+    def start(self, readings, statuses=(200,)):
+        """Run start_codespace against a scripted client on a fake clock; returns (client, error)."""
+        clock = {'t': 1_000_000.0}
+        class Client:
+            posts, reads = [], 0
+            def read(self):
+                row = readings[min(self.reads, len(readings) - 1)]
+                self.reads += 1
+                return Reading(clock['t'], True, row[0], row[1] if len(row) > 1 else False, None)
+            def post_start(self):
+                self.posts.append(clock['t'])
+                return statuses[min(len(self.posts) - 1, len(statuses) - 1)]
+        client = Client()
+        client.posts = []
+        def sleep(seconds):
+            clock['t'] += seconds
+        real_start = lifecycle.start
+        def start(api, **kwargs):
+            return real_start(api, now=lambda: clock['t'], sleep=sleep, **kwargs)
+        with patch('devcontainer_setup.project_sync.codespaces.lifecycle.LifecycleAPI', return_value=client), \
+                patch('devcontainer_setup.project_sync.codespaces.lifecycle.start', side_effect=start):
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.service().start_codespace('example')
+            except ValueError as error:
+                return client, error
+        return client, None
+
+    def test_start_during_shutting_down_posts_only_after_shutdown(self):
+        client, error = self.start([('ShuttingDown',), ('ShuttingDown',), ('Shutdown', True), ('Shutdown',),
+                                    ('Starting',), ('Available',)])
+        self.assertIsNone(error)
+        self.assertEqual(len(client.posts), 1)
+        self.assertEqual(client.reads, 6)
+
+    def test_start_409_waits_and_posts_again_instead_of_blaming_authentication(self):
+        client, error = self.start([('Shutdown',), ('ShuttingDown',), ('Shutdown',), ('Available',)], (409, 200))
+        self.assertIsNone(error)
+        self.assertEqual(len(client.posts), 2)
+
+    def test_start_already_available_does_not_post(self):
+        client, error = self.start([('Available',)])
+        self.assertIsNone(error)
+        self.assertEqual(client.posts, [])
 
     def test_start_remaining_shutdown_times_out_with_last_state(self):
-        service = self.service()
-        with patch.object(service, '_api_env', return_value={}), \
-                patch.object(service, '_api', return_value={'state': 'Shutdown'}) as api, \
-                patch('devcontainer_setup.project_sync.codespaces.time.monotonic', side_effect=[0, 1, 2, 301]), \
-                patch('devcontainer_setup.project_sync.codespaces.time.sleep'):
-            with self.assertRaisesRegex(ValueError, 'timed out.*Shutdown'):
-                service.start_codespace('example')
-        self.assertEqual([call.args[0] for call in api.call_args_list], ['POST', 'GET'])
+        client, error = self.start([('Shutdown',)])
+        self.assertRegex(str(error), 'timed out.*Shutdown')
+        self.assertLessEqual(len(client.posts), 2)
 
-    def test_token_only_list_and_start_wait_until_available(self):
-        service = self.service()
-        responses = [
-            Mock(returncode=0, stdout='[{"codespaces": []}]'),
-            Mock(returncode=0, stdout='{}'),
-            Mock(returncode=0, stdout='{"state": "Starting"}'),
-            Mock(returncode=0, stdout='{"state": "Available"}'),
-        ]
-        with patch.dict('os.environ', {'GH_TOKEN': 'secret', 'GH_HOST': 'evil'}, clear=True), patch('devcontainer_setup.project_sync.codespaces.subprocess.run', side_effect=responses) as run, patch('subprocess.check_output', return_value='main\n'), patch('time.sleep'):
-            self.assertEqual(service.spaces(), [])
-            service.start_codespace('example')
-        self.assertEqual([call.args[0][3] for call in run.call_args_list], ['GET', 'POST', 'GET', 'GET'])
-        for call in run.call_args_list:
-            self.assertEqual(call.kwargs['env']['GH_TOKEN'], 'secret')
-            self.assertNotIn('GH_HOST', call.kwargs['env'])
-            self.assertIn('--hostname', call.args[0])
-            self.assertIn('github.com', call.args[0])
+    def test_start_refused_names_status_without_blaming_a_token(self):
+        client, error = self.start([('Shutdown',)], (403,))
+        self.assertRegex(str(error), 'HTTP 403')
+        self.assertEqual(len(client.posts), 1)
 
-    def test_selected_account_used_for_discovery_and_start(self):
+    def test_discovery_uses_the_selected_account(self):
         service = self.service()
         calls = []
         def command(args, **kwargs):
@@ -64,11 +82,10 @@ class CodespaceAPITests(unittest.TestCase):
                 self.assertNotIn('GITHUB_TOKEN', kwargs['env'])
                 return Mock(returncode=0, stdout='selected-token\n')
             self.assertEqual(kwargs['env']['GH_TOKEN'], 'selected-token')
-            return Mock(returncode=0, stdout='[]' if '--slurp' in args else '{"state":"Available"}')
+            return Mock(returncode=0, stdout='[]')
         with patch.dict('os.environ', {'DEVCONTAINER_GH_USER': 'alternate', 'GITHUB_TOKEN': 'wrong'}, clear=True), patch('subprocess.run', side_effect=command), patch('subprocess.check_output', return_value='main\n'):
             service.spaces()
-            service.start_codespace('example')
-        self.assertEqual(sum(args[1:3] == ['auth', 'token'] for args, _ in calls), 2)
+        self.assertEqual(sum(args[1:3] == ['auth', 'token'] for args, _ in calls), 1)
 
     def test_paginated_match_and_bound_space_survives_branch_change(self):
         service = self.service()
@@ -106,15 +123,16 @@ class CodespaceAPITests(unittest.TestCase):
                 service.spaces()
         with patch('devcontainer_setup.project_sync.codespaces.github_token', return_value='secret'), patch('subprocess.run', side_effect=subprocess.TimeoutExpired(['gh'], 30)):
             with self.assertRaisesRegex(ValueError, 'timed out'):
-                service.start_codespace('example')
+                service.spaces()
 
-    def test_start_terminal_failure_and_timeout(self):
-        for state in ('Failed', 'Unavailable', 'Deleted'):
-            with self.subTest(state=state), patch('devcontainer_setup.project_sync.codespaces.github_token', return_value='secret'), patch('subprocess.run', return_value=Mock(returncode=0, stdout=json.dumps({'state': state}))) as run:
-                with self.assertRaisesRegex(ValueError, state):
-                    self.service().start_codespace('example')
-                self.assertEqual(sum('POST' in c.args[0] for c in run.call_args_list), 1)
-        with patch('devcontainer_setup.project_sync.codespaces.github_token', return_value='secret'), patch('subprocess.run', return_value=Mock(returncode=0, stdout='{"state":"Starting"}')) as run, patch('time.monotonic', side_effect=[0, 301]):
-            with self.assertRaisesRegex(ValueError, 'timed out'):
-                self.service().start_codespace('example')
-            self.assertEqual(sum('POST' in c.args[0] for c in run.call_args_list), 1)
+    def test_start_terminal_states_fail_without_posting(self):
+        for state in ('Failed', 'Unavailable', 'Deleted', 'Archived'):
+            with self.subTest(state=state):
+                client, error = self.start([(state,)])
+                self.assertRegex(str(error), state)
+                self.assertEqual(client.posts, [])
+
+    def test_start_terminal_state_after_post_fails_once(self):
+        client, error = self.start([('Shutdown',), ('Failed',)])
+        self.assertRegex(str(error), 'Failed')
+        self.assertEqual(len(client.posts), 1)

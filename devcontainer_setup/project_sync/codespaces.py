@@ -3,8 +3,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
-import time
-from . import scratch
+from . import lifecycle, scratch
 from .state import read_json
 from .transport import CodespaceConnection, clean_env, github_token, _name
 
@@ -129,29 +128,17 @@ print(json.dumps(roots))
         if name is None and not config:
             raise ValueError('Choose or pair a Codespace first')
         name = _name(name or config['codespace'])
-        env = self._api_env()
-        self._api('POST', 'user/codespaces/' + name + '/start', env, timeout=120)
-        deadline = time.monotonic() + 300
-        last_state = None
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise ValueError(
-                    f'Codespace start timed out (last state: {last_state or "unknown"}); inspect its status in GitHub '
-                    'and retry when Available'
-                )
-            row = self._api('GET', 'user/codespaces/' + name, env, timeout=min(30, remaining))
-            state = row.get('state')
-            if state == 'Available':
-                return
-            # A successful start request can precede its visible state change.
-            # Shutdown remains a waiting state until the bounded deadline.
-            if state in ('Failed', 'Unavailable', 'Deleted', 'Archived'):
-                raise ValueError(
-                    f'Codespace start ended in {state}; '
-                    'inspect its logs in GitHub before retrying'
-                )
-            if state != last_state:
-                print('Waiting for Codespace to become Available…', file=sys.stderr)
-                last_state = state
-            time.sleep(min(2, max(0, deadline - time.monotonic())))
+        result = lifecycle.start(
+            lifecycle.LifecycleAPI(name),
+            say=lambda text: print(text + '…', file=sys.stderr))
+        if result['outcome'] == 'available':
+            return
+        state, status = result['last_state'], result['status']
+        if state in lifecycle.TERMINAL:
+            raise ValueError(f'Codespace start ended in {state}; inspect its logs in GitHub before retrying')
+        if result['outcome'] == 'failed':
+            raise ValueError(
+                f'Codespace start request failed (HTTP {status}); check GitHub authorization and status, then retry')
+        raise ValueError(
+            f'Codespace start timed out (last state: {state or "unknown"}); inspect its status in GitHub '
+            'and retry when Available')
