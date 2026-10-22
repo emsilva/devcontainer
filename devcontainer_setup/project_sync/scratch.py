@@ -365,7 +365,7 @@ class _Notices:
         self._send(f"{self.project}'s Codespace stopped ({self.known}); run task work:cs to bring it back")
 
     def watch_keeper(self):
-        """Notify once an armed project's keeper reads dead or hung twice, a check apart; local files only."""
+        """Notify once an armed project's keeper has read dead or hung for 5 minutes; local files only."""
         from . import keeper
         now = self.clock()
         if self.checked_at is not None and now - self.checked_at < KEEPER_CHECK:
@@ -388,9 +388,10 @@ class _Notices:
                 self.runtime['notified_keeper'] = False
                 self.save()
         elif self.unhealthy_at is None:
-            # One reading can fall before an arm starts its keeper, as on a re-arm (D1).
+            # An arm can start its keeper minutes after the worker, as on a re-arm (D1), so wait
+            # out the same 5 minutes that make a heartbeat stale before notifying (R25).
             self.unhealthy_at = now
-        elif now - self.unhealthy_at >= KEEPER_CHECK and not self.runtime.get('notified_keeper'):
+        elif now - self.unhealthy_at >= keeper.HEARTBEAT_STALE and not self.runtime.get('notified_keeper'):
             self.runtime['notified_keeper'] = True
             self.save()
             self._send(f'Recovery for {self.project} is not running; run task work:cs:armed')
