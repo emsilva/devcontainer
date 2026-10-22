@@ -196,6 +196,34 @@ class KeeperStepTests(unittest.TestCase):
         self.assertEqual(len(self.notes), 1)
         self.assertIn('task work:cs:armed', self.notes[0])
 
+    def test_a_missing_pairing_is_refused_with_the_pairing_command(self):
+        (self.state / 'scratch.json').unlink()
+        k = self.keeper([up(T0, last_used_at=T0)])
+        self.run_steps(k, [T0])
+        self.assertEqual(self.api.reads, 0)
+        runtime = self.runtime()
+        self.assertEqual(runtime['phase'], 'refused')
+        self.assertIn('not paired', runtime['error'])
+        self.assertIn('run task work:cs', runtime['error'])
+        self.assertNotIn('not the armed one', runtime['error'])
+        self.assertIn('not paired', self.notes[0])
+
+    def test_start_replaces_an_owned_keeper_whose_heartbeat_is_stale(self):
+        from devcontainer_setup.project_sync.state import runtime_id
+        owned = {'running': True, 'pid': 4121, 'nonce': 'n' * 48, 'process_identity': 'x',
+                 'runtime_id': runtime_id(), 'codespace': 'cs-1', 'gh_user': 'octo'}
+        launched = {'running': True, 'pid': 4122, 'nonce': 'm' * 48}
+        for age, replaced in ((keeper.HEARTBEAT_STALE - 1, False), (keeper.HEARTBEAT_STALE + 1, True),
+                              (None, True)):
+            with self.subTest(age=age), \
+                    patch.object(keeper, 'status', return_value=dict(owned, heartbeat_age=age)), \
+                    patch.object(keeper, '_stop') as stop, \
+                    patch.object(keeper, 'launch_detached', return_value=launched) as launch:
+                result = keeper.start(self.state.parent, self.state)
+            self.assertEqual(stop.called, replaced)
+            self.assertEqual(launch.called, replaced)
+            self.assertEqual(result['pid'], 4122 if replaced else 4121)
+
     def test_disarmed_keeper_ends_its_watch(self):
         arming.write(self.state, dict(arming.read(self.state), armed=False))
         k = self.keeper([up(T0, last_used_at=T0)])
@@ -296,10 +324,13 @@ class ForeignProcessTests(unittest.TestCase):
                 '  505 gh codespace ssh -c cs-other -- -N -L 13570:localhost:3570',
                 '  606 grep gh codespace cs-1',
                 '  707 gh codespace ports forward 3570:3570 --codespace=cs-1',
+                '  808 gh cs ssh -c cs-1 -- -N -L 13570:localhost:3570',
+                '  909 /usr/local/bin/gh cs ports forward 3570:3570 -c cs-1',
+                '  910 gh cs ports forward 2222:50124 -c cs-1',
                 'garbage line',
             ])
             run = lambda *a, **k: subprocess.CompletedProcess(a, 0, listing + '\n', '')
-            self.assertEqual(keeper.foreign_processes(state, 'cs-1', run=run), [404, 707])
+            self.assertEqual(keeper.foreign_processes(state, 'cs-1', run=run), [404, 707, 808, 909])
             with self.assertRaisesRegex(ValueError, 'retry'):
                 keeper.foreign_processes(state, 'cs-1', run=lambda *a, **k: subprocess.CompletedProcess(a, 1, '', ''))
 

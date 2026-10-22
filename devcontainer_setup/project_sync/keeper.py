@@ -65,7 +65,10 @@ def start(root: Path, state: Path) -> dict:
     with locked(state / 'keeper-control.lock', blocking=True):
         current = status(state)
         if current['running']:
-            if all(current.get(key) == item for key, item in wanted.items()):
+            age = current.get('heartbeat_age')
+            # A hung keeper (no heartbeat for 5 min) is replaced, as status advises.
+            if (all(current.get(key) == item for key, item in wanted.items())
+                    and isinstance(age, (int, float)) and age <= HEARTBEAT_STALE):
                 return current
             _stop(state, current)
         return launch_detached('keeper', '--keep', root, state, env=_env(value), status=status,
@@ -128,7 +131,7 @@ def foreign_processes(state: Path, codespace: str, *, run=subprocess.run) -> lis
         if len(fields) < 3 or not fields[0].isdigit():
             continue
         pid, args = int(fields[0]), fields[1:]
-        if os.path.basename(args[0]) != 'gh' or args[1] != 'codespace':
+        if os.path.basename(args[0]) != 'gh' or args[1] not in ('codespace', 'cs'):
             continue
         if codespace not in args and not any(arg.endswith('=' + codespace) for arg in args):
             continue
@@ -252,7 +255,7 @@ class Keeper:
         try:
             binding = read_json(self.state / CONFIG)
         except FileNotFoundError:
-            binding = {}
+            return 'this project is not paired with a Codespace; run task work:cs'
         self.project = Path(binding.get('root') or self.api.name).name
         # Consent names one Codespace; never watch or start another one.
         if value.get('codespace') != self.api.name or binding.get('codespace') != self.api.name:
