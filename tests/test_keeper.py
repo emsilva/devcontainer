@@ -264,6 +264,52 @@ class KeeperStepTests(unittest.TestCase):
         self.assertEqual(len(self.notes), 1)
         self.assertIn('other than the 12-hour limit', self.notes[0])
 
+    def stops_at(self, start):
+        return [start + LIFE + 20 + 60 * i for i in range(3)]
+
+    def test_a_fresh_replacement_keeps_its_anchor_through_a_no_op_start_request(self):
+        # Observed start at A; a no-op start request at A + 2 h moves last_used_at but not
+        # GitHub's clock; an upgrade replaces the keeper at A + 3 h, 65 s after its last reading.
+        a = T0
+        saved = {'codespace': 'cs-1', 'heartbeat_at': a + 3 * 3600 - 60, 'anchor': {'at': a, 'source': 'observed'},
+                 'last_up_at': a + 3 * 3600 - 60, 'down': {'count': 0, 'first_at': None},
+                 'last_ok': {'at': a + 3 * 3600 - 60, 'state': 'Available'}}
+        atomic_write(self.state / keeper.RUNTIME, json.dumps(saved).encode())
+        self.clock = a + 3 * 3600
+        stops = self.stops_at(a)
+        k = self.keeper([up(a + 3 * 3600 + 5, last_used_at=a + 2 * 3600)] + [down(at, 'ShuttingDown') for at in stops])
+        self.run_steps(k, [a + 3 * 3600 + 5] + stops)
+        self.assertEqual(self.runtime()['anchor'], {'at': a, 'source': 'observed'})
+        self.assertEqual(self.runtime()['down']['kind'], 'LIFETIME')
+
+    def test_one_keeper_reading_every_minute_ignores_a_no_op_start_request(self):
+        a = T0
+        k = self.keeper([down(a - 60), up(a, last_used_at=a - 30), up(a + 7140, last_used_at=a - 30),
+                         up(a + 7200, last_used_at=a + 7190), up(a + 7260, last_used_at=a + 7190)]
+                        + [down(at) for at in self.stops_at(a)])
+        self.run_steps(k, [a - 60, a, a + 7140, a + 7200, a + 7260] + self.stops_at(a))
+        self.assertEqual(self.runtime()['anchor'], {'at': a, 'source': 'observed'})
+        self.assertEqual(self.runtime()['down']['kind'], 'LIFETIME')
+
+    def test_a_reading_gap_that_could_hide_a_restart_anchors_from_last_used_at(self):
+        # One keeper whose reads fail for hours while the Codespace stops and is started at S.
+        a, s = T0, T0 + 6 * 3600
+        readings = ([up(a + 60, last_used_at=a)] + [failed(a + 120 + 60 * i) for i in range(5)]
+                    + [up(s + 60 + 60 * i, last_used_at=s) for i in range(3)]
+                    + [down(a + LIFE + 60 * i) for i in range(3)])
+        k = self.keeper(readings)
+        self.run_steps(k, [r.at for r in readings])
+        self.assertEqual(self.runtime()['anchor'], {'at': s, 'source': 'api'})
+        self.assertEqual(self.runtime()['down']['kind'], 'OTHER')
+
+    def test_a_fresh_replacement_still_sees_the_transition_it_was_in(self):
+        saved = {'codespace': 'cs-1', 'heartbeat_at': T0 - 60, 'last_ok': {'at': T0 - 60, 'state': 'Shutdown'},
+                 'down': {'count': 1, 'first_at': T0 - 60}}
+        atomic_write(self.state / keeper.RUNTIME, json.dumps(saved).encode())
+        k = self.keeper([up(T0, last_used_at=T0 - 30)])
+        self.run_steps(k, [T0])
+        self.assertEqual(self.runtime()['anchor'], {'at': T0, 'source': 'observed'})
+
     def test_a_stale_reload_starts_a_fresh_watch(self):
         saved = {'codespace': 'cs-1', 'heartbeat_at': T0 - keeper.HEARTBEAT_STALE - 1,
                  'down': {'count': 2, 'first_at': T0 - 300}, 'last_up_at': T0 - 1000}

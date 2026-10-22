@@ -154,7 +154,7 @@ class Keeper:
         self.keepalive, self.herdr, self.now, self.sleep = keepalive, herdr, now, sleep
         self.ledger = lifecycle.Ledger(self.state / LEDGER, now=now)
         self.project = api.name
-        self.previous = None  # state of the last good reading this process saw; None before its first
+        self.previous = None, None  # (state, time) of the last successful reading
         self.delay, self._backoff, self.done = 0, 2, False
         self.runtime = self._load()
 
@@ -187,6 +187,11 @@ class Keeper:
                 runtime['down']['kind'] = watch['kind']
             if isinstance(old.get('last_up_at'), (int, float)):
                 runtime['last_up_at'] = old['last_up_at']
+        last = old.get('last_ok')
+        if isinstance(last, dict) and isinstance(last.get('state'), str) and isinstance(last.get('at'), (int, float)):
+            # So an upgrade keeps observing transitions and measuring reading gaps.
+            runtime['last_ok'] = {'at': last['at'], 'state': last['state']}
+            self.previous = last['state'], last['at']
         return runtime
 
     def step(self) -> None:
@@ -235,7 +240,7 @@ class Keeper:
             watch['count'] = 0
             self.runtime.update(phase='waiting', error='Codespace state unreadable; check gh auth status and the network')
             return
-        if reading.state != self.previous:
+        if reading.state != self.previous[0]:
             _LOG.info('Codespace %s at %s', reading.state, _utc(reading.at))
         self.runtime.update(phase='watching', error=None)
         if reading.state == 'Available':
@@ -249,7 +254,8 @@ class Keeper:
                     self._classify(value, watch)
             else:
                 watch['count'] = 0
-        self.previous = reading.state
+        self.previous = reading.state, reading.at
+        self.runtime['last_ok'] = {'at': reading.at, 'state': reading.state}
 
     def _refusal(self, value):
         try:
@@ -264,13 +270,16 @@ class Keeper:
 
     def _up(self, reading):
         anchor = self.runtime.get('anchor')
-        if self.previous is not None and self.previous != 'Available':
+        state, seen_at = self.previous
+        if state is not None and state != 'Available':
             anchor = {'at': reading.at, 'source': 'observed'}
         elif reading.last_used_at is not None and (
                 anchor is None or reading.at > anchor['at'] + lifecycle.LIFETIME + lifecycle.WINDOW
-                or (self.previous is None and reading.last_used_at > anchor['at'])):
-            # No anchor yet; one from a run GitHub has certainly stopped since; or, on this
-            # process's first reading, a later start request that it could not have seen.
+                or (reading.last_used_at > anchor['at']
+                    and (seen_at is None or reading.at - seen_at > HEARTBEAT_STALE))):
+            # No anchor yet; one from a run GitHub has certainly stopped since; or a newer start
+            # request after a gap long enough to hide a stop and a start (R16). Without such a
+            # gap a newer last_used_at is a no-op request, which leaves GitHub's clock alone.
             anchor = {'at': reading.last_used_at, 'source': 'api'}
         if anchor != self.runtime.get('anchor'):
             _LOG.info('Anchor %s from %s', _utc(anchor['at']), anchor['source'])
