@@ -412,6 +412,23 @@ class ReplicationTests(unittest.TestCase):
         self.assertEqual(str(error), 'Project connection verification failed; identity/authentication must be valid')
         self.assertEqual(error.state, 'Available')
 
+    def test_a_passing_verification_reads_no_state(self):
+        self.conversation(self.local_env)
+        result = replication.sync_project_data(self.connection, self.project, self.store.state,
+                                               str(self.root), env=self.local_env)
+        self.assertEqual(result['outcome'], 'complete')
+        # A failed direction makes verify() run again after the exchange; passing, it reads nothing either.
+        actual = self.connection.python
+        def refuse_publish(code, payload=b'', timeout=60):
+            if payload and json.loads(payload)['request']['operation'] == 'publish':
+                raise ValueError('publication refused')
+            return actual(code, payload, timeout)
+        with patch.object(self.connection, 'python', side_effect=refuse_publish):
+            again = replication.sync_project_data(self.connection, self.project, self.store.state,
+                                                  str(self.root), env=self.local_env)
+        self.assertEqual(again['directions']['desktop_to_codespace']['outcome'], 'failed')
+        self.assertEqual(self.reads, [])
+
     def test_malformed_publication_result_does_not_suppress_opposite_direction(self):
         self.conversation(self.connection.env)
         actual = self.connection.python

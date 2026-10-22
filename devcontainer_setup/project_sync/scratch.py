@@ -26,7 +26,9 @@ from .transport import CodespaceConnection
 CONFIG = 'scratch.json'
 RUNTIME = 'scratch-runtime.json'
 SESSION = 'scratch-session.json'
-STATE_READ_GAP = 60  # at most one Codespace state read a minute, and only after a failure
+# A failure reads the Codespace state at most once a minute. verify() reads it on its own
+# failures, once per attempt, and those attempts back off from 2 s to 60 s (R23).
+STATE_READ_GAP = 60
 KEEPER_CHECK = 60  # the keeper watch reads local files at most once a minute
 _runtime_id = project_state.runtime_id
 
@@ -326,24 +328,25 @@ class _Notices:
     An unreadable file skips a notice and a failed osascript is logged; neither stops the worker.
     """
 
-    def __init__(self, state, config, runtime, logger):
-        self.state, self.runtime, self.logger = Path(state), runtime, logger
+    def __init__(self, state, config, runtime, logger, *, clock=time.monotonic):
+        self.state, self.runtime, self.logger, self.clock = Path(state), runtime, logger, clock
         self.codespace, self.project = config['codespace'], Path(config['root']).name
-        self.read_at = self.checked_at = self.known = None
+        self.read_at = self.checked_at = self.unhealthy_at = self.known = None
         self.unreadable_logged = False
 
     def save(self):
         _write(self.state / RUNTIME, self.runtime)
 
-    def connected(self):
-        # A connected Codespace ends the stop, so the next one notifies again.
+    def verified(self):
+        # Only a cycle that passes verify() shows the Codespace is back (R23): that ends the
+        # stop, so the next one notifies again. A connection alone can still fail verify().
         self.runtime['notified_stop'] = False
         self.known = None
 
     def explain(self, error, message):
         """The worker's error for a failure; a known stop names its state, not the symptom (#48)."""
         from .replication import ConnectionVerificationError, read_codespace_state, stopped_message
-        now = time.monotonic()
+        now = self.clock()
         if isinstance(error, ConnectionVerificationError):
             self.read_at, self.known = now, error.state  # verify() has just read it
         elif self.read_at is None or now - self.read_at >= STATE_READ_GAP:
@@ -352,20 +355,24 @@ class _Notices:
 
     def notify_stop(self):
         """Notify once per stop of an unarmed project's Codespace, from the state explain() learned."""
-        if self.known in (None, 'Available') or self.runtime.get('notified_stop') or self._armed() is not False:
+        from . import keeper, lifecycle
+        # Only a state that means down (R24); Starting or Queued may be the owner's own start.
+        if (self.known not in keeper.DOWN + lifecycle.TERMINAL or self.runtime.get('notified_stop')
+                or self._armed() is not False):
             return  # armed projects hear from their keeper
         self.runtime['notified_stop'] = True
         self.save()
         self._send(f"{self.project}'s Codespace stopped ({self.known}); run task work:cs to bring it back")
 
     def watch_keeper(self):
-        """Notify once while an armed project's keeper is dead or hung; local files only."""
+        """Notify once an armed project's keeper reads dead or hung twice, a check apart; local files only."""
         from . import keeper
-        now = time.monotonic()
+        now = self.clock()
         if self.checked_at is not None and now - self.checked_at < KEEPER_CHECK:
             return
         self.checked_at = now
         if self._armed() is not True:
+            self.unhealthy_at = None
             return  # unarmed, disarmed or unknown: nothing to watch
         try:
             current = keeper.status(self.state)
@@ -376,10 +383,14 @@ class _Notices:
             return
         age = current.get('heartbeat_age')
         if current.get('running') and isinstance(age, (int, float)) and age <= keeper.HEARTBEAT_STALE:
+            self.unhealthy_at = None
             if self.runtime.get('notified_keeper'):
                 self.runtime['notified_keeper'] = False
                 self.save()
-        elif not self.runtime.get('notified_keeper'):
+        elif self.unhealthy_at is None:
+            # One reading can fall before an arm starts its keeper, as on a re-arm (D1).
+            self.unhealthy_at = now
+        elif now - self.unhealthy_at >= KEEPER_CHECK and not self.runtime.get('notified_keeper'):
             self.runtime['notified_keeper'] = True
             self.save()
             self._send(f'Recovery for {self.project} is not running; run task work:cs:armed')
@@ -554,11 +565,15 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
         notices = _Notices(state, config, runtime, logger)
         def update(phase, **values):
             runtime.update(phase=phase, heartbeat_at=time.time(), **values)
-            if phase == 'syncing':
-                notices.connected()
-            else:
+            if phase != 'syncing':
                 runtime['connection_prepared'] = False
             _write(state / RUNTIME, runtime)
+        def verified():
+            # The Codespace answered verify(): end the stop and reset the reconnect backoff,
+            # so a reachable Codespace whose verify() keeps failing still backs off (R23).
+            nonlocal backoff
+            backoff = 2
+            notices.verified()
         update('starting')
         binary = None
         session = receipt['name'] if receipt else None
@@ -608,12 +623,13 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                         _mutagen(binary, state, 'sync', 'resume', info['identifier'])
                         update('syncing', connection_prepared=True, prepared_binding=config,
                                prepared_at=time.time(), error=None)
-                        backoff = 2
                         logger.info('Scratch connection established.')
                         def synchronize():
                             from .replication import sync_project_data, ConnectionVerificationError
                             project = discover_project(root)
                             def progress(result):
+                                if result['stage'] != 'verify':
+                                    verified()  # this cycle has passed verify()
                                 for name, row in result['directions'].items():
                                     if sync_cycle.receipt_matches(row.get('receipt'), row.get('snapshot_id')):
                                         runtime['retained_receipts'][name] = row['receipt']
@@ -662,8 +678,13 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                             break
                     # Only controlled ValueError messages are exposed. Never log
                     # request/connection bodies or arbitrary subprocess output.
-                    message = notices.explain(error, str(error) if isinstance(error, ValueError) else type(error).__name__)
+                    message = str(error) if isinstance(error, ValueError) else type(error).__name__
+                    # Waiting first: the state read can take 40 s, and status must not show syncing meanwhile.
                     update('waiting', error=message)
+                    explained = notices.explain(error, message)
+                    if explained != message:
+                        message = explained
+                        update('waiting', error=message)
                     logger.info('Scratch waiting: %s', message)
                     notices.notify_stop()
                     notices.watch_keeper()

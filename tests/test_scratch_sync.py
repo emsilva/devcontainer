@@ -789,6 +789,15 @@ class ScratchTests(unittest.TestCase):
         gh = '#!' + os.sys.executable + '\nimport sys,time,pathlib\nif sys.argv[1]=="--version":print("gh version 2.102.0 (fixture)")\nelse:\n pathlib.Path(' + repr(str(home / 'forward-entered')) + ').write_text("entered")\n time.sleep(60)\n'
         atomic_write(bindir / 'gh', gh.encode(), 0o700)
         env = dict(os.environ, HOME=str(home), GH_TOKEN='fixture-adapter-upstream-token', PATH=str(bindir) + os.pathsep + os.environ['PATH'])
+        # A worker that fails reads the Codespace state; a dead local proxy keeps that read off the network.
+        dead = 'http://127.0.0.1:9'
+        for name in ('no_proxy', 'NO_PROXY'):
+            env.pop(name, None)
+        env.update(https_proxy=dead, HTTPS_PROXY=dead)
+        routed = subprocess.run([os.sys.executable, '-I', '-c', 'import urllib.request as u; '
+                                 'print(u.getproxies().get("https"), u.proxy_bypass("api.github.com"))'],
+                                env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(routed.stdout.split(), [dead, 'False'])
         try:
             with patch.dict(os.environ, env, clear=True):
                 started = self.module.start(self.root, self.state)
@@ -1154,13 +1163,14 @@ class ScratchTests(unittest.TestCase):
     def _work(self, attempts, cycles=()):
         """Run the worker in this process against scripted connections and sync cycles.
 
-        Each attempt is 'ok' or the error opening the connection raises; each cycle is 'ok'
-        or the error that sync cycle raises. The worker stops once both lists are used up.
-        It returns the last runtime and the worker log.
+        Each attempt is 'ok' or the error opening the connection raises; each cycle is 'ok',
+        the error that sync cycle raises, or a callable run in its place. The worker stops once
+        both lists are used up. It returns the last runtime and the worker log; self.waits
+        holds each wait's timeout.
         """
         from types import SimpleNamespace
         from devcontainer_setup.project_sync import sync_cycle
-        m, attempts, cycles = self.module, list(attempts), list(cycles)
+        m, attempts, cycles, self.waits = self.module, list(attempts), list(cycles), []
         config = dict(identity='github.com/owner/repo', codespace='bound-name', root=str(self.root),
                       remote_root='/workspaces/repo')
         name = 'scratch-' + 'e' * 48
@@ -1169,10 +1179,12 @@ class ScratchTests(unittest.TestCase):
         class Event:
             def is_set(self): return getattr(self, 'stopped', False)
             def set(self): self.stopped = True
-            def wait(self, timeout):
-                self.stopped = not (attempts or cycles)
-                return self.stopped
+            def wait(inner, timeout):
+                self.waits.append(timeout)
+                inner.stopped = not (attempts or cycles)
+                return inner.stopped
         class Connection:
+            codespace, env = config['codespace'], {}
             def __init__(self, *args, **kwargs): self.child = SimpleNamespace(poll=lambda: None)
             def __enter__(self):
                 outcome = attempts.pop(0)
@@ -1185,6 +1197,8 @@ class ScratchTests(unittest.TestCase):
             outcome = cycles.pop(0)
             if isinstance(outcome, Exception):
                 raise outcome
+            if callable(outcome):
+                return outcome(connection, project, state, remote_root, **kwargs)
             cycle = sync_cycle.begin(project, remote_root)
             cycle.update(outcome='complete', stage='complete', completed_at=time.time())
             return cycle
@@ -1200,7 +1214,7 @@ class ScratchTests(unittest.TestCase):
         return json.loads((self.state / m.RUNTIME).read_text()), (self.state / 'scratch.log').read_text()
 
     def test_unarmed_stop_notifies_once_until_syncing(self):
-        # A stop seen in a cycle, the forward refusing while it lasts, the Codespace back, then a second stop.
+        # A stop seen in a cycle, the forward refusing while it lasts, a cycle passing verify(), then a second stop.
         runtime, log = self._work(['ok', self.FORWARD_DOWN, 'ok'], [self._stopped_cycle(), 'ok', self._stopped_cycle()])
         self.assertEqual(self.notes, [self.STOP_NOTE, self.STOP_NOTE])
         self.assertTrue(runtime['notified_stop'])
@@ -1248,7 +1262,7 @@ class ScratchTests(unittest.TestCase):
         self._arm()
         dead, hung, healthy = ({'running': False, 'heartbeat_age': None}, {'running': True, 'heartbeat_age': 301},
                                {'running': True, 'heartbeat_age': 5})
-        readings = [dead, hung, healthy, dead]
+        readings = [dead, hung, healthy, dead, dead]
         def status(state):
             reading = readings.pop(0)
             if not readings:
@@ -1257,11 +1271,104 @@ class ScratchTests(unittest.TestCase):
         with patch.object(self.module, 'KEEPER_CHECK', 0), \
                 patch('devcontainer_setup.project_sync.keeper.status', side_effect=status) as watched:
             # The keeper is checked while waiting, then on each syncing tick.
-            runtime, _ = self._work([self.FORWARD_DOWN, 'ok'], ['ok'] * 5)
-        self.assertEqual(watched.call_count, 4)
-        # Dead: notified. Hung: already notified. Healthy: cleared. Dead again: notified again.
+            runtime, _ = self._work([self.FORWARD_DOWN, 'ok'], ['ok'] * 6)
+        self.assertEqual(watched.call_count, 5)
+        # Dead: recorded. Hung: notified. Healthy: cleared. Dead: recorded. Dead: notified again.
         self.assertEqual(self.notes, [self.KEEPER_NOTE, self.KEEPER_NOTE])
         self.assertTrue(runtime['notified_keeper'])
+
+    def test_a_stop_through_a_reconnect_that_fails_verify_notifies_once(self):
+        # The stop is first seen at the forward; a brief reconnect then fails verify(): one stop, one notice.
+        self.replies.append((200, json.dumps({'name': 'bound-name', 'state': 'ShuttingDown'}).encode()))
+        runtime, _ = self._work([self.FORWARD_DOWN, 'ok'], [self._stopped_cycle()])
+        self.assertEqual(self.notes, [('Codespace recovery', "repo's Codespace stopped (ShuttingDown); "
+                                       'run task work:cs to bring it back')])
+        self.assertTrue(runtime['notified_stop'])
+
+    def test_connects_that_each_fail_verify_notify_once(self):
+        # Through the real verify(), whose own progress emits must not count as a passing cycle.
+        from devcontainer_setup.project_sync import replication
+        self.replies.extend([(200, json.dumps({'name': 'bound-name', 'state': 'Shutdown'}).encode())] * 2)
+        with patch('devcontainer_setup.project_sync.workspace._verify_roots', side_effect=ValueError('fixture')):
+            runtime, _ = self._work(['ok', 'ok'], [replication.sync_project_data] * 2)
+        self.assertEqual(self.notes, [self.STOP_NOTE])
+        self.assertEqual(len(self.reads), 2)
+        self.assertEqual(runtime['error'], self.STOPPED)
+
+    def test_a_verify_that_keeps_failing_backs_off_with_one_read_per_attempt(self):
+        # A reachable Codespace whose identity check fails: only a passing verify() resets the backoff.
+        from devcontainer_setup.project_sync import replication
+        self.replies.extend([(200, json.dumps({'name': 'bound-name', 'state': 'Available'}).encode())] * 7)
+        with patch('devcontainer_setup.project_sync.workspace._verify_roots', side_effect=ValueError('fixture')):
+            runtime, _ = self._work(['ok'] * 7, [replication.sync_project_data] * 7)
+        self.assertEqual(self.waits, [2, 4, 8, 16, 32, 60, 60])
+        self.assertEqual(len(self.reads), 7)
+        self.assertEqual(runtime['error'], 'Project connection verification failed; identity/authentication must be valid')
+        self.assertEqual(self.notes, [])
+
+    def test_only_a_down_state_sends_the_stop_notice(self):
+        for state, notified in (('Starting', False), ('Queued', False), ('Unknown', False),
+                                ('ShuttingDown', True), ('Shutdown', True), ('Failed', True)):
+            with self.subTest(state=state):
+                (self.state / self.module.RUNTIME).unlink(missing_ok=True)
+                self.notes.clear()
+                self.replies[:] = [(200, json.dumps({'name': 'bound-name', 'state': state}).encode())]
+                runtime, _ = self._work([self.FORWARD_DOWN])
+                # The error names whatever state was read; only a down state notifies.
+                self.assertEqual(runtime['error'], 'Codespace is ' + state + '; no start request was allowed.')
+                self.assertEqual(bool(self.notes), notified)
+                self.assertEqual(runtime['notified_stop'], notified)
+
+    def test_waiting_is_written_before_the_state_read(self):
+        seen = []
+        def upstream(url, token):
+            runtime = json.loads((self.state / self.module.RUNTIME).read_text())
+            seen.append((runtime['phase'], runtime.get('error')))
+            return 200, json.dumps({'name': 'bound-name', 'state': 'Shutdown'}).encode()
+        with patch('devcontainer_setup.project_sync.transport._upstream', side_effect=upstream):
+            runtime, log = self._work([self.FORWARD_DOWN])
+        self.assertEqual(seen, [('waiting', str(self.FORWARD_DOWN))])
+        self.assertEqual(runtime['error'], self.STOPPED)
+        self.assertEqual(log.count('Scratch waiting: '), 1)
+
+    def _notices(self, now):
+        import logging
+        config = dict(codespace='bound-name', root=str(self.root))
+        return self.module._Notices(self.state, config, {}, logging.getLogger('fixture-notices'),
+                                    clock=lambda: now[0])
+
+    def test_keeper_watch_waits_for_two_unhealthy_readings_a_check_apart(self):
+        # A keeper may start up to two minutes after the worker on a re-arm (D1): one reading never notifies.
+        self._arm()
+        dead, healthy = {'running': False, 'heartbeat_age': None}, {'running': True, 'heartbeat_age': 5}
+        for name, sequence, expected in (('one unhealthy reading', [dead], 0),
+                                         ('two a check apart', [dead, dead, dead], 1),
+                                         ('a healthy reading between', [dead, healthy, dead], 0)):
+            with self.subTest(name):
+                self.notes.clear()
+                now, readings = [1000.0], list(sequence)
+                notices = self._notices(now)
+                with patch('devcontainer_setup.project_sync.keeper.status', side_effect=lambda state: readings.pop(0)):
+                    for _ in sequence:
+                        notices.watch_keeper()
+                        now[0] += self.module.KEEPER_CHECK
+                self.assertEqual(readings, [])
+                self.assertEqual(self.notes, [self.KEEPER_NOTE] * expected)
+
+    def test_keeper_watch_never_reads_twice_within_a_check(self):
+        self._arm()
+        now = [1000.0]
+        notices = self._notices(now)
+        with patch('devcontainer_setup.project_sync.keeper.status',
+                   return_value={'running': False, 'heartbeat_age': None}) as status:
+            for step in (0, 30, 29):  # 0 s, 30 s and 59 s: one reading
+                now[0] += step
+                notices.watch_keeper()
+            self.assertEqual(status.call_count, 1)
+            now[0] += 1  # 60 s after the first reading: the second, and the notice
+            notices.watch_keeper()
+        self.assertEqual(status.call_count, 2)
+        self.assertEqual(self.notes, [self.KEEPER_NOTE])
 
     def test_unreadable_arming_sends_no_notice_and_logs_once(self):
         from devcontainer_setup.project_sync.state import atomic_write
