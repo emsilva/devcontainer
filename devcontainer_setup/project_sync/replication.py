@@ -195,7 +195,30 @@ def _memory(project, *, env=None):
 
 
 class ConnectionVerificationError(ValueError):
-    """Root or authenticated transport verification failed before exchange."""
+    """Root or authenticated transport verification failed before exchange.
+
+    `state` is the Codespace state read after the failure, or None when it is unknown.
+    """
+
+    def __init__(self, message, state=None):
+        super().__init__(message)
+        self.state = state
+
+
+def read_codespace_state(codespace, env):
+    """One read-only GET of the Codespace state, made only after a failure; None when unknown.
+
+    Neither the token nor the response body reaches a message or a log.
+    """
+    from .transport import codespace_state, github_token
+    try:
+        return codespace_state(codespace, github_token(env))
+    except (OSError, ValueError):
+        return None
+
+
+def stopped_message(state):
+    return 'Codespace is ' + state + '; no start request was allowed.'
 
 
 def sync_project_data(connection, project, state, remote_root, *, env=None, historical_roots=(), progress=None):
@@ -219,7 +242,15 @@ def sync_project_data(connection, project, state, remote_root, *, env=None, hist
             cycle.update(outcome='failed', completed_at=time.time(),
                          issues=[dict(stage='verify', reason='Project connection verification failed')])
             sync_cycle.emit(cycle, progress)
-            raise ConnectionVerificationError('Project connection verification failed; identity/authentication must be valid') from error
+            # A stopped Codespace fails here too; name its state, not authentication (#48).
+            state = read_codespace_state(connection.codespace, connection.env)
+            if state is None:
+                message = 'Project connection verification failed; Codespace state unknown.'
+            elif state != 'Available':
+                message = stopped_message(state)
+            else:
+                message = 'Project connection verification failed; identity/authentication must be valid'
+            raise ConnectionVerificationError(message, state) from error
     verify()
     try:
         with sync_cycle.stage(cycle, 'memory', progress):

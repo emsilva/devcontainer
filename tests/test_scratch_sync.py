@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -26,6 +27,17 @@ class ScratchTests(unittest.TestCase):
         self.scratch = self.root / '.scratch'
         self.scratch.mkdir()
         self.module = importlib.import_module('devcontainer_setup.project_sync.scratch')
+        # A failing worker reads the Codespace state once; never real gh, the network or osascript.
+        self.reads, self.replies, self.notes = [], [], []
+        def upstream(url, token):
+            self.reads.append(url)
+            return self.replies.pop(0) if self.replies else (500, b'{}')
+        for fake in (patch('devcontainer_setup.project_sync.transport._upstream', side_effect=upstream),
+                     patch('devcontainer_setup.project_sync.transport.github_token', return_value='fixture-token'),
+                     patch('devcontainer_setup.project_sync.notify.notify',
+                           side_effect=lambda title, text: self.notes.append((title, text)) or True)):
+            fake.start()
+            self.addCleanup(fake.stop)
 
     def _cache_link_fixture(self, scratch):
         (scratch / 'memory').mkdir()
@@ -553,6 +565,13 @@ class ScratchTests(unittest.TestCase):
         env = dict(os.environ)
         env['PYTHONPATH'] = str(poison)
         env['HOME'] = str(Path(self.temp.name).resolve())
+        # The waiting worker reads the Codespace state once: fake gh has no token, so it is unknown.
+        fakes, calls = Path(self.temp.name).resolve() / 'fake-bin', Path(self.temp.name).resolve() / 'fake-calls'
+        for tool in ('gh', 'osascript'):
+            atomic_write(fakes / tool, ('#!/bin/sh\necho ' + tool + ' "$@" >> ' + shlex.quote(str(calls))
+                                        + '\nexit 1\n').encode(), 0o700)
+        env.pop('GH_TOKEN', None)
+        env['PATH'] = str(fakes) + os.pathsep + env['PATH']
         launcher = subprocess.run([os.sys.executable, '-I', '-B', '-c', code], env=env, capture_output=True, text=True, timeout=15)
         self.assertEqual(launcher.returncode, 0, launcher.stderr)
         started = json.loads(launcher.stdout)
@@ -594,6 +613,8 @@ class ScratchTests(unittest.TestCase):
             while self.module.status(self.state)['phase'] != 'waiting' and time.monotonic() < deadline:
                 time.sleep(.05)
             self.assertIn('SSH key', self.module.status(self.state)['error'])
+            self.assertIn('gh auth token', calls.read_text())
+            self.assertNotIn('osascript', calls.read_text())
         finally:
             self.module.stop(self.state)
         self.assertLess((self.state / 'scratch.log').stat().st_size, 256 * 1024)
@@ -1115,6 +1136,157 @@ class ScratchTests(unittest.TestCase):
                 self.assertNotIn(('sync', 'create'), operations)
                 self.assertIn(('sync', 'pause'), operations)
                 backup.assert_not_called()
+
+    FORWARD_DOWN = ValueError('Codespace forward unavailable; it may be stopped or authentication expired. '
+                              'No start request was allowed.')
+    STOPPED = 'Codespace is Shutdown; no start request was allowed.'
+    STOP_NOTE = ('Codespace recovery', "repo's Codespace stopped (Shutdown); run task work:cs to bring it back")
+    KEEPER_NOTE = ('Codespace recovery', 'Recovery for repo is not running; run task work:cs:armed')
+
+    def _stopped_cycle(self):
+        from devcontainer_setup.project_sync.replication import ConnectionVerificationError
+        return ConnectionVerificationError(self.STOPPED, 'Shutdown')
+
+    def _arm(self, armed=True):
+        from devcontainer_setup.project_sync import arming
+        arming.write(self.state, {'schema': 1, 'armed': armed, 'codespace': 'bound-name', 'gh_user': 'fixture'})
+
+    def _work(self, attempts, cycles=()):
+        """Run the worker in this process against scripted connections and sync cycles.
+
+        Each attempt is 'ok' or the error opening the connection raises; each cycle is 'ok'
+        or the error that sync cycle raises. The worker stops once both lists are used up.
+        It returns the last runtime and the worker log.
+        """
+        from types import SimpleNamespace
+        from devcontainer_setup.project_sync import sync_cycle
+        m, attempts, cycles = self.module, list(attempts), list(cycles)
+        config = dict(identity='github.com/owner/repo', codespace='bound-name', root=str(self.root),
+                      remote_root='/workspaces/repo')
+        name = 'scratch-' + 'e' * 48
+        m._write(self.state / m.SESSION, dict(name=name, nonce='e' * 48, binding=config, established=True,
+                                              identifier='sync_owned'))
+        class Event:
+            def is_set(self): return getattr(self, 'stopped', False)
+            def set(self): self.stopped = True
+            def wait(self, timeout):
+                self.stopped = not (attempts or cycles)
+                return self.stopped
+        class Connection:
+            def __init__(self, *args, **kwargs): self.child = SimpleNamespace(poll=lambda: None)
+            def __enter__(self):
+                outcome = attempts.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return self
+            def __exit__(self, *args): pass
+            def ssh_config(self, path): pass
+        def exchange(connection, project, state, remote_root, **kwargs):
+            outcome = cycles.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            cycle = sync_cycle.begin(project, remote_root)
+            cycle.update(outcome='complete', stage='complete', completed_at=time.time())
+            return cycle
+        def command(binary, state, *args, **kwargs):
+            return json.dumps([dict(name=name, identifier='sync_owned')]) if args[:2] == ('sync', 'list') else ''
+        remote = json.dumps(dict(identity=config['identity'], root=config['remote_root'])).encode()
+        with patch.object(m, '_config', return_value=config), patch.object(m, 'CodespaceConnection', Connection), \
+                patch.object(m, 'install_mutagen', return_value=Path('/fake/tool')), \
+                patch.object(m, '_remote', return_value=remote), patch.object(m.threading, 'Event', Event), \
+                patch.object(m.signal, 'signal'), patch.object(m, '_mutagen', side_effect=command), \
+                patch('devcontainer_setup.project_sync.replication.sync_project_data', side_effect=exchange):
+            m.supervise(self.root, self.state, 'e' * 48)
+        return json.loads((self.state / m.RUNTIME).read_text()), (self.state / 'scratch.log').read_text()
+
+    def test_unarmed_stop_notifies_once_until_syncing(self):
+        # A stop seen in a cycle, the forward refusing while it lasts, the Codespace back, then a second stop.
+        runtime, log = self._work(['ok', self.FORWARD_DOWN, 'ok'], [self._stopped_cycle(), 'ok', self._stopped_cycle()])
+        self.assertEqual(self.notes, [self.STOP_NOTE, self.STOP_NOTE])
+        self.assertTrue(runtime['notified_stop'])
+        self.assertEqual(runtime['error'], self.STOPPED)
+        # The forward's refusal is reported by the state verify() read under a minute ago.
+        self.assertEqual(log.count('Scratch waiting: ' + self.STOPPED), 3)
+        self.assertNotIn('forward unavailable', log)
+        # verify() carried its own reading, and the healthy path reads nothing.
+        self.assertEqual(self.reads, [])
+
+    def test_stop_first_seen_at_the_forward_names_the_state_and_notifies_once(self):
+        self.replies.append((200, json.dumps({'name': 'bound-name', 'state': 'Shutdown'}).encode()))
+        runtime, log = self._work([self.FORWARD_DOWN, self.FORWARD_DOWN])
+        self.assertEqual(runtime['error'], self.STOPPED)
+        self.assertEqual(self.notes, [self.STOP_NOTE])
+        self.assertTrue(runtime['notified_stop'])
+        # One read: the second refusal, under a minute later, reuses it.
+        self.assertEqual(self.reads, ['https://api.github.com/user/codespaces/bound-name'])
+        self.assertIn('Notify: ' + self.STOP_NOTE[1], log)
+        self.assertNotIn('fixture-token', log + json.dumps(runtime))
+
+    def test_forward_refusal_keeps_its_text_when_the_state_is_unknown_or_available(self):
+        for reply in ((500, b'{}'), (200, json.dumps({'name': 'bound-name', 'state': 'Available'}).encode())):
+            with self.subTest(reply=reply):
+                self.replies[:] = [reply]
+                self.notes.clear()
+                runtime, _ = self._work([self.FORWARD_DOWN])
+                self.assertEqual(runtime['error'], str(self.FORWARD_DOWN))
+                self.assertEqual(self.notes, [])
+                self.assertFalse(runtime['notified_stop'])
+
+    def test_armed_stop_leaves_notifications_to_the_keeper(self):
+        self._arm()
+        healthy = {'running': True, 'heartbeat_age': 12}
+        with patch('devcontainer_setup.project_sync.keeper.status', return_value=healthy) as status:
+            runtime, _ = self._work(['ok', self.FORWARD_DOWN], ['ok', 'ok', self._stopped_cycle()])
+        self.assertEqual(self.notes, [])
+        self.assertFalse(runtime['notified_stop'])
+        self.assertEqual(runtime['error'], self.STOPPED)
+        # Two ticks and two waits within one minute: the keeper is checked once.
+        self.assertEqual(status.call_count, 1)
+        self.assertFalse(runtime['notified_keeper'])
+
+    def test_dead_keeper_notifies_once(self):
+        self._arm()
+        dead, hung, healthy = ({'running': False, 'heartbeat_age': None}, {'running': True, 'heartbeat_age': 301},
+                               {'running': True, 'heartbeat_age': 5})
+        readings = [dead, hung, healthy, dead]
+        def status(state):
+            reading = readings.pop(0)
+            if not readings:
+                self._arm(False)  # disarmed: the next check ends the watch without a notice
+            return reading
+        with patch.object(self.module, 'KEEPER_CHECK', 0), \
+                patch('devcontainer_setup.project_sync.keeper.status', side_effect=status) as watched:
+            # The keeper is checked while waiting, then on each syncing tick.
+            runtime, _ = self._work([self.FORWARD_DOWN, 'ok'], ['ok'] * 5)
+        self.assertEqual(watched.call_count, 4)
+        # Dead: notified. Hung: already notified. Healthy: cleared. Dead again: notified again.
+        self.assertEqual(self.notes, [self.KEEPER_NOTE, self.KEEPER_NOTE])
+        self.assertTrue(runtime['notified_keeper'])
+
+    def test_unreadable_arming_sends_no_notice_and_logs_once(self):
+        from devcontainer_setup.project_sync.state import atomic_write
+        atomic_write(self.state / 'arming.json', b'{"schema": 2, "armed": false}\n')
+        self.replies.append((200, json.dumps({'name': 'bound-name', 'state': 'Shutdown'}).encode()))
+        with patch.object(self.module, 'KEEPER_CHECK', 0), \
+                patch('devcontainer_setup.project_sync.keeper.status') as status:
+            runtime, log = self._work([self.FORWARD_DOWN, 'ok'], ['ok', 'ok', self._stopped_cycle()])
+        self.assertEqual(self.notes, [])
+        status.assert_not_called()
+        self.assertEqual(runtime['error'], self.STOPPED)
+        lines = [line for line in log.splitlines() if 'arming.json' in line]
+        self.assertEqual(len(lines), 1)
+        self.assertIn('task work:status', lines[0])
+
+    def test_restarted_worker_keeps_the_notices_it_sent(self):
+        config = dict(identity='github.com/owner/repo', codespace='bound-name', root=str(self.root),
+                      remote_root='/workspaces/repo')
+        self.module._write(self.state / self.module.RUNTIME,
+                           dict(binding=config, phase='waiting', notified_stop=True, notified_keeper=True))
+        self.replies.append((200, json.dumps({'name': 'bound-name', 'state': 'Shutdown'}).encode()))
+        runtime, _ = self._work([self.FORWARD_DOWN])
+        self.assertEqual(self.notes, [])
+        self.assertTrue(runtime['notified_stop'])
+        self.assertTrue(runtime['notified_keeper'])
 
     def test_only_planned_session_absence_is_retryable_and_inventory_failure_is_not_absence(self):
         receipt = {'name': 'scratch-' + 'a' * 48, 'nonce': 'a' * 48, 'binding': {}, 'established': False}

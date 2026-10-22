@@ -17,11 +17,14 @@ from devcontainer_setup.project_sync.state import discover_project, state_dir
 
 
 class IsolatedPythonConnection:
+    codespace = 'fixture-cs'
+
     def __init__(self, home):
         self.home = home
         home.mkdir()
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(('GIT_', 'CODEX_', 'CLAUDE_'))}
-        self.env.update(HOME=str(home), XDG_STATE_HOME=str(home / 'state'),
+        # A fixture token, so a failed verification's state read never reaches real gh.
+        self.env.update(HOME=str(home), XDG_STATE_HOME=str(home / 'state'), GH_TOKEN='fixture-token',
                         CODEX_HOME=str(home / '.codex'), CLAUDE_CONFIG_DIR=str(home / '.claude'))
         self.calls = []
 
@@ -53,6 +56,14 @@ class ReplicationTests(unittest.TestCase):
         self.local_env = dict(self.connection.env, HOME=str(self.base / 'local-home'),
                               CODEX_HOME=str(self.base / 'local-home/.codex'),
                               CLAUDE_CONFIG_DIR=str(self.base / 'local-home/.claude'))
+        # The Codespace state read after a failed verification stays offline.
+        self.reads, self.replies = [], []
+        def upstream(url, token):
+            self.reads.append((url, token))
+            return self.replies.pop(0) if self.replies else (500, b'{}')
+        offline = patch('devcontainer_setup.project_sync.transport._upstream', side_effect=upstream)
+        offline.start()
+        self.addCleanup(offline.stop)
 
     def git(self, *args):
         return subprocess.check_output(['git', '--no-optional-locks', '-C', str(self.root), *args], stderr=subprocess.DEVNULL)
@@ -355,6 +366,51 @@ class ReplicationTests(unittest.TestCase):
         self.assertEqual(progress[-1]['outcome'], 'failed')
         self.assertEqual(progress[-1]['stage'], 'verify')
         self.assertIsNotNone(progress[-1]['directions']['desktop_to_codespace']['receipt'])
+
+    def failed_verification(self, *replies):
+        """Run a cycle whose root verification fails; the Codespace reads answer `replies`."""
+        self.replies[:] = replies
+        with patch('devcontainer_setup.project_sync.workspace._verify_roots',
+                   side_effect=ValueError('SSH connection failed')):
+            with self.assertRaises(replication.ConnectionVerificationError) as caught:
+                replication.sync_project_data(self.connection, self.project, self.store.state,
+                                              str(self.root), env=self.local_env)
+        return caught.exception
+
+    @staticmethod
+    def codespace(state):
+        return 200, json.dumps(dict(name='fixture-cs', state=state)).encode()
+
+    def test_verify_reports_shutdown_not_authentication(self):
+        error = self.failed_verification(self.codespace('Shutdown'))
+        self.assertEqual(str(error), 'Codespace is Shutdown; no start request was allowed.')
+        self.assertEqual(error.state, 'Shutdown')
+        # One read of this Codespace, with the token github_token(connection.env) hands over.
+        self.assertEqual(self.reads, [('https://api.github.com/user/codespaces/fixture-cs', 'fixture-token')])
+        self.assertNotIn('fixture-token', str(error))
+
+    def test_verify_reports_unknown_state_when_read_fails(self):
+        from devcontainer_setup.project_sync import transport
+        unknown = 'Project connection verification failed; Codespace state unknown.'
+        for case in ('http', 'name', 'token'):
+            with self.subTest(case=case):
+                self.reads.clear()
+                if case == 'token':
+                    with patch.object(transport, 'github_token',
+                                      side_effect=transport.TokenTimeout('GitHub authentication timed out')):
+                        error = self.failed_verification()
+                    self.assertEqual(self.reads, [])
+                else:
+                    reply = (503, b'{}') if case == 'http' else (200, json.dumps(dict(name='other', state='Shutdown')).encode())
+                    error = self.failed_verification(reply)
+                    self.assertEqual(len(self.reads), 1)
+                self.assertEqual(str(error), unknown)
+                self.assertIsNone(error.state)
+
+    def test_verify_keeps_identity_message_when_available(self):
+        error = self.failed_verification(self.codespace('Available'))
+        self.assertEqual(str(error), 'Project connection verification failed; identity/authentication must be valid')
+        self.assertEqual(error.state, 'Available')
 
     def test_malformed_publication_result_does_not_suppress_opposite_direction(self):
         self.conversation(self.connection.env)

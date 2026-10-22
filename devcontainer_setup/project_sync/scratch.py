@@ -26,6 +26,8 @@ from .transport import CodespaceConnection
 CONFIG = 'scratch.json'
 RUNTIME = 'scratch-runtime.json'
 SESSION = 'scratch-session.json'
+STATE_READ_GAP = 60  # at most one Codespace state read a minute, and only after a failure
+KEEPER_CHECK = 60  # the keeper watch reads local files at most once a minute
 _runtime_id = project_state.runtime_id
 
 
@@ -316,6 +318,91 @@ class _Shutdown(BaseException):
     pass
 
 
+class _Notices:
+    """The worker's notices to the owner (spec 6.7, D7), each sent once.
+
+    An unarmed project hears once per Codespace stop; an armed one, once while its keeper
+    is dead or hung. The flags live in the runtime, so a restarted worker keeps them.
+    An unreadable file skips a notice and a failed osascript is logged; neither stops the worker.
+    """
+
+    def __init__(self, state, config, runtime, logger):
+        self.state, self.runtime, self.logger = Path(state), runtime, logger
+        self.codespace, self.project = config['codespace'], Path(config['root']).name
+        self.read_at = self.checked_at = self.known = None
+        self.unreadable_logged = False
+
+    def save(self):
+        _write(self.state / RUNTIME, self.runtime)
+
+    def connected(self):
+        # A connected Codespace ends the stop, so the next one notifies again.
+        self.runtime['notified_stop'] = False
+        self.known = None
+
+    def explain(self, error, message):
+        """The worker's error for a failure; a known stop names its state, not the symptom (#48)."""
+        from .replication import ConnectionVerificationError, read_codespace_state, stopped_message
+        now = time.monotonic()
+        if isinstance(error, ConnectionVerificationError):
+            self.read_at, self.known = now, error.state  # verify() has just read it
+        elif self.read_at is None or now - self.read_at >= STATE_READ_GAP:
+            self.read_at, self.known = now, read_codespace_state(self.codespace, os.environ)
+        return message if self.known in (None, 'Available') else stopped_message(self.known)
+
+    def notify_stop(self):
+        """Notify once per stop of an unarmed project's Codespace, from the state explain() learned."""
+        if self.known in (None, 'Available') or self.runtime.get('notified_stop') or self._armed() is not False:
+            return  # armed projects hear from their keeper
+        self.runtime['notified_stop'] = True
+        self.save()
+        self._send(f"{self.project}'s Codespace stopped ({self.known}); run task work:cs to bring it back")
+
+    def watch_keeper(self):
+        """Notify once while an armed project's keeper is dead or hung; local files only."""
+        from . import keeper
+        now = time.monotonic()
+        if self.checked_at is not None and now - self.checked_at < KEEPER_CHECK:
+            return
+        self.checked_at = now
+        if self._armed() is not True:
+            return  # unarmed, disarmed or unknown: nothing to watch
+        try:
+            current = keeper.status(self.state)
+        except (OSError, ValueError):
+            current = {'running': False}  # as task work:status shows it
+        except Exception as error:
+            self.logger.info('Keeper check skipped: %s', type(error).__name__)
+            return
+        age = current.get('heartbeat_age')
+        if current.get('running') and isinstance(age, (int, float)) and age <= keeper.HEARTBEAT_STALE:
+            if self.runtime.get('notified_keeper'):
+                self.runtime['notified_keeper'] = False
+                self.save()
+        elif not self.runtime.get('notified_keeper'):
+            self.runtime['notified_keeper'] = True
+            self.save()
+            self._send(f'Recovery for {self.project} is not running; run task work:cs:armed')
+
+    def _armed(self):
+        """True or False from arming.json; None when it cannot be read, which sends no notice."""
+        from . import arming
+        try:
+            return bool(arming.read(self.state).get('armed'))
+        except (OSError, ValueError):
+            if not self.unreadable_logged:
+                self.unreadable_logged = True
+                self.logger.info('arming.json cannot be read, so no stop or recovery notice is sent; '
+                                 'inspect task work:status')
+            return None
+
+    def _send(self, text):
+        from . import keeper, notify
+        self.logger.info('Notify: %s', text)
+        if not notify.notify(keeper.TITLE, text):
+            self.logger.info('The notification could not be shown')
+
+
 def complete_retarget(state):
     """Finish a prior explicit owned transition before choosing another one."""
     state = Path(state)
@@ -456,14 +543,20 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
         logger.addHandler(handler)
         receipt = _saved_session(state, config)
         previous = read_json(state / RUNTIME) if (state / RUNTIME).exists() else {}
-        retained = previous.get('retained_receipts', {}) if previous.get('binding', previous.get('prepared_binding')) == config else {}
+        same = previous.get('binding', previous.get('prepared_binding')) == config
+        retained = previous.get('retained_receipts', {}) if same else {}
         runtime = {'pid': os.getpid(), 'nonce': nonce, 'process_identity': project_state.process_identity(os.getpid()),
                    'phase': 'starting', 'session': receipt['name'] if receipt else None,
                    'checkpoint_version': sync_cycle.SCHEMA, 'runtime_id': _runtime_id(),
-                   'connection_prepared': False, 'binding': config, 'retained_receipts': retained}
+                   'connection_prepared': False, 'binding': config, 'retained_receipts': retained,
+                   'notified_stop': same and previous.get('notified_stop') is True,
+                   'notified_keeper': same and previous.get('notified_keeper') is True}
+        notices = _Notices(state, config, runtime, logger)
         def update(phase, **values):
             runtime.update(phase=phase, heartbeat_at=time.time(), **values)
-            if phase != 'syncing':
+            if phase == 'syncing':
+                notices.connected()
+            else:
                 runtime['connection_prepared'] = False
             _write(state / RUNTIME, runtime)
         update('starting')
@@ -549,6 +642,7 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                                 progress(result)
                         synchronize()
                         while not exiting.wait(5):
+                            notices.watch_keeper()
                             if connection.child.poll() is not None:
                                 raise ValueError('Codespace forward disconnected; waiting to reconnect.')
                             _validate_tree(root / '.scratch')
@@ -568,9 +662,11 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                             break
                     # Only controlled ValueError messages are exposed. Never log
                     # request/connection bodies or arbitrary subprocess output.
-                    message = str(error) if isinstance(error, ValueError) else type(error).__name__
+                    message = notices.explain(error, str(error) if isinstance(error, ValueError) else type(error).__name__)
                     update('waiting', error=message)
                     logger.info('Scratch waiting: %s', message)
+                    notices.notify_stop()
+                    notices.watch_keeper()
                     if exiting.wait(backoff):
                         break
                     backoff = min(backoff * 2, 60)
