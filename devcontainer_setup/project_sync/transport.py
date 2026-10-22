@@ -19,6 +19,8 @@ from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 SUPPORTED_GH = '2.102.0'
+LIVENESS_INTERVAL = 30
+LIVENESS_DOWN = 3
 
 
 def _name(name):
@@ -40,6 +42,19 @@ def _upstream(url, token):
             return response.status, response.read(2 * 1024 * 1024)
     except HTTPError as error:
         return error.code, b'{}'
+
+
+def codespace_state(name, token, *, upstream=None):
+    """One read of the Codespace state; None on any HTTP, JSON or network failure."""
+    try:
+        status, body = (upstream or _upstream)('https://api.github.com/user/codespaces/' + _name(name), token)
+        if status != 200:
+            return None
+        obj = json.loads(body)
+        state = obj.get('name') == name and obj.get('state')
+        return state if isinstance(state, str) else None
+    except Exception:
+        return None
 
 
 def clean_env(env=None):
@@ -213,10 +228,22 @@ def herdr_stdio(codespace: str, state: str | Path) -> int:
         _check_gh(os.environ)
         for number in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
             handlers[number] = signal.signal(number, shutdown)
-        with ReadOnlyAPI(name, github_token()) as api:
+        token = github_token()
+        with ReadOnlyAPI(name, token) as api:
             child = subprocess.Popen(['gh', 'codespace', 'ssh', '-c', name, '--stdio', '--', '-i', str(key)],
                     env=api.child_env(), stderr=subprocess.DEVNULL, start_new_session=True)
-            return child.wait()
+            # gh --stdio can outlive a stopped Codespace and pin the SSH master;
+            # end it once the Codespace is clearly not Available.
+            down = 0
+            while True:
+                try:
+                    return child.wait(timeout=LIVENESS_INTERVAL)
+                except subprocess.TimeoutExpired:
+                    pass
+                state = codespace_state(name, token)
+                down = down + 1 if state not in (None, 'Available') else 0
+                if down >= LIVENESS_DOWN:
+                    return 1
     except (OSError, ValueError):
         print('Herdr Codespace SSH proxy unavailable; run task work:cs to reconnect.', file=sys.stderr)
         return 1

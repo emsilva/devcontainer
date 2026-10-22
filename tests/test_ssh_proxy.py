@@ -36,6 +36,9 @@ if sys.argv[1:]==["--version"]:
 else:
  (s/"child.json").write_text(json.dumps({"pid":os.getpid(),"args":sys.argv[1:],"private_token_leaked":os.environ.get("GH_TOKEN")=="real-private-token","api":os.environ.get("GITHUB_API_URL","").startswith("http://127.0.0.1:")}))
  if os.environ.get("TEST_MODE")=="fail":print("private-error-detail",file=sys.stderr);sys.exit(2)
+ if os.environ.get("TEST_MODE")=="hang":
+  import time
+  time.sleep(float(os.environ.get("TEST_HANG_LIMIT","1000000")));sys.exit(3)
  while True:
   data=os.read(0,4096)
   if not data:break
@@ -44,6 +47,53 @@ else:
         gh.chmod(0o700)
         self.env = dict(os.environ, HOME=str(self.home), PATH=str(self.bin) + os.pathsep + os.environ['PATH'],
                         GH_TOKEN='real-private-token', TEST_STATE=str(self.state))
+
+    def run_proxy(self, reads, **extra):
+        """Run herdr_stdio in-process against scripted Codespace reads."""
+        items, made = list(reads), []
+        def fake(url, token):
+            made.append(url)
+            item = items.pop(0) if items else 'Available'
+            if item == 'error':
+                return 500, b'{}'
+            return 200, json.dumps({'name': 'fixture', 'state': item}).encode()
+        old = signal.signal(signal.SIGALRM, lambda *_: self.fail('proxy hung'))
+        signal.alarm(10)
+        try:
+            with mock.patch.dict(os.environ, dict(self.env, TEST_MODE='hang', **extra), clear=True), \
+                    mock.patch.object(transport, 'LIVENESS_INTERVAL', 0.05), \
+                    mock.patch.object(transport, '_upstream', fake):
+                return transport.herdr_stdio('fixture', self.state), made
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old)
+
+    def test_proxy_exits_after_three_consecutive_down_reads(self):
+        code, made = self.run_proxy(['Available', 'ShuttingDown', 'ShuttingDown', 'Shutdown'])
+        self.assertNotEqual(code, 0)
+        child = json.loads((self.state / 'child.json').read_text())
+        with self.assertRaises(ProcessLookupError): os.kill(child['pid'], 0)
+        self.assertEqual(len(made), 4)
+
+    def test_failed_read_resets_the_down_count(self):
+        code, made = self.run_proxy(['Shutdown', 'error', 'Shutdown', 'Shutdown', 'Shutdown'])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(len(made), 5)
+
+    def test_available_reads_never_end_a_live_proxy(self):
+        code, made = self.run_proxy(['Available'] * 20, TEST_HANG_LIMIT='1')
+        self.assertEqual(code, 3)
+        self.assertGreater(len(made), 3)
+
+    def test_codespace_state_reads_only_a_matching_200(self):
+        def reply(status, body):
+            return lambda url, token: (status, body)
+        self.assertEqual(transport.codespace_state('fixture', 't', upstream=reply(200, b'{"name":"fixture","state":"Available"}')), 'Available')
+        self.assertIsNone(transport.codespace_state('fixture', 't', upstream=reply(200, b'{"name":"other","state":"Available"}')))
+        self.assertIsNone(transport.codespace_state('fixture', 't', upstream=reply(500, b'{}')))
+        self.assertIsNone(transport.codespace_state('fixture', 't', upstream=reply(200, b'not json')))
+        def boom(url, token): raise OSError('down')
+        self.assertIsNone(transport.codespace_state('fixture', 't', upstream=boom))
 
     def command(self):
         self.assertTrue(callable(getattr(transport, 'herdr_stdio', None)), 'Herdr needs a native read-only SSH proxy')
