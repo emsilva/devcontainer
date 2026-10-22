@@ -124,6 +124,29 @@ class StateTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         self.assertTrue(path.exists())  # Do not unlink lock inodes and split ownership.
 
+    def test_simultaneous_first_locks_both_wait_instead_of_failing(self):
+        # macOS can fail one of two simultaneous openat(O_CREAT) calls for a new
+        # name with ENOENT. Two arms at once must queue on the lock, not error.
+        import threading
+        for attempt in range(20):
+            path = self.root / ('race-' + str(attempt)) / 'control.lock'
+            path.parent.mkdir()
+            barrier, errors, held = threading.Barrier(2), [], []
+            def take():
+                barrier.wait()
+                try:
+                    with locked(path, blocking=True):
+                        held.append(True)
+                except OSError as error:
+                    errors.append(error)
+            threads = [threading.Thread(target=take) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+            self.assertEqual(errors, [])
+            self.assertEqual(len(held), 2)
+
 
 class NamespacePrivacyTests(unittest.TestCase):
     def setUp(self):

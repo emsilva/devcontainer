@@ -259,7 +259,15 @@ def read_json(path: Path) -> dict:
 def locked(path: Path, blocking: bool = False):
     """Hold an advisory process lock; never unlink the shared lock inode."""
     with _parent(path, create=True, private=True) as (parent, name):
-        fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent)
+        for attempt in range(2):
+            try:
+                fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent)
+                break
+            except FileNotFoundError:
+                # macOS (measured on 26.7) fails one of two simultaneous creates of a
+                # new name with ENOENT; the other creator won, so open its file.
+                if attempt:
+                    raise
         try:
             _regular(fd)
             os.fchmod(fd, 0o600)
