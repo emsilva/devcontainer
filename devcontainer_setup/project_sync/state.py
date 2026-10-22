@@ -283,6 +283,8 @@ def locked(path: Path, blocking: bool = False):
 
 
 _CHILDREN = {}
+STARTUP_WAIT = 8
+TERMINATE_WAIT = 5
 
 
 def runtime_id() -> str:
@@ -316,7 +318,7 @@ def launch_detached(name: str, flag: str, root: Path, state: Path, *, env: dict,
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
     _CHILDREN[child.pid] = child
-    deadline = time.monotonic() + 8
+    deadline = time.monotonic() + STARTUP_WAIT
     while time.monotonic() < deadline:
         current = status(state)
         if current.get('nonce') == nonce and current['running']:
@@ -324,9 +326,14 @@ def launch_detached(name: str, flag: str, root: Path, state: Path, *, env: dict,
         if child.poll() is not None:
             raise ValueError(exited)
         time.sleep(.1)
-    # We own this Popen handle, so startup timeout can safely terminate it.
+    # We own this Popen handle, so startup timeout can safely terminate it,
+    # and kill it if it ignores that, so it is always reaped.
     child.terminate()
-    child.wait(timeout=5)
+    try:
+        child.wait(timeout=TERMINATE_WAIT)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait(timeout=TERMINATE_WAIT)
     raise ValueError(timed_out)
 
 

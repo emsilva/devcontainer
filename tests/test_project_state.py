@@ -6,6 +6,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from unittest import mock
@@ -123,6 +124,31 @@ class StateTests(unittest.TestCase):
         with locked(path):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         self.assertTrue(path.exists())  # Do not unlink lock inodes and split ownership.
+
+    def test_a_detached_child_that_ignores_sigterm_at_startup_timeout_is_killed_and_reaped(self):
+        from devcontainer_setup.project_sync import state as project_state
+        ready = self.root / 'ignoring-sigterm'
+        code = ('import pathlib, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); '
+                'pathlib.Path(' + repr(str(ready)) + ').touch(); time.sleep(60)')
+        real, children = subprocess.Popen, []
+        def popen(args, **kwargs):
+            # The real launch options, with a child that ignores SIGTERM and never becomes owned.
+            children.append(real([sys.executable, '-c', code], **kwargs))
+            return children[-1]
+        def status(_):
+            deadline = time.monotonic() + 5
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(.02)
+            return {'running': False}
+        with mock.patch.object(project_state.subprocess, 'Popen', side_effect=popen), \
+                mock.patch.object(project_state, 'STARTUP_WAIT', .2), \
+                mock.patch.object(project_state, 'TERMINATE_WAIT', .3):
+            with self.assertRaisesRegex(ValueError, '^Fixture startup timed out.$'):
+                project_state.launch_detached('scratch', '--supervise', self.root, self.root / 'state',
+                                              env=dict(os.environ), status=status, exited='exited',
+                                              timed_out='Fixture startup timed out.')
+        self.assertTrue(ready.exists())
+        self.assertEqual(children[0].returncode, -9)  # killed after ignoring SIGTERM, and reaped
 
     def test_simultaneous_first_locks_both_wait_instead_of_failing(self):
         # macOS can fail one of two simultaneous openat(O_CREAT) calls for a new
