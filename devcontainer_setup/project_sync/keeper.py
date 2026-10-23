@@ -511,6 +511,10 @@ class Keeper:
         return getattr(self.api, 'token_usable', None) is not False
 
     def _refused(self, key, stop_at, reason):
+        # R37: the token retry is transient and has its own once-per-stop notice, so the owner told
+        # "tries again" still hears the final outcome on the stop's own key.
+        if reason.startswith(NO_TOKEN):
+            key = 'retry-' + key
         self._notify(key, f"{self.project} stopped at {arming.format_time(stop_at)} for GitHub's 12-hour limit "
                           f'and was not restarted: {reason}. Run task work:cs to start it.')
 

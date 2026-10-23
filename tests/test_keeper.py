@@ -225,7 +225,7 @@ class KeeperStepTests(unittest.TestCase):
         self.assertEqual(len(herdr.prompts), 1)
         self.assertEqual(herdr.prompts[0][0], 'lead-proj')
         self.assertEqual(herdr.prompts[0][1], restore.resume_text(rid, stops[0], runtime['last_restart']['back_at']))
-        self.assertEqual(len(self.notes), 1)
+        self.assertEqual(len(self.notes), 1)  # no retry: exactly one notice for the stop
         self.assertIn('proj restarted after GitHub', self.notes[0])
         self.assertIn('lead-proj', self.notes[0])
         self.assertNotIn('ghp_', json.dumps(runtime))
@@ -412,20 +412,33 @@ class KeeperStepTests(unittest.TestCase):
         self.assertEqual(self.api.posts, 1)
         self.assertEqual(len(herdr.prompts), 1)
         self.assertEqual(self.runtime()['anchor']['source'], 'keeper')
-        self.assertEqual(len(self.notes), 1)  # one notice per stop
+        # R37: told "tries again", the owner then hears how it ended; exactly these two.
+        self.assertEqual(len(self.notes), 2)
+        self.assertIn('the keeper tries again each minute', self.notes[0])
+        self.assertIn("proj restarted after GitHub's 12-hour stop (" + lifecycle.new_rid(later[3]) + ')', self.notes[1])
 
     def test_a_token_refusal_survives_a_keeper_replacement(self):
-        # An upgrade replaces the keeper within minutes; the stop is still asked again.
+        # An upgrade replaces the keeper within minutes, between the retry notice and the restart;
+        # the stop is still asked again, and neither notice is sent twice.
         stops, readings = self.lifetime()
         k = self.keeper(readings, herdr=FakeHerdr())
         self.api.token_usable = False
         self.run_steps(k, [T0] + stops)
         self.assertIs(self.runtime()['down']['token_wait'], True)
         at = stops[2] + 60
-        replacement = self.keeper([down(at), down(at + 5), up(at + 70, last_used_at=at)], herdr=FakeHerdr())
-        self.run_steps(replacement, [at])
+        waiting = self.keeper([down(at)], herdr=FakeHerdr())
+        self.api.token_usable = False
+        self.run_steps(waiting, [at])
+        self.assertEqual((self.api.posts, len(self.notes)), (0, 1))
+        replacement = self.keeper([down(at + 60), down(at + 65), up(at + 130, last_used_at=at + 60)],
+                                  herdr=FakeHerdr())
+        self.run_steps(replacement, [at + 60])
         self.assertEqual(self.api.posts, 1)
-        self.assertEqual(len(self.notes), 1)
+        later = self.keeper([up(at + 190, last_used_at=at + 60)], herdr=FakeHerdr())
+        self.run_steps(later, [at + 190, at + 250])
+        self.assertEqual(len(self.notes), 2)
+        self.assertIn('tries again each minute', self.notes[0])
+        self.assertIn('proj restarted after GitHub', self.notes[1])
 
     def test_a_token_refusal_ends_at_a_final_refusal(self):
         stops, readings = self.lifetime()
@@ -439,7 +452,10 @@ class KeeperStepTests(unittest.TestCase):
         arming.write(self.state, dict(arming.read(self.state), hold_until=None))
         self.run_steps(k, later[2:])
         self.assertEqual(self.api.posts, 0)
-        self.assertEqual(len(self.notes), 1)
+        # The retry notice, then the final refusal; no further notice once it is final.
+        self.assertEqual(len(self.notes), 2)
+        self.assertIn('tries again each minute', self.notes[0])
+        self.assertIn('was not restarted: on hold until', self.notes[1])
         self.assertNotIn('token_wait', self.runtime()['down'])
 
     def test_an_unwritable_ledger_refuses_before_any_post(self):
