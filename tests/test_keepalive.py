@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import socket
 import subprocess
@@ -192,6 +193,7 @@ class FreePortTests(Fakes):
         self.assertNotIn('-L', self.rows(count=1)[0]['args'])
 
 
+@unittest.skipUnless(shutil.which('lsof'), 'requires lsof')
 class AnyListenerTests(unittest.TestCase):
     """R19 through free_ports itself, with the real lsof (local only), as the reviewer's probe_bind.py.
 

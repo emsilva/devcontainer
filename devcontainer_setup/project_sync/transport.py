@@ -244,8 +244,8 @@ def herdr_stdio(codespace: str, state: str | Path) -> int:
                     return child.wait(timeout=LIVENESS_INTERVAL)
                 except subprocess.TimeoutExpired:
                     pass
-                state = codespace_state(name, token)
-                down = down + 1 if state not in (None, 'Available') else 0
+                cs_state = codespace_state(name, token)
+                down = down + 1 if cs_state not in (None, 'Available') else 0
                 if down >= LIVENESS_DOWN:
                     return 1
     except (OSError, ValueError):

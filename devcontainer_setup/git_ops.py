@@ -115,12 +115,15 @@ def setup_worktree(project: Path, root: Path) -> tuple[Path, str]:
     path = root / branch.replace('/', '-')
     if path.exists() or path.is_symlink():
         path = Path(tempfile.mkdtemp(prefix=path.name + '-', dir=root))
-    if not _succeeds(project, 'worktree', 'add', '--quiet', '--no-track', '-b', branch, str(path), start):
+    added = subprocess.run(['git', '-C', str(project), 'worktree', 'add', '--quiet', '--no-track', '-b', branch,
+                            str(path), start], capture_output=True, text=True)
+    if added.returncode:
         # `worktree add` can create the branch before it fails; drop only that empty branch.
         if _tip(project, branch) == start and branch not in _worktrees(project).values():
             _succeeds(project, 'branch', '-D', branch)
-        raise ValueError(f'Cannot create the setup worktree {path}; check that {root} is writable, '
-                         'then run setup again.')
+        reason = added.stderr.strip()
+        raise ValueError(f'Cannot create the setup worktree {path}' + (f': {reason}' if reason else '')
+                         + f'; check that {root} is writable, then run setup again.')
     return path, branch
 
 

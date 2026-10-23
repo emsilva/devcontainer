@@ -457,6 +457,15 @@ class SetupWorktreeTests(unittest.TestCase):
         self.assertIn(f'{detached} on a detached HEAD', error.getvalue())
         self.assertTrue(detached.exists())
 
+    def test_setup_worktree_failure_carries_gits_own_reason(self):
+        hook = self.project / '.git/hooks/post-checkout'
+        hook.write_text('#!/bin/sh\necho "hook says no: lint failed" >&2\nexit 1\n')
+        hook.chmod(0o755)
+        with self.assertRaises(ValueError) as caught:
+            setup_worktree(self.project, self.root)
+        self.assertIn('hook says no: lint failed', str(caught.exception))
+        self.assertIn('check that', str(caught.exception))
+
     def commit_in(self, path, name='setup.txt'):
         (path / name).write_text('setup\n')
         git(path, 'add', name)
