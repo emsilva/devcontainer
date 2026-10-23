@@ -705,13 +705,13 @@ def _launch_on_default(api: Codespaces, project: Path, repo: str, default: str, 
 
 
 def _merge_and_launch(ui, api: Codespaces, project: Path, repo: str, default: str, number: int, branch: str,
-                      worktree: Path | None, launch: dict | None, preferences: dict):
-    """One confirmation, GitHub's merge, then the codespace on <default>."""
+                      head: str, worktree: Path | None, launch: dict | None, preferences: dict):
+    """One confirmation, GitHub's merge of the reviewed head, then the codespace on <default>."""
     user = api.user()
     if not ui.confirm(f'Merge PR #{number} into {default} as {user}? '
                       'Required reviews are bypassed if your account is allowed to.'):
         raise ValueError(f'PR #{number} is open. {RERUN}')
-    sha = api.merge_pr(repo, number, f'{SETUP_TITLE} (#{number})', MERGE_MESSAGE)
+    sha = api.merge_pr(repo, number, f'{SETUP_TITLE} (#{number})', MERGE_MESSAGE, head)
     return _launch_on_default(api, project, repo, default, sha, launch, preferences, merged=branch, worktree=worktree)
 
 
@@ -721,12 +721,13 @@ def _resume_setup_pr(ui, api: Codespaces, project: Path, repo: str, default: str
     if len(prs) != 1:
         raise ValueError(_open_setup_prs(prs))
     (pr,) = prs
-    print(f'Setup PR #{pr["number"]} is open: {pr["title"]} ({pr["head"]["ref"]} into {default}).', flush=True)
+    print(f'Setup PR #{pr["number"]} is open: {pr["title"]} ({pr["head"]["ref"]} into {default}, '
+          f'at {pr["head"]["sha"][:12]}).', flush=True)
     launch = _launch_options(ui, api, project, default, resume)
     if launch:
         launch.pop('repo')
-    name, config = _merge_and_launch(ui, api, project, repo, default, pr['number'], pr['head']['ref'], None,
-                                     launch, preferences)
+    name, config = _merge_and_launch(ui, api, project, repo, default, pr['number'], pr['head']['ref'],
+                                     pr['head']['sha'], None, launch, preferences)
     if config.get('customizations', {}).get('devcontainerSetup', {}).get('selections', {}).get('continuity'):
         setup_continuity(project, ui, name)
     return 0
@@ -818,7 +819,8 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
                 if open_prs := api.setup_prs(launch['repo'], default):
                     raise ValueError(_open_setup_prs(open_prs))
                 plan.push()
-                pull = api.open_pr(launch['repo'], plan.branch, default, SETUP_TITLE, '\n'.join(summary)), plan.branch, source
+                pull = (api.open_pr(launch['repo'], plan.branch, default, SETUP_TITLE, '\n'.join(summary)),
+                        plan.branch, sha, source)
             break
     name = None
     if launch:

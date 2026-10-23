@@ -419,28 +419,43 @@ class FakePulls:
         self.refusals = []         # GitHub's message for each refused merge, in order
         self.json_errors = True    # gh prints the error body on stdout as well as its stderr line
         self.status = []           # (state, total_count) per status read; then ('success', 1)
-        self.runs = []             # check-run statuses per check-runs read; then none
+        self.runs = []             # check runs (a status, or a run) per check-runs read; then none
         self.merged_by_hand = False
+        self.moved_head = None     # the head GitHub reports after the first refusal
+        self.merge_output = None   # what a successful merge prints instead of its usual body
+        self.timeouts, self.clock, self.put_seconds, self.hang = [], None, 0, None
+        self.marks_merged = True
 
     def __call__(self, args, **kwargs):
         self.calls.append(args)
         self.inputs.append(kwargs.get('input'))
+        self.timeouts.append(kwargs.get('timeout'))
         endpoint = next(arg for arg in args[2:] if arg.startswith('repos/') or arg == 'user')
         path = endpoint.split('?')[0]
+        if self.hang and path.endswith(self.hang):
+            raise subprocess.TimeoutExpired(args, kwargs.get('timeout'))
         if path.endswith('/merge'):
+            if self.clock:
+                self.clock.now += self.put_seconds
             if self.refusals:
                 message = self.refusals.pop(0)
                 if self.merged_by_hand:
                     self.pr.update(merged=True, state='closed', merge_commit_sha='e' * 40)
+                if self.moved_head:
+                    self.pr['head'] = dict(self.pr['head'], sha=self.moved_head)
                 body = json.dumps({'message': message, 'status': '405'}) if self.json_errors else ''
                 return subprocess.CompletedProcess(args, 1, body, f'gh: {message} (HTTP 405)\n')
+            if self.marks_merged:
+                self.pr.update(merged=True, state='closed', merge_commit_sha='d' * 40)
+            if self.merge_output is not None:
+                return subprocess.CompletedProcess(args, 0, self.merge_output, '')
             return self.reply(args, {'sha': 'd' * 40, 'merged': True, 'message': 'Pull Request successfully merged'})
         if path.endswith('/status'):
             state, total = self.status.pop(0) if self.status else ('success', 1)
             return self.reply(args, {'state': state, 'total_count': total, 'statuses': []})
         if path.endswith('/check-runs'):
-            runs = self.runs.pop(0) if self.runs else []
-            return self.reply(args, {'total_count': len(runs), 'check_runs': [{'status': run} for run in runs]})
+            runs = [run if isinstance(run, dict) else {'status': run} for run in (self.runs.pop(0) if self.runs else [])]
+            return self.reply(args, {'total_count': len(runs), 'check_runs': runs})
         if path == 'repos/owner/project/pulls/7':
             return self.reply(args, self.pr)
         if path == 'repos/owner/project/pulls' and '--method' in args:
@@ -457,14 +472,100 @@ class FakePulls:
         return [index for index, call in enumerate(self.calls) if call[1:4] == ['api', '--method', 'PUT']]
 
 
+class FakeClock:
+    def __init__(self):
+        self.now, self.slept = 1000.0, []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
 class PullRequestTests(unittest.TestCase):
     def setUp(self):
         self.pulls = FakePulls()
         self.api = Codespaces(run=self.pulls)
+        self.clock = self.pulls.clock = FakeClock()
 
-    def merge(self, **options):
-        return self.api.merge_pr('owner/project', 7, 'Configure project devcontainer (#7)',
-                                 'Reviewed and merged with task devcontainer:setup.', **options)
+    def merge(self, expected='c' * 40, **options):
+        options.setdefault('sleep', self.clock.sleep)
+        with patch('devcontainer_setup.codespaces.time.monotonic', self.clock.monotonic):
+            return self.api.merge_pr('owner/project', 7, 'Configure project devcontainer (#7)',
+                                     'Reviewed and merged with task devcontainer:setup.', expected, **options)
+
+    def test_merge_refuses_a_head_other_than_the_reviewed_one(self):
+        with self.assertRaises(ValueError) as caught:
+            self.merge('b' * 40, sleep=self.fail)
+        self.assertEqual(str(caught.exception), f'PR #7 is at {"c" * 12}, not the reviewed {"b" * 12}; nothing was merged. {RERUN}')
+        self.assertEqual(self.pulls.merges(), [])
+        # The head moves while setup waits for checks: the next merge is never sent.
+        self.setUp()
+        self.pulls.refusals, self.pulls.status, self.pulls.moved_head = ['Required status check "ci" is expected.'], [('pending', 1)], 'f' * 40
+        with self.assertRaises(ValueError) as caught:
+            self.merge(sleep=self.fail)
+        self.assertEqual(str(caught.exception), f'PR #7 is at {"f" * 12}, not the reviewed {"c" * 12}; nothing was merged. {RERUN}')
+        self.assertEqual(len(self.pulls.merges()), 1)
+        # Merged by someone else at another head: no codespace on a commit nobody reviewed here.
+        self.setUp()
+        self.pulls.pr.update(merged=True, state='closed', merge_commit_sha='e' * 40)
+        with self.assertRaises(ValueError) as caught:
+            self.merge('b' * 40, sleep=self.fail)
+        self.assertEqual(str(caught.exception), f'PR #7 was merged at {"c" * 12}, not the reviewed {"b" * 12}; no codespace '
+                         'was created. Run task devcontainer:setup again to create the Codespace.')
+
+    def test_merge_refuses_a_closed_pr(self):
+        self.pulls.pr.update(state='closed')
+        with self.assertRaises(ValueError) as caught:
+            self.merge(sleep=self.fail)
+        self.assertEqual(str(caught.exception), 'PR #7 was closed without being merged; nothing was merged. '
+                         'Run task devcontainer:setup again to open a new one.')
+        self.assertEqual(self.pulls.merges(), [])
+
+    def test_merge_wait_is_bounded_by_the_clock(self):
+        # Each refused merge takes 400 s: the 15-minute bound is wall time, not a count of sleeps.
+        self.pulls.refusals = ['Required status check "ci" is expected.'] * 30
+        self.pulls.status, self.pulls.put_seconds = [('pending', 1)] * 30, 400
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(ValueError) as caught:
+            self.merge()
+        self.assertEqual(self.clock.slept, [30, 30])
+        self.assertTrue(str(caught.exception).endswith(RERUN))
+
+    def test_hung_github_call_ends_as_a_refusal(self):
+        for hang in ('/merge', '/status', 'pulls/7'):
+            with self.subTest(hang=hang):
+                self.setUp()
+                self.pulls.hang = hang
+                self.pulls.refusals, self.pulls.status = ['Required status check "ci" is expected.'], [('pending', 1)]
+                with self.assertRaises(ValueError) as caught:
+                    self.merge(sleep=self.fail)
+                self.assertEqual(str(caught.exception),
+                                 f'PR #7 is not confirmed merged: GitHub did not answer within 60s. {RERUN}')
+                self.assertTrue(all(self.pulls.timeouts), self.pulls.timeouts)
+
+    def test_failed_checks_refuse_without_waiting(self):
+        reason = 'Required status check "ci" has failed'
+        self.pulls.refusals, self.pulls.status = [reason + '.'], [('failure', 1)]
+        self.pulls.runs = [[{'status': 'completed', 'conclusion': 'failure'}, {'status': 'completed', 'conclusion': 'success'}]]
+        with self.assertRaises(ValueError) as caught:
+            self.merge(sleep=self.fail)
+        self.assertEqual(str(caught.exception), f'PR #7 is open: {reason}. {RERUN}')
+
+    def test_merge_without_its_sha_reads_the_merge_commit(self):
+        for output in ('{}', '', 'not json'):
+            with self.subTest(output=output):
+                self.setUp()
+                self.pulls.merge_output = output
+                self.assertEqual(self.merge(sleep=self.fail), 'd' * 40)
+        # GitHub took the merge but does not show it yet: a fixed text, never a traceback.
+        self.setUp()
+        self.pulls.merge_output, self.pulls.marks_merged = '{}', False
+        with self.assertRaises(ValueError) as caught:
+            self.merge(sleep=self.fail)
+        self.assertEqual(str(caught.exception), 'GitHub accepted the merge of PR #7 but does not show it merged yet; '
+                         'run task devcontainer:setup again to create the Codespace.')
 
     def test_merge_uses_rest_with_verbatim_message(self):
         self.assertEqual(self.merge(sleep=self.fail), 'd' * 40)
@@ -483,10 +584,10 @@ class PullRequestTests(unittest.TestCase):
         self.pulls.refusals = [reason, reason]
         # A pending commit status, then no statuses (GitHub still says "pending") but a queued check run.
         self.pulls.status, self.pulls.runs = [('pending', 1), ('pending', 0)], [['completed', 'queued']]
-        sleeps, output = [], io.StringIO()
+        output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            self.assertEqual(self.merge(sleep=sleeps.append), 'd' * 40)
-        self.assertEqual(sleeps, [30, 30])
+            self.assertEqual(self.merge(), 'd' * 40)
+        self.assertEqual(self.clock.slept, [30, 30])
         self.assertEqual(len(self.pulls.merges()), 3)
         self.assertEqual(len([line for line in output.getvalue().splitlines() if 'PR #7' in line]), 2)
 
@@ -494,10 +595,9 @@ class PullRequestTests(unittest.TestCase):
         reason = 'Required status check "ci" is expected.'
         self.pulls.refusals = [reason] * 10
         self.pulls.status = [('pending', 1)] * 10
-        sleeps = []
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(ValueError) as caught:
-            self.merge(wait=90, sleep=sleeps.append)
-        self.assertEqual(sleeps, [30, 30, 30])
+            self.merge(wait=90)
+        self.assertEqual(self.clock.slept, [30, 30, 30])
         self.assertEqual(str(caught.exception), f'PR #7 is open: Required status check "ci" is expected. {RERUN}')
 
     def test_merge_refusal_reports_github_reason_and_rerun(self):

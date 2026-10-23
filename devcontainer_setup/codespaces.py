@@ -16,6 +16,7 @@ from urllib.parse import urlencode
 from .git_ops import SETUP_BRANCH
 
 RERUN = 'Merge it, then run task devcontainer:setup again to create the Codespace.'
+GH_TIMEOUT = 60  # seconds for each GitHub call while merging
 
 
 def _with_github(command: str) -> str:
@@ -138,38 +139,75 @@ class Codespaces:
         return int(created['number'])
 
     def _checks_running(self, repo: str, sha: str) -> bool:
-        status = self.command('api', f'repos/{repo}/commits/{sha}/status', json_output=True)
+        status = self.command('api', f'repos/{repo}/commits/{sha}/status', json_output=True, timeout=GH_TIMEOUT)
         # With no statuses at all GitHub still reports "pending"; only a counted one is running.
         if status.get('state') == 'pending' and status.get('total_count', 0) > 0:
             return True
-        runs = self.command('api', f'repos/{repo}/commits/{sha}/check-runs?per_page=100', json_output=True)
+        runs = self.command('api', f'repos/{repo}/commits/{sha}/check-runs?per_page=100', json_output=True,
+                            timeout=GH_TIMEOUT)
         return any(run.get('status') != 'completed' for run in runs.get('check_runs', []))
 
-    def merge_pr(self, repo: str, number: int, title: str, message: str, *,
+    def merge_pr(self, repo: str, number: int, title: str, message: str, expected_head: str, *,
                  wait: float = 900, sleep=time.sleep) -> str:
-        """Merge through REST with a verbatim title and message (gh pr merge adds a co-author
-        stub); GitHub decides whether it may. Returns the merge commit."""
+        """Merge the reviewed commit, expected_head, through REST with a verbatim title and message
+        (gh pr merge adds a co-author stub); GitHub decides whether it may. Returns the merge commit."""
         self._repository(repo)
-        pr = self.command('api', f'repos/{repo}/pulls/{number}', json_output=True)
-        head, waited = pr['head']['sha'], 0
-        while not pr.get('merged'):
-            body = {'merge_method': 'merge', 'commit_title': title, 'commit_message': message, 'sha': head}
-            result = self._gh('api', '--method', 'PUT', f'repos/{repo}/pulls/{number}/merge', '--input', '-',
-                              input=json.dumps(body))
-            if not result.returncode:
-                return json.loads(result.stdout)['sha']
-            reason = self._reason(result)
-            pr = self.command('api', f'repos/{repo}/pulls/{number}', json_output=True)
+        try:
+            return self._merge(repo, number, title, message, expected_head, time.monotonic() + wait, sleep)
+        except subprocess.TimeoutExpired as error:
+            raise ValueError(f'PR #{number} is not confirmed merged: GitHub did not answer within '
+                             f'{GH_TIMEOUT}s. {RERUN}') from error
+
+    def _merge(self, repo: str, number: int, title: str, message: str, expected: str, deadline: float, sleep) -> str:
+        start = time.monotonic()
+        pr = self._pull(repo, number)
+        while True:
+            head = (pr.get('head') or {}).get('sha') or ''
             if pr.get('merged'):
-                break
-            if (pr.get('state') != 'open' or pr['head']['sha'] != head or waited >= wait
-                    or not self._checks_running(repo, head)):
+                if head != expected:
+                    raise ValueError(f'PR #{number} was merged at {head[:12]}, not the reviewed {expected[:12]}; no '
+                                     'codespace was created. Run task devcontainer:setup again to create the Codespace.')
+                return self._merge_commit(pr, number)
+            if head != expected:
+                raise ValueError(f'PR #{number} is at {head[:12]}, not the reviewed {expected[:12]}; nothing was '
+                                 f'merged. {RERUN}')
+            if pr.get('state') != 'open':
+                raise ValueError(f'PR #{number} was closed without being merged; nothing was merged. '
+                                 'Run task devcontainer:setup again to open a new one.')
+            body = {'merge_method': 'merge', 'commit_title': title, 'commit_message': message, 'sha': expected}
+            result = self._gh('api', '--method', 'PUT', f'repos/{repo}/pulls/{number}/merge', '--input', '-',
+                              input=json.dumps(body), timeout=GH_TIMEOUT)
+            if not result.returncode:
+                try:
+                    sha = json.loads(result.stdout).get('sha')
+                except (ValueError, AttributeError):
+                    sha = None
+                return sha if isinstance(sha, str) and re.fullmatch(r'[0-9a-f]{40}', sha) else (
+                    self._merge_commit(self._pull(repo, number), number))
+            reason = self._reason(result)
+            pr = self._pull(repo, number)
+            if pr.get('merged') or pr.get('state') != 'open' or (pr.get('head') or {}).get('sha') != expected:
+                continue
+            if time.monotonic() >= deadline or not self._checks_running(repo, expected):
                 raise ValueError(f'PR #{number} is open: {reason}. {RERUN}')
-            waited += 30
+            waited = int(time.monotonic() - start) + 30
             print(f'PR #{number}: required checks are still running; merging again in 30s '
-                  f'({waited // 60}:{waited % 60:02d} of {int(wait) // 60} min).', flush=True)
+                  f'({waited // 60}:{waited % 60:02d} of {int(deadline - start) // 60} min).', flush=True)
             sleep(30)
-        return pr['merge_commit_sha']
+
+    def _pull(self, repo: str, number: int) -> dict:
+        pr = self.command('api', f'repos/{repo}/pulls/{number}', json_output=True, timeout=GH_TIMEOUT)
+        if not isinstance(pr, dict):
+            raise ValueError(f'GitHub returned no PR #{number}; run task devcontainer:setup again.')
+        return pr
+
+    @staticmethod
+    def _merge_commit(pr: dict, number: int) -> str:
+        sha = pr.get('merge_commit_sha')
+        if not pr.get('merged') or not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha):
+            raise ValueError(f'GitHub accepted the merge of PR #{number} but does not show it merged yet; '
+                             'run task devcontainer:setup again to create the Codespace.')
+        return sha
 
     @staticmethod
     def _reason(result) -> str:

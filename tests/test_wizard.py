@@ -615,7 +615,7 @@ if args[0] == 'api':
     if match:
         pr = next(pr for pr in prs if pr['number'] == int(match[1]))
         if not match[2]:
-            reply(pr)
+            reply(dict(pr, head=dict(pr['head'], sha=state['moved_head'])) if state.get('moved_head') else pr)
         if state.get('refusal'):
             reply({{'message': state['refusal']}}, 1, 'gh: ' + state['refusal'] + ' (HTTP 405)\n')
         if state.get('phantom_merge'):
@@ -1054,6 +1054,27 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
                 self.assertEqual(self.git('worktree', 'list', '--porcelain').count('\nworktree '), 0)
                 self.assertEqual(self.snapshot(), before)
 
+    def test_merge_refuses_a_head_moved_after_review(self):
+        self.checkout_feature()
+        self.gh(moved_head='e' * 40)
+        with self.assertRaises(ValueError) as caught:
+            self.interact(dict(self.LAUNCH, **{self.MERGE: True}))
+        reviewed = self.git('rev-parse', 'refs/heads/setup/devcontainer')
+        self.assertEqual(str(caught.exception), f'PR #1 is at {"e" * 12}, not the reviewed {reviewed[:12]}; '
+                         f'nothing was merged. {self.RERUN}')
+        # The R45 rerun binds to the head it listed and showed.
+        with self.assertRaises(ValueError) as caught:
+            self.interact(dict(self.LAUNCH, **{self.MERGE: True}))
+        self.assertIn(f'(setup/devcontainer into main, at {reviewed[:12]})', self.seen['output'])
+        self.assertEqual(str(caught.exception), f'PR #1 is at {"e" * 12}, not the reviewed {reviewed[:12]}; '
+                         f'nothing was merged. {self.RERUN}')
+        calls = self.gh()['calls']
+        self.assertFalse(any(call['args'][:3] == ['api', '--method', 'PUT'] for call in calls))
+        self.assertFalse(any(call['args'][:1] == ['codespace'] for call in calls))
+        (pr,) = self.gh()['prs']
+        self.assertEqual((pr['state'], pr['head']['sha']), ('open', reviewed))
+        self.assertEqual(self.origin_git('rev-parse', 'refs/heads/setup/devcontainer'), reviewed)
+
     def test_rerun_resumes_the_open_setup_pr(self):
         from devcontainer_setup.git_ops import GitPlan
         # A clean checkout on main: the merge fast-forwards it.
@@ -1063,7 +1084,8 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
                 patch('devcontainer_setup.__main__.setup_worktree', side_effect=AssertionError('a worktree was cut')):
             seen = self.interact(dict(self.LAUNCH, **{self.MERGE: True}))
         self.assertEqual(seen['result'], 0, seen['output'])
-        self.assertIn('Setup PR #1 is open: Configure project devcontainer (setup/devcontainer into main).', seen['output'])
+        self.assertIn(f'Setup PR #1 is open: Configure project devcontainer (setup/devcontainer into main, at {head[:12]}).',
+                      seen['output'])
         self.assertNotIn('Review setup', seen['choices'])
         calls = self.gh()['calls'][start:]
         self.assertFalse(any(call['args'][:3] == ['api', '--method', 'POST'] for call in calls))
