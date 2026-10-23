@@ -708,8 +708,13 @@ def _merge_and_launch(ui, api: Codespaces, project: Path, repo: str, default: st
                       head: str, worktree: Path | None, launch: dict | None, preferences: dict):
     """One confirmation, GitHub's merge of the reviewed head, then the codespace on <default>."""
     user = api.user()
-    if not ui.confirm(f'Merge PR #{number} into {default} as {user}? '
-                      'Required reviews are bypassed if your account is allowed to.'):
+    try:
+        # Only an explicit yes merges: Enter and Ctrl-C leave the PR open.
+        merge = ui.confirm(f'Merge PR #{number} into {default} as {user}? '
+                           'Required reviews are bypassed if your account is allowed to.', False)
+    except Cancelled:
+        merge = False
+    if not merge:
         raise ValueError(f'PR #{number} is open. {RERUN}')
     sha = api.merge_pr(repo, number, f'{SETUP_TITLE} (#{number})', MERGE_MESSAGE, head)
     return _launch_on_default(api, project, repo, default, sha, launch, preferences, merged=branch, worktree=worktree)
@@ -723,9 +728,14 @@ def _resume_setup_pr(ui, api: Codespaces, project: Path, repo: str, default: str
     (pr,) = prs
     print(f'Setup PR #{pr["number"]} is open: {pr["title"]} ({pr["head"]["ref"]} into {default}, '
           f'at {pr["head"]["sha"][:12]}).', flush=True)
-    launch = _launch_options(ui, api, project, default, resume)
-    if launch:
-        launch.pop('repo')
+    try:
+        launch = _launch_options(ui, api, project, default, resume)
+    except Cancelled:
+        launch = None
+    if not launch:
+        # Commit only means no push and no PR: the open one stays as it is.
+        raise ValueError(f'PR #{pr["number"]} is open. {RERUN}')
+    launch.pop('repo')
     name, config = _merge_and_launch(ui, api, project, repo, default, pr['number'], pr['head']['ref'],
                                      pr['head']['sha'], None, launch, preferences)
     if config.get('customizations', {}).get('devcontainerSetup', {}).get('selections', {}).get('continuity'):

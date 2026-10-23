@@ -532,6 +532,10 @@ class WizardCliTests(unittest.TestCase):
                 self.assertEqual(prompts, ['Continue with commit only?'])
 
 
+# What the fake owner answers: Ctrl-C, or Enter on the prompt's own default.
+CTRL_C, ENTER = object(), object()
+
+
 # Serves ssh://git@github.com/<owner>/<repo>.git from $FAKE_GITHUB, so a GitHub
 # origin needs no network: Git runs `<command> host "git-upload-pack '/path'"`.
 FAKE_SSH = '''import os, shlex, sys
@@ -750,7 +754,11 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
 
             def confirm(self, title, default=True):
                 seen.setdefault('confirms', []).append(title)
-                return answers.get(title, False)
+                seen.setdefault('defaults', {})[title] = default
+                answer = answers.get(title, False)
+                if answer is CTRL_C:
+                    raise Cancelled()
+                return default if answer is ENTER else answer
 
             def choose(self, title, options, selected=None):
                 seen.setdefault('choices', []).append(title)
@@ -758,8 +766,30 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
                     seen['worktrees'] = case.git('worktree', 'list', '--porcelain')
                 if title not in answers:
                     raise AssertionError(f'Unexpected choice: {title}')
+                if answers[title] is CTRL_C:
+                    raise Cancelled()
                 return answers[title]
+        from devcontainer_setup.ui import Cancelled
         return UI
+
+    def run_main(self, answers):
+        """The whole CLI on a terminal, answering as the owner would; returns its exit code."""
+        import contextlib
+        import io
+        from devcontainer_setup.__main__ import main
+
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        seen = self.seen = {}
+        output = Terminal()
+        with patch('devcontainer_setup.__main__.Gum', self.ui(answers, seen)), \
+                patch('devcontainer_setup.__main__._ensure_runner'), \
+                patch('devcontainer_setup.__main__.repository_access', return_value=True), \
+                patch.object(sys, 'stdin', Terminal()), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            code = main(['--project', str(self.root)])
+        seen['output'] = output.getvalue()
+        return code
 
     def interact(self, answers, ref='a' * 40, ui=None, **kwargs):
         import contextlib
@@ -1074,6 +1104,37 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         (pr,) = self.gh()['prs']
         self.assertEqual((pr['state'], pr['head']['sha']), ('open', reviewed))
         self.assertEqual(self.origin_git('rev-parse', 'refs/heads/setup/devcontainer'), reviewed)
+
+    def assert_pr_left_open(self, code, start=0):
+        self.assertEqual(code, 1, self.seen['output'])
+        self.assertIn(f'Setup: PR #1 is open. {self.RERUN}', self.seen['output'])
+        self.assertNotIn('No push or codespace creation performed', self.seen['output'])
+        calls = self.gh()['calls'][start:]
+        self.assertFalse(any(call['args'][:3] == ['api', '--method', 'PUT'] for call in calls))
+        self.assertFalse(any(call['args'][:1] == ['codespace'] for call in calls))
+        (pr,) = self.gh()['prs']
+        self.assertEqual(pr['state'], 'open')
+        self.assertEqual(self.origin_git('rev-parse', 'refs/heads/setup/devcontainer'), pr['head']['sha'])
+
+    def test_merge_needs_an_explicit_yes(self):
+        for label, answer in (('enter', ENTER), ('ctrl-c', CTRL_C)):
+            with self.subTest(label):
+                self.setUp()
+                self.assert_pr_left_open(self.run_main(dict(self.LAUNCH, **{self.MERGE: answer})))
+                self.assertIs(self.seen['defaults'][self.MERGE], False)
+
+    def test_resumed_pr_stays_open_unless_merged(self):
+        stops = (('commit only', {'After setup': 'Commit only (no Codespace)'}),
+                 ('ctrl-c at the codespace questions', {'After setup': CTRL_C}),
+                 ('declined', {self.MERGE: False}), ('enter', {self.MERGE: ENTER}), ('ctrl-c', {self.MERGE: CTRL_C}))
+        for label, answers in stops:
+            with self.subTest(label):
+                self.setUp()
+                start = self.decline_merge()
+                self.assert_pr_left_open(self.run_main(dict(self.LAUNCH, **answers)), start)
+                self.assertNotIn('Review setup', self.seen.get('choices', []))
+                if label in ('commit only', 'ctrl-c at the codespace questions'):
+                    self.assertNotIn(self.MERGE, self.seen.get('confirms', []))
 
     def test_rerun_resumes_the_open_setup_pr(self):
         from devcontainer_setup.git_ops import GitPlan
