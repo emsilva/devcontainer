@@ -24,7 +24,13 @@ create checkouts. Uncommitted code stays on the host where it was edited.
 | `task work:disconnect` | Disconnect only this project's saved Codespace machine from local Herdr |
 | `task work:status` | Show a short offline scratch and conversation summary |
 | `task work:status -- --json` | Show cycle, stage, receipt and publication detail as JSON |
-| `task work:stop` | Stop this project's owned sync worker |
+| `task work:stop` | Stop this project's owned sync worker and its keeper |
+| `task work:cs:armed` | Connect as `work:cs`, then arm restart after GitHub's 12-hour stop |
+| `task work:hold -- 09:30` / `-- off` | Hold restarts and resume prompts until a local time / end the hold |
+| `task work:disarm` | Stop this project's keeper and its keep-alive; sync continues |
+| `task work:cs:stop` | Record your stop, then stop the Codespace; it is never restarted |
+| `task work:cs:restart` | Stop and start the Codespace now, outside the restart budget |
+| `task work:logs` | Show the last keeper and worker log lines, merged by time |
 
 Run the connection tasks on your Mac. Inside Herdr, connection returns to your
 shell; select the Codespace group to work remotely. From another terminal, it
@@ -139,7 +145,18 @@ checkouts before manually deleting them.
 
 The foreground connection command can start a stopped Codespace. The detached
 worker has a GET-only GitHub API capability and cannot restart a Codespace or
-spend credits. Run `task work:cs` again after a Mac reboot.
+spend credits. The keeper of an armed project is the one background process that
+can start a Codespace. It does so only after a stop it classified as GitHub's
+12-hour stop, at most 2 restarts in any 24 hours and at least 30 minutes apart,
+and never during a hold. It then ends any stale Herdr proxy, waits up to 10
+minutes for Herdr, and sends the project's one `lead-*` agent the resume message.
+Every other outcome, and every stop it does not restart except your own, gets
+one Mac notification that names what to run. `task work:cs:stop` records your
+stop first, so it is never restarted. `task work:cs:restart` restarts with you
+present, outside the budget; for an armed project the keeper then restores Herdr
+and tells the lead. Both use the armed account, or the active gh account for an
+unarmed project, and refuse while `GH_TOKEN` or `GITHUB_TOKEN` is set. Run
+`task work:cs` (or `task work:cs:armed`) again after a Mac reboot.
 
 Connections wait up to 45 seconds for a successful SSH handshake and separately
 up to 45 seconds for the saved Herdr machine's remote API after startup. Only

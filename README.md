@@ -47,6 +47,12 @@ small helpers, and a Taskfile include. Personal preferences live in
 | `task work:disconnect` | Disconnect this project's Codespace from the local Herdr UI |
 | `task work:status` / `task work:stop` | Read offline sync summary / stop this project’s worker |
 | `task work:status -- --json` | Inspect cycle, receipt and publication detail |
+| `task work:cs:armed` | Connect as `work:cs`, then arm restart after GitHub's 12-hour stop |
+| `task work:hold -- 09:30` / `-- off` | Hold restarts and resume prompts until a local time / end the hold |
+| `task work:disarm` | Stop this project's keeper and its keep-alive; sync continues |
+| `task work:cs:stop` | Stop the Codespace and keep it stopped |
+| `task work:cs:restart` | Restart the Codespace now; an armed project's lead is told to resume |
+| `task work:logs` | Show recent keeper and worker logs, merged by time |
 | `task devcontainer:setup` | Review or change the setup |
 | `task devcontainer:setup -- --scan` | Show runtime and tool recommendations |
 | `task devcontainer:setup -- --dry-run` | Preview the recommended file changes |
@@ -115,7 +121,12 @@ Partial or stale cycles cannot inherit earlier healthy status. Previous verified
 receipts remain visible separately. `task work:disconnect` disconnects this project's saved
 Codespace machine from Herdr while sync keeps running. `task work:stop` stops the
 sync worker. Background reconnects cannot start a stopped Codespace; `task work:cs`
-is the explicit start command. Reconnects reuse the saved machine and workspace.
+is the explicit start command. The one exception is the keeper of a project armed
+with `task work:cs:armed`: it is the only background process that can start a
+Codespace, and only after a stop it classified as GitHub's 12-hour stop, at most
+2 restarts in 24 hours and 30 minutes apart. It then tells the project's `lead-*`
+agent to resume. A stop you make with `task work:cs:stop`, or any other stop, is
+never restarted. Reconnects reuse the saved machine and workspace.
 
 Older generated recovery checkouts and stored checkpoints remain untouched during
 migration. Inspect them and move any desired code through Git before removing
