@@ -195,6 +195,24 @@ class RecoveryStatusTests(unittest.TestCase):
         self.assertIn('13570 18787', lines[3])
         self.assertTrue(lines[4].startswith('Last restart'))
 
+    def test_an_active_restart_is_named_and_only_a_restarting_stop_stops_pointing_at_work_cs(self):
+        shutdown = {'at': self.now - 180, 'ok': True, 'state': 'Shutdown', 'pending': False}
+        down = {'count': 3, 'first_at': self.now - 300, 'kind': 'LIFETIME'}
+        outcome = {'rid': 'r-010203Z', 'at': self.now - 100, 'stopped_at': self.now - 300, 'outcome': 'restarting'}
+        for phase in ('restarting', 'restoring', 'resuming'):
+            with self.subTest(phase=phase):
+                # _restart rewrites the reading to Available before it restores and resumes.
+                reading = shutdown if phase == 'restarting' else dict(shutdown, state='Available')
+                lines = self.lines(phase=phase, reading=reading, down=down, last_restart=outcome,
+                                   anchor={'at': self.now - 60, 'source': 'keeper'})
+                self.assertRegex(lines[1], r'caffeinate held; ' + phase + ' r-010203Z$')
+                if phase == 'restarting':
+                    self.assertIn("(GitHub's 12-hour stop); the keeper is restarting it (r-010203Z), "
+                                  'follow task work:logs', lines[2])
+                    self.assertNotIn('work:cs', lines[2])
+                else:
+                    self.assertTrue(lines[2].startswith('Codespace    Available since '), lines[2])
+
     def test_keep_alive_line_shows_skipped_ports_and_what_to_run(self):
         holding = self.lines(keepalive={'pid': 5402, 'ports_up': [[13570, 3570]],
                                         'ports_skipped': [[18787, 812], [13571, None]]})

@@ -285,9 +285,10 @@ def recovery_lines(value):
                  + str(config.get('gh_user')) + ', ' + held + '; restarts ' + str(value['restarts'])
                  + ' of ' + str(lifecycle.MAX_RESTARTS) + ' in 24 h']
     running, age = runtime.get('running'), runtime.get('heartbeat_age')
+    phase, rid = runtime.get('phase'), (runtime.get('last_restart') or {}).get('rid')
     if not running:
         lines.append('Keeper       not running; run task work:cs:armed')
-    elif runtime.get('phase') == 'refused':
+    elif phase == 'refused':
         lines.append('Keeper       refused: ' + str(runtime.get('error')))
     elif age is None or age > keeper.HEARTBEAT_STALE:
         lines.append(f'Keeper       running (pid {runtime.get("pid")}) but its heartbeat is '
@@ -295,8 +296,10 @@ def recovery_lines(value):
     else:
         text = (f'Keeper       running (pid {runtime.get("pid")}), heartbeat {int(age)} s, caffeinate '
                 + ('held' if runtime.get('caffeinate') else 'not held'))
-        if runtime.get('phase') == 'waiting':
+        if phase == 'waiting':
             text += '; waiting: ' + str(runtime.get('error'))
+        elif phase in ('restarting', 'restoring', 'resuming'):
+            text += f'; {phase} {rid}'
         lines.append(text)
     reading, anchor, watch = runtime.get('reading') or {}, runtime.get('anchor'), runtime.get('down') or {}
     if not running or not reading:
@@ -316,7 +319,10 @@ def recovery_lines(value):
         text = 'Codespace    ' + str(reading.get('state')) + ' since ' + format_time(watch.get('first_at') or reading['at'])
         reason = {'OWNER': 'stopped by you', 'OTHER': 'not the 12-hour stop',
                   'LIFETIME': "GitHub's 12-hour stop"}.get(watch.get('kind'))
-        lines.append(text + (' (' + reason + ')' if reason else '') + '; run task work:cs to start it')
+        text += (' (' + reason + ')') if reason else ''
+        # lifecycle.start never rewrites the reading, so only the phase says the keeper is on it.
+        lines.append(text + (f'; the keeper is restarting it ({rid}), follow task work:logs'
+                             if phase == 'restarting' else '; run task work:cs to start it'))
     keepalive, ports = runtime.get('keepalive') or {}, _ports(config.get('ports', []))
     if running and keepalive.get('pid'):
         # A port in use was skipped at launch; the child holds the Codespace without it.
