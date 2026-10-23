@@ -130,7 +130,8 @@ class Codespaces:
         """The active gh account; setup never switches it."""
         data = self.command('api', 'user', json_output=True)
         login = data.get('login') if isinstance(data, dict) else None
-        if not isinstance(login, str) or not re.fullmatch(r'[A-Za-z0-9-]+', login):
+        # An enterprise managed user's login ends in _<shortcode>, such as mannu_kyndryl.
+        if not isinstance(login, str) or not re.fullmatch(r'[A-Za-z0-9-]+(?:_[A-Za-z0-9]+)?', login):
             raise ValueError('GitHub returned no account name; check gh auth status.')
         return login
 

@@ -502,6 +502,24 @@ class FakeClock:
         self.now += seconds
 
 
+class AccountTests(unittest.TestCase):
+    @staticmethod
+    def user(login):
+        return Codespaces(run=lambda args, **kwargs: subprocess.CompletedProcess(
+            args, 0, json.dumps({'login': login}), '')).user()
+
+    def test_user_accepts_enterprise_managed_logins(self):
+        # An enterprise managed user's login ends in _<shortcode>, such as mannu_kyndryl.
+        for login in ('octo', 'octo-cat', 'mannu_kyndryl'):
+            with self.subTest(login=login):
+                self.assertEqual(self.user(login), login)
+
+    def test_user_rejects_a_missing_or_malformed_login(self):
+        for login in (None, '', 7, 'octo cat', '../octo', 'octo\n'):
+            with self.subTest(login=login), self.assertRaisesRegex(ValueError, 'GitHub returned no account name'):
+                self.user(login)
+
+
 class PullRequestTests(unittest.TestCase):
     def setUp(self):
         self.pulls = FakePulls()
