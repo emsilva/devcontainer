@@ -580,6 +580,7 @@ class PullRequestTests(unittest.TestCase):
         # GitHub took the merge but does not show it yet: a fixed text, never a traceback.
         self.setUp()
         self.pulls.merge_output, self.pulls.marks_merged = '{}', False
+        self.pulls.pr['merge_commit_sha'] = 'f' * 40  # An open PR's test merge, never the merge itself.
         with self.assertRaises(ValueError) as caught:
             self.merge(sleep=self.fail)
         self.assertEqual(str(caught.exception), 'GitHub accepted the merge of PR #7 but does not show it merged yet; '
