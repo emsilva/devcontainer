@@ -711,6 +711,29 @@ class KeeperStepTests(unittest.TestCase):
         self.assertEqual(lifecycle.Ledger(self.state / keeper.LEDGER).rows()[-1]['kind'], 'result')
         self.assertIn('not restarted: on hold until', self.runtime()['last_restart']['outcome'])
 
+    def test_a_continued_rid_on_a_fresh_keeper_dates_the_stop_at_its_intent(self):
+        intent_at = T0 - 60
+        lifecycle.Ledger(self.state / keeper.LEDGER, now=lambda: intent_at).append('intent', 'r-000001Z', post=1)
+        herdr = FakeHerdr()
+        k = self.keeper([down(T0), down(T0 + 60), down(T0 + 70), up(T0 + 80, last_used_at=T0 + 70)], herdr=herdr)
+        self.run_steps(k, [T0, T0 + 60])
+        last = self.runtime()['last_restart']
+        self.assertEqual(last['stopped_at'], intent_at)  # not the keeper's own first reading at T0
+        self.assertEqual(herdr.prompts[0][1], restore.resume_text('r-000001Z', intent_at, last['back_at']))
+        self.assertEqual([args[2] for args in self.proxies], [intent_at])
+
+    def test_an_unwritable_ledger_does_not_stop_the_pass_that_closes_an_interrupted_rid(self):
+        lifecycle.Ledger(self.state / keeper.LEDGER, now=lambda: T0 - 60).append('intent', 'r-000001Z', post=1)
+        held = FakeKeepAlive()
+        k = self.keeper([up(T0, last_used_at=T0 - 30)], keepalive=held)
+        with patch.object(lifecycle.Ledger, 'append', side_effect=PermissionError('read-only')), \
+                self.assertLogs(keeper._LOG, 'INFO') as logs:
+            self.run_steps(k, [T0])
+        self.assertEqual(held.calls, [True])  # the keep-alive is still tended
+        self.assertEqual(self.runtime()['phase'], 'watching')
+        self.assertTrue(any('Restart r-000001Z not closed in the ledger: PermissionError' in line
+                            for line in logs.output))
+
     def test_a_start_after_a_reading_gap_anchors_at_its_start_request(self):
         # Lead ruling 1: Shutdown, hours of failed reads while the owner starts it at S, then
         # Available: the anchor is last_used_at, so GitHub's real stop at S + 12 h reads LIFETIME.

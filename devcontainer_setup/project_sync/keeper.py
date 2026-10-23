@@ -21,8 +21,8 @@ import time
 from . import arming, lifecycle, notify, restore
 from .keepalive import KeepAlive, end_left_behind, recorded_child
 from .scratch import CONFIG
-from .state import (atomic_write, launch_detached, locked, log_formatter, owned_process, process_identity,
-                    read_json, runtime_id, wait_gone)
+from .state import (STARTUP_WAIT, atomic_write, launch_detached, locked, log_formatter, owned_process,
+                    process_identity, read_json, runtime_id, wait_gone)
 from .transport import _terminate
 
 RUNTIME = 'keeper-runtime.json'
@@ -79,7 +79,7 @@ def start(root: Path, state: Path) -> dict:
             _stop(state, current)
         return launch_detached('keeper', '--keep', root, state, env=_env(value), status=status,
                                exited='The keeper exited during startup; inspect task work:logs',
-                               timed_out='The keeper did not start within 8 seconds; inspect task work:logs')
+                               timed_out=f'The keeper did not start within {STARTUP_WAIT} seconds; inspect task work:logs')
 
 
 def _stop(state, current):
@@ -357,6 +357,9 @@ class Keeper:
                 # may have begun, counts, though it ended before this first good reading (Mac asleep).
                 if isinstance(hold, (int, float)) and hold > (since if isinstance(since, (int, float)) else reading.at):
                     watch['hold_at_stop'] = hold
+            if continuing is not None:
+                # A fresh keeper saw this stop late; the continued rid's first intent is no later than it.
+                watch['first_at'] = min(watch['first_at'], continuing[3])
             if reading.state in DOWN:
                 watch['count'] += 1
                 if continuing is not None:
@@ -370,7 +373,7 @@ class Keeper:
         self.previous = reading.state, reading.at
         self.runtime['last_ok'] = {'at': reading.at, 'state': reading.state}
         if continuing is not None:
-            rid, posts, last_at = continuing
+            rid, posts, last_at = continuing[:3]
             # Within REPOST_AFTER of its intent the POST may still be landing (spec 6.4 step 5.4).
             if self.now() - last_at >= lifecycle.REPOST_AFTER:
                 return self._restart(watch, rid, posts)
@@ -382,7 +385,7 @@ class Keeper:
 
     def _close_or_continue(self, reading):
         """Close a restart interrupted between its intent and result, or return (rid, POSTs, last intent
-        time) to continue it.
+        time, first intent time) to continue it.
 
         Only a Shutdown reading within the start routine's own span continues it; any other
         state closes it with an interrupted result and no POST, since a Queued, Starting or
@@ -399,13 +402,17 @@ class Keeper:
         # A start request since the intent that this keeper did not send: its stop is another one.
         started = reading.last_used_at is not None and reading.last_used_at > rows[-1]['at']
         if reading.state != 'Shutdown' or stale or started:
-            self.ledger.append('result', rid, interrupted=True, state=reading.state)
+            try:
+                self.ledger.append('result', rid, interrupted=True, state=reading.state)
+            except OSError as error:
+                _LOG.info('Restart %s not closed in the ledger: %s', rid, type(error).__name__)
             _LOG.info('Restart %s was interrupted; the Codespace is %s, so nothing is posted', rid, reading.state)
             last = self.runtime.get('last_restart')
             if isinstance(last, dict) and last.get('rid') == rid:
                 last['outcome'] = 'interrupted; the Codespace was ' + str(reading.state)
             return None
-        return rid, sum(row['rid'] == rid and row['kind'] == 'intent' for row in rows), rows[-1]['at']
+        intents = [row['at'] for row in rows if row['rid'] == rid and row['kind'] == 'intent']
+        return rid, len(intents), rows[-1]['at'], min(intents)
 
     def _refusal(self, value):
         try:
