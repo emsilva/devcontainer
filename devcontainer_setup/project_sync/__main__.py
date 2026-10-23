@@ -178,15 +178,14 @@ def _owner_power(project, state, *, restart, api=None, now=time.time, sleep=time
     # The armed account, as the keeper uses; otherwise the active gh account, as work:cs.
     api = api or lifecycle.LifecycleAPI(codespace, value.get('gh_user') if armed else None)
     with locked(state / 'workspace-control.lock', blocking=True):
-        before, stopped_at = arming.read(state).get('owner_stop_at'), now()
+        stopped_at = now()
         arming.record_owner_stop(state, stopped_at)
     status = api.post_stop()
+    # The record stays on every failure (R33): a refused stop during GitHub's own stop would
+    # otherwise let the keeper restart a Codespace you asked to keep stopped.
     if 400 <= status < 500:
-        # GitHub refused it, so nothing stopped; any other failure may still take effect.
-        with locked(state / 'workspace-control.lock', blocking=True):
-            arming.write(state, dict(arming.read(state), owner_stop_at=before))
-        raise ValueError(f'GitHub refused the stop request (HTTP {status}); nothing was stopped. '
-                         'Check gh auth status --hostname github.com, then retry.')
+        raise ValueError(f'GitHub refused the stop request (HTTP {status}); it is recorded as your stop, so the '
+                         'keeper will not restart it. Check task work:status.')
     if not 200 <= status < 300:
         raise ValueError(f'The stop request did not complete (HTTP {status}); it may still take effect, and the '
                          'keeper treats it as your stop. Inspect task work:status, then retry.')

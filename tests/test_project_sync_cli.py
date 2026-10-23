@@ -222,15 +222,53 @@ class OwnerPowerTests(unittest.TestCase):
         self.assertEqual(api.calls, [('stop', T0)])
         self.assertEqual(arming.read(self.state)['owner_stop_at'], T0)
         self.assertIn('stays stopped', out)
-        # A definite refusal stopped nothing, so the record is undone; an unknown outcome keeps it.
-        self.clock = T0 + 100
-        with self.assertRaisesRegex(ValueError, r'HTTP 403\); nothing was stopped'):
-            self.power(OwnerAPI(self.state, [], stop=403), restart=False)
-        self.assertEqual(arming.read(self.state)['owner_stop_at'], T0)
-        self.clock = T0 + 200
+        # R33: every failed stop keeps the record, so the keeper never restarts what you asked to stop.
+        for status in (403, 409):
+            self.clock += 100
+            with self.assertRaisesRegex(ValueError, rf'GitHub refused the stop request \(HTTP {status}\); it is '
+                                                    'recorded as your stop, so the keeper will not restart it. '
+                                                    'Check task work:status.'):
+                self.power(OwnerAPI(self.state, [], stop=status), restart=False)
+            self.assertEqual(arming.read(self.state)['owner_stop_at'], self.clock)
+        self.clock = T0 + 300
         with self.assertRaisesRegex(ValueError, 'HTTP 0'):
             self.power(OwnerAPI(self.state, [], stop=0), restart=False)
-        self.assertEqual(arming.read(self.state)['owner_stop_at'], T0 + 200)
+        self.assertEqual(arming.read(self.state)['owner_stop_at'], T0 + 300)
+
+    def test_a_refused_stop_during_the_12_hour_stop_is_never_restarted(self):
+        # The reviewer's owner_4xx_undo: work:cs:stop while GitHub's own stop is under way, and
+        # GitHub refuses the request (409) or its answer is lost (0). The keeper must not restart it.
+        from devcontainer_setup.project_sync import keeper, lifecycle
+        from devcontainer_setup.project_sync.lifecycle import Reading
+        for status in (409, 403, 0):
+            with self.subTest(status=status):
+                self.setUp()
+                self.arm()
+                anchor = T0 - 3600
+                state = {'now': 'Available'}
+
+                class Codespace(OwnerAPI):
+                    def read(api):
+                        return Reading(self.clock, True, state['now'], False, anchor)
+                api, notes = Codespace(self.state, [], stop=status), []
+                k = keeper.Keeper(self.state, api=api, notifier=lambda title, text: notes.append(text) or True,
+                                  herdr=OwnerHerdr(), now=lambda: self.clock, sleep=self.advance,
+                                  end_proxies=lambda *args: [])
+                k.step()
+                self.clock = anchor + lifecycle.LIFETIME + 30
+                state['now'] = 'ShuttingDown'
+                k.step()
+                self.advance(30)
+                with self.assertRaises(ValueError):
+                    self.power(api, restart=False)
+                state['now'] = 'Shutdown'
+                for _ in range(30):
+                    self.advance(60)
+                    k.step()
+                self.assertEqual([call for call, _ in api.calls], ['stop'])
+                self.assertEqual(lifecycle.Ledger(self.state / keeper.LEDGER).rows(), [])
+                self.assertEqual(len(notes), 1)
+                self.assertIn('was not restarted: you stopped it at', notes[0])
 
     def test_owner_commands_refuse_environment_tokens(self):
         for name in ('GH_TOKEN', 'GITHUB_TOKEN'):
