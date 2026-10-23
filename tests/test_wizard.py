@@ -1061,6 +1061,17 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
         self.assertIn('Your checkout lacks the new setup files until you merge or pull main.', seen['output'])
 
+    def test_pr_body_leaves_out_the_dotfiles_repository(self):
+        seen = self.interact(dict(self.LAUNCH, **{self.MERGE: True, 'Apply dotfiles inside the container?': True,
+                                                   'Dotfiles repository': 'owner/dotfiles'}))
+        self.assertEqual(seen['result'], 0, seen['output'])
+        self.assertIn('dotfiles: owner/dotfiles', seen['output'])  # The review still shows it.
+        calls = self.gh()['calls']
+        body = json.loads(calls[self.first(calls, 'api', '--method', 'POST', 'repos/owner/project/pulls')]['stdin'])['body']
+        self.assertIn('Agents: Codex, Claude Code, OpenCode (baseline)\n', body)
+        self.assertNotIn('owner/dotfiles', body)
+        self.assertNotIn('dotfiles:', body)
+
     def test_cancelled_merge_leaves_pr_open_and_no_codespace(self):
         reason = 'At least 1 approving review is required by reviewers with write access.'
         for label in ('declined', 'refused'):

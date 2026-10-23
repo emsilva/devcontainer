@@ -789,13 +789,15 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
                 plan.branch = plan.start_branch
             origin = f' (from origin/{default})' if default else ''
             marker = json.loads(files['.devcontainer/devcontainer.json'])['customizations']['devcontainerSetup']
-            # Also the PR body: no local path, no launch choices.
-            summary = [f'Branch: {plan.branch}{origin}', f'Runtimes: {chosen["runtimes"]}',
-                       f'Tools: {", ".join(chosen["tools"]) or "baseline only"}',
-                       f'Agents: Codex, Claude Code, OpenCode (baseline); dotfiles: {preferences["dotfiles_repo"] if chosen["dotfiles"] else "disabled"}',
-                       f'Files: {", ".join(plan.changed) or "already configured"}',
-                       *[f'Dependency: {detail}' for detail in marker.get('dependencies', {}).values()],
-                       *[f'Version note: {detail}' for detail in marker.get('pinningLimitations', {}).values()]]
+            # The PR body: the review without the local path, the dotfiles repository or the launch choices.
+            body = [f'Branch: {plan.branch}{origin}', f'Runtimes: {chosen["runtimes"]}',
+                    f'Tools: {", ".join(chosen["tools"]) or "baseline only"}',
+                    'Agents: Codex, Claude Code, OpenCode (baseline)',
+                    f'Files: {", ".join(plan.changed) or "already configured"}',
+                    *[f'Dependency: {detail}' for detail in marker.get('dependencies', {}).values()],
+                    *[f'Version note: {detail}' for detail in marker.get('pinningLimitations', {}).values()]]
+            summary = list(body)
+            summary[3] += f'; dotfiles: {preferences["dotfiles_repo"] if chosen["dotfiles"] else "disabled"}'
             print(f'\nProject: {project}\n' + '\n'.join(summary), flush=True)
             if launch:
                 print(f'Launch: {launch["machine"]}, idle {launch["idle_timeout"]}, {launch["client"]}', flush=True)
@@ -836,7 +838,7 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
                 if open_prs := api.setup_prs(launch['repo'], default):
                     raise ValueError(_open_setup_prs(open_prs))
                 plan.push()
-                pull = (api.open_pr(launch['repo'], plan.branch, default, SETUP_TITLE, '\n'.join(summary)),
+                pull = (api.open_pr(launch['repo'], plan.branch, default, SETUP_TITLE, '\n'.join(body)),
                         plan.branch, sha, source)
             break
     name = None
