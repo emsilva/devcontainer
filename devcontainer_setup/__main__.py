@@ -421,16 +421,18 @@ def setup_checkout(project: Path):
 def _close_setup_worktree(project: Path, root: Path, worktree: Path, branch: str, start: str,
                           failing: bool = False) -> None:
     """Keep a branch that holds a setup commit; drop one that holds nothing."""
+    committed = git(project, 'rev-parse', '--verify', '--quiet', f'refs/heads/{branch}', check=False) != start
     try:
-        if git(project, 'rev-parse', '--verify', '--quiet', f'refs/heads/{branch}', check=False) == start:
+        if not committed:
             remove_setup_worktree(project, worktree, branch, remote=False, root=root, cut=start)
             return
+        pushed = ', also pushed to origin' if git(project, 'config', f'branch.{branch}.remote', check=False) else ''
+        print(f'Setup commit is on branch {branch}{pushed}; your checkout and its branch are unchanged.', flush=True)
         remove_worktree(project, worktree, branch, root=root)
-        print(f'Setup commit is on branch {branch}; your checkout and its branch are unchanged.', flush=True)
     except ValueError as error:
-        if not failing:
+        # A committed setup stands; never mask the error or cancellation that ended setup.
+        if not (failing or committed):
             raise
-        # Never mask the error or cancellation that ended setup.
         print(f'Setup: {error}', file=sys.stderr)
 
 

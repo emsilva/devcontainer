@@ -693,7 +693,6 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
                 self.assertEqual(self.snapshot(), before)
                 self.assert_nothing_left()
 
-
     def test_dry_run_failing_inside_render_leaves_nothing(self):
         import contextlib
         import io
@@ -712,7 +711,6 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
                             main(['--project', str(self.root), '--dry-run'])
                 self.assertEqual(self.snapshot(), before)
                 self.assert_nothing_left()
-
 
     def test_dry_run_removes_its_worktree_on_error(self):
         # Only origin's main has the unresolved pins; this checkout has none.
@@ -754,6 +752,25 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.assertTrue(worktree.exists())  # Reported, never silently deleted.
         self.assertEqual(self.git('rev-parse', 'refs/heads/setup/devcontainer'),
                          subprocess.check_output(['git', '-C', str(self.origin), 'rev-parse', 'main'], text=True).strip())
+        self.assertEqual(self.snapshot(), before)
+
+    def test_cleanup_failure_after_commit_reports_the_commit_and_finishes(self):
+        self.checkout_feature()
+        before = self.snapshot()
+        # Leaves an untracked file in the worktree after a good commit, so its removal refuses.
+        hook = self.root / '.git/hooks/post-commit'
+        hook.write_text('#!/bin/sh\necho cache > hook-cache.txt\n')
+        hook.chmod(0o755)
+        with patch.dict(os.environ, CODESPACES=''):
+            seen = self.interact(dict(self.COMMIT_ONLY, **{'Sync scratch files and project notes with your Mac?': True}))
+        self.assertEqual(seen['result'], 0, seen['output'])
+        output = seen['output']
+        self.assertTrue(self.git('rev-parse', '--verify', 'refs/heads/setup/devcontainer'))
+        self.assertLess(output.index('Setup commit is on branch setup/devcontainer'),
+                        output.index('worktree remove --force'))
+        self.assertNotIn('nothing else was changed', output)
+        self.assertIn('No Codespace was opened', output)  # setup_continuity ran, as on success.
+        self.assertTrue((self.worktree_root() / 'setup-devcontainer/hook-cache.txt').exists())
         self.assertEqual(self.snapshot(), before)
 
     def test_commit_only_commits_in_the_worktree_and_keeps_the_branch(self):
