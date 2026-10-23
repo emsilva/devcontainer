@@ -184,6 +184,21 @@ class NativeCheckpointTests(NativeFixture):
         result = self.capture()
         self.assertIn('Unsupported', result['issues'][0]['reason'])
 
+    def test_failed_put_is_an_issue_at_its_session_position(self):
+        sid = str(uuid.uuid4())
+        self.codex(sid)
+        self.claude(rows=[dict(type='user', message=dict(role='user', content='unfinished'), uuid=str(uuid.uuid4()))])
+        put = self.store.put
+        def full(data):
+            if sid.encode() in data:
+                raise OSError('fixture store full')
+            return put(data)
+        self.store.put = full
+        result = self.capture()
+        self.assertEqual(result['entries'], [])
+        self.assertEqual([(item['agent'], item['session_id'], item['reason']) for item in result['issues']],
+                         [('codex', sid, 'fixture store full'), ('claude', self.sid, 'No validated completed Claude turn yet')])
+
     def test_claude_complete_prefix_keeps_request_dependencies(self):
         path = self.claude()
         original = path.read_bytes()

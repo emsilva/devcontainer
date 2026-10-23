@@ -356,9 +356,20 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
     """Observe ordinary project sessions without a native process or writer lock."""
     scopes = _scopes(project, state, historical_roots)
     result = dict(schema=SCHEMA, entries=[], issues=[])
-    built = []
     def issue(agent, sid, error):
         result['issues'].append(dict(agent=agent, session_id=sid, reason=sessions.display_text(str(error), 400)))
+    def keep(retained, entry):
+        # Decide before any put: no manifest would reference an unchanged import's
+        # blobs, and the store never deletes. Its retained bytes are still in hand.
+        if _unchanged_import(project, retained, state, entry):
+            return
+        try:
+            for item in entry['files']:
+                store.put(retained[item['session_id']])
+        except (ValueError, OSError) as exc:
+            issue(entry['agent'], entry['session_id'], exc)
+            return
+        result['entries'].append(entry)
     try:
         index = sessions._codex_index(sessions.native_home('codex', env))
     except (ValueError, OSError) as exc:
@@ -384,9 +395,12 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
             approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, first, store)))
             if meta.get('cwd') not in approved:
                 continue
-            built.append(_codex_entry(project, store, sid, index, state=state, scopes=scopes))
+            retained, entry = _codex_entry(project, store, sid, index, state=state, scopes=scopes)
         except (ValueError, OSError) as exc:
             issue('codex', sid, exc)
+            continue
+        keep(retained, entry)
+        del retained  # Hold one session's retained bytes at a time.
     home = sessions.native_home('claude', env)
     aliases = _import_aliases(project, state)
     for root in scopes:
@@ -400,21 +414,12 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
             sid = path.stem
             try:
                 sessions.session_uuid(sid)
-                built.append(_claude_entry(project, store, sid, path, state=state, scopes=scopes))
+                retained, entry = _claude_entry(project, store, sid, path, state=state, scopes=scopes)
             except (ValueError, OSError) as exc:
                 issue('claude', sid, exc)
-    # Decide before any put: no manifest would reference an unchanged import's
-    # blobs, and the store never deletes. Its retained bytes are still in hand.
-    for retained, entry in built:
-        if _unchanged_import(project, retained, state, entry):
-            continue
-        try:
-            for item in entry['files']:
-                store.put(retained[item['session_id']])
-        except (ValueError, OSError) as exc:
-            issue(entry['agent'], entry['session_id'], exc)
-            continue
-        result['entries'].append(entry)
+                continue
+            keep(retained, entry)
+            del retained
     result['entries'].sort(key=lambda item: (-item['updated_at'], item['agent'], item['session_id']))
     return result
 
