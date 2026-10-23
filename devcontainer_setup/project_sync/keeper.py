@@ -368,8 +368,9 @@ class Keeper:
     def _unanswered(self, reading):
         """The rid, POST count and last intent time of a restart interrupted between intent and result.
 
-        Only a Shutdown reading continues it; any other state closes it with an interrupted
-        result and no POST, since a Queued, Starting or Available Codespace needs none.
+        Only a Shutdown reading within the start routine's own span continues it; any other
+        state closes it with an interrupted result and no POST, since a Queued, Starting or
+        Available Codespace needs none, and so does an intent older than that span.
         """
         try:
             rows = [row for row in self.ledger.rows() if not row['rid'].startswith(lifecycle.OWNER_RID)]
@@ -378,7 +379,8 @@ class Keeper:
         if not rows or rows[-1]['kind'] != 'intent':
             return None
         rid = rows[-1]['rid']
-        if reading.state != 'Shutdown':
+        stale = self.now() - rows[-1]['at'] > lifecycle.SHUTDOWN_WAIT + lifecycle.AVAILABLE_WAIT
+        if reading.state != 'Shutdown' or stale:
             self.ledger.append('result', rid, interrupted=True, state=reading.state)
             _LOG.info('Restart %s was interrupted; the Codespace is %s, so nothing is posted', rid, reading.state)
             last = self.runtime.get('last_restart')
@@ -452,6 +454,12 @@ class Keeper:
         """
         value, rows = arming.read(self.state), self.ledger.rows()
         reason = lifecycle.gate(arming=value, rows=[row for row in rows if row['rid'] != rid], now=self.now())
+        # The pairing, as each pass checks it: a re-pair during the wait never starts the old one.
+        reason = reason or self._refusal(value)
+        if reason is None and getattr(self.api, 'token_read_ok', True) is False:
+            # The reading just made used the last good token (D10); a start request needs a read that works.
+            reason = (f'the GitHub token for {value.get("gh_user")} could not be read; run gh auth status '
+                      '--hostname github.com')
         held = watch.get('hold_at_stop')
         if reason is None and isinstance(held, (int, float)):
             reason = 'it stopped during your hold until ' + arming.format_time(held)

@@ -29,6 +29,7 @@ class FakeAPI:
 
     def __init__(self, readings, name='cs-1', status=200):
         self.name, self.readings, self.reads, self.posts, self.status = name, list(readings), 0, 0, status
+        self.token_read_ok = True
 
     def read(self):
         item = self.readings[min(self.reads, len(self.readings) - 1)]
@@ -319,7 +320,10 @@ class KeeperStepTests(unittest.TestCase):
         self.assertIn('stopped during your hold', self.notes[0])
 
     def test_a_hold_or_owner_stop_during_the_wait_refuses_at_the_post(self):
-        for change in ('hold', 'owner'):
+        reasons = {'hold': 'on hold until', 'owner': 'you stopped it at', 'disarm': 'not armed',
+                   'repair': 'the paired Codespace is not the armed one; run task work:cs:armed',
+                   'token': 'the GitHub token for octo could not be read; run gh auth status --hostname github.com'}
+        for change, reason in reasons.items():
             with self.subTest(change=change):
                 self.setUp()
                 self.clock = T0
@@ -328,8 +332,14 @@ class KeeperStepTests(unittest.TestCase):
                     value = arming.read(self.state)
                     if change == 'hold':
                         arming.write(self.state, dict(value, hold_until=self.clock + 3600))
-                    else:
+                    elif change == 'owner':
                         arming.record_owner_stop(self.state, self.clock)
+                    elif change == 'disarm':
+                        arming.write(self.state, dict(value, armed=False))
+                    elif change == 'repair':
+                        self.bind('cs-2')
+                    else:
+                        self.api.token_read_ok = False  # this reading used the last good token
                     return down(self.clock)
                 # Classified while ShuttingDown; the start routine waits, and the change lands meanwhile.
                 anchor = T0 - 3600
@@ -341,9 +351,49 @@ class KeeperStepTests(unittest.TestCase):
                 self.assertEqual(self.api.posts, 0)
                 self.assertEqual(lifecycle.Ledger(self.state / keeper.LEDGER).rows(), [])
                 self.assertEqual(len(self.notes), 1)
-                self.assertIn('was not restarted: ' + ('on hold until' if change == 'hold' else 'you stopped it at'),
-                              self.notes[0])
+                self.assertIn('was not restarted: ' + reason, self.notes[0])
                 self.assertIn('not restarted', self.runtime()['last_restart']['outcome'])
+
+    def test_a_failed_token_read_or_unwritable_ledger_refuses_before_any_post(self):
+        # Spec 6.4 step 4: each check refuses and its notice names it and what to run.
+        stops, readings = self.lifetime([down(T0 + LIFE), up(T0 + LIFE + 60, last_used_at=T0 + LIFE)])
+        k = self.keeper(readings, herdr=FakeHerdr())
+        self.run_steps(k, [T0] + stops[:2])
+        self.api.token_read_ok = False
+        self.run_steps(k, stops[2:])
+        self.assertEqual(self.api.posts, 0)
+        self.assertIn('was not restarted: the GitHub token for octo could not be read; run gh auth status '
+                      '--hostname github.com', self.notes[0])
+        self.setUp()
+        self.clock = T0
+        stops, readings = self.lifetime([down(T0 + LIFE), up(T0 + LIFE + 60, last_used_at=T0 + LIFE)])
+        k = self.keeper(readings, herdr=FakeHerdr())
+        with patch.object(lifecycle.Ledger, 'append', side_effect=PermissionError('read-only')):
+            self.run_steps(k, [T0] + stops + [stops[2] + 60 * i for i in range(1, 5)])
+        self.assertEqual(self.api.posts, 0)
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn('was not restarted: the restart ledger ' + str(self.state / keeper.LEDGER)
+                      + ' cannot be written; check its directory, then task work:status', self.notes[0])
+
+    def test_an_open_intent_older_than_the_start_routine_is_closed_not_continued(self):
+        # Killed (SIGTERM-shaped) between its intent row and the POST, then replaced long after.
+        stops, readings = self.lifetime([down(T0 + LIFE)])
+        k = self.keeper(readings, herdr=FakeHerdr())
+
+        def killed():
+            raise keeper._Shutdown()
+        self.api.post_start = killed
+        with self.assertRaises(keeper._Shutdown):
+            self.run_steps(k, [T0] + stops)
+        rows = lifecycle.Ledger(self.state / keeper.LEDGER).rows()
+        self.assertEqual([row['kind'] for row in rows], ['intent'])
+        late = rows[0]['at'] + lifecycle.SHUTDOWN_WAIT + lifecycle.AVAILABLE_WAIT + 60
+        later = self.keeper([down(late + 60 * i) for i in range(10)], herdr=FakeHerdr())
+        self.run_steps(later, [late + 60 * i for i in range(10)])
+        self.assertEqual(self.api.posts, 0)
+        rows = lifecycle.Ledger(self.state / keeper.LEDGER).rows()
+        self.assertEqual([(row['kind'], row.get('interrupted')) for row in rows], [('intent', None), ('result', True)])
+        self.assertEqual(rows[1]['state'], 'Shutdown')
 
     def test_owner_stop_is_never_restarted(self):
         # work:cs:stop records the stop before its POST, so the keeper reads OWNER, logs it and waits.

@@ -215,14 +215,19 @@ class StartTests(unittest.TestCase):
             self.assertEqual(oct(ledger.path.stat().st_mode & 0o777), '0o600')
 
     def test_unwritable_ledger_blocks_the_post(self):
+        # Spec 6.4 step 4: an intent row that cannot be written refuses the start, naming the ledger.
         class Broken:
+            path = Path('/state/keeper-ledger.jsonl')
+
             def append(self, *args, **kwargs):
-                raise OSError('read-only')
+                raise PermissionError('read-only')
         clock = Clock()
         client = FakeClient(clock, [reading('Shutdown')])
-        with self.assertRaises(OSError):
-            lifecycle.start(client, ledger=Broken(), now=clock.now, sleep=clock.sleep)
+        result = lifecycle.start(client, ledger=Broken(), now=clock.now, sleep=clock.sleep)
         self.assertEqual(client.posts, 0)
+        self.assertEqual((result['outcome'], result['posts']), ('refused', 0))
+        self.assertEqual(result['reason'], 'the restart ledger /state/keeper-ledger.jsonl cannot be written; '
+                                           'check its directory, then task work:status')
 
     def test_ledger_skips_unparsable_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -331,9 +336,13 @@ class LifecycleAPITests(unittest.TestCase):
             used.append(token)
             return 200, json.dumps({'name': self.NAME, 'state': 'Available'}).encode()
         api = lifecycle.LifecycleAPI(self.NAME, upstream=upstream, token_reader=reader)
+        self.assertIsNone(api.token_read_ok)
         self.assertTrue(api.read().ok)
+        self.assertIs(api.token_read_ok, True)
         self.assertTrue(api.read().ok)
         self.assertEqual(used, ['good', 'good'])
+        # The read went through on the last good token, but the token read itself failed (spec 6.4 step 4).
+        self.assertIs(api.token_read_ok, False)
 
     def test_no_token_ever_means_no_request(self):
         def reader():
