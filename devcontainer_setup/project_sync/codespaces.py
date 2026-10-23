@@ -131,14 +131,18 @@ print(json.dumps(roots))
         result = lifecycle.start(
             lifecycle.LifecycleAPI(name),
             say=lambda text: print(text + '…', file=sys.stderr))
-        if result['outcome'] == 'available':
-            return
-        state, status = result['last_state'], result['status']
-        if state in lifecycle.TERMINAL:
-            raise ValueError(f'Codespace start ended in {state}; inspect its logs in GitHub before retrying')
-        if result['outcome'] == 'failed':
-            raise ValueError(
-                f'Codespace start request failed (HTTP {status}); check GitHub authorization and status, then retry')
-        raise ValueError(
-            f'Codespace start timed out (last state: {state or "unknown"}); inspect its status in GitHub '
-            'and retry when Available')
+        if result['outcome'] != 'available':
+            raise start_error(result)
+
+
+def start_error(result):
+    """The fixed-text error for an owner-present start that did not end Available."""
+    state, status = result['last_state'], result['status']
+    if state in lifecycle.TERMINAL:
+        return ValueError(f'Codespace start ended in {state}; inspect its logs in GitHub before retrying')
+    if result['outcome'] == 'failed':
+        return ValueError(
+            f'Codespace start request failed (HTTP {status}); check GitHub authorization and status, then retry')
+    return ValueError(
+        f'Codespace start timed out (last state: {state or "unknown"}); inspect its status in GitHub '
+        'and retry when Available')

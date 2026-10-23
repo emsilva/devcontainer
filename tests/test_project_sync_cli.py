@@ -135,6 +135,193 @@ class ArmFlowTests(unittest.TestCase):
             parser().parse_args(['work', '--armed', '--port', '60000'])
 
 
+T0 = 1_000_000.0
+
+
+class OwnerAPI:
+    """Replays readings; records each POST with the owner stop arming.json holds at that moment."""
+
+    def __init__(self, state, readings, stop=202, start=200):
+        self.state, self.readings, self.reads, self.calls = state, list(readings), 0, []
+        self.stop, self.start, self.name = stop, start, 'cs-1'
+
+    def read(self):
+        item = self.readings[min(self.reads, len(self.readings) - 1)]
+        self.reads += 1
+        return item
+
+    def post_stop(self):
+        from devcontainer_setup.project_sync import arming
+        self.calls.append(('stop', arming.read(self.state).get('owner_stop_at')))
+        return self.stop
+
+    def post_start(self):
+        self.calls.append(('start', None))
+        return self.start
+
+
+class OwnerHerdr:
+    def __init__(self):
+        self.prompts, self.status = [], 'idle'
+
+    def reachable(self):
+        return True
+
+    def agents(self):
+        return [{'pane_id': 'p1'}, {'name': 'lead-proj', 'agent_status': self.status}]
+
+    def prompt(self, name, text):
+        self.prompts.append((name, text))
+        self.status = 'working'
+        return True
+
+    def read(self, name, lines=80):
+        return ''
+
+
+class OwnerPowerTests(unittest.TestCase):
+    """work:cs:stop and work:cs:restart with the owner present."""
+
+    def setUp(self):
+        from unittest import mock
+        from devcontainer_setup.project_sync.state import atomic_write
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        base = Path(self.temp.name).resolve()
+        self.state, root = base / 'state', base / 'proj'
+        root.mkdir()
+        atomic_write(self.state / 'scratch.json', json.dumps({'codespace': 'cs-1', 'root': str(root)}).encode())
+        self.project = mock.Mock(root=root)
+        self.clock = T0
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        for name in ('GH_TOKEN', 'GITHUB_TOKEN'):
+            os.environ.pop(name, None)
+
+    def advance(self, seconds):
+        self.clock += seconds
+
+    def arm(self):
+        from devcontainer_setup.project_sync import arming
+        arming.arm(self.state, gh_user='octo', codespace='cs-1', consent='x', billable_owner='octo', ports=[],
+                   now=T0 - 7200)
+
+    def power(self, api, restart):
+        from devcontainer_setup.project_sync import __main__ as cli
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            cli._owner_power(self.project, self.state, restart=restart, api=api, now=lambda: self.clock,
+                             sleep=self.advance)
+        return out.getvalue()
+
+    def test_codespace_stop_records_the_owner_stop_before_its_post(self):
+        from devcontainer_setup.project_sync import arming
+        from devcontainer_setup.project_sync.lifecycle import Reading
+        api = OwnerAPI(self.state, [Reading(T0, True, 'Available', False, None)])
+        out = self.power(api, restart=False)
+        self.assertEqual(api.calls, [('stop', T0)])
+        self.assertEqual(arming.read(self.state)['owner_stop_at'], T0)
+        self.assertIn('stays stopped', out)
+        # A definite refusal stopped nothing, so the record is undone; an unknown outcome keeps it.
+        self.clock = T0 + 100
+        with self.assertRaisesRegex(ValueError, r'HTTP 403\); nothing was stopped'):
+            self.power(OwnerAPI(self.state, [], stop=403), restart=False)
+        self.assertEqual(arming.read(self.state)['owner_stop_at'], T0)
+        self.clock = T0 + 200
+        with self.assertRaisesRegex(ValueError, 'HTTP 0'):
+            self.power(OwnerAPI(self.state, [], stop=0), restart=False)
+        self.assertEqual(arming.read(self.state)['owner_stop_at'], T0 + 200)
+
+    def test_owner_commands_refuse_environment_tokens(self):
+        for name in ('GH_TOKEN', 'GITHUB_TOKEN'):
+            for restart in (False, True):
+                with self.subTest(name=name, restart=restart):
+                    api = OwnerAPI(self.state, [])
+                    os.environ[name] = 'ghp_leaked'
+                    try:
+                        with self.assertRaisesRegex(ValueError, 'Unset ' + name) as caught:
+                            self.power(api, restart=restart)
+                    finally:
+                        del os.environ[name]
+                    self.assertNotIn('ghp_leaked', str(caught.exception))
+                    self.assertEqual(api.calls, [])
+        self.assertFalse((self.state / 'arming.json').exists())
+
+    def test_owner_commands_use_the_armed_account_else_the_active_one(self):
+        from unittest import mock
+        from devcontainer_setup.project_sync import __main__ as cli, lifecycle
+        for armed, user in ((False, None), (True, 'octo')):
+            with self.subTest(armed=armed):
+                if armed:
+                    self.arm()
+                with mock.patch.object(lifecycle, 'LifecycleAPI', return_value=OwnerAPI(self.state, [])) as made, \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    cli._owner_power(self.project, self.state, restart=False, now=lambda: self.clock)
+                made.assert_called_once_with('cs-1', user)
+
+    def test_planned_restart_skips_budget_and_resumes(self):
+        from devcontainer_setup.project_sync import arming, keeper, lifecycle, restore
+        from devcontainer_setup.project_sync.lifecycle import Reading
+        self.arm()
+        # One keeper restart two hours ago: the planned one must leave the budget at 1 of 2.
+        lifecycle.Ledger(self.state / keeper.LEDGER, now=lambda: T0 - 7200).append('intent', 'r-000001Z', post=1)
+        lifecycle.Ledger(self.state / keeper.LEDGER, now=lambda: T0 - 7190).append('result', 'r-000001Z', post=1,
+                                                                                status=200)
+        rows_before = lifecycle.Ledger(self.state / keeper.LEDGER).rows()
+        api = OwnerAPI(self.state, [Reading(T0, True, 'Available', False, None),
+                                    Reading(T0, True, 'ShuttingDown', False, None),
+                                    Reading(T0, True, 'ShuttingDown', False, None),
+                                    Reading(T0, True, 'Shutdown', False, None),
+                                    Reading(T0, True, 'Starting', False, None),
+                                    Reading(T0, True, 'Available', False, None)])
+        out = self.power(api, restart=True)
+        self.assertEqual(api.calls, [('stop', T0), ('start', None)])
+        value = arming.read(self.state)
+        pending = value['pending_restore']
+        self.assertTrue(pending['rid'].startswith(lifecycle.OWNER_RID))
+        self.assertEqual(pending['stopped_at'], T0)
+        self.assertEqual(pending['back_at'], self.clock)
+        self.assertIn(pending['rid'], out)
+        self.assertIn('task work:logs', out)
+        # Outside the budget: no ledger rows, and the gate answers as before.
+        rows = lifecycle.Ledger(self.state / keeper.LEDGER).rows()
+        self.assertEqual(rows, rows_before)
+        self.assertEqual(lifecycle.restart_rids(rows, self.clock), ['r-000001Z'])
+        self.assertIsNone(lifecycle.gate(arming=value, rows=rows, now=self.clock))
+        # The keeper reads the stop as the owner's, then restores and resumes the planned rid once.
+        herdr, notes = OwnerHerdr(), []
+        k = keeper.Keeper(self.state, api=OwnerAPI(self.state, [Reading(self.clock + 30, True, 'Available', False,
+                                                                        self.clock - 60)]),
+                          notifier=lambda title, text: notes.append(text) or True, herdr=herdr,
+                          now=lambda: self.clock, sleep=self.advance, end_proxies=lambda *args: [])
+        for _ in range(3):
+            self.advance(60)
+            k.step()
+        self.assertEqual(len(herdr.prompts), 1)
+        self.assertEqual(herdr.prompts[0], ('lead-proj', restore.resume_text(pending['rid'], T0, pending['back_at'])))
+        self.assertEqual(len(notes), 1)
+        self.assertIn('back from your restart', notes[0])
+        self.assertEqual(lifecycle.Ledger(self.state / keeper.LEDGER).rows(), rows_before)
+
+    def test_unarmed_restart_prints_the_times_and_hands_nothing_on(self):
+        from devcontainer_setup.project_sync import arming
+        from devcontainer_setup.project_sync.lifecycle import Reading
+        api = OwnerAPI(self.state, [Reading(T0, True, 'ShuttingDown', False, None),
+                                    Reading(T0, True, 'Shutdown', False, None),
+                                    Reading(T0, True, 'Available', False, None)])
+        out = self.power(api, restart=True)
+        self.assertEqual([call for call, _ in api.calls], ['stop', 'start'])
+        self.assertIn('restarted (o-', out)
+        self.assertIn(arming.format_time(T0), out)
+        self.assertNotIn('pending_restore', arming.read(self.state))
+
+    def test_a_failed_planned_start_names_its_outcome(self):
+        from devcontainer_setup.project_sync.lifecycle import Reading
+        api = OwnerAPI(self.state, [Reading(T0, True, 'Shutdown', False, None)], start=403)
+        with self.assertRaisesRegex(ValueError, 'HTTP 403'):
+            self.power(api, restart=True)
+
+
 class ProjectSyncCLITests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

@@ -139,6 +139,84 @@ def _arming_edit(args, state):
     return 0
 
 
+def _wait_stopping(api, now, sleep):
+    # A stop takes effect asynchronously; until the Codespace leaves Available the
+    # start routine would take the old run for the new one.
+    from . import lifecycle
+    deadline = now() + lifecycle.SHUTDOWN_WAIT
+    while True:
+        reading = api.read()
+        if reading.ok and reading.state != 'Available':
+            return
+        if now() >= deadline:
+            raise ValueError('The Codespace has not begun to stop within 20 minutes; inspect it in GitHub, '
+                             'then retry task work:cs:restart')
+        sleep(lifecycle.POLL)
+
+
+def _owner_power(project, state, *, restart, api=None, now=time.time, sleep=time.sleep):
+    """Spec 6.8 work:cs:stop and work:cs:restart, with the owner present.
+
+    The owner stop is recorded before the stop request, so the keeper reads the stop as
+    OWNER and never restarts it. A restart then starts the Codespace outside the budget
+    (D6) and, for an armed project, hands restore and resume to the keeper.
+    """
+    from . import arming, keeper, lifecycle
+    from .codespaces import start_error
+    from .state import locked, read_json
+    for name in ('GH_TOKEN', 'GITHUB_TOKEN'):
+        if os.environ.get(name):
+            raise ValueError(f'Unset {name} before stopping or restarting the Codespace; it must use a real gh account.')
+    try:
+        codespace = read_json(state / scratch.CONFIG)['codespace']
+    except FileNotFoundError:
+        raise ValueError('Pair a Codespace first: run task work:cs') from None
+    value = arming.read(state)
+    armed = bool(value.get('armed'))
+    if armed and value.get('codespace') != codespace:
+        raise ValueError('The paired Codespace is not the armed one; run task work:cs:armed')
+    # The armed account, as the keeper uses; otherwise the active gh account, as work:cs.
+    api = api or lifecycle.LifecycleAPI(codespace, value.get('gh_user') if armed else None)
+    with locked(state / 'workspace-control.lock', blocking=True):
+        before, stopped_at = arming.read(state).get('owner_stop_at'), now()
+        arming.record_owner_stop(state, stopped_at)
+    status = api.post_stop()
+    if 400 <= status < 500:
+        # GitHub refused it, so nothing stopped; any other failure may still take effect.
+        with locked(state / 'workspace-control.lock', blocking=True):
+            arming.write(state, dict(arming.read(state), owner_stop_at=before))
+        raise ValueError(f'GitHub refused the stop request (HTTP {status}); nothing was stopped. '
+                         'Check gh auth status --hostname github.com, then retry.')
+    if not 200 <= status < 300:
+        raise ValueError(f'The stop request did not complete (HTTP {status}); it may still take effect, and the '
+                         'keeper treats it as your stop. Inspect task work:status, then retry.')
+    if not restart:
+        print(f'Stopping {codespace}; it stays stopped until task work:cs' + (':armed' if armed else '')
+              + ' starts it again.')
+        return 0
+    _wait_stopping(api, now, sleep)
+    rid = lifecycle.owner_rid(now())
+    # No ledger and no gate: the owner's restart is outside the budget (D6).
+    result = lifecycle.start(api, rid=rid, now=now, sleep=sleep, say=lambda text: print(text + '…', file=sys.stderr))
+    if result['outcome'] != 'available':
+        raise start_error(result)
+    back_at = now()
+    if not armed:
+        print(f'{codespace} restarted ({rid}): stopped {arming.format_time(stopped_at)}, back '
+              f'{arming.format_time(back_at)}.')
+        return 0
+    with locked(state / 'workspace-control.lock', blocking=True):
+        latest = arming.read(state)
+        if latest.get('armed'):
+            arming.write(state, dict(latest, pending_restore={'rid': rid, 'stopped_at': stopped_at,
+                                                              'back_at': back_at}))
+    print(f'{codespace} is back ({rid}); its keeper reconnects Herdr and tells the lead to resume. Follow it '
+          'with task work:logs.')
+    if not keeper.status(state)['running']:
+        print('The keeper is not running, so nothing will tell the lead; run task work:cs:armed.')
+    return 0
+
+
 def _log_lines(path, count=80):
     # The last lines of one log, each keyed by its leading UTC time; an older line
     # without one keeps the key of the line before it.
@@ -214,7 +292,7 @@ def run(args):
         if args.armed:
             return workspace.remote(project, state, armed=lambda primary: _armed(primary, state, args))
         if args.codespace_stop or args.codespace_restart:
-            raise ValueError('Stopping and restarting the Codespace from a task is not available yet')
+            return _owner_power(project, state, restart=args.codespace_restart)
         if args.codespace:
             return workspace.remote(project, state)
     if args.action == 'configure':
