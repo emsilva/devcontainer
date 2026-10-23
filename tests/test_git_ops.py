@@ -463,6 +463,21 @@ class SetupWorktreeTests(unittest.TestCase):
         git(path, 'commit', '--quiet', '-m', 'Setup commit')
         return git(path, 'rev-parse', 'HEAD')
 
+    def merge_on_origin(self, project, branch):
+        """Merge origin's <branch> into origin's main from another clone, as a PR merge would."""
+        self.clones += 1
+        clone = self.base / f'clone-{self.clones}'
+        git(self.base, 'clone', '--quiet', str(self.origin(project)), str(clone))
+        git(clone, 'config', 'user.name', 'Other User')
+        git(clone, 'config', 'user.email', 'other@example.com')
+        git(clone, 'merge', '--quiet', '--no-ff', '-m', f'Merge {branch}', f'origin/{branch}')
+        git(clone, 'push', '--quiet', 'origin', 'HEAD:refs/heads/main')
+        return git(clone, 'rev-parse', 'HEAD')
+
+    def refs(self, project):
+        return (git(project, 'worktree', 'list'), git(project, 'for-each-ref', '--exclude=refs/remotes/origin/main'),
+                git(self.origin(project), 'for-each-ref'))
+
     def test_remove_setup_worktree_deletes_branch_after_worktree(self):
         project, origin = self.project, self.origin(self.project)
         git(project, 'push', '--quiet', 'origin', 'main:refs/heads/setup/devcontainer-9')
@@ -470,9 +485,10 @@ class SetupWorktreeTests(unittest.TestCase):
         path, branch = setup_worktree(project, self.root)
         self.commit_in(path)
         git(path, 'push', '--quiet', 'origin', f'HEAD:refs/heads/{branch}')
+        self.merge_on_origin(project, branch)
         calls, recording = self.recorded()
         with recording:
-            remove_setup_worktree(project, path, branch, remote=True)
+            remove_setup_worktree(project, path, branch, remote=True, root=self.root)
         steps = [next(index for index, call in enumerate(calls) if call[:len(prefix)] == prefix)
                  for prefix in (('worktree', 'remove'), ('branch', '-D'), ('push',))]
         self.assertEqual(steps, sorted(steps), calls)
@@ -488,23 +504,78 @@ class SetupWorktreeTests(unittest.TestCase):
         self.assertTrue(git(origin, 'rev-parse', '--verify', 'refs/heads/main'))
         self.assertEqual(git(project, 'branch', '--show-current'), 'main')
 
+    def test_remove_setup_worktree_keeps_an_unmerged_commit(self):
+        # Commit only leaves exactly this: a kept branch whose worktree is gone (and, in the
+        # interim launch, the same commit on origin). A later cleanup must not destroy it.
+        project, origin = self.project, self.origin(self.project)
+        path, branch = setup_worktree(project, self.root)
+        cut = git(path, 'rev-parse', 'HEAD')
+        sha = self.commit_in(path)
+        remove_worktree(project, path, branch, root=self.root)
+        git(project, 'push', '--quiet', 'origin', f'{branch}:refs/heads/{branch}')
+        before = self.refs(project)
+        for remote in (True, False):
+            with self.subTest(remote=remote):
+                with self.assertRaisesRegex(ValueError, f'{branch}.*not on main'):
+                    remove_setup_worktree(project, path, branch, remote=remote, root=self.root, cut=cut)
+                self.assertEqual(self.refs(project), before)
+        self.assertEqual(git(project, 'rev-parse', f'refs/heads/{branch}'), sha)
+        self.assertEqual(git(origin, 'rev-parse', f'refs/heads/{branch}'), sha)
+
     def test_remove_setup_worktree_without_remote_makes_no_network_call(self):
         project = self.project
         path, branch = setup_worktree(project, self.root)
+        cut = git(path, 'rev-parse', 'HEAD')
         git(path, 'push', '--quiet', 'origin', f'HEAD:refs/heads/{branch}')
         calls, recording = self.recorded()
         with recording:
-            remove_setup_worktree(project, path, branch, remote=False)
+            remove_setup_worktree(project, path, branch, remote=False, root=self.root, cut=cut)
         self.assertFalse([call for call in calls if call[0] in {'ls-remote', 'push', 'fetch'}], calls)
         self.assertFalse(path.exists())
         self.assertNotEqual(run(project, 'rev-parse', '--verify', f'refs/heads/{branch}').returncode, 0)
         self.assertTrue(git(self.origin(project), 'rev-parse', '--verify', f'refs/heads/{branch}'))
 
     def test_remove_setup_worktree_accepts_a_branch_origin_already_deleted(self):
-        path, branch = setup_worktree(self.project, self.root)
-        remove_setup_worktree(self.project, path, branch, remote=True)
+        # GitHub can delete a merged head branch itself.
+        project, origin = self.project, self.origin(self.project)
+        path, branch = setup_worktree(project, self.root)
+        self.commit_in(path)
+        git(path, 'push', '--quiet', 'origin', f'HEAD:refs/heads/{branch}')
+        self.merge_on_origin(project, branch)
+        git(origin, 'update-ref', '-d', f'refs/heads/{branch}')
+        remove_setup_worktree(project, path, branch, remote=True, root=self.root)
         self.assertFalse(path.exists())
-        self.assertNotEqual(run(self.project, 'rev-parse', '--verify', f'refs/heads/{branch}').returncode, 0)
+        self.assertNotEqual(run(project, 'rev-parse', '--verify', f'refs/heads/{branch}').returncode, 0)
+
+    def test_remote_delete_never_removes_a_newer_remote_tip(self):
+        project, origin = self.project, self.origin(self.project)
+        path, branch = setup_worktree(project, self.root)
+        sha = self.commit_in(path)
+        git(path, 'push', '--quiet', 'origin', f'HEAD:refs/heads/{branch}')
+        self.merge_on_origin(project, branch)
+        newer = self.push_to_origin(project, 'later.txt', ref=f'refs/heads/{branch}')
+        # Newer before the call: refused up front, nothing changed.
+        before = self.refs(project)
+        with self.assertRaisesRegex(ValueError, f'origin has a different {branch}'):
+            remove_setup_worktree(project, path, branch, remote=True, root=self.root)
+        self.assertEqual(self.refs(project), before)
+        # Newer between the check and the delete: the lease refuses it.
+        git(origin, 'update-ref', f'refs/heads/{branch}', sha)
+        real, raced = subprocess.run, []
+
+        def race(args, **kwargs):
+            result = real(args, **kwargs)
+            if args[3:4] == ['ls-remote'] and not raced:
+                raced.append(real(['git', '-C', str(origin), 'update-ref', f'refs/heads/{branch}', newer]))
+            return result
+        with patch.object(operations.subprocess, 'run', side_effect=race), \
+                self.assertRaises(ValueError) as caught:
+            remove_setup_worktree(project, path, branch, remote=True, root=self.root)
+        self.assertTrue(raced)
+        self.assertIn(f'push origin --delete {branch}', str(caught.exception))
+        self.assertNotIn('branch -D', str(caught.exception))
+        self.assertEqual(git(origin, 'rev-parse', f'refs/heads/{branch}'), newer)
+        self.assertNotEqual(run(project, 'rev-parse', '--verify', f'refs/heads/{branch}').returncode, 0)
 
     def test_remove_setup_worktree_refuses_any_other_branch(self):
         project = self.project
@@ -515,54 +586,66 @@ class SetupWorktreeTests(unittest.TestCase):
         for name in ('owner-work', 'feature/setup/devcontainer', 'setup/devcontainer-x', 'setup/devcontainer-0'):
             git(project, 'branch', name)
             git(project, 'push', '--quiet', 'origin', f'{name}:refs/heads/{name}')
-        before = (git(project, 'worktree', 'list'), git(project, 'for-each-ref'),
-                  git(self.origin(project), 'for-each-ref'))
+        before = self.refs(project)
         invalid = ('main', 'owner-work', 'feature/setup/devcontainer', 'setup/devcontainer-x',
                    'setup/devcontainer-0', 'setup/devcontainer/extra')
-        # Against the setup worktree and against a path that is no worktree at all.
-        cases = [(name, target) for name in invalid for target in (path, self.base / 'no-such-worktree')]
+        # Against the setup worktree and against a path under the root that is no worktree.
+        cases = [(name, target) for name in invalid for target in (path, self.root / 'no-such-worktree')]
         cases.append(('setup/devcontainer-2', path))  # A valid name, but not the branch this worktree holds.
         for name, target in cases:
             with self.subTest(name=name, target=target), self.assertRaisesRegex(ValueError, 'setup/devcontainer'):
-                remove_setup_worktree(project, target, name, remote=True)
-        self.assertEqual((git(project, 'worktree', 'list'), git(project, 'for-each-ref'),
-                          git(self.origin(project), 'for-each-ref')), before)
+                remove_setup_worktree(project, target, name, remote=True, root=self.root)
+        self.assertEqual(self.refs(project), before)
         self.assertTrue(path.exists())
+
+    def test_remove_refuses_a_path_outside_the_root_before_any_git_call(self):
+        project = self.project
+        path, branch = setup_worktree(project, self.root)
+        git(project, 'switch', '--quiet', '-c', 'setup/devcontainer-2')  # The owner's checkout on a setup name.
+        before = self.refs(project)
+        calls, recording = self.recorded()
+        with recording:
+            for target in (project, self.base / 'elsewhere', self.root, path / 'nested'):
+                for remove in (lambda target: remove_worktree(project, target, 'setup/devcontainer-2', root=self.root),
+                               lambda target: remove_setup_worktree(project, target, 'setup/devcontainer-2',
+                                                                    remote=True, root=self.root)):
+                    with self.subTest(target=target), self.assertRaisesRegex(ValueError, 'setup worktrees'):
+                        remove(target)
+        self.assertEqual(calls, [])
+        self.assertEqual(self.refs(project), before)
+        self.assertTrue((project / 'app.txt').exists())
 
     def test_remove_setup_worktree_failure_keeps_state_and_names_the_commands(self):
         project = self.project
         path, branch = setup_worktree(project, self.root)
+        cut = git(path, 'rev-parse', 'HEAD')
+        git(path, 'push', '--quiet', 'origin', f'HEAD:refs/heads/{branch}')
         (path / 'untracked.txt').write_text('not committed\n')
         with self.assertRaises(ValueError) as caught:
-            remove_setup_worktree(project, path, branch, remote=True)
+            remove_setup_worktree(project, path, branch, remote=True, root=self.root, cut=cut)
         message = str(caught.exception)
-        for step in ('worktree remove', f'branch -D {branch}', f'push origin --delete {branch}'):
+        for step in ('worktree remove --force', f'branch -D {branch}', f'push origin --delete {branch}'):
             self.assertIn(step, message)
         self.assertEqual((path / 'untracked.txt').read_text(), 'not committed\n')
         self.assertTrue(git(project, 'rev-parse', '--verify', f'refs/heads/{branch}'))
-        # A later step's failure names only what is left to run.
+        # An origin that cannot be read is found before anything changes.
         (path / 'untracked.txt').unlink()
+        reachable = self.origin(project)
         git(project, 'remote', 'set-url', 'origin', str(self.base / 'unreachable.git'))
-        with self.assertRaises(ValueError) as caught:
-            remove_setup_worktree(project, path, branch, remote=True)
-        message = str(caught.exception)
-        self.assertIn(f'push origin --delete {branch}', message)
-        self.assertNotIn('worktree remove', message)
-        self.assertNotIn('branch -D', message)
-        self.assertFalse(path.exists())
+        before = (git(project, 'worktree', 'list'), git(project, 'for-each-ref'), git(reachable, 'for-each-ref'))
+        with self.assertRaisesRegex(ValueError, 'nothing was changed'):
+            remove_setup_worktree(project, path, branch, remote=True, root=self.root, cut=cut)
+        self.assertEqual((git(project, 'worktree', 'list'), git(project, 'for-each-ref'),
+                          git(reachable, 'for-each-ref')), before)
+        self.assertTrue(path.exists())
 
     def test_remove_worktree_keeps_the_setup_commit(self):
         path, branch = setup_worktree(self.project, self.root)
         sha = self.commit_in(path)
-        remove_worktree(self.project, path, branch)
+        remove_worktree(self.project, path, branch, root=self.root)
         self.assertFalse(path.exists())
         self.assertNotIn(str(path), git(self.project, 'worktree', 'list'))
         self.assertEqual(git(self.project, 'rev-parse', f'refs/heads/{branch}'), sha)
-
-    def refs(self, project):
-        return (git(project, 'worktree', 'list'), git(project, 'for-each-ref', '--exclude=refs/remotes/origin/main'),
-                git(self.origin(project), 'for-each-ref'))
-
 
     def test_failed_worktree_add_leaves_no_branch(self):
         self.root.mkdir(parents=True)
@@ -574,7 +657,6 @@ class SetupWorktreeTests(unittest.TestCase):
         self.assertEqual(git(self.project, 'branch', '--list', 'setup/*'), '')
         self.assertEqual(self.refs(self.project), before)
 
-
     def test_setup_fetches_leave_fetch_head_alone(self):
         project = self.project
         fetch_head = project / '.git/FETCH_HEAD'
@@ -582,8 +664,8 @@ class SetupWorktreeTests(unittest.TestCase):
         self.push_to_origin(project, 'remote.txt')
         path, branch = setup_worktree(project, self.root)
         self.assertTrue(fast_forward_checkout(project, 'main'))
+        remove_setup_worktree(project, path, branch, remote=False, root=self.root)  # Fetches to check merged.
         self.assertEqual(fetch_head.read_text(), 'owner fetch head\n')
-
 
     def test_fetch_failure_without_origin_head_suggests_set_head(self):
         project, origin = self.project, self.origin(self.project)
@@ -600,7 +682,6 @@ class SetupWorktreeTests(unittest.TestCase):
         path, branch = setup_worktree(project, self.root)
         self.assertEqual(git(path, 'rev-parse', 'HEAD'), git(origin, 'rev-parse', 'trunk'))
         self.assertEqual(git(project, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/setup'), branch)
-
 
     def test_fast_forward_only_when_clean_on_default(self):
         for case in ('clean', 'dirty', 'untracked', 'feature', 'detached', 'diverged', 'ignored'):

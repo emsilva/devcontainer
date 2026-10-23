@@ -413,18 +413,19 @@ def setup_checkout(project: Path):
     try:
         yield worktree, default
     except BaseException:
-        _close_setup_worktree(project, worktree, branch, start, failing=True)
+        _close_setup_worktree(project, root, worktree, branch, start, failing=True)
         raise
-    _close_setup_worktree(project, worktree, branch, start)
+    _close_setup_worktree(project, root, worktree, branch, start)
 
 
-def _close_setup_worktree(project: Path, worktree: Path, branch: str, start: str, failing: bool = False) -> None:
+def _close_setup_worktree(project: Path, root: Path, worktree: Path, branch: str, start: str,
+                          failing: bool = False) -> None:
     """Keep a branch that holds a setup commit; drop one that holds nothing."""
     try:
         if git(project, 'rev-parse', '--verify', '--quiet', f'refs/heads/{branch}', check=False) == start:
-            remove_setup_worktree(project, worktree, branch, remote=False)
+            remove_setup_worktree(project, worktree, branch, remote=False, root=root, cut=start)
             return
-        remove_worktree(project, worktree, branch)
+        remove_worktree(project, worktree, branch, root=root)
         print(f'Setup commit is on branch {branch}; your checkout and its branch are unchanged.', flush=True)
     except ValueError as error:
         if not failing:

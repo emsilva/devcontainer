@@ -128,53 +128,85 @@ def _manual(project: Path, steps: list[str]) -> str:
     return 'run by hand: ' + ' && '.join(f'git -C {shlex.quote(str(project))} {step}' for step in steps)
 
 
-def _remove_worktree(project: Path, path: Path, branch: str, steps: list[str]) -> None:
+def _setup_path(path: Path, branch: str, root: Path) -> Path:
+    """Refuse, before any Git call, a branch or path that setup never creates."""
     if not SETUP_BRANCH.fullmatch(branch):
         raise ValueError(f'Refusing to remove {branch}: setup removes only setup/devcontainer[-N] branches.')
-    held = _worktrees(project).get(Path(path).resolve())
-    if held is None:
-        return  # Already removed.
-    if held != branch:
+    path, root = Path(path).resolve(), Path(root).resolve()
+    if path.parent != root:
+        raise ValueError(f'Refusing to remove {path}: setup removes only its own setup worktrees in {root}.')
+    return path
+
+
+def _registered(project: Path, path: Path, branch: str) -> bool:
+    """Whether path is still a worktree; one holding anything but branch is refused."""
+    held = _worktrees(project).get(path)
+    if held is not None and held != branch:
         raise ValueError(f'{path} holds {held or "a detached HEAD"}, not {branch}; refusing to remove it '
                          'as the setup/devcontainer worktree.')
-    if not _succeeds(project, 'worktree', 'remove', str(path)):
-        # A plain retry would refuse again: the hand-run step forces it once inspected.
-        raise ValueError(f'Could not remove the setup worktree {path}; nothing else was changed. Inspect it, then '
-                         + _manual(project, [f'worktree remove --force {shlex.quote(str(path))}', *steps[1:]]))
+    return held is not None
 
 
-def remove_worktree(project: Path, path: Path, branch: str) -> None:
+def remove_worktree(project: Path, path: Path, branch: str, *, root: Path) -> None:
     """Remove a setup worktree and keep its branch, which holds the setup commit."""
-    _remove_worktree(project, path, branch, [f'worktree remove {shlex.quote(str(path))}'])
+    path = _setup_path(path, branch, root)
+    if _registered(project, path, branch) and not _succeeds(project, 'worktree', 'remove', str(path)):
+        # A plain retry would refuse again: the hand-run step forces it once inspected.
+        raise ValueError(f'Could not remove the setup worktree {path}; branch {branch} keeps the setup commit. '
+                         'Inspect the worktree, then '
+                         + _manual(project, [f'worktree remove --force {shlex.quote(str(path))}']))
 
 
-def remove_setup_worktree(project: Path, path: Path, branch: str, *, remote: bool) -> None:
-    """Remove the worktree, then the branch locally and (if remote) on origin, then verify origin."""
-    steps = [f'worktree remove {shlex.quote(str(path))}', f'branch -D {branch}']
+def remove_setup_worktree(project: Path, path: Path, branch: str, *, remote: bool, root: Path,
+                          cut: str | None = None) -> None:
+    """Remove the worktree, then the branch locally and (if remote) on origin, then verify origin.
+
+    Only a branch whose tip is on a freshly fetched origin/<default>, or still at `cut` (the
+    commit it was cut from), is deleted; anything else holds work and is refused unchanged."""
+    path = _setup_path(path, branch, root)
+    registered = _registered(project, path, branch)
+    elsewhere = [other for other, held in _worktrees(project).items() if held == branch and other != path]
+    if elsewhere:
+        raise ValueError(f'Refusing to delete {branch}: it is checked out at {elsewhere[0]}; nothing was changed.')
+    local, remote_tip = _tip(project, branch), ''
     if remote:
-        steps.append(f'push origin --delete {branch}')
-    _remove_worktree(project, path, branch, steps)
-    # -D: the name is guarded above and the branch is this run's own; `-d` would judge
-    # it against whatever the owner's checkout has out.
-    if (_succeeds(project, 'rev-parse', '--verify', '--quiet', f'refs/heads/{branch}')
-            and not _succeeds(project, 'branch', '-D', branch)):
-        raise ValueError(f'Removed the setup worktree, but could not delete branch {branch}; '
-                         + _manual(project, steps[1:]))
+        listed = _read(project, 'ls-remote', '--heads', 'origin', f'refs/heads/{branch}')
+        if listed is None:
+            raise ValueError(f'Cannot read origin to delete {branch} there; nothing was changed.')
+        remote_tip = listed.split('\t', 1)[0]
+        if local and remote_tip and remote_tip != local:
+            raise ValueError(f'Refusing to delete {branch}: origin has a different {branch} than this '
+                             'repository; nothing was changed.')
+    tip = local or remote_tip
+    if tip and tip != cut:
+        default = default_branch(project)
+        if not _fetch_default(project, default):
+            raise ValueError(f'Cannot fetch {default} from origin to check {branch}; nothing was changed.')
+        if not _succeeds(project, 'merge-base', '--is-ancestor', tip, f'refs/remotes/origin/{default}'):
+            raise ValueError(f'Refusing to delete {branch}: it holds commits not on {default}; nothing was '
+                             f'changed. Merge it into {default} first.')
+    steps = ([f'worktree remove --force {shlex.quote(str(path))}'] if registered else []) + (
+        [f'branch -D {branch}'] if local else []) + ([f'push origin --delete {branch}'] if remote_tip else [])
+    if registered and not _succeeds(project, 'worktree', 'remove', str(path)):
+        raise ValueError(f'Could not remove the setup worktree {path}; nothing else was changed. Inspect it, then '
+                         + _manual(project, steps))
+    done = int(registered)
+    if local:
+        # -D, not -d (which judges the branch against whatever the owner has checked out):
+        # the merge check above is what makes the deletion safe.
+        if _tip(project, branch) != local or not _succeeds(project, 'branch', '-D', branch):
+            raise ValueError(f'Could not delete branch {branch}; ' + _manual(project, steps[done:]))
+        done += 1
     if not remote:
         return
-    failed = f'Deleted {branch} locally, but not on origin; ' + _manual(project, steps[2:])
-    listed = _remote_head(project, branch)
-    # GitHub may already have deleted a merged head branch.
-    if listed is None or (listed and not _succeeds(project, 'push', '--quiet', 'origin', '--delete',
-                                                   f'refs/heads/{branch}')):
-        raise ValueError(failed)
-    if _remote_head(project, branch) != '':
-        raise ValueError(f'Could not confirm origin no longer has {branch}; ' + _manual(project, steps[2:]))
-
-
-def _remote_head(project: Path, branch: str) -> str | None:
-    """`git ls-remote --heads origin <branch>`: '' when absent, None when origin cannot be read."""
-    return _read(project, 'ls-remote', '--heads', 'origin', f'refs/heads/{branch}')
+    # The lease refuses to delete a tip on origin newer than the one checked above.
+    if remote_tip and not _succeeds(project, 'push', '--quiet', f'--force-with-lease=refs/heads/{branch}:{remote_tip}',
+                                    'origin', '--delete', f'refs/heads/{branch}'):
+        raise ValueError(f'Could not delete {branch} on origin: its tip there is no longer {remote_tip[:12]}, '
+                         'or origin refused. Check it, then ' + _manual(project, steps[done:]))
+    if _read(project, 'ls-remote', '--heads', 'origin', f'refs/heads/{branch}') != '':
+        raise ValueError(f'Could not confirm origin no longer has {branch}; check with '
+                         + _manual(project, [f'ls-remote --heads origin {branch}']).removeprefix('run by hand: '))
 
 
 def fast_forward_checkout(project: Path, default: str) -> bool:
