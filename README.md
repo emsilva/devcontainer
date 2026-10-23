@@ -126,7 +126,9 @@ with `task work:cs:armed`: it is the only background process that can start a
 Codespace, and only after a stop it classified as GitHub's 12-hour stop, at most
 2 restarts in 24 hours and 30 minutes apart. It then tells the project's `lead-*`
 agent to resume. A stop you make with `task work:cs:stop`, or any other stop, is
-never restarted. Reconnects reuse the saved machine and workspace.
+never restarted. Arming refuses while another gh process, such as a project's own
+`cs:ports` forward or a mirror script, holds this Codespace's link; stop it
+first. Reconnects reuse the saved machine and workspace.
 
 Older generated recovery checkouts and stored checkpoints remain untouched during
 migration. Inspect them and move any desired code through Git before removing
