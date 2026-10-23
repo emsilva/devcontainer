@@ -191,6 +191,11 @@ def _utc(when):
     return time.strftime('%Y-%m-%d %H:%M:%SZ', time.gmtime(when))
 
 
+def _detail(error):
+    # Only a fixed ValueError text, up to its fix; anything else by its type, so no secret can leak.
+    return str(error).split(';')[0] if isinstance(error, ValueError) else type(error).__name__
+
+
 def _start_detail(result):
     # What a start routine that did not end Available reports, as fixed text.
     if result['outcome'] == 'failed' and result['last_state'] == 'Shutdown':
@@ -336,7 +341,7 @@ class Keeper:
         if reading.state != self.previous[0]:
             _LOG.info('Codespace %s at %s', reading.state, _utc(reading.at))
         self.runtime.update(phase='watching', error=None)
-        unanswered, due = self._unanswered(reading), None
+        continuing, due = self._close_or_continue(reading), None
         if reading.state == 'Available':
             self._up(reading)
         else:
@@ -348,7 +353,7 @@ class Keeper:
                     watch['hold_at_stop'] = hold
             if reading.state in DOWN:
                 watch['count'] += 1
-                if unanswered is not None:
+                if continuing is not None:
                     watch['kind'] = 'LIFETIME'  # its restart is under way; never a second rid for it
                 elif watch['count'] >= lifecycle.DOWN_READINGS and not watch.get('kind'):
                     due = self._classify(value, watch)
@@ -356,8 +361,8 @@ class Keeper:
                 watch['count'] = 0
         self.previous = reading.state, reading.at
         self.runtime['last_ok'] = {'at': reading.at, 'state': reading.state}
-        if unanswered is not None:
-            rid, posts, last_at = unanswered
+        if continuing is not None:
+            rid, posts, last_at = continuing
             # Within REPOST_AFTER of its intent the POST may still be landing (spec 6.4 step 5.4).
             if self.now() - last_at >= lifecycle.REPOST_AFTER:
                 return self._restart(watch, rid, posts)
@@ -367,8 +372,9 @@ class Keeper:
             self._planned(value)
         return reading.state == 'Available'
 
-    def _unanswered(self, reading):
-        """The rid, POST count and last intent time of a restart interrupted between intent and result.
+    def _close_or_continue(self, reading):
+        """Close a restart interrupted between its intent and result, or return (rid, POSTs, last intent
+        time) to continue it.
 
         Only a Shutdown reading within the start routine's own span continues it; any other
         state closes it with an interrupted result and no POST, since a Queued, Starting or
@@ -508,8 +514,7 @@ class Keeper:
                                      sleep=self._pause, tick=self._tick,
                                      gate=lambda: self._start_refusal(rid, watch))
         except Exception as error:
-            # Only fixed ValueError texts are kept; anything else is named by its type.
-            detail = str(error).split(';')[0] if isinstance(error, ValueError) else type(error).__name__
+            detail = _detail(error)
             self._close(rid)
             return self._failed(key, last, detail)
         _LOG.info('Restart %s: %s after %s POSTs, last state %s, HTTP %s', rid, result['outcome'], result['posts'],
@@ -627,10 +632,9 @@ class Keeper:
                                                          'task work:hold -- off ends the hold, and task work:status '
                                                          'shows the restart.')
             self._tick('resuming')
-            told = restore.resume(herdr, rid, restore.resume_text(rid, stopped_at, back_at), now=self.now,
-                                  sleep=self._pause, tick=self._tick)
+            told, name = restore.resume(herdr, rid, restore.resume_text(rid, stopped_at, back_at), now=self.now,
+                                        sleep=self._pause, tick=self._tick)
             last['resume'] = told
-            name = (restore.lead(herdr.agents()) or {}).get('name') if told != 'no-lead' else None
             who = f'its lead {name}' if name else 'its lead'
             _LOG.info('Resume %s: %s (%s)', rid, told, name or 'no lead')
             if told in ('delivered', 'resent'):
@@ -645,7 +649,7 @@ class Keeper:
                 outcome(f'resume not delivered to {name or "the lead"}',
                         f', but the resume message did not reach {who}; tell it to resume, and see task work:logs.')
         except Exception as error:
-            detail = str(error).split(';')[0] if isinstance(error, ValueError) else type(error).__name__
+            detail = _detail(error)
             _LOG.info('Restore %s failed: %s', rid, detail)
             outcome('restore failed: ' + detail, f', but restoring it failed ({detail}); tell its lead to resume, '
                                                  'and see task work:logs.')

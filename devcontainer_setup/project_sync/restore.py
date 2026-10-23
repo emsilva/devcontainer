@@ -232,22 +232,23 @@ def _proven(herdr, name, rid, now, sleep):
             return False
 
 
-def resume(herdr: Herdr, rid: str, text: str, *, now=time.time, sleep=time.sleep, tick=None) -> str:
-    """Spec 6.6: 'delivered', 'resent', 'no-lead', 'busy' or 'undelivered'. Never logs the screen.
+def resume(herdr: Herdr, rid: str, text: str, *, now=time.time, sleep=time.sleep,
+           tick=None) -> tuple[str, str | None]:
+    """Spec 6.6: ('delivered' | 'resent' | 'no-lead' | 'busy' | 'undelivered', the lead's name or None).
 
-    `tick`, when given, runs after each Herdr call, as the keeper's heartbeat.
+    Never logs the screen. `tick`, when given, runs after each Herdr call, as the keeper's heartbeat.
     """
     herdr = _ticked(herdr, tick)
     found = lead(herdr.agents())
     if found is None:
-        return 'no-lead'
+        return 'no-lead', None
     name = found['name']
     if not _settled(herdr, name, now, sleep):
-        return 'busy'
+        return 'busy', name
     herdr.prompt(name, text)
     if _proven(herdr, name, rid, now, sleep):
-        return 'delivered'
+        return 'delivered', name
     if _status(herdr, name) not in READY:
-        return 'undelivered'
+        return 'undelivered', name
     herdr.prompt(name, text)
-    return 'resent' if _proven(herdr, name, rid, now, sleep) else 'undelivered'
+    return ('resent' if _proven(herdr, name, rid, now, sleep) else 'undelivered'), name

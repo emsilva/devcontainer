@@ -588,7 +588,8 @@ class KeeperStepTests(unittest.TestCase):
         self.assertNotIn('pending_restore', value)
         self.assertEqual((value['armed'], value['owner_stop_at']), (True, stopped))
         arming.write(self.state, dict(value, pending_restore={'rid': rid, 'stopped_at': stopped, 'back_at': back}))
-        # A replacement keeper does not prompt again.
+        # A replacement keeper does not prompt again, though the lead is idle again.
+        herdr.list[0]['agent_status'] = 'idle'
         again = self.keeper([up(T0 + 1300, last_used_at=T0 - 100)], herdr=herdr)
         self.run_steps(again, [T0 + 1300])
         self.assertEqual(len(herdr.prompts), 1)

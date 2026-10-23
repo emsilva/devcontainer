@@ -257,39 +257,45 @@ class ResumeTests(unittest.TestCase):
     def resume(self, herdr, clock):
         return restore.resume(herdr, 'r-012820Z', 'text r-012820Z', now=clock.now, sleep=clock.sleep)
 
+    def test_resume_names_the_lead_it_prompted(self):
+        # The keeper's notice names the lead from this answer, with no Herdr call of its own.
+        clock = Clock()
+        self.assertEqual(self.resume(FakeHerdr(clock, ['idle'], working_after_prompt=True), clock),
+                         ('delivered', 'lead-proj'))
+
     def test_resume_delivers_once_the_lead_is_idle_on_two_reads(self):
         clock = Clock()
         # The first read finds the lead; then idle at 0, working at 10, idle at 20 and 30.
         herdr = FakeHerdr(clock, ['idle', 'idle', 'working', 'idle', 'idle'], working_after_prompt=True)
-        self.assertEqual(self.resume(herdr, clock), 'delivered')
+        self.assertEqual(self.resume(herdr, clock), ('delivered', 'lead-proj'))
         self.assertEqual(len(herdr.prompts), 1)
         # The prompt follows the second idle read in a row.
         self.assertEqual(herdr.prompts[0][2], 1_000_000.0 + 3 * restore.SETTLE)
         clock = Clock()
         by_screen = FakeHerdr(clock, ['idle'], shows_rid_after=1)
-        self.assertEqual(self.resume(by_screen, clock), 'delivered')
+        self.assertEqual(self.resume(by_screen, clock), ('delivered', 'lead-proj'))
         self.assertEqual(len(by_screen.prompts), 1)
 
     def test_resume_resends_once_when_rid_absent(self):
         clock = Clock()
         herdr = FakeHerdr(clock, ['idle'], shows_rid_after=2)
-        self.assertEqual(self.resume(herdr, clock), 'resent')
+        self.assertEqual(self.resume(herdr, clock), ('resent', 'lead-proj'))
         self.assertEqual(len(herdr.prompts), 2)
         self.assertEqual(herdr.prompts[1][2] - herdr.prompts[0][2], restore.PROOF_WAIT)
         clock = Clock()
         never = FakeHerdr(clock, ['idle'])
-        self.assertEqual(self.resume(never, clock), 'undelivered')
+        self.assertEqual(self.resume(never, clock), ('undelivered', 'lead-proj'))
         self.assertEqual(len(never.prompts), 2)
         clock = Clock()
         # Not idle after the first prompt (blocked on a dialog): no second prompt.
         blocked = FakeHerdr(clock, ['idle', 'idle', 'idle', 'blocked'])
-        self.assertEqual(self.resume(blocked, clock), 'undelivered')
+        self.assertEqual(self.resume(blocked, clock), ('undelivered', 'lead-proj'))
         self.assertEqual(len(blocked.prompts), 1)
 
     def test_resume_waits_for_idle_then_gives_up_busy(self):
         clock = Clock()
         herdr = FakeHerdr(clock, ['working'])
-        self.assertEqual(self.resume(herdr, clock), 'busy')
+        self.assertEqual(self.resume(herdr, clock), ('busy', 'lead-proj'))
         self.assertEqual(herdr.prompts, [])
         self.assertGreaterEqual(clock.t - 1_000_000.0, restore.IDLE_WAIT)
         self.assertLess(clock.t - 1_000_000.0, restore.IDLE_WAIT + 2 * restore.SETTLE)
@@ -317,14 +323,14 @@ class ResumeTests(unittest.TestCase):
         herdr = Counting(clock, ['idle'])
         restore.wait_reachable(herdr, now=clock.now, sleep=clock.sleep, tick=lambda: log.append('tick'))
         self.assertEqual(restore.resume(herdr, 'r-012820Z', 'text', now=clock.now, sleep=clock.sleep,
-                                        tick=lambda: log.append('tick')), 'undelivered')
+                                        tick=lambda: log.append('tick')), ('undelivered', 'lead-proj'))
         self.assertGreater(log.count('call'), 10)
         self.assertEqual(log, ['call', 'tick'] * log.count('call'))
 
     def test_resume_without_exactly_one_lead_sends_nothing(self):
         clock = Clock()
         two = FakeHerdr(clock, agents=[{'name': 'lead-other', 'agent_status': 'idle'}])
-        self.assertEqual(self.resume(two, clock), 'no-lead')
+        self.assertEqual(self.resume(two, clock), ('no-lead', None))
         self.assertEqual(two.prompts, [])
 
 
