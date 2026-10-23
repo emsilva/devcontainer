@@ -292,7 +292,8 @@ def _codex_entry(project, store, sid, index, *, state, scopes):
         sessions._validate_codex_dependencies(valid, meta, current)
         sessions._validate_codex_scope(valid, approved)
         retained[current], cutoff_by_id[current] = kept, cutoff
-        files.append(dict(session_id=current, path=path.name, size=len(kept), sha256=hashlib.sha256(kept).hexdigest(), scope_roots=approved, origin_root=meta['cwd']))
+        digest = hashlib.sha256(kept).hexdigest()
+        files.append(dict(session_id=current, path=path.name, size=len(kept), sha256=digest, blob=digest, scope_roots=approved, origin_root=meta['cwd']))
         observed.append((path, kept))
         visiting.remove(current)
         return cutoff
@@ -303,10 +304,8 @@ def _codex_entry(project, store, sid, index, *, state, scopes):
             raise ValueError('Native dependency prefix changed during checkpoint')
     if sum(len(data) for data in retained.values()) > sessions.MAX_BYTES:
         raise ValueError('Native dependency closure exceeds size limit')
-    for item in files:
-        item['blob'] = store.put(retained[item['session_id']])
     meta = _rows(retained[sid])[0]['payload']
-    return dict(schema=SCHEMA, agent='codex', session_id=sid, project_id=project.project_id, identity=project.identity, source_root=meta['cwd'], scope_roots=sorted({root for item in files for root in item['scope_roots']}), cutoff=dict(turn_id=cutoff, bytes=len(retained[sid])), files=files, title=sessions._catalog_metadata(retained[sid], 'codex', index[sid])['title'], updated_at=index[sid].stat().st_mtime)
+    return retained, dict(schema=SCHEMA, agent='codex', session_id=sid, project_id=project.project_id, identity=project.identity, source_root=meta['cwd'], scope_roots=sorted({root for item in files for root in item['scope_roots']}), cutoff=dict(turn_id=cutoff, bytes=len(retained[sid])), files=files, title=sessions._catalog_metadata(retained[sid], 'codex', index[sid])['title'], updated_at=index[sid].stat().st_mtime)
 
 
 def _claude_entry(project, store, sid, path, *, state, scopes):
@@ -339,7 +338,8 @@ def _claude_entry(project, store, sid, path, *, state, scopes):
     if any(path.with_suffix('').rglob('*')) or any((home / 'tasks' / sid).glob('*')):
         raise ValueError('Claude live dependency closure changed during checkpoint')
     origin = next(row['cwd'] for row in reversed(valid) if 'cwd' in row)
-    return dict(schema=SCHEMA, agent='claude', session_id=sid, project_id=project.project_id, identity=project.identity, source_root=origin, scope_roots=approved, cutoff=dict(turn_id=cutoff, bytes=len(kept)), files=[dict(session_id=sid, path=path.name, size=len(kept), sha256=hashlib.sha256(kept).hexdigest(), blob=store.put(kept), scope_roots=approved, origin_root=origin)], title=sessions._catalog_metadata(kept, 'claude', path)['title'], updated_at=path.stat().st_mtime)
+    digest = hashlib.sha256(kept).hexdigest()
+    return {sid: kept}, dict(schema=SCHEMA, agent='claude', session_id=sid, project_id=project.project_id, identity=project.identity, source_root=origin, scope_roots=approved, cutoff=dict(turn_id=cutoff, bytes=len(kept)), files=[dict(session_id=sid, path=path.name, size=len(kept), sha256=digest, blob=digest, scope_roots=approved, origin_root=origin)], title=sessions._catalog_metadata(kept, 'claude', path)['title'], updated_at=path.stat().st_mtime)
 
 
 def _import_aliases(project, state):
@@ -356,6 +356,7 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
     """Observe ordinary project sessions without a native process or writer lock."""
     scopes = _scopes(project, state, historical_roots)
     result = dict(schema=SCHEMA, entries=[], issues=[])
+    built = []
     def issue(agent, sid, error):
         result['issues'].append(dict(agent=agent, session_id=sid, reason=sessions.display_text(str(error), 400)))
     try:
@@ -383,7 +384,7 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
             approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, first, store)))
             if meta.get('cwd') not in approved:
                 continue
-            result['entries'].append(_codex_entry(project, store, sid, index, state=state, scopes=scopes))
+            built.append(_codex_entry(project, store, sid, index, state=state, scopes=scopes))
         except (ValueError, OSError) as exc:
             issue('codex', sid, exc)
     home = sessions.native_home('claude', env)
@@ -399,10 +400,21 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
             sid = path.stem
             try:
                 sessions.session_uuid(sid)
-                result['entries'].append(_claude_entry(project, store, sid, path, state=state, scopes=scopes))
+                built.append(_claude_entry(project, store, sid, path, state=state, scopes=scopes))
             except (ValueError, OSError) as exc:
                 issue('claude', sid, exc)
-    result['entries'] = [entry for entry in result['entries'] if not _unchanged_import(project, store, state, entry)]
+    # Decide before any put: no manifest would reference an unchanged import's
+    # blobs, and the store never deletes. Its retained bytes are still in hand.
+    for retained, entry in built:
+        if _unchanged_import(project, retained, state, entry):
+            continue
+        try:
+            for item in entry['files']:
+                store.put(retained[item['session_id']])
+        except (ValueError, OSError) as exc:
+            issue(entry['agent'], entry['session_id'], exc)
+            continue
+        result['entries'].append(entry)
     result['entries'].sort(key=lambda item: (-item['updated_at'], item['agent'], item['session_id']))
     return result
 
@@ -860,15 +872,14 @@ def _publication_receipts(project, state):
             yield receipt
 
 
-def _unchanged_import(project, store, state, entry):
+def _unchanged_import(project, retained, state, entry):
     for receipt in _publication_receipts(project, state):
         for baseline in receipt.get('baselines', []):
             if baseline.get('agent') == entry['agent'] and baseline.get('session_id') == entry['session_id']:
                 # A completed-turn advance is the only reason to export an import.
                 # Still collect and fully validate its dependency closure first.
                 if baseline.get('turn_id') == entry['cutoff']['turn_id']:
-                    retained = next(item for item in entry['files'] if item['session_id'] == entry['session_id'])
-                    data = store.read(retained['blob'])
+                    data = retained[entry['session_id']]
                     for owned in receipt.get('files', []):
                         if (Path(owned['destination']).name.endswith(entry['session_id'] + '.jsonl')
                                 and len(data) >= owned['size']
