@@ -19,6 +19,23 @@ RERUN = 'Merge it, then run task devcontainer:setup again to create the Codespac
 GH_TIMEOUT = 60  # seconds for each GitHub call while merging
 
 
+def move_first(name: str, branch: str, ref: str | None) -> str:
+    return f'Move {name} to {branch} first; it is on {ref}.'
+
+
+def save_receipt(path: Path, values: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix='.launch-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            json.dump(values, stream, indent=2)
+            stream.write('\n')
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def _with_github(command: str) -> str:
     """Run a remote command that reaches GitHub in a login shell.
 
@@ -259,18 +276,7 @@ class Codespaces:
         except ValueError as error:
             raise ValueError(f'{error}\nOpen https://{name}.github.dev/ in your browser.') from error
 
-    @staticmethod
-    def _save_receipt(path: Path, values: dict) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd, temporary = tempfile.mkstemp(prefix='.launch-', dir=path.parent)
-        try:
-            with os.fdopen(fd, 'w') as stream:
-                json.dump(values, stream, indent=2)
-                stream.write('\n')
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+    _save_receipt = staticmethod(save_receipt)
 
     @staticmethod
     def resource_settings(data: dict) -> dict:
@@ -308,8 +314,9 @@ class Codespaces:
                client: str, dotfiles_repo: str | None, receipt: Path,
                *, resume: str | None = None, location: str | None = None,
                retention: str | None = None, workspace: str | None = None,
-               machine_profile: dict | None = None) -> str:
-        """Create (or reuse) a codespace on branch, which must contain sha, the merged setup."""
+               machine_profile: dict | None = None, state_root: Path | None = None) -> str:
+        """Create (or reuse) a codespace on branch, which must contain sha, the merged setup. A reused
+        codespace confirmed on branch takes over its retired setup branch's receipt from state_root."""
         self._repository(repo)
         self._preflight_receipt(receipt)
         folder = workspace or f'/workspaces/{repo.split("/")[1]}'
@@ -323,7 +330,7 @@ class Codespaces:
                 raise ValueError('The selected codespace belongs to a different repository.')
             ref = data.get('git_status', {}).get('ref')
             if ref != branch:
-                raise ValueError(f'Move {name} to {branch} first; it is on {ref}.')
+                raise ValueError(move_first(name, branch, ref))
             settings = self.resource_settings(data)
             requested = {'machine': machine, 'idle_timeout_minutes': self._minutes(idle_timeout),
                          'location': location, 'retention_period_minutes': self._minutes(retention)}
@@ -331,6 +338,8 @@ class Codespaces:
                 if value is not None and value != settings[key]:
                     raise ValueError(f'The existing codespace has {key}={settings[key]!r}; '
                                      f'requested {value!r} was not applied. Review its actual resource settings.')
+            if state_root is not None:
+                migrate_receipt(state_root, repo, branch, name)
         try:
             if not name:
                 available = self.machines(repo, sha)
@@ -374,7 +383,7 @@ class Codespaces:
             if resume:
                 actual_branch = self._read_ssh(name, f'cd {shlex.quote(folder)} && git branch --show-current')
                 if actual_branch != branch:
-                    raise ValueError(f'Move {name} to {branch} first; it is on {actual_branch}.')
+                    raise ValueError(move_first(name, branch, actual_branch))
                 dirty = self._read_ssh(name, f'cd {shlex.quote(folder)} && git status --porcelain --untracked-files=all')
                 if dirty:
                     raise ValueError(f'The existing codespace has user changes. Preserve them before reuse:\n{dirty}')
@@ -440,5 +449,5 @@ def migrate_receipt(state_root: Path, repo: str, default: str, codespace: str) -
     if not found:
         return None
     _, _, values = max(found, key=lambda entry: entry[0])
-    Codespaces._save_receipt(target, dict(values, branch=default))
+    save_receipt(target, dict(values, branch=default))
     return target

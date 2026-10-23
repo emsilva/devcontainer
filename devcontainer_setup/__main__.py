@@ -9,13 +9,14 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 from urllib.parse import urlsplit
 
-from .codespaces import RERUN, Codespaces, migrate_receipt, receipt_path
+from .codespaces import RERUN, Codespaces, move_first, receipt_path
 from .discovery import scan
 from .git_ops import (GitPlan, ReviewChanged, default_branch, default_contains, fast_forward_checkout, git,
                       is_ancestor, merged_setup_branches, proposed_branch, remove_setup_worktree, remove_worktree,
@@ -588,7 +589,7 @@ def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume
             data = api.get(resume)
             settings = api.resource_settings(data)
             if data.get('git_status', {}).get('ref') != branch:
-                raise ValueError(f'Move {resume} to {branch} first; it is on {data.get("git_status", {}).get("ref")}.')
+                raise ValueError(move_first(resume, branch, data.get('git_status', {}).get('ref')))
             print(f'Existing codespace {resume}: {json.dumps(settings, sort_keys=True)}', flush=True)
             if not ui.confirm('Reuse this codespace with these existing resource settings?'):
                 raise Cancelled()
@@ -678,15 +679,23 @@ def _launch_on_default(api: Codespaces, project: Path, repo: str, default: str, 
     if not default_contains(project, default, sha):
         raise ValueError(f'Cannot confirm that origin/{default} contains the setup merge {sha[:12]}; no codespace was '
                          'created. Check origin, then run task devcontainer:setup again to create the Codespace.')
-    root = setup_worktree_root(discover_project(project))
-    paths = {merged: worktree} if merged else {}
-    for branch in dict.fromkeys([*paths, *merged_setup_branches(project, default)]):
+    # Pruning never blocks the codespace; each failure names what to run by hand.
+    paths, root, listed, here = {merged: worktree} if merged else {}, None, [], shlex.quote(str(project))
+    try:
+        root = setup_worktree_root(discover_project(project))
+        listed = merged_setup_branches(project, default)
+    except (ValueError, subprocess.CalledProcessError, OSError) as error:
+        print(f'Setup: could not list merged setup branches: {error}. Check them with '
+              f'git -C {here} branch --list "setup/*"', file=sys.stderr, flush=True)
+    for branch in dict.fromkeys([*paths, *listed]) if root else ():
         try:
             remove_setup_worktree(project, paths.get(branch) or root / branch.replace('/', '-'), branch,
                                   remote=True, root=root)
         except ValueError as error:
-            # Never blocks the codespace; the error names what to run by hand.
             print(f'Setup: {error}', file=sys.stderr, flush=True)
+        except (subprocess.CalledProcessError, OSError) as error:
+            print(f'Setup: could not remove {branch}: {error}. Check it, then run by hand: git -C {here} branch -D '
+                  f'{branch} && git -C {here} push origin --delete {branch}', file=sys.stderr, flush=True)
     if not fast_forward_checkout(project, default) and not is_ancestor(project, sha, 'HEAD'):
         # Never a branch switch, a merge into a feature branch or a rebase.
         print(f'Your checkout lacks the new setup files until you merge or pull {default}.', flush=True)
@@ -695,11 +704,9 @@ def _launch_on_default(api: Codespaces, project: Path, repo: str, default: str, 
         return None, config
     state_home = os.environ.get('XDG_STATE_HOME', '')
     state = Path(state_home) if state_home and Path(state_home).is_absolute() else Path.home() / '.local/state'
-    if launch.get('resume'):
-        migrate_receipt(state, repo, default, launch['resume'])
     dotfiles = preferences['dotfiles_repo'] if preferences['apply_dotfiles'] else None
     name = api.launch(repo, default, sha, dotfiles_repo=dotfiles, receipt=receipt_path(state, repo, default),
-                      workspace=config.get('workspaceFolder'),
+                      workspace=config.get('workspaceFolder'), state_root=state,
                       machine_profile=_machine_profile(project) if dotfiles else None, **launch)
     return name, config
 
@@ -751,15 +758,15 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
     if not github:
         print(f'Note: {NO_GITHUB_ORIGIN} Commit-only setup works without it.', file=sys.stderr, flush=True)
     else:
-        default = default_branch(project)
+        base = default_branch(project)
         try:
-            pending = api.setup_prs(github, default)
+            pending = api.setup_prs(github, base)
         except ValueError as error:
             # Commit only needs no GitHub; a launch checks again before it pushes.
             pending = []
             print(f'Note: cannot check GitHub for an open setup PR: {error}', file=sys.stderr, flush=True)
         if pending:
-            return _resume_setup_pr(ui, api, project, github, default, pending, resume, preferences)
+            return _resume_setup_pr(ui, api, project, github, base, pending, resume, preferences)
     pull = None
     with setup_checkout(project) as (source, default):
         if default:

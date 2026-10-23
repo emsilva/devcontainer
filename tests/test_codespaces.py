@@ -175,6 +175,24 @@ class CodespacesTests(unittest.TestCase):
         self.assertFalse(any(c[1] == 'codespace' for c in self.runner.calls))
         self.assertFalse(self.receipt.exists())
 
+    def test_reuse_migrates_a_receipt_only_once_confirmed_on_default(self):
+        state = Path(self.tmp.name) / 'state'
+        values = {'codespace': 'new-space', 'repository': 'owner/project', 'branch': 'setup/devcontainer',
+                  'commit': 'a' * 40, 'validated_commit': 'a' * 40, 'rebuild_pending': False}
+        self.api._save_receipt(receipt_path(state, 'owner/project', 'setup/devcontainer'), values)
+        target = receipt_path(state, 'owner/project', 'main')
+        self.runner.api_ref = 'setup/devcontainer'
+        with self.assertRaisesRegex(ValueError, 'Move new-space to main first'):
+            self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
+                            None, target, resume='new-space', state_root=state)
+        self.assertFalse(target.exists())
+        self.runner.api_ref = 'main'
+        self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
+                        None, target, resume='new-space', state_root=state)
+        self.assertEqual(json.loads(target.read_text())['branch'], 'main')
+        # The migrated receipt certified the image: no rebuild.
+        self.assertFalse(any(c[1:3] == ['codespace', 'rebuild'] for c in self.runner.calls))
+
     def test_receipt_migrates_from_retired_setup_branch(self):
         state = Path(self.tmp.name) / 'state'
         old = receipt_path(state, 'owner/project', 'setup/devcontainer')

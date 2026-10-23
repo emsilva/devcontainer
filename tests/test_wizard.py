@@ -1223,6 +1223,20 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.assertIn('push origin --delete setup/devcontainer', seen['output'])
         self.assert_created_on_main_at(self.gh()['calls'], self.origin_git('rev-parse', 'main'))
 
+    def test_failed_prune_never_blocks_the_codespace(self):
+        for label, target, error in (('listing', 'merged_setup_branches', ValueError('fatal: bad object')),
+                                     ('removal', 'remove_setup_worktree', OSError('permission denied'))):
+            with self.subTest(label):
+                self.setUp()
+                self.checkout_feature()
+                with patch(f'devcontainer_setup.__main__.{target}', side_effect=error):
+                    seen = self.interact(dict(self.LAUNCH, **{self.MERGE: True}))
+                self.assertEqual(seen['result'], 0, seen['output'])
+                self.assertIn(str(error), seen['output'])
+                if label == 'listing':
+                    self.assertIn('branch --list', seen['output'])
+                self.assert_created_on_main_at(self.gh()['calls'], self.origin_git('rev-parse', 'main'))
+
     def test_no_second_setup_pr_when_the_first_check_failed(self):
         from devcontainer_setup.git_ops import GitPlan
         self.checkout_feature()
@@ -1262,7 +1276,9 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.assertEqual(args, ('owner/project', 'main', sha))
         self.assertEqual(kwargs['receipt'], receipt_path(self.state, 'owner/project', 'main'))
         self.assertEqual(kwargs['workspace'], '/workspaces/kept')
-        self.assertEqual(json.loads(kwargs['receipt'].read_text()), dict(values, branch='main'))
+        # launch migrates it, after its own check that the codespace is on main; never the caller.
+        self.assertEqual(kwargs['state_root'], self.state)
+        self.assertFalse(kwargs['receipt'].exists())
         self.assertEqual(json.loads(old.read_text()), values)
 
     def test_no_origin_keeps_current_flow(self):
