@@ -363,7 +363,8 @@ class SetupWorktreeTests(unittest.TestCase):
         return {'branch': git(project, 'branch', '--show-current'), 'head': git(project, 'rev-parse', 'HEAD'),
                 'status': git(project, 'status', '--porcelain', '--untracked-files=all'),
                 'index': git(project, 'ls-files', '--stage'), 'files': files, 'heads': heads,
-                'stash': git(project, 'stash', 'list')}
+                'stash': (git(project, 'stash', 'list'),
+                          run(project, 'rev-parse', '--verify', '--quiet', 'refs/stash').stdout.strip())}
 
     def recorded(self):
         """Record each Git command the helpers run, minus `git -C <project>`."""
@@ -391,6 +392,8 @@ class SetupWorktreeTests(unittest.TestCase):
         (project / 'feature.txt').write_text('unpushed\n')
         git(project, 'add', 'feature.txt')
         git(project, 'commit', '--quiet', '-m', 'Unpushed feature')
+        (project / 'app.txt').write_text('stashed owner edit\n')
+        git(project, 'stash', 'push', '--quiet', '-m', 'owner stash')
         (project / 'app.txt').write_text('owner edit\n')
         (project / 'notes.txt').write_text('untracked owner work\n')
         stale = git(project, 'rev-parse', 'refs/remotes/origin/main')
@@ -411,6 +414,7 @@ class SetupWorktreeTests(unittest.TestCase):
         self.assertFalse((path / 'feature.txt').exists())
         self.assertFalse((path / 'notes.txt').exists())
         self.assertEqual(self.snapshot(project), before)
+        self.assertTrue(before['stash'][1])
         self.assertEqual((project / 'notes.txt').read_text(), 'untracked owner work\n')
         # Fetches only origin <default>, sets no upstream and never pushes.
         self.assertEqual(git(project, 'rev-parse', 'refs/remotes/origin/main'), fresh)
@@ -436,6 +440,8 @@ class SetupWorktreeTests(unittest.TestCase):
         stray = self.root / 'setup-devcontainer-2'
         stray.mkdir()
         (stray / 'keep.txt').write_text('stray\n')
+        detached = self.root / 'detached-leftover'
+        git(project, 'worktree', 'add', '--quiet', '--detach', str(detached), 'main')
         error = io.StringIO()
         with contextlib.redirect_stderr(error):
             second, second_branch = setup_worktree(project, self.root)
@@ -448,6 +454,8 @@ class SetupWorktreeTests(unittest.TestCase):
         self.assertEqual(git(first, 'branch', '--show-current'), first_branch)
         self.assertIn(str(first), error.getvalue())
         self.assertIn(first_branch, error.getvalue())
+        self.assertIn(f'{detached} on a detached HEAD', error.getvalue())
+        self.assertTrue(detached.exists())
 
     def commit_in(self, path, name='setup.txt'):
         (path / name).write_text('setup\n')
@@ -551,8 +559,51 @@ class SetupWorktreeTests(unittest.TestCase):
         self.assertNotIn(str(path), git(self.project, 'worktree', 'list'))
         self.assertEqual(git(self.project, 'rev-parse', f'refs/heads/{branch}'), sha)
 
+    def refs(self, project):
+        return (git(project, 'worktree', 'list'), git(project, 'for-each-ref', '--exclude=refs/remotes/origin/main'),
+                git(self.origin(project), 'for-each-ref'))
+
+
+    def test_failed_worktree_add_leaves_no_branch(self):
+        self.root.mkdir(parents=True)
+        self.root.chmod(0o500)
+        self.addCleanup(self.root.chmod, 0o700)
+        before = self.refs(self.project)
+        with self.assertRaises(ValueError):
+            setup_worktree(self.project, self.root)
+        self.assertEqual(git(self.project, 'branch', '--list', 'setup/*'), '')
+        self.assertEqual(self.refs(self.project), before)
+
+
+    def test_setup_fetches_leave_fetch_head_alone(self):
+        project = self.project
+        fetch_head = project / '.git/FETCH_HEAD'
+        fetch_head.write_text('owner fetch head\n')
+        self.push_to_origin(project, 'remote.txt')
+        path, branch = setup_worktree(project, self.root)
+        self.assertTrue(fast_forward_checkout(project, 'main'))
+        self.assertEqual(fetch_head.read_text(), 'owner fetch head\n')
+
+
+    def test_fetch_failure_without_origin_head_suggests_set_head(self):
+        project, origin = self.project, self.origin(self.project)
+        git(origin, 'branch', '-m', 'main', 'trunk')
+        git(origin, 'symbolic-ref', 'HEAD', 'refs/heads/trunk')
+        with self.assertRaisesRegex(ValueError, 'git remote set-head origin --auto'):
+            setup_worktree(project, self.root)
+        git(project, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/gone')
+        with self.assertRaises(ValueError) as caught:
+            setup_worktree(project, self.root)
+        self.assertNotIn('set-head', str(caught.exception))
+        # Once origin/HEAD names the real default, as set-head would, the cut works.
+        git(project, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/trunk')
+        path, branch = setup_worktree(project, self.root)
+        self.assertEqual(git(path, 'rev-parse', 'HEAD'), git(origin, 'rev-parse', 'trunk'))
+        self.assertEqual(git(project, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/setup'), branch)
+
+
     def test_fast_forward_only_when_clean_on_default(self):
-        for case in ('clean', 'dirty', 'untracked', 'feature', 'diverged', 'ignored'):
+        for case in ('clean', 'dirty', 'untracked', 'feature', 'detached', 'diverged', 'ignored'):
             with self.subTest(case=case):
                 project = self.make_project(f'ff-{case}')
                 if case == 'ignored':
@@ -568,6 +619,8 @@ class SetupWorktreeTests(unittest.TestCase):
                     (project / 'notes.txt').write_text('owner notes\n')
                 elif case == 'feature':
                     git(project, 'switch', '--quiet', '-c', 'feature/local')
+                elif case == 'detached':
+                    git(project, 'switch', '--quiet', '--detach')
                 elif case == 'diverged':
                     (project / 'app.txt').write_text('local commit\n')
                     git(project, 'commit', '--quiet', '-am', 'Local only')

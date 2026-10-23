@@ -390,11 +390,6 @@ def _repository(project: Path) -> str:
     return repo
 
 
-def _state_root() -> Path:
-    state_home = os.environ.get('XDG_STATE_HOME', '')
-    return Path(state_home) if state_home and Path(state_home).is_absolute() else Path.home() / '.local/state'
-
-
 def _check_revision(metadata: dict, ref: str, upgrade: bool, default: str | None = None) -> None:
     if metadata and metadata.get('sourceRef') != ref and not upgrade:
         if default:
@@ -410,9 +405,9 @@ def setup_checkout(project: Path):
     if not _github_repository(project):
         yield project, None
         return
-    from .project_sync.state import discover_project
+    from .project_sync.state import discover_project, setup_worktree_root
     default = default_branch(project)
-    root = _state_root() / 'devcontainer-setup/setup-worktrees' / discover_project(project).project_id
+    root = setup_worktree_root(discover_project(project))
     worktree, branch = setup_worktree(project, root)
     start = git(project, 'rev-parse', f'refs/heads/{branch}')
     try:
@@ -723,7 +718,9 @@ def interactive(project: Path, found: dict, metadata: dict, ref: str, resume: st
             _preferences_after_commit(project, preferences)
             if launch:
                 repo = launch.pop('repo')
-                receipt = _state_root() / 'devcontainer-setup' / (hashlib.sha256(f'{repo}:{plan.branch}'.encode()).hexdigest()[:16] + '.json')
+                state_home = os.environ.get('XDG_STATE_HOME', '')
+                state = Path(state_home) if state_home and Path(state_home).is_absolute() else Path.home() / '.local/state'
+                receipt = state / 'devcontainer-setup' / (hashlib.sha256(f'{repo}:{plan.branch}'.encode()).hexdigest()[:16] + '.json')
                 config = json.loads(files['.devcontainer/devcontainer.json'])
                 name = api.launch(plan, repo, dotfiles_repo=preferences['dotfiles_repo'] if chosen['dotfiles'] else None,
                                   receipt=receipt, workspace=config.get('workspaceFolder'),

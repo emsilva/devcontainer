@@ -569,6 +569,8 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         (self.root / 'go.mod').write_text('module example.com/feature\n\ngo 1.26\n')
         self.git('add', '.')
         self.git('commit', '--quiet', '-m', 'Feature work')
+        (self.root / 'package.json').write_text('{"engines":{"node":"24"},"stashed":true}\n')
+        self.git('stash', 'push', '--quiet', '-m', 'owner stash')
         (self.root / 'package.json').write_text('{"engines":{"node":"24"},"private":true}\n')
         (self.root / 'scratch.txt').write_text('untracked owner work\n')
 
@@ -577,7 +579,9 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
                  if path.is_file() and '.git' not in path.relative_to(self.root).parts}
         return (self.git('branch', '--show-current'), self.git('rev-parse', 'HEAD'),
                 self.git('status', '--porcelain', '--untracked-files=all'), self.git('ls-files', '--stage'),
-                files, self.git('stash', 'list'))
+                files, self.git('stash', 'list'),
+                subprocess.run(['git', '-C', str(self.root), 'rev-parse', '--verify', '--quiet', 'refs/stash'],
+                               capture_output=True, text=True).stdout.strip())
 
     def worktree_root(self):
         from devcontainer_setup.project_sync.state import discover_project
@@ -650,6 +654,26 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.assertIn('devcontainers/features/node:1', result.stdout)
         self.assertEqual(self.snapshot(), before)
         self.assert_nothing_left()
+
+    def test_dry_run_failing_inside_render_leaves_nothing(self):
+        import contextlib
+        import io
+        from devcontainer_setup.__main__ import main
+        self.checkout_feature()
+        before = self.snapshot()
+        for error in (ValueError('render rejected input'), KeyboardInterrupt()):
+            with self.subTest(type(error).__name__):
+                output = io.StringIO()
+                with patch('devcontainer_setup.__main__.render', side_effect=error), \
+                        contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                    if isinstance(error, ValueError):
+                        self.assertEqual(main(['--project', str(self.root), '--dry-run']), 1)
+                    else:
+                        with self.assertRaises(KeyboardInterrupt):
+                            main(['--project', str(self.root), '--dry-run'])
+                self.assertEqual(self.snapshot(), before)
+                self.assert_nothing_left()
+
 
     def test_dry_run_removes_its_worktree_on_error(self):
         # Only origin's main has the unresolved pins; this checkout has none.

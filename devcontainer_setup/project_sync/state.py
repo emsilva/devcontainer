@@ -152,6 +152,13 @@ def state_dir(project: Project, env: Mapping | None = None) -> Path:
     return _state_home(env) / 'devcontainer-setup/projects' / project.project_id
 
 
+def setup_worktree_root(project: Project, env: Mapping | None = None) -> Path:
+    """Where setup's temporary worktrees for this project go, beside its state; not created here."""
+    if not re.fullmatch(r'[0-9a-f]{24}', project.project_id):
+        raise ValueError('Invalid project ID')
+    return _state_home(env) / 'devcontainer-setup/setup-worktrees' / project.project_id
+
+
 @contextmanager
 def _parent(path: Path, create: bool = False, private: bool = False):
     """Walk using directory descriptors so symlink swaps cannot redirect writes."""
