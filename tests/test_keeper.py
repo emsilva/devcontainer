@@ -268,6 +268,56 @@ class KeeperStepTests(unittest.TestCase):
         self.assertEqual(self.api.posts, 0)
         self.assertIn('was not restarted: 2 restarts already in 24 hours', self.notes[0])
 
+    def test_a_stop_that_began_during_a_hold_is_never_restarted(self):
+        # D5, R32: the hold at the stop's first reading counts, even when it ends (or is turned off)
+        # before the stop is classified or a start request would go out.
+        anchor = T0 - 3600
+        for case in ('ends before the third reading', 'turned off after the first reading'):
+            with self.subTest(case=case):
+                self.setUp()
+                self.clock = T0
+                stops = [anchor + LIFE + 30 + 60 * i for i in range(3)]
+                arming.write(self.state, dict(arming.read(self.state), hold_until=stops[0] + 90))
+                readings = [up(T0, last_used_at=anchor)] + [down(at) for at in stops]
+                if case.startswith('turned off'):
+                    def hold_off(at=stops[1]):
+                        arming.write(self.state, dict(arming.read(self.state), hold_until=None))
+                        return down(at)
+                    readings[2] = hold_off
+                k = self.keeper(readings + [down(stops[2] + 60 * i) for i in range(1, 40)], herdr=FakeHerdr())
+                self.run_steps(k, [T0] + stops + [stops[2] + 60 * i for i in range(1, 40)])
+                self.assertEqual(self.api.posts, 0)
+                self.assertEqual(lifecycle.Ledger(self.state / keeper.LEDGER).rows(), [])
+                self.assertEqual(len(self.notes), 1)
+                self.assertIn('was not restarted: it stopped during your hold until '
+                              + arming.format_time(stops[0] + 90), self.notes[0])
+
+    def test_a_stop_that_began_in_a_hold_stays_held_through_an_outage(self):
+        # The reviewer's d5_hold_outage: first down reading 10 min inside the hold, then 40 min of
+        # failed GETs, then Shutdown readings long after the hold ended.
+        anchor = T0 - 3600
+        first = anchor + LIFE
+        arming.write(self.state, dict(arming.read(self.state), hold_until=first + 600))
+        later = [first + 60 + 60 * i for i in range(60)]
+        readings = [up(T0, last_used_at=anchor), down(first)] + [
+            failed(at) if at < first + 60 + 40 * 60 else down(at) for at in later]
+        k = self.keeper(readings, herdr=FakeHerdr())
+        self.run_steps(k, [T0, first] + later)
+        self.assertEqual(self.api.posts, 0)
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn('stopped during your hold', self.notes[0])
+        # A replacement keeper within minutes carries the hold with the watch.
+        self.setUp()
+        self.clock = T0
+        arming.write(self.state, dict(arming.read(self.state), hold_until=first + 60))
+        k = self.keeper([up(T0, last_used_at=anchor), down(first)], herdr=FakeHerdr())
+        self.run_steps(k, [T0, first])
+        self.assertEqual(self.runtime()['down']['hold_at_stop'], first + 60)
+        replacement = self.keeper([down(first + 120 + 60 * i) for i in range(5)], herdr=FakeHerdr())
+        self.run_steps(replacement, [first + 120 + 60 * i for i in range(5)])
+        self.assertEqual(self.api.posts, 0)
+        self.assertIn('stopped during your hold', self.notes[0])
+
     def test_a_hold_or_owner_stop_during_the_wait_refuses_at_the_post(self):
         for change in ('hold', 'owner'):
             with self.subTest(change=change):

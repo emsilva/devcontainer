@@ -245,6 +245,8 @@ class Keeper:
             runtime['down'] = {'count': watch['count'], 'first_at': watch['first_at']}
             if watch.get('kind') in ('OWNER', 'LIFETIME', 'OTHER'):
                 runtime['down']['kind'] = watch['kind']
+            if isinstance(watch.get('hold_at_stop'), (int, float)):
+                runtime['down']['hold_at_stop'] = watch['hold_at_stop']
             if isinstance(old.get('last_up_at'), (int, float)):
                 runtime['last_up_at'] = old['last_up_at']
         last = old.get('last_ok')
@@ -338,6 +340,10 @@ class Keeper:
         else:
             if watch['first_at'] is None:
                 watch['first_at'] = reading.at  # the stop's first non-Available reading
+                hold = value.get('hold_until')
+                if isinstance(hold, (int, float)) and hold > reading.at:
+                    # D5: a stop that began in a hold is never restarted, whatever the hold does later.
+                    watch['hold_at_stop'] = hold
             if reading.state in DOWN:
                 watch['count'] += 1
                 if unanswered is not None:
@@ -426,7 +432,7 @@ class Keeper:
                               'other than the 12-hour limit; run task work:cs to start it.')
         elif kind == 'LIFETIME':
             try:
-                reason = self._start_refusal(None, watch['first_at'])
+                reason = self._start_refusal(None, watch)
             except OSError:
                 reason = 'the restart ledger is unreadable'
             if reason is None:
@@ -437,15 +443,19 @@ class Keeper:
         watch['kind'] = kind
         return due
 
-    def _start_refusal(self, rid, stop_at):
-        """The gate, read afresh: arming, hold and budget, and no owner stop since the stop.
+    def _start_refusal(self, rid, watch):
+        """The gate, read afresh: arming, hold and budget, no hold when the stop began (D5),
+        and no owner stop since the stop.
 
         Asked at classification and again at each POST. The rid's own ledger rows are not
         another restart, and an owner stop after the stop began means keep it stopped.
         """
         value, rows = arming.read(self.state), self.ledger.rows()
         reason = lifecycle.gate(arming=value, rows=[row for row in rows if row['rid'] != rid], now=self.now())
-        since = min([stop_at] + [row['at'] for row in rows if row['rid'] == rid])
+        held = watch.get('hold_at_stop')
+        if reason is None and isinstance(held, (int, float)):
+            reason = 'it stopped during your hold until ' + arming.format_time(held)
+        since = min([watch['first_at']] + [row['at'] for row in rows if row['rid'] == rid])
         owner = value.get('owner_stop_at')
         if reason is None and isinstance(owner, (int, float)) and owner >= since:
             reason = 'you stopped it at ' + arming.format_time(owner)
@@ -486,7 +496,7 @@ class Keeper:
         try:
             result = lifecycle.start(self.api, ledger=self.ledger, rid=rid, posts=posts, now=self.now,
                                      sleep=self._pause, tick=self._tick,
-                                     gate=lambda: self._start_refusal(rid, stop_at))
+                                     gate=lambda: self._start_refusal(rid, watch))
         except Exception as error:
             # Only fixed ValueError texts are kept; anything else is named by its type.
             detail = str(error).split(';')[0] if isinstance(error, ValueError) else type(error).__name__
