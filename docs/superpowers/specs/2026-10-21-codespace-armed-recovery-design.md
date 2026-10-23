@@ -150,7 +150,7 @@ What runs on the Mac for an armed project: the Herdr TUI and its per-machine pro
 
 | File | Single writer | Content |
 |---|---|---|
-| `arming.json` | the CLI, under `workspace-control.lock` | schema, armed, armed_at, gh_user, consent text sha256 and time, billable_owner, ports, hold_until, owner_stop_at |
+| `arming.json` | the CLI, under `workspace-control.lock`; the keeper only to clear a consumed `pending_restore`, under the same lock | schema, armed, armed_at, gh_user, consent text sha256 and time, billable_owner, ports, hold_until, owner_stop_at, pending_restore |
 | `keeper-runtime.json` | the keeper | pid, nonce, process_identity, heartbeat_at, phase, last GET (time, state, pending), anchor {at, source}, K4 child {pid, ports up, ports skipped}, last restart summary |
 | `keeper-ledger.jsonl` | the keeper, append-only | one `intent` line before and one `result` line after each start request: rid, UTC time, HTTP status, never a body |
 | `keeper.log` | the keeper | rotating text log, one line per phase change, UTC time and pid on every line |
