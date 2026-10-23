@@ -270,6 +270,15 @@ class OwnerPowerTests(unittest.TestCase):
                 self.assertEqual(len(notes), 1)
                 self.assertIn('was not restarted: you stopped it at', notes[0])
 
+    def test_owner_commands_inside_a_codespace_say_to_run_them_on_the_mac(self):
+        os.environ['CODESPACES'] = 'true'
+        for restart, task in ((False, 'work:cs:stop'), (True, 'work:cs:restart')):
+            with self.subTest(task=task):
+                api = OwnerAPI(self.state, [])
+                with self.assertRaisesRegex(ValueError, f'Run task {task} on your Mac'):
+                    self.power(api, restart=restart)
+                self.assertEqual(api.calls, [])
+
     def test_owner_commands_refuse_environment_tokens(self):
         for name in ('GH_TOKEN', 'GITHUB_TOKEN'):
             for restart in (False, True):

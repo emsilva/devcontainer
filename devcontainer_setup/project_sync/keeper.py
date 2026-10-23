@@ -231,7 +231,9 @@ class Keeper:
         if isinstance(notified, dict):
             runtime['notified'] = notified
         if isinstance(old.get('last_restart'), dict):
-            runtime['last_restart'] = old['last_restart']
+            runtime['last_restart'] = dict(old['last_restart'])
+            if runtime['last_restart'].get('outcome') in ('restarting', 'restoring'):
+                runtime['last_restart']['outcome'] = 'interrupted'  # its keeper died mid-flow
         beat = old.get('heartbeat_at')
         if not (isinstance(beat, (int, float)) and self.now() - beat <= HEARTBEAT_STALE):
             # After a longer gap the old anchor and readings say nothing about this run.
@@ -569,11 +571,24 @@ class Keeper:
         key = 'restore-' + rid
         if ((self.runtime.get('last_restart') or {}).get('rid') == rid or key in self.runtime['notified']
                 or self.now() - back_at > PENDING_FRESH):
+            self._clear_pending(rid)  # consumed or expired
             return
         last = {'rid': rid, 'at': self.now(), 'stopped_at': stopped_at, 'back_at': back_at, 'outcome': 'restoring'}
         self.runtime['last_restart'] = last
+        self._clear_pending(rid)
         _LOG.info('Restore %s after your restart', rid)
         self._restore(key, last, rid, stopped_at, back_at, f'{self.project} is back from your restart ({rid})', 'back')
+
+    def _clear_pending(self, rid):
+        # The keeper's one arming.json write: under the CLI's lock, never waiting for it. A skipped
+        # clear is retried on a later pass; the rid check holds the restart to one restore meanwhile.
+        try:
+            with locked(self.state / 'workspace-control.lock'):
+                arming.clear_pending_restore(self.state, rid)
+        except BlockingIOError:
+            pass
+        except (OSError, ValueError) as error:
+            _LOG.info('Planned restart %s not cleared from arming.json: %s', rid, type(error).__name__)
 
     def _machine(self):
         try:

@@ -164,6 +164,9 @@ def _owner_power(project, state, *, restart, api=None, now=time.time, sleep=time
     from . import arming, keeper, lifecycle
     from .codespaces import start_error
     from .state import locked, read_json
+    if os.environ.get('CODESPACES') == 'true':
+        verb = 'restart' if restart else 'stop'
+        raise ValueError(f'Run task work:cs:{verb} on your Mac to {verb} the Codespace')
     for name in ('GH_TOKEN', 'GITHUB_TOKEN'):
         if os.environ.get(name):
             raise ValueError(f'Unset {name} before stopping or restarting the Codespace; it must use a real gh account.')

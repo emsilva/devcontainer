@@ -583,6 +583,11 @@ class KeeperStepTests(unittest.TestCase):
         self.assertEqual(len(self.notes), 1)
         self.assertIn('is back from your restart (' + rid + ')', self.notes[0])
         self.assertEqual(self.runtime()['last_restart']['rid'], rid)
+        # Consumed, so it is cleared; the rest of arming.json stays as it was.
+        value = arming.read(self.state)
+        self.assertNotIn('pending_restore', value)
+        self.assertEqual((value['armed'], value['owner_stop_at']), (True, stopped))
+        arming.write(self.state, dict(value, pending_restore={'rid': rid, 'stopped_at': stopped, 'back_at': back}))
         # A replacement keeper does not prompt again.
         again = self.keeper([up(T0 + 1300, last_used_at=T0 - 100)], herdr=herdr)
         self.run_steps(again, [T0 + 1300])
@@ -596,6 +601,59 @@ class KeeperStepTests(unittest.TestCase):
         k = self.keeper([up(T0, last_used_at=T0 - 3 * 3600)], herdr=herdr)
         self.run_steps(k, [T0])
         self.assertEqual((herdr.prompts, self.notes), ([], []))
+        self.assertNotIn('pending_restore', arming.read(self.state))
+
+    def test_a_pending_restore_survives_a_held_control_lock(self):
+        # The keeper never waits on workspace-control.lock; dedup by rid still holds it to one resume.
+        from devcontainer_setup.project_sync.state import locked
+        rid = 'o-000100Z'
+        arming.write(self.state, dict(arming.read(self.state),
+                                      pending_restore={'rid': rid, 'stopped_at': T0 - 300, 'back_at': T0 - 30}))
+        herdr = FakeHerdr()
+        k = self.keeper([up(T0, last_used_at=T0 - 100)], herdr=herdr)
+        with locked(self.state / 'workspace-control.lock'):
+            self.run_steps(k, [T0, T0 + 60])
+        self.assertEqual(len(herdr.prompts), 1)
+        self.assertIn('pending_restore', arming.read(self.state))
+        self.run_steps(k, [T0 + 120])
+        self.assertEqual(len(herdr.prompts), 1)
+        self.assertNotIn('pending_restore', arming.read(self.state))
+
+    def test_the_same_keeper_reads_a_planned_restart_as_yours(self):
+        # work:cs:restart while this keeper watches: its stop is OWNER, the keeper never starts it,
+        # and the restore runs once from pending_restore when it is back.
+        herdr, anchor, rid = FakeHerdr(), T0 - 3600, 'o-000500Z'
+
+        def owner_stop():
+            arming.record_owner_stop(self.state, self.clock)
+            return up(self.clock, last_used_at=anchor)
+
+        def back():
+            arming.write(self.state, dict(arming.read(self.state), pending_restore={
+                'rid': rid, 'stopped_at': T0 + 60, 'back_at': self.clock}))
+            return up(self.clock, last_used_at=self.clock - 40)
+        times = [T0 + 60 * i for i in range(12)]
+        readings = [up(T0, last_used_at=anchor), owner_stop] + [down(at, 'ShuttingDown') for at in times[2:5]] \
+            + [down(at) for at in times[5:8]] + [back, up(times[9], last_used_at=times[8] - 40)]
+        k = self.keeper(readings, herdr=herdr)
+        self.run_steps(k, times)
+        self.assertEqual(self.api.posts, 0)
+        self.assertEqual(lifecycle.Ledger(self.state / keeper.LEDGER).rows(), [])
+        self.assertEqual(len(herdr.prompts), 1)
+        self.assertEqual(herdr.prompts[0][1], restore.resume_text(rid, T0 + 60, times[8]))
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn('is back from your restart (' + rid + ')', self.notes[0])
+        self.assertNotIn('pending_restore', arming.read(self.state))
+
+    def test_an_in_progress_restart_left_by_a_dead_keeper_reads_interrupted(self):
+        for outcome in ('restarting', 'restoring'):
+            with self.subTest(outcome=outcome):
+                saved = {'codespace': 'cs-1', 'heartbeat_at': T0 - 30,
+                         'last_restart': {'rid': 'r-000001Z', 'at': T0 - 600, 'outcome': outcome}}
+                atomic_write(self.state / keeper.RUNTIME, json.dumps(saved).encode())
+                k = self.keeper([up(T0, last_used_at=T0 - 700)])
+                self.run_steps(k, [T0])
+                self.assertEqual(self.runtime()['last_restart']['outcome'], 'interrupted')
 
     def test_a_hold_suppresses_the_resume_prompt(self):
         rid = 'o-000100Z'

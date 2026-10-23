@@ -145,3 +145,11 @@ def hold_until(value: str, now: float) -> float | None:
 
 def record_owner_stop(state: Path, now: float) -> None:
     write(state, dict(read(state), owner_stop_at=now))
+
+
+def clear_pending_restore(state: Path, rid: str) -> None:
+    """Drop the planned restart `rid` the keeper consumed; a newer one stays."""
+    value = read(state)
+    pending = value.get('pending_restore')
+    if isinstance(pending, dict) and pending.get('rid') == rid:
+        write(state, {key: item for key, item in value.items() if key != 'pending_restore'})
