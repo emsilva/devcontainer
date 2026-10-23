@@ -29,26 +29,34 @@ def is_proxy(command, codespace: str, state) -> bool:
             and command.rstrip().endswith(f' {codespace} {state}'))
 
 
-def stale_proxies(codespace: str, state: Path, before: float, *, run=subprocess.run) -> list[int]:
+def _elapsed(text):
+    # ps etime: [[dd-]hh:]mm:ss, in seconds; None for anything else.
+    days, dash, clock = text.rpartition('-')
+    parts = clock.split(':')
+    if not 2 <= len(parts) <= 3 or not all(part.isdigit() for part in parts) or (dash and not days.isdigit()):
+        return None
+    seconds = 0
+    for part in parts:
+        seconds = seconds * 60 + int(part)
+    return int(days or 0) * 86400 + seconds
+
+
+def stale_proxies(codespace: str, state: Path, before: float, *, run=subprocess.run, now=time.time) -> list[int]:
     """Pids of this project's Herdr proxies started before `before`; [] when ps cannot be read."""
     try:
-        # lstart is localized ("qui 22 out" under pt_BR), and strptime reads it in English.
-        listing = run(['ps', '-axo', 'pid=,lstart=,command='], capture_output=True, text=True, timeout=10,
-                      env=dict(os.environ, LC_ALL='C'))
+        # Elapsed time, not lstart: no local-time parse, so a DST fall-back hour cannot misdate one (R35).
+        listing = run(['ps', '-axo', 'pid=,etime=,command='], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return []
     if listing.returncode:
         return []
-    found = []
+    found, at = [], now()
     for line in listing.stdout.splitlines():
-        fields = line.split(None, 6)
-        if len(fields) < 7 or not fields[0].isdigit():
+        fields = line.split(None, 2)
+        if len(fields) < 3 or not fields[0].isdigit():
             continue
-        try:
-            started = time.mktime(time.strptime(' '.join(fields[1:6]), '%a %b %d %H:%M:%S %Y'))
-        except (ValueError, OverflowError):
-            continue
-        if started < before and is_proxy(fields[6], codespace, state):
+        elapsed = _elapsed(fields[1])
+        if elapsed is not None and at - elapsed < before and is_proxy(fields[2], codespace, state):
             found.append(int(fields[0]))
     return found
 

@@ -17,9 +17,13 @@ PROXY = ("/usr/bin/python3 -I -B -c import sys;sys.path.insert(0,'/repo');from "
          'raise SystemExit(herdr_stdio(sys.argv[1],sys.argv[2]))')
 
 
-def lstart(when):
-    # As ps prints it under LC_ALL=C: a space-padded day of the month.
-    return time.strftime('%a %b %e %H:%M:%S %Y', time.localtime(when))
+def etime(seconds):
+    # As ps prints elapsed time: [[dd-]hh:]mm:ss.
+    seconds = int(seconds)
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    clock = f'{hours:02d}:{rest // 60:02d}:{rest % 60:02d}' if days or hours else f'{rest // 60:02d}:{rest % 60:02d}'
+    return f'{days}-{clock}' if days else clock
 
 
 def listed(rows):
@@ -67,27 +71,40 @@ class FakeHerdr:
 
 class ProxyTests(unittest.TestCase):
     def test_stale_proxies_match_only_this_codespace_and_older(self):
-        before = time.mktime((2026, 10, 2, 10, 0, 0, 0, 0, -1))  # a one-digit day, padded by ps
-        rows = [f'  101 {lstart(before - 3600)} {PROXY} cs-1 {STATE}',
-                f'  202 {lstart(before + 60)} {PROXY} cs-1 {STATE}',
-                f'  303 {lstart(before - 3600)} {PROXY} cs-2 {STATE}',
-                f'  404 {lstart(before - 3600)} {PROXY} cs-1 {STATE}-other',
-                f'  505 {lstart(before - 3600)} gh codespace ssh -c cs-1 --stdio -- -i key {STATE}',
+        # Start times come from elapsed time (R35): no local-time parse a DST fall-back hour could misdate.
+        now, before = 1_000_000.0, 1_000_000.0 - 600
+        rows = [f'  101 {etime(3 * 86400 + 5)} {PROXY} cs-1 {STATE}',
+                f'  102 {etime(4000)} {PROXY} cs-1 {STATE}',
+                f'  103 {etime(601)} {PROXY} cs-1 {STATE}',
+                f'  202 {etime(599)} {PROXY} cs-1 {STATE}',
+                f'  303 {etime(4000)} {PROXY} cs-2 {STATE}',
+                f'  404 {etime(4000)} {PROXY} cs-1 {STATE}-other',
+                f'  505 {etime(4000)} gh codespace ssh -c cs-1 --stdio -- -i key {STATE}',
+                f'  606 1:2:3:4 {PROXY} cs-1 {STATE}',
                 'garbage line']
         calls = []
 
         def run(args, **kwargs):
             calls.append((args, kwargs))
             return listed(rows)(args, **kwargs)
-        self.assertEqual(restore.stale_proxies('cs-1', Path(STATE), before, run=run), [101])
+        self.assertEqual(restore.stale_proxies('cs-1', Path(STATE), before, run=run, now=lambda: now),
+                         [101, 102, 103])
         args, kwargs = calls[0]
-        self.assertEqual(args, ['ps', '-axo', 'pid=,lstart=,command='])
-        # lstart is localized (measured: "qui 22 out" under pt_BR), so ps runs in the C locale.
-        self.assertEqual(kwargs['env']['LC_ALL'], 'C')
+        self.assertEqual(args, ['ps', '-axo', 'pid=,etime=,command='])
         self.assertIn('timeout', kwargs)
         for failure in (lambda *a, **k: subprocess.CompletedProcess(a, 1, '', ''),
                         lambda *a, **k: (_ for _ in ()).throw(subprocess.TimeoutExpired('ps', 10))):
             self.assertEqual(restore.stale_proxies('cs-1', Path(STATE), before, run=failure), [])
+
+    def test_elapsed_time_parses_every_ps_shape(self):
+        for text, seconds in (('00:05', 5), ('59:59', 3599), ('01:00:00', 3600), ('23:59:59', 86399),
+                              ('1-00:00:00', 86400), ('12-03:04:05', 12 * 86400 + 3 * 3600 + 245)):
+            with self.subTest(text=text):
+                self.assertEqual(restore._elapsed(text), seconds)
+                self.assertEqual(etime(seconds), text)
+        for text in ('', '5', '1:2:3:4', 'a-00:01', '00:x1', '-00:01'):
+            with self.subTest(text=text):
+                self.assertIsNone(restore._elapsed(text))
 
     def test_end_stale_proxies_signals_only_the_matching_processes_it_lists(self):
         # Fake ps output naming only processes this test started; nothing else can be signalled.
@@ -97,10 +114,10 @@ class ProxyTests(unittest.TestCase):
             self.addCleanup(child.kill)
             return child
         stale, other_codespace, newer = decoy(), decoy(), decoy()
-        before = time.time()
-        rows = [f'{stale.pid} {lstart(before - 600)} {PROXY} cs-1 {STATE}',
-                f'{other_codespace.pid} {lstart(before - 600)} {PROXY} cs-2 {STATE}',
-                f'{newer.pid} {lstart(before + 600)} {PROXY} cs-1 {STATE}']
+        before = time.time() - 300
+        rows = [f'{stale.pid} {etime(900)} {PROXY} cs-1 {STATE}',
+                f'{other_codespace.pid} {etime(900)} {PROXY} cs-2 {STATE}',
+                f'{newer.pid} {etime(60)} {PROXY} cs-1 {STATE}']
         self.assertEqual(restore.end_stale_proxies('cs-1', Path(STATE), before, run=listed(rows)), [stale.pid])
         self.assertEqual(stale.wait(timeout=5), -15)
         time.sleep(.2)
