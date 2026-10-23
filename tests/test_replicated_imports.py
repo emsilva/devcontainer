@@ -170,9 +170,10 @@ class ReplicatedImportTests(unittest.TestCase):
         self.desktop_claude()
         self.assertEqual([step['receipts'] for step in self.run_cycles()], [['complete']] * CYCLES)
 
-    def test_import_with_web_search_leaves_every_object_referenced(self):
+    def test_import_with_web_search_completes_and_leaves_every_object_referenced(self):
         self.desktop_codex(web_search=True)
-        self.run_cycles()
+        # Publication completes in its first cycle, so later cycles never resume the fork again.
+        self.assertEqual([(step['receipts'], step['resumes']) for step in self.run_cycles()], [(['complete'], 1)] * CYCLES)
 
 
 if __name__ == '__main__':

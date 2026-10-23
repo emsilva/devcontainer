@@ -681,10 +681,12 @@ def _verify_history(history, expected):
     # Persisted events use internal Rust enum names/fields; the paginated API
     # exposes camelCase public items. Compare their stable identities and text
     # rather than pretending those distinct representations are byte equal.
-    def identity(item):
+    def identity(item, persisted=False):
         kind = item.get('type', '')
+        if persisted and kind == 'Extension' and item.get('kind') == 'web.search':
+            kind = 'webSearch'  # Persisted as an extension kind, listed as its own item type.
         return item.get('id'), kind[:1].lower() + kind[1:]
-    if [identity(item) for item in actual] != [identity(item) for item in items]:
+    if [identity(item) for item in actual] != [identity(item, persisted=True) for item in items]:
         raise ValueError('Native history items do not match retained checkpoint')
     for retained, native in zip(items, actual):
         kind = retained.get('type')

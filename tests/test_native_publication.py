@@ -520,6 +520,15 @@ class PublicationTests(NativeFixture):
         self.assertEqual(result['issues'],[])
         self.api._preflight(self.project,self.store,entry)
 
+    def test_history_matches_only_a_web_search_extension_to_web_search(self):
+        history = dict(turns=[dict(id=self.turn, status='completed')], items=[dict(item=dict(type='webSearch', id='exec-1', query='orchid'))])
+        def persisted(kind):
+            return [self.turn], [dict(type='Extension', kind=kind, id='exec-1', query='orchid')]
+        self.api._verify_history(history, persisted('web.search'))
+        for kind in ('web.fetch', 'image.generation', None):
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, 'history items do not match'):
+                self.api._verify_history(history, persisted(kind))
+
     def test_wrong_manifest_identity_and_legacy_manifest_rejected_without_writes(self):
         self.store.load=lambda sid:dict(schema=1,files=[])
         with self.assertRaises(ValueError):self.api.publish_conversations(self.project,self.store,'bad',state=self.root/'state',env=self.env)
