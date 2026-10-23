@@ -28,6 +28,7 @@ POLL = 10
 RETRY_GAP = 30
 UNREADABLE_NOTICE = 3
 TERMINAL = ('Failed', 'Unavailable', 'Deleted', 'Archived')
+OWNER_RID = 'o-'  # the owner's planned restart, outside the budget (D6)
 # How the token errors begin; status matches on them to name the fix.
 NO_TOKEN = 'GitHub authentication unavailable'
 TOKEN_TIMEOUT = 'Reading the GitHub token'
@@ -59,6 +60,10 @@ def parse_time(value):
 
 def new_rid(now):
     return 'r-' + time.strftime('%H%M%S', time.gmtime(now)) + 'Z'
+
+
+def owner_rid(now):
+    return OWNER_RID + new_rid(now)[2:]
 
 
 class Ledger:
@@ -198,12 +203,15 @@ def classify(*, last_up_at, first_down_at, anchor_at, owner_stop_at):
     return 'OTHER'
 
 
+def _budgeted(row):
+    return row.get('kind') == 'intent' and not row['rid'].startswith(OWNER_RID)
+
+
 def restart_rids(rows, now):
-    """Distinct rids with an intent row inside RESTART_PERIOD, oldest first."""
+    """Distinct keeper rids with an intent row inside RESTART_PERIOD, oldest first; never an owner's o- rid."""
     found = []
     for row in rows:
-        if (row.get('kind') == 'intent' and now - row['at'] <= RESTART_PERIOD
-                and row['rid'] not in found):
+        if _budgeted(row) and now - row['at'] <= RESTART_PERIOD and row['rid'] not in found:
             found.append(row['rid'])
     return found
 
@@ -218,27 +226,30 @@ def gate(*, arming, rows, now):
         return 'on hold until ' + format_time(hold)
     if len(restart_rids(rows, now)) >= MAX_RESTARTS:
         return f'{MAX_RESTARTS} restarts already in 24 hours'
-    intents = [row['at'] for row in rows if row.get('kind') == 'intent']
+    intents = [row['at'] for row in rows if _budgeted(row)]
     if intents and now - max(intents) < MIN_GAP:
         return 'last restart was less than 30 minutes ago'
     return None
 
 
-def start(client, *, ledger=None, rid=None, now=time.time, sleep=time.sleep, say=None, tick=None):
+def start(client, *, ledger=None, rid=None, posts=0, gate=None, now=time.time, sleep=time.sleep, say=None,
+          tick=None):
     """Spec 6.4 step 5: POST start only from Shutdown with nothing pending.
 
     Waits for a clean Shutdown (20 min), posts, re-posts once if still Shutdown 2 min
     after an accepted post, retries 409/5xx within MAX_POSTS (a 409 retry needs a clean
     Shutdown reading RETRY_GAP later), then waits for Available (45 min).
+    `posts` counts the rid's earlier POSTs, so a continued rid keeps MAX_POSTS. `gate`, when
+    given, is asked before each POST; a reason it returns ends the start as 'refused'.
     """
     rid = rid or new_rid(now())
-    posts, posted_at, accepted_at, last_state, status = 0, None, None, None, None
+    posted_at, accepted_at, last_state, status, reason = None, None, None, None, None
     reposted, waiting, extended, unreadable, not_before = False, False, False, 0, 0
     deadline = now() + SHUTDOWN_WAIT
 
     def result(outcome):
         return {'outcome': outcome, 'posted_at': posted_at, 'posts': posts,
-                'last_state': last_state, 'status': status}
+                'last_state': last_state, 'status': status, 'reason': reason}
 
     while True:
         reading = client.read()
@@ -268,6 +279,10 @@ def start(client, *, ledger=None, rid=None, now=time.time, sleep=time.sleep, say
             if not waiting and clean and t >= not_before:
                 if posts >= MAX_POSTS:
                     return result('failed')
+                # Asked at the POST itself: a hold, disarm or owner stop during the wait counts.
+                reason = gate() if gate else None
+                if reason is not None:
+                    return result('refused')
                 posts += 1
                 if ledger:
                     ledger.append('intent', rid, post=posts, state=last_state)

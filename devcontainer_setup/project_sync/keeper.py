@@ -1,8 +1,9 @@
 """The per-project keeper: one detached process that watches an armed Codespace.
 
 It reads the Codespace once a minute over direct HTTPS and classifies each stop,
-and holds the read-only keep-alive child while the Codespace is Available.
-In this version a 12-hour stop only notifies "would restart"; nothing is posted.
+and holds the read-only keep-alive child while the Codespace is Available. After
+GitHub's 12-hour stop, within the budget, it is the one background process that
+starts the Codespace again; then it restores Herdr and tells the project's lead.
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ import subprocess
 import sys
 import time
 
-from . import arming, lifecycle, notify
+from . import arming, lifecycle, notify, restore
 from .keepalive import KeepAlive, end_left_behind, recorded_child
 from .scratch import CONFIG
 from .state import (atomic_write, launch_detached, locked, log_formatter, owned_process, process_identity,
@@ -34,6 +35,7 @@ ENV = ('HOME', 'PATH', 'LANG', 'TMPDIR', 'USER', 'LOGNAME')
 DOWN = ('ShuttingDown', 'Shutdown')
 TITLE = 'Codespace recovery'
 NOTICE_DAYS = 7
+PENDING_FRESH = 30 * 60  # a planned restart is restored only this soon after it came back
 _LOG = logging.getLogger('project-sync-keeper')
 
 
@@ -148,12 +150,13 @@ def wait_ready(state: Path, nonce: str, timeout: float = 60) -> dict:
 def foreign_processes(state: Path, codespace: str, *, run=subprocess.run) -> list[int]:
     """Pids of gh codespace processes naming this Codespace that this package did not start.
 
-    Ours are the worker's forward, a Herdr proxy's gh --stdio and the keeper's
-    keep-alive child. Anything else, such as a project's cs:ports, can start
-    the Codespace through gh and holds the ports the keep-alive child needs.
+    Ours are the worker's forward, the gh --stdio this project's Herdr proxy started
+    and the keeper's keep-alive child. Anything else, such as a project's cs:ports or
+    another gh --stdio, can start the Codespace through gh and holds the ports the
+    keep-alive child needs.
     """
     try:
-        listing = run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True, timeout=10)
+        listing = run(['ps', '-axo', 'pid=,ppid=,command='], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         listing = None
     if listing is None or listing.returncode:
@@ -163,18 +166,22 @@ def foreign_processes(state: Path, codespace: str, *, run=subprocess.run) -> lis
         keepalive = recorded_child(read_json(Path(state) / RUNTIME).get('keepalive'), codespace)
     except FileNotFoundError:
         keepalive = None
-    found = []
+    processes = {}
     for line in listing.stdout.splitlines():
-        fields = line.split()
-        if len(fields) < 3 or not fields[0].isdigit():
-            continue
-        pid, args = int(fields[0]), fields[1:]
-        if os.path.basename(args[0]) != 'gh' or args[1] not in ('codespace', 'cs'):
+        fields = line.split(None, 2)
+        if len(fields) == 3 and fields[0].isdigit() and fields[1].isdigit():
+            processes[int(fields[0])] = int(fields[1]), fields[2]
+    found = []
+    for pid, (parent, command) in processes.items():
+        args = command.split()
+        if len(args) < 2 or os.path.basename(args[0]) != 'gh' or args[1] not in ('codespace', 'cs'):
             continue
         if codespace not in args and not any(arg.endswith('=' + codespace) for arg in args):
             continue
         forward = args[2:4] == ['ports', 'forward'] and any(arg.startswith('2222:') for arg in args)
-        proxy = args[2:3] == ['ssh'] and '--stdio' in args
+        # By its parent: the same proxy signature the keeper's restore matches (#46).
+        proxy = (args[2:3] == ['ssh'] and '--stdio' in args
+                 and restore.is_proxy(processes.get(parent, (0, ''))[1], codespace, Path(state)))
         if not (forward or proxy or pid == keepalive):
             found.append(pid)
     return found
@@ -182,6 +189,15 @@ def foreign_processes(state: Path, codespace: str, *, run=subprocess.run) -> lis
 
 def _utc(when):
     return time.strftime('%Y-%m-%d %H:%M:%SZ', time.gmtime(when))
+
+
+def _start_detail(result):
+    # What a start routine that did not end Available reports, as fixed text.
+    if result['outcome'] == 'failed' and result['last_state'] == 'Shutdown':
+        if result['status'] is None:
+            return f'no start request left; {lifecycle.MAX_POSTS} were made'
+        return f'HTTP {result["status"]}'
+    return f'{result["outcome"]} in {result["last_state"] or "an unknown state"}'
 
 
 class Keeper:
@@ -192,9 +208,10 @@ class Keeper:
     """
 
     def __init__(self, state, *, api, notifier, keepalive=None, herdr=None, now=time.time, sleep=time.sleep,
-                 clock=time.monotonic):
+                 clock=time.monotonic, end_proxies=restore.end_stale_proxies):
         self.state, self.api, self.notifier = Path(state), api, notifier
         self.keepalive, self.herdr, self.now, self.sleep, self.clock = keepalive, herdr, now, sleep, clock
+        self.end_proxies = end_proxies
         self.ledger = lifecycle.Ledger(self.state / LEDGER, now=now)
         self.project = api.name
         self.previous = None, None  # (state, time) of the last successful reading
@@ -315,6 +332,7 @@ class Keeper:
         if reading.state != self.previous[0]:
             _LOG.info('Codespace %s at %s', reading.state, _utc(reading.at))
         self.runtime.update(phase='watching', error=None)
+        unanswered, due = self._unanswered(reading), None
         if reading.state == 'Available':
             self._up(reading)
         else:
@@ -322,13 +340,46 @@ class Keeper:
                 watch['first_at'] = reading.at  # the stop's first non-Available reading
             if reading.state in DOWN:
                 watch['count'] += 1
-                if watch['count'] >= lifecycle.DOWN_READINGS and not watch.get('kind'):
-                    self._classify(value, watch)
+                if unanswered is not None:
+                    watch['kind'] = 'LIFETIME'  # its restart is under way; never a second rid for it
+                elif watch['count'] >= lifecycle.DOWN_READINGS and not watch.get('kind'):
+                    due = self._classify(value, watch)
             else:
                 watch['count'] = 0
         self.previous = reading.state, reading.at
         self.runtime['last_ok'] = {'at': reading.at, 'state': reading.state}
+        if unanswered is not None:
+            rid, posts, last_at = unanswered
+            # Within REPOST_AFTER of its intent the POST may still be landing (spec 6.4 step 5.4).
+            if self.now() - last_at >= lifecycle.REPOST_AFTER:
+                return self._restart(watch, rid, posts)
+        elif due is not None:
+            return self._restart(watch, due, 0)
+        elif reading.state == 'Available':
+            self._planned(value)
         return reading.state == 'Available'
+
+    def _unanswered(self, reading):
+        """The rid, POST count and last intent time of a restart interrupted between intent and result.
+
+        Only a Shutdown reading continues it; any other state closes it with an interrupted
+        result and no POST, since a Queued, Starting or Available Codespace needs none.
+        """
+        try:
+            rows = [row for row in self.ledger.rows() if not row['rid'].startswith(lifecycle.OWNER_RID)]
+        except OSError:
+            return None  # an unreadable ledger also refuses any new restart at the gate
+        if not rows or rows[-1]['kind'] != 'intent':
+            return None
+        rid = rows[-1]['rid']
+        if reading.state != 'Shutdown':
+            self.ledger.append('result', rid, interrupted=True, state=reading.state)
+            _LOG.info('Restart %s was interrupted; the Codespace is %s, so nothing is posted', rid, reading.state)
+            last = self.runtime.get('last_restart')
+            if isinstance(last, dict) and last.get('rid') == rid:
+                last['outcome'] = 'interrupted; the Codespace was ' + str(reading.state)
+            return None
+        return rid, sum(row['rid'] == rid and row['kind'] == 'intent' for row in rows), rows[-1]['at']
 
     def _refusal(self, value):
         try:
@@ -344,15 +395,20 @@ class Keeper:
     def _up(self, reading):
         anchor = self.runtime.get('anchor')
         state, seen_at = self.previous
+        gap = seen_at is None or reading.at - seen_at > HEARTBEAT_STALE
         if state is not None and state != 'Available':
-            anchor = {'at': reading.at, 'source': 'observed'}
+            if gap and reading.last_used_at is not None and seen_at < reading.last_used_at <= reading.at:
+                # A start this keeper did not see, inside a gap: its request is the run's start.
+                anchor = {'at': reading.last_used_at, 'source': 'api'}
+            else:
+                anchor = {'at': reading.at, 'source': 'observed'}
         elif reading.last_used_at is not None and (
                 anchor is None or reading.at > anchor['at'] + lifecycle.LIFETIME + lifecycle.WINDOW
-                or (reading.last_used_at > anchor['at']
-                    and (seen_at is None or reading.at - seen_at > HEARTBEAT_STALE))):
+                or (anchor.get('source') != 'keeper' and reading.last_used_at > anchor['at'] and gap)):
             # No anchor yet; one from a run GitHub has certainly stopped since; or a newer start
             # request after a gap long enough to hide a stop and a start (R16). Without such a
             # gap a newer last_used_at is a no-op request, which leaves GitHub's clock alone.
+            # The keeper's own accepted POST stays the anchor of the run it started.
             anchor = {'at': reading.last_used_at, 'source': 'api'}
         if anchor != self.runtime.get('anchor'):
             _LOG.info('Anchor %s from %s', _utc(anchor['at']), anchor['source'])
@@ -364,24 +420,195 @@ class Keeper:
                                   anchor_at=anchor.get('at'), owner_stop_at=value.get('owner_stop_at'))
         _LOG.info('Stop first seen %s classified %s (anchor %s)', _utc(watch['first_at']), kind,
                   anchor.get('source', 'none'))
-        key = 'stop-' + repr(watch['first_at'])
+        key, due = 'stop-' + repr(watch['first_at']), None
         if kind == 'OTHER':
             self._notify(key, f'{self.project} stopped at {arming.format_time(watch["first_at"])} for a reason '
                               'other than the 12-hour limit; run task work:cs to start it.')
         elif kind == 'LIFETIME':
-            # Notify mode: name what a restart would do; the start routine is not called.
             try:
-                reason = lifecycle.gate(arming=value, rows=self.ledger.rows(), now=self.now())
+                reason = self._start_refusal(None, watch['first_at'])
             except OSError:
                 reason = 'the restart ledger is unreadable'
             if reason is None:
-                self._notify(key, f'Would restart {self.project} ({lifecycle.new_rid(self.now())}) after '
-                                  "GitHub's 12-hour stop; automatic restart is not switched on yet. "
-                                  'Run task work:cs to start it.')
+                due = lifecycle.new_rid(self.now())
             else:
-                self._notify(key, f'Would not restart {self.project}: {reason}. Run task work:cs to start it.')
+                self._refused(key, watch['first_at'], reason)
         # Only now: a raise above leaves the stop unclassified, so the next readings retry it.
         watch['kind'] = kind
+        return due
+
+    def _start_refusal(self, rid, stop_at):
+        """The gate, read afresh: arming, hold and budget, and no owner stop since the stop.
+
+        Asked at classification and again at each POST. The rid's own ledger rows are not
+        another restart, and an owner stop after the stop began means keep it stopped.
+        """
+        value, rows = arming.read(self.state), self.ledger.rows()
+        reason = lifecycle.gate(arming=value, rows=[row for row in rows if row['rid'] != rid], now=self.now())
+        since = min([stop_at] + [row['at'] for row in rows if row['rid'] == rid])
+        owner = value.get('owner_stop_at')
+        if reason is None and isinstance(owner, (int, float)) and owner >= since:
+            reason = 'you stopped it at ' + arming.format_time(owner)
+        if reason is None and value.get('codespace') != self.api.name:
+            reason = 'the armed Codespace changed; run task work:cs:armed'
+        return reason
+
+    def _refused(self, key, stop_at, reason):
+        self._notify(key, f"{self.project} stopped at {arming.format_time(stop_at)} for GitHub's 12-hour limit "
+                          f'and was not restarted: {reason}. Run task work:cs to start it.')
+
+    def _tick(self, phase=None):
+        try:
+            self.beat(phase)
+        except Exception as error:
+            _LOG.info('Keeper heartbeat not written: %s', type(error).__name__)
+
+    def _pause(self, seconds):
+        # A restart's waits keep the heartbeat, and a held keep-alive child, going.
+        self.sleep(seconds)
+        if self.keepalive is not None:
+            try:
+                record = self.keepalive.tend()
+                if record is not None:
+                    self.runtime['keepalive'] = record
+            except Exception as error:
+                _LOG.info('Keep-alive check failed: %s', type(error).__name__)
+        self._tick()
+
+    def _restart(self, watch, rid, posts):
+        """Spec 6.4 steps 5-7 for one rid: True once the Codespace is back. One notification per outcome."""
+        stop_at = watch['first_at']
+        key = 'stop-' + repr(stop_at)
+        last = {'rid': rid, 'at': self.now(), 'stopped_at': stop_at, 'outcome': 'restarting'}
+        self.runtime['last_restart'] = last
+        _LOG.info('Restart %s after the stop first seen %s', rid, _utc(stop_at))
+        self._tick('restarting')
+        try:
+            result = lifecycle.start(self.api, ledger=self.ledger, rid=rid, posts=posts, now=self.now,
+                                     sleep=self._pause, tick=self._tick,
+                                     gate=lambda: self._start_refusal(rid, stop_at))
+        except Exception as error:
+            # Only fixed ValueError texts are kept; anything else is named by its type.
+            detail = str(error).split(';')[0] if isinstance(error, ValueError) else type(error).__name__
+            self._close(rid)
+            return self._failed(key, last, detail)
+        _LOG.info('Restart %s: %s after %s POSTs, last state %s, HTTP %s', rid, result['outcome'], result['posts'],
+                  result['last_state'], result['status'])
+        if result['outcome'] != 'available':
+            self._close(rid)
+        if result['outcome'] == 'refused':
+            last['outcome'] = 'not restarted: ' + result['reason']
+            self._refused(key, stop_at, result['reason'])
+            return False
+        if result['outcome'] != 'available':
+            return self._failed(key, last, _start_detail(result))
+        back_at = self.now()
+        if result['posted_at'] is None:
+            # Someone else started it during the wait: not this keeper's restart, so no resume.
+            last['outcome'] = 'started elsewhere'
+            _LOG.info('Restart %s: the Codespace came back without an accepted start request from the keeper', rid)
+            return True
+        anchor = {'at': result['posted_at'], 'source': 'keeper'}
+        _LOG.info('Anchor %s from keeper', _utc(anchor['at']))
+        # Recorded as a reading, so the next pass sees no transition and keeps the keeper's anchor.
+        self.runtime.update(anchor=anchor, last_up_at=back_at, down={'count': 0, 'first_at': None},
+                            reading={'at': back_at, 'ok': True, 'state': 'Available', 'pending': False},
+                            last_ok={'at': back_at, 'state': 'Available'})
+        self.previous = 'Available', back_at
+        last.update(posted_at=result['posted_at'], back_at=back_at)
+        self._restore(key, last, rid, stop_at, back_at,
+                      f"{self.project} restarted after GitHub's 12-hour stop ({rid})",
+                      f'back in {int(back_at - result["posted_at"])} s')
+        return True
+
+    def _close(self, rid):
+        # A rid given up on is answered, so it never continues later (and never POSTs then).
+        try:
+            rows = [row for row in self.ledger.rows() if row['rid'] == rid]
+            if rows and rows[-1]['kind'] == 'intent':
+                self.ledger.append('result', rid, interrupted=True)
+        except OSError as error:
+            _LOG.info('Restart %s not closed in the ledger: %s', rid, type(error).__name__)
+
+    def _failed(self, key, last, detail):
+        last['outcome'] = 'start failed: ' + detail
+        self._notify(key, f"{self.project} could not be restarted after GitHub's 12-hour stop ({detail}); "
+                          'run task work:cs to start it.')
+        return False
+
+    def _planned(self, value):
+        """work:cs:restart hands its restore and resume to the keeper (D6): once per rid, while fresh."""
+        pending = value.get('pending_restore')
+        if not isinstance(pending, dict):
+            return
+        rid, stopped_at, back_at = pending.get('rid'), pending.get('stopped_at'), pending.get('back_at')
+        if not (isinstance(rid, str) and rid.startswith(lifecycle.OWNER_RID)
+                and all(isinstance(at, (int, float)) and not isinstance(at, bool) for at in (stopped_at, back_at))):
+            return
+        key = 'restore-' + rid
+        if ((self.runtime.get('last_restart') or {}).get('rid') == rid or key in self.runtime['notified']
+                or self.now() - back_at > PENDING_FRESH):
+            return
+        last = {'rid': rid, 'at': self.now(), 'stopped_at': stopped_at, 'back_at': back_at, 'outcome': 'restoring'}
+        self.runtime['last_restart'] = last
+        _LOG.info('Restore %s after your restart', rid)
+        self._restore(key, last, rid, stopped_at, back_at, f'{self.project} is back from your restart ({rid})', 'back')
+
+    def _machine(self):
+        try:
+            return restore.Herdr(read_json(self.state / 'herdr-machine.json').get('machine_id'))
+        except (OSError, ValueError):
+            return None
+
+    def _restore(self, key, last, rid, stopped_at, back_at, what, back):
+        """Spec 6.4 step 6 and 6.6: keep-alive, stale proxies, Herdr, then the lead. Never raises."""
+        def outcome(text, note):
+            last['outcome'] = back + '; ' + text
+            self._notify(key, f'{what}{note}')
+        self._tick('restoring')
+        try:
+            if self.keepalive is not None:
+                self.runtime['keepalive'] = self.keepalive.ensure(True)
+            ended = self.end_proxies(self.api.name, self.state, stopped_at)
+            if ended:
+                _LOG.info('Ended Herdr proxies older than the stop (#46): %s', ' '.join(map(str, ended)))
+            herdr = self.herdr or self._machine()
+            herdr_at = restore.wait_reachable(herdr, now=self.now, sleep=self._pause) if herdr else None
+            if herdr_at is None:
+                _LOG.info('Restore %s: Herdr not reachable', rid)
+                return outcome('Herdr not reachable', ', but its Herdr machine is not reachable; open the Herdr TUI '
+                                                      '(run herdr), then tell its lead to resume.')
+            last['herdr_at'] = herdr_at
+            hold = arming.read(self.state).get('hold_until')
+            if isinstance(hold, (int, float)) and hold > self.now():
+                # No resume prompts during a hold either (spec 6.8).
+                return outcome('on hold, lead not told', f'; restarts are on hold until {arming.format_time(hold)}, '
+                                                         'so its lead was not told to resume.')
+            self._tick('resuming')
+            told = restore.resume(herdr, rid, restore.resume_text(rid, stopped_at, back_at), now=self.now,
+                                  sleep=self._pause)
+            last['resume'] = told
+            name = (restore.lead(herdr.agents()) or {}).get('name') if told != 'no-lead' else None
+            who = f'its lead {name}' if name else 'its lead'
+            _LOG.info('Resume %s: %s (%s)', rid, told, name or 'no lead')
+            if told in ('delivered', 'resent'):
+                outcome(f'Herdr in {int(herdr_at - back_at)} s; {name or "lead"} told',
+                        f' and {who} was told to resume; task work:status shows the restart.')
+            elif told == 'no-lead':
+                outcome('no single lead', ', but no single lead-* agent was found on its Herdr machine; tell its '
+                                          'lead to resume.')
+            elif told == 'busy':
+                outcome(f'{name or "lead"} busy', f', but {who} stayed busy for 10 minutes; tell it to resume.')
+            else:
+                outcome(f'resume not delivered to {name or "the lead"}',
+                        f', but the resume message did not reach {who}; tell it to resume, and see task work:logs.')
+        except Exception as error:
+            detail = str(error).split(';')[0] if isinstance(error, ValueError) else type(error).__name__
+            _LOG.info('Restore %s failed: %s', rid, detail)
+            outcome('restore failed: ' + detail, f', but restoring it failed ({detail}); tell its lead to resume, '
+                                                 'and see task work:logs.')
+        finally:
+            self.runtime['phase'] = 'watching'
 
     def _notify(self, key, text):
         notified, now = self.runtime['notified'], self.now()

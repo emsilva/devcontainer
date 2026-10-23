@@ -126,6 +126,36 @@ class StartTests(unittest.TestCase):
         self.assertEqual(client.posts, lifecycle.MAX_POSTS)
         self.assertEqual((result['outcome'], result['status']), ('failed', 503))
 
+    def test_a_continued_rid_keeps_its_post_budget(self):
+        # An interrupted rid continues with the POSTs it already made counted (MAX_POSTS per rid).
+        client, _, result = self.run_start([reading('Shutdown')], (503,), posts=2)
+        self.assertEqual(client.posts, 1)
+        self.assertEqual(result['posts'], lifecycle.MAX_POSTS)
+        client, _, result = self.run_start([reading('Shutdown')], posts=lifecycle.MAX_POSTS)
+        self.assertEqual((client.posts, result['outcome']), (0, 'failed'))
+
+    def test_gate_is_asked_before_each_post_and_its_reason_ends_the_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            clock = Clock()
+            ledger = lifecycle.Ledger(Path(tmp).resolve() / 'keeper-ledger.jsonl', now=clock.now)
+            asked = []
+
+            def gate():
+                asked.append([row['kind'] for row in ledger.rows()])
+                return None if len(asked) == 1 else 'on hold until later'
+            client = FakeClient(clock, [reading('Shutdown')], (409,))
+            result = lifecycle.start(client, ledger=ledger, rid='r-000000Z', gate=gate, now=clock.now,
+                                     sleep=clock.sleep)
+            # Asked before the intent row of each POST; the second refusal posts nothing more.
+            self.assertEqual(asked, [[], ['intent', 'result']])
+            self.assertEqual(client.posts, 1)
+            self.assertEqual((result['outcome'], result['reason']), ('refused', 'on hold until later'))
+            self.assertEqual([row['kind'] for row in ledger.rows()], ['intent', 'result'])
+        client, _, result = self.run_start([reading('Shutdown')], gate=lambda: 'not armed')
+        self.assertEqual((client.posts, result['outcome'], result['reason']), (0, 'refused', 'not armed'))
+        _, _, result = self.run_start([reading('Shutdown'), reading('Available')], gate=lambda: None)
+        self.assertEqual((result['outcome'], result['reason']), ('available', None))
+
     def test_other_4xx_stops_without_retry(self):
         client, _, result = self.run_start([reading('Shutdown')], (403,))
         self.assertEqual(client.posts, 1)
@@ -472,6 +502,14 @@ class GateTests(unittest.TestCase):
         self.assertEqual(lifecycle.restart_rids(rows, self.NOW), ['r-1'])
         self.assertIsNone(lifecycle.gate(arming={'armed': True}, rows=rows, now=self.NOW))
 
+
+    def test_owner_restarts_never_count_toward_the_budget(self):
+        # D6: a planned restart (o- rid) is outside the budget, even if one is ever logged.
+        rows = [self.row('intent', 'o-1', 600), self.row('intent', 'o-2', 300), self.row('result', 'o-2', 290)]
+        self.assertEqual(lifecycle.restart_rids(rows, self.NOW), [])
+        self.assertIsNone(lifecycle.gate(arming={'armed': True}, rows=rows, now=self.NOW))
+        self.assertTrue(lifecycle.owner_rid(self.NOW).startswith(lifecycle.OWNER_RID))
+        self.assertEqual(lifecycle.owner_rid(self.NOW)[2:], lifecycle.new_rid(self.NOW)[2:])
 
 if __name__ == '__main__':
     unittest.main()

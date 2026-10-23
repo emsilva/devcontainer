@@ -1,4 +1,4 @@
-"""The keeper: detached launch, adoption and stop by fact, and its watch in notify mode."""
+"""The keeper: detached launch, adoption and stop by fact, its watch, and recovery after the 12-hour stop."""
 import json
 import os
 from pathlib import Path
@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from devcontainer_setup.project_sync import arming, keeper, lifecycle
+from devcontainer_setup.project_sync import arming, keeper, lifecycle, restore
 from devcontainer_setup.project_sync.lifecycle import Reading
 from devcontainer_setup.project_sync.state import atomic_write, process_identity, read_json
 
@@ -25,23 +25,47 @@ AUTH_ERROR = 'GitHub authentication unavailable'
 
 
 class FakeAPI:
-    """Replays readings; an exception in the list is raised by read()."""
+    """Replays readings; an exception in the list is raised by read(), a callable is called for one."""
 
-    def __init__(self, readings, name='cs-1'):
-        self.name, self.readings, self.reads, self.posts = name, list(readings), 0, 0
+    def __init__(self, readings, name='cs-1', status=200):
+        self.name, self.readings, self.reads, self.posts, self.status = name, list(readings), 0, 0, status
 
     def read(self):
         item = self.readings[min(self.reads, len(self.readings) - 1)]
         self.reads += 1
         if isinstance(item, BaseException):
             raise item
-        return item
+        return item() if callable(item) else item
 
     def post_start(self):
         self.posts += 1
-        return 200
+        return self.status
 
     post_stop = post_start
+
+
+class FakeHerdr:
+    """A reachable Herdr machine with one idle lead; a prompt sets it working."""
+
+    def __init__(self, reachable=True, agents=None, works=True):
+        self.reach, self.works, self.prompts = reachable, works, []
+        self.list = [{'name': 'lead-proj', 'agent_status': 'idle'}] if agents is None else agents
+
+    def reachable(self):
+        return self.reach
+
+    def agents(self):
+        return [dict(agent) for agent in self.list]
+
+    def prompt(self, name, text):
+        self.prompts.append((name, text))
+        for agent in self.list:
+            if agent.get('name') == name and self.works:
+                agent['agent_status'] = 'working'
+        return True
+
+    def read(self, name, lines=80):
+        return ''
 
 
 def up(at, last_used_at=None):
@@ -92,14 +116,20 @@ class KeeperStepTests(unittest.TestCase):
                    ports=[], now=T0 - 10)
         self.bind('cs-1')
         self.clock = T0
-        self.notes = []
+        self.notes, self.proxies = [], []
 
     def bind(self, codespace):
         atomic_write(self.state / 'scratch.json',
                      json.dumps({'codespace': codespace, 'root': '/work/proj'}).encode())
 
-    def keeper(self, readings, **extra):
-        self.api = FakeAPI(readings)
+    def advance(self, seconds):
+        self.clock += seconds
+
+    def keeper(self, readings, status=200, **extra):
+        self.api = FakeAPI(readings, status=status)
+        # A restart's waits run on the test clock, and no real process table is read.
+        extra.setdefault('sleep', self.advance)
+        extra.setdefault('end_proxies', lambda *args: self.proxies.append(args) or [])
         return keeper.Keeper(self.state, api=self.api, notifier=lambda title, text: self.notes.append(text) or True,
                              now=lambda: self.clock, **extra)
 
@@ -165,30 +195,291 @@ class KeeperStepTests(unittest.TestCase):
         self.assertEqual(self.notes, [])
         self.assertEqual(self.runtime()['down']['count'], 1)
 
-    def test_lifetime_in_notify_mode_never_posts(self):
-        anchor = T0 - 3600
-        stops = [anchor + LIFE + 30 + 60 * i for i in range(4)]
-        k = self.keeper([up(T0, last_used_at=anchor)] + [down(at, 'ShuttingDown') for at in stops[:1]]
-                        + [down(at) for at in stops[1:]])
-        self.run_steps(k, [T0] + stops)
-        self.assertEqual(self.api.posts, 0)
-        self.assertEqual(len(self.notes), 1)
-        self.assertIn(('would restart proj (' + lifecycle.new_rid(stops[2]) + ')').lower(), self.notes[0].lower())
-        self.assertEqual(self.runtime()['down']['kind'], 'LIFETIME')
-        self.assertEqual(lifecycle.Ledger(self.state / keeper.LEDGER).rows(), [])
-
-    def test_lifetime_names_the_refusing_gate(self):
-        anchor = T0 - 3600
-        arming.write(self.state, dict(arming.read(self.state), hold_until=anchor + LIFE + 3 * 3600))
+    def lifetime(self, after=(), anchor=T0 - 3600):
+        """A watch anchored at `anchor` up to GitHub's stop: Available, then ShuttingDown and two Shutdowns."""
         stops = [anchor + LIFE + 30 + 60 * i for i in range(3)]
-        k = self.keeper([up(T0, last_used_at=anchor)] + [down(at) for at in stops])
+        return stops, [up(T0, last_used_at=anchor), down(stops[0], 'ShuttingDown')] + [down(at) for at in stops[1:]] \
+            + list(after)
+
+    def test_lifetime_restart_end_to_end_with_fakes(self):
+        held, herdr = FakeKeepAlive(), FakeHerdr()
+        # Then the start routine reads a clean Shutdown, posts, and reads Available.
+        stops, readings = self.lifetime([down(T0 + LIFE), up(T0 + LIFE + 60, last_used_at=T0 + LIFE)])
+        k = self.keeper(readings, keepalive=held, herdr=herdr)
         self.run_steps(k, [T0] + stops)
+        rid = lifecycle.new_rid(stops[2])
+        rows = lifecycle.Ledger(self.state / keeper.LEDGER).rows()
+        self.assertEqual([(row['kind'], row['rid']) for row in rows], [('intent', rid), ('result', rid)])
+        self.assertEqual(rows[1]['status'], 200)
+        self.assertEqual(self.api.posts, 1)
+        runtime = self.runtime()
+        self.assertEqual(runtime['anchor'], {'at': rows[1]['at'], 'source': 'keeper'})
+        self.assertEqual(runtime['reading']['state'], 'Available')
+        self.assertEqual(runtime['down'], {'count': 0, 'first_at': None})
+        self.assertEqual(runtime['last_restart']['rid'], rid)
+        self.assertEqual(runtime['last_restart']['resume'], 'delivered')
+        self.assertIn('lead-proj told', runtime['last_restart']['outcome'])
+        self.assertEqual(held.calls[-2:], [True, True])  # the restore, then the pass's own verdict
+        self.assertEqual(self.proxies, [('cs-1', self.state, stops[0])])
+        self.assertEqual(len(herdr.prompts), 1)
+        self.assertEqual(herdr.prompts[0][0], 'lead-proj')
+        self.assertEqual(herdr.prompts[0][1], restore.resume_text(rid, stops[0], runtime['last_restart']['back_at']))
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn('proj restarted after GitHub', self.notes[0])
+        self.assertIn('lead-proj', self.notes[0])
+        self.assertNotIn('ghp_', json.dumps(runtime))
+
+    def test_the_pass_after_a_restart_keeps_the_keeper_anchor(self):
+        # Even after a long resume and a last_used_at a second past the POST (clock skew).
+        stops, readings = self.lifetime([down(T0 + LIFE), up(T0 + LIFE + 60, last_used_at=T0 + LIFE)])
+        k = self.keeper(readings, herdr=FakeHerdr())
+        self.run_steps(k, [T0] + stops)
+        anchor = self.runtime()['anchor']
+        self.assertEqual(anchor['source'], 'keeper')
+        later = self.clock + keeper.HEARTBEAT_STALE + 60
+        self.api.readings.append(up(later, last_used_at=anchor['at'] + 1))
+        self.run_steps(k, [later])
+        self.assertEqual(self.runtime()['anchor'], anchor)
+
+    def test_gate_refusal_never_posts(self):
+        # D5: a stop during a hold is notified at the stop and never restarted when the hold ends.
+        anchor = T0 - 3600
+        hold = anchor + LIFE + 3 * 3600
+        arming.write(self.state, dict(arming.read(self.state), hold_until=hold))
+        stops, readings = self.lifetime([down(hold + 60 * i) for i in range(1, 4)])
+        k = self.keeper(readings, herdr=FakeHerdr())
+        self.run_steps(k, [T0] + stops + [hold + 60 * i for i in range(1, 4)])
         self.assertEqual(self.api.posts, 0)
         self.assertEqual(len(self.notes), 1)
-        self.assertIn('would not restart proj: on hold until', self.notes[0].lower())
+        self.assertIn("proj stopped at " + arming.format_time(stops[0]) + " for GitHub's 12-hour limit and was not "
+                      'restarted: on hold until', self.notes[0])
+        self.assertIn('Run task work:cs to start it', self.notes[0])
+        self.assertEqual(lifecycle.Ledger(self.state / keeper.LEDGER).rows(), [])
+        # Spent budget: two restarts in the last 24 hours.
+        self.setUp()
+        self.clock = T0
+        ledger = lifecycle.Ledger(self.state / keeper.LEDGER, now=lambda: T0 - 3000)
+        ledger.append('intent', 'r-000001Z', post=1)
+        ledger = lifecycle.Ledger(self.state / keeper.LEDGER, now=lambda: T0 - 1000)
+        ledger.append('intent', 'r-000002Z', post=1)
+        stops, readings = self.lifetime()
+        k = self.keeper(readings, herdr=FakeHerdr())
+        self.run_steps(k, [T0] + stops)
+        self.assertEqual(self.api.posts, 0)
+        self.assertIn('was not restarted: 2 restarts already in 24 hours', self.notes[0])
+
+    def test_a_hold_or_owner_stop_during_the_wait_refuses_at_the_post(self):
+        for change in ('hold', 'owner'):
+            with self.subTest(change=change):
+                self.setUp()
+                self.clock = T0
+
+                def meanwhile(change=change):
+                    value = arming.read(self.state)
+                    if change == 'hold':
+                        arming.write(self.state, dict(value, hold_until=self.clock + 3600))
+                    else:
+                        arming.record_owner_stop(self.state, self.clock)
+                    return down(self.clock)
+                # Classified while ShuttingDown; the start routine waits, and the change lands meanwhile.
+                anchor = T0 - 3600
+                stops = [anchor + LIFE + 30 + 60 * i for i in range(3)]
+                readings = [up(T0, last_used_at=anchor)] + [down(at, 'ShuttingDown') for at in stops] \
+                    + [down(stops[2], 'ShuttingDown'), meanwhile, down(stops[2])]
+                k = self.keeper(readings, herdr=FakeHerdr())
+                self.run_steps(k, [T0] + stops)
+                self.assertEqual(self.api.posts, 0)
+                self.assertEqual(lifecycle.Ledger(self.state / keeper.LEDGER).rows(), [])
+                self.assertEqual(len(self.notes), 1)
+                self.assertIn('was not restarted: ' + ('on hold until' if change == 'hold' else 'you stopped it at'),
+                              self.notes[0])
+                self.assertIn('not restarted', self.runtime()['last_restart']['outcome'])
+
+    def test_owner_stop_is_never_restarted(self):
+        # work:cs:stop records the stop before its POST, so the keeper reads OWNER, logs it and waits.
+        arming.record_owner_stop(self.state, T0 + 3600)
+        stops = [T0 + 3700 + 60 * i for i in range(60)]
+        k = self.keeper([up(T0, last_used_at=T0 - 60)] + [down(at) for at in stops], herdr=FakeHerdr())
+        self.run_steps(k, [T0] + stops)
+        self.assertEqual(self.api.posts, 0)
+        self.assertEqual(self.notes, [])
+        self.assertEqual(self.runtime()['down']['kind'], 'OWNER')
+        # Even when GitHub's 12-hour stop falls inside the hour the owner stopped it in.
+        self.setUp()
+        anchor = T0 - LIFE + 3600
+        arming.record_owner_stop(self.state, anchor + LIFE + 10)
+        stops = [anchor + LIFE + 20 + 60 * i for i in range(60)]
+        k = self.keeper([up(T0, last_used_at=anchor)] + [down(at) for at in stops], herdr=FakeHerdr())
+        self.run_steps(k, [T0] + stops)
+        self.assertEqual((self.api.posts, self.notes, self.runtime()['down']['kind']), (0, [], 'OWNER'))
+
+    def test_restart_outcomes_notify_once_each(self):
+        cases = (
+            ('start failed', {'status': 403}, 'could not be restarted', 'task work:cs'),
+            ('Herdr not reachable', {'herdr': FakeHerdr(reachable=False)}, 'Herdr machine is not reachable',
+             'open the Herdr TUI'),
+            ('no receipt', {}, 'Herdr machine is not reachable', 'open the Herdr TUI'),
+            ('no lead', {'herdr': FakeHerdr(agents=[{'name': 'lead-a', 'agent_status': 'idle'},
+                                                     {'name': 'lead-b', 'agent_status': 'idle'}])},
+             'no single lead', 'tell its lead to resume'),
+            ('busy', {'herdr': FakeHerdr(agents=[{'name': 'lead-proj', 'agent_status': 'working'}])},
+             'lead-proj stayed busy', 'tell it to resume'),
+            ('undelivered', {'herdr': FakeHerdr(works=False)}, 'did not reach its lead lead-proj', 'task work:logs'),
+            ('lead gone', {'herdr': FakeHerdr(agents=[])}, 'no single lead', 'tell its lead to resume'),
+        )
+        for name, extra, what, run in cases:
+            with self.subTest(name=name):
+                self.setUp()
+                self.clock = T0
+                stops, readings = self.lifetime([down(T0 + LIFE), up(T0 + LIFE + 60, last_used_at=T0 + LIFE)])
+                k = self.keeper(readings, **extra)
+                self.run_steps(k, [T0] + stops + [stops[2] + 7200 + 60 * i for i in range(3)])
+                self.assertEqual(len(self.notes), 1, self.notes)
+                self.assertIn(what, self.notes[0])
+                self.assertIn(run, self.notes[0])
+                self.assertLessEqual(self.api.posts, 1)
+                self.assertEqual(self.runtime()['phase'], 'watching')
+
+    def test_a_restart_that_raises_notifies_once_and_is_never_retried(self):
+        stops, readings = self.lifetime([RuntimeError('token ghp_secret')])
+        k = self.keeper(readings, herdr=FakeHerdr())
+        self.run_steps(k, [T0] + stops + [stops[2] + 60 * i for i in range(1, 40)])
+        self.assertEqual(self.api.posts, 0)
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn("could not be restarted after GitHub's 12-hour stop (RuntimeError)", self.notes[0])
+        self.assertNotIn('ghp_secret', json.dumps(self.runtime()) + self.notes[0])
+
+    def test_interrupted_intent_is_not_reposted(self):
+        # Review Focus 2: a keeper that died between its ledger intent and the POST's result.
+        for state in ('Queued', 'Starting', 'Available', 'ShuttingDown'):
+            with self.subTest(state=state):
+                self.setUp()
+                self.clock = T0
+                lifecycle.Ledger(self.state / keeper.LEDGER, now=lambda: T0 - 600).append('intent', 'r-000001Z',
+                                                                                         post=1, state='Shutdown')
+                reading = up(T0, last_used_at=T0 - 590) if state == 'Available' else down(T0, state)
+                k = self.keeper([reading], herdr=FakeHerdr())
+                self.run_steps(k, [T0, T0 + 60])
+                self.assertEqual(self.api.posts, 0)
+                rows = lifecycle.Ledger(self.state / keeper.LEDGER).rows()
+                self.assertEqual([(row['kind'], row['rid']) for row in rows],
+                                 [('intent', 'r-000001Z'), ('result', 'r-000001Z')])
+                self.assertIs(rows[1]['interrupted'], True)
+                self.assertEqual(rows[1]['state'], state)
+                # The interrupted rid still counts toward the budget.
+                self.assertEqual(lifecycle.restart_rids(rows, T0), ['r-000001Z'])
+
+    def test_an_interrupted_rid_in_shutdown_continues_within_its_posts(self):
+        ledger = lifecycle.Ledger(self.state / keeper.LEDGER, now=lambda: T0 - 60)
+        ledger.append('intent', 'r-000001Z', post=1, state='Shutdown')
+        herdr = FakeHerdr()
+        k = self.keeper([down(T0), down(T0 + 60), down(T0 + 70), up(T0 + 80, last_used_at=T0 + 70)], herdr=herdr)
+        # 60 s after the intent its POST may still be landing: wait out REPOST_AFTER first.
+        self.run_steps(k, [T0])
+        self.assertEqual(self.api.posts, 0)
+        self.run_steps(k, [T0 + 60])
+        rows = lifecycle.Ledger(self.state / keeper.LEDGER).rows()
+        self.assertEqual(self.api.posts, 1)
+        self.assertEqual([(row['kind'], row['rid'], row.get('post')) for row in rows],
+                         [('intent', 'r-000001Z', 1), ('intent', 'r-000001Z', 2), ('result', 'r-000001Z', 2)])
+        self.assertEqual(self.runtime()['anchor']['source'], 'keeper')
+        self.assertEqual(len(herdr.prompts), 1)
+        self.assertIn('r-000001Z', herdr.prompts[0][1])
+        # A rid that has used its POSTs is closed without another.
+        self.setUp()
+        self.clock = T0
+        for post in range(1, lifecycle.MAX_POSTS + 1):
+            lifecycle.Ledger(self.state / keeper.LEDGER, now=lambda: T0 - 600).append('intent', 'r-000001Z', post=post)
+        k = self.keeper([down(T0)], herdr=FakeHerdr())
+        with self.assertLogs(keeper._LOG, 'INFO') as logs:
+            self.run_steps(k, [T0, T0 + 60, T0 + 120, T0 + 180])
+        self.assertEqual(self.api.posts, 0)
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn('could not be restarted after GitHub\'s 12-hour stop (no start request left', self.notes[0])
+        # Closed with an interrupted result, so it is tried once and never again.
+        rows = lifecycle.Ledger(self.state / keeper.LEDGER).rows()
+        self.assertEqual((rows[-1]['kind'], rows[-1]['interrupted']), ('result', True))
+        self.assertEqual(sum('Restart r-000001Z after' in line for line in logs.output), 1)
+        # So is one the gate refuses, as for a hold set since its intent.
+        self.setUp()
+        self.clock = T0
+        arming.write(self.state, dict(arming.read(self.state), hold_until=T0 + 3600))
+        lifecycle.Ledger(self.state / keeper.LEDGER, now=lambda: T0 - 600).append('intent', 'r-000001Z', post=1)
+        k = self.keeper([down(T0)], herdr=FakeHerdr())
+        self.run_steps(k, [T0, T0 + 60, T0 + 120])
+        self.assertEqual(self.api.posts, 0)
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn('was not restarted: on hold until', self.notes[0])
+        self.assertEqual(lifecycle.Ledger(self.state / keeper.LEDGER).rows()[-1]['kind'], 'result')
+        self.assertIn('not restarted: on hold until', self.runtime()['last_restart']['outcome'])
+
+    def test_a_start_after_a_reading_gap_anchors_at_its_start_request(self):
+        # Lead ruling 1: Shutdown, hours of failed reads while the owner starts it at S, then
+        # Available: the anchor is last_used_at, so GitHub's real stop at S + 12 h reads LIFETIME.
+        a, s = T0, T0 + 3600
+        readings = ([down(a)] + [failed(a + 60 + 60 * i) for i in range(4 * 60)]
+                    + [up(s + 3 * 3600, last_used_at=s)]
+                    + [down(s + LIFE + 20 + 60 * i, 'ShuttingDown') for i in range(3)])
+        k = self.keeper(readings, herdr=FakeHerdr())
+        self.run_steps(k, [r.at for r in readings])
+        self.assertEqual(self.runtime()['down'].get('kind'), 'LIFETIME')
+        # Inside the gap window only: a last_used_at before the last reading is an older request.
+        self.setUp()
+        self.clock = T0
+        k = self.keeper([down(a), up(a + 600, last_used_at=a - 5)])
+        self.run_steps(k, [a, a + 600])
+        self.assertEqual(self.runtime()['anchor'], {'at': a + 600, 'source': 'observed'})
+        # Without a gap the observation stays the anchor.
+        self.setUp()
+        self.clock = T0
+        k = self.keeper([down(a), up(a + 60, last_used_at=a + 30)])
+        self.run_steps(k, [a, a + 60])
+        self.assertEqual(self.runtime()['anchor'], {'at': a + 60, 'source': 'observed'})
+
+    def test_a_planned_restart_is_restored_once_while_fresh(self):
+        # work:cs:restart leaves pending_restore in arming.json; the keeper restores and resumes it once.
+        rid, stopped, back = 'o-000100Z', T0 - 300, T0 - 30
+        arming.write(self.state, dict(arming.read(self.state), owner_stop_at=stopped,
+                                      pending_restore={'rid': rid, 'stopped_at': stopped, 'back_at': back}))
+        herdr = FakeHerdr()
+        k = self.keeper([down(T0 - 60), up(T0, last_used_at=T0 - 100)], herdr=herdr)
+        self.run_steps(k, [T0 - 60])
+        self.assertEqual(herdr.prompts, [])  # not while the Codespace reads down
+        self.run_steps(k, [T0, T0 + 600, T0 + 1200])
+        self.assertEqual(self.api.posts, 0)
+        self.assertEqual(len(herdr.prompts), 1)
+        self.assertEqual(herdr.prompts[0][1], restore.resume_text(rid, stopped, back))
+        self.assertEqual(self.proxies, [('cs-1', self.state, stopped)])
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn('is back from your restart (' + rid + ')', self.notes[0])
+        self.assertEqual(self.runtime()['last_restart']['rid'], rid)
+        # A replacement keeper does not prompt again.
+        again = self.keeper([up(T0 + 1300, last_used_at=T0 - 100)], herdr=herdr)
+        self.run_steps(again, [T0 + 1300])
+        self.assertEqual(len(herdr.prompts), 1)
+        # One that came back too long ago is left alone.
+        self.setUp()
+        self.clock = T0
+        arming.write(self.state, dict(arming.read(self.state), pending_restore={
+            'rid': rid, 'stopped_at': T0 - 3 * 3600, 'back_at': T0 - keeper.PENDING_FRESH - 1}))
+        herdr = FakeHerdr()
+        k = self.keeper([up(T0, last_used_at=T0 - 3 * 3600)], herdr=herdr)
+        self.run_steps(k, [T0])
+        self.assertEqual((herdr.prompts, self.notes), ([], []))
+
+    def test_a_hold_suppresses_the_resume_prompt(self):
+        rid = 'o-000100Z'
+        arming.write(self.state, dict(arming.read(self.state), hold_until=T0 + 3600,
+                                      pending_restore={'rid': rid, 'stopped_at': T0 - 300, 'back_at': T0 - 30}))
+        herdr = FakeHerdr()
+        k = self.keeper([up(T0, last_used_at=T0 - 100)], herdr=herdr)
+        self.run_steps(k, [T0, T0 + 60])
+        self.assertEqual(herdr.prompts, [])
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn('on hold until', self.notes[0])
 
     def test_owner_stop_is_logged_only(self):
-        arming.write(self.state, dict(arming.read(self.state), owner_stop_at=T0 + 3600))
+        arming.record_owner_stop(self.state, T0 + 3600)
         stops = [T0 + 3700 + 60 * i for i in range(4)]
         k = self.keeper([up(T0, last_used_at=T0 - 60)] + [down(at) for at in stops])
         self.run_steps(k, [T0] + stops)
@@ -357,14 +648,15 @@ class KeeperStepTests(unittest.TestCase):
         anchor = T0 - 3600
         stops = [anchor + LIFE + 30 + 60 * i for i in range(6)]
         k = self.keeper([up(T0, last_used_at=anchor)] + [down(at) for at in stops])
-        with patch.object(lifecycle, 'gate', side_effect=[RuntimeError('ledger trouble'), None]):
+        with patch.object(lifecycle, 'gate', side_effect=[RuntimeError('ledger trouble'), 'not armed']):
             self.run_steps(k, [T0] + stops[:3])
             self.assertNotIn('kind', self.runtime()['down'])
             self.assertEqual(self.notes, [])
             self.run_steps(k, stops[3:])
         self.assertEqual(self.runtime()['down']['kind'], 'LIFETIME')
         self.assertEqual(len(self.notes), 1)
-        self.assertIn('would restart', self.notes[0].lower())
+        self.assertIn('was not restarted: not armed', self.notes[0])
+        self.assertEqual(self.api.posts, 0)
 
     def test_a_malformed_saved_watch_starts_clean(self):
         saved = {'codespace': 'cs-1', 'heartbeat_at': T0, 'down': {'count': 2}, 'last_up_at': 'soon',
@@ -505,25 +797,37 @@ class ForeignProcessTests(unittest.TestCase):
             state = Path(tmp).resolve()
             child, record = keepalive_decoy(self, state)
             atomic_write(state / keeper.RUNTIME, json.dumps({'keepalive': record}).encode())
+            proxy = ("/usr/bin/python3 -I -B -c import sys;from devcontainer_setup.project_sync.transport import "
+                     "herdr_stdio;raise SystemExit(herdr_stdio(sys.argv[1],sys.argv[2])) cs-1 ")
             listing = '\n'.join([
-                '  101 gh codespace ports forward 2222:50123 -c cs-1',
-                '  202 /opt/homebrew/bin/gh codespace ssh -c cs-1 --stdio -- -i /Users/me/.ssh/codespaces.auto',
-                f'  {child.pid} gh codespace ssh -c cs-1 -- -i key -o ServerAliveInterval=30 exec sleep infinity',
-                '  404 gh codespace ssh -c cs-1 -- -N -L 13570:localhost:3570',
-                '  505 gh codespace ssh -c cs-other -- -N -L 13570:localhost:3570',
-                '  606 grep gh codespace cs-1',
-                '  707 gh codespace ports forward 3570:3570 --codespace=cs-1',
-                '  808 gh cs ssh -c cs-1 -- -N -L 13570:localhost:3570',
-                '  909 /usr/local/bin/gh cs ports forward 3570:3570 -c cs-1',
-                '  910 gh cs ports forward 2222:50124 -c cs-1',
+                '  101     1 gh codespace ports forward 2222:50123 -c cs-1',
+                f'  150     1 {proxy}{state}',
+                f'  151     1 {proxy}{state}-other',
+                '  202   150 /opt/homebrew/bin/gh codespace ssh -c cs-1 --stdio -- -i /Users/me/.ssh/codespaces.auto',
+                '  203     1 gh codespace ssh -c cs-1 --stdio -- -i /Users/me/.ssh/codespaces.auto',
+                '  204   151 gh codespace ssh -c cs-1 --stdio -- -i /Users/me/.ssh/codespaces.auto',
+                f'  {child.pid}     1 gh codespace ssh -c cs-1 -- -i key -o ServerAliveInterval=30 exec sleep infinity',
+                '  404     1 gh codespace ssh -c cs-1 -- -N -L 13570:localhost:3570',
+                '  505     1 gh codespace ssh -c cs-other -- -N -L 13570:localhost:3570',
+                '  606     1 grep gh codespace cs-1',
+                '  707     1 gh codespace ports forward 3570:3570 --codespace=cs-1',
+                '  808     1 gh cs ssh -c cs-1 -- -N -L 13570:localhost:3570',
+                '  909     1 /usr/local/bin/gh cs ports forward 3570:3570 -c cs-1',
+                '  910     1 gh cs ports forward 2222:50124 -c cs-1',
                 'garbage line',
             ])
-            run = lambda *a, **k: subprocess.CompletedProcess(a, 0, listing + '\n', '')
-            self.assertEqual(keeper.foreign_processes(state, 'cs-1', run=run), [404, 707, 808, 909])
+            calls = []
+
+            def run(args, **kwargs):
+                calls.append(args)
+                return subprocess.CompletedProcess(args, 0, listing + '\n', '')
+            # Only the gh --stdio that this project's Herdr proxy started is ours (lead ruling 7).
+            self.assertEqual(keeper.foreign_processes(state, 'cs-1', run=run), [203, 204, 404, 707, 808, 909])
+            self.assertEqual(calls[0], ['ps', '-axo', 'pid=,ppid=,command='])
             # Exempt by fact only: a record whose start time differs (a reused pid) exempts nothing.
             recycled = dict(record, process_identity='X' + record['process_identity'][1:])
             atomic_write(state / keeper.RUNTIME, json.dumps({'keepalive': recycled}).encode())
-            self.assertEqual(keeper.foreign_processes(state, 'cs-1', run=run), [child.pid, 404, 707, 808, 909])
+            self.assertEqual(keeper.foreign_processes(state, 'cs-1', run=run), [203, 204, child.pid, 404, 707, 808, 909])
             with self.assertRaisesRegex(ValueError, 'retry'):
                 keeper.foreign_processes(state, 'cs-1', run=lambda *a, **k: subprocess.CompletedProcess(a, 1, '', ''))
 
