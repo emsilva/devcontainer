@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -496,6 +497,267 @@ class WizardCliTests(unittest.TestCase):
         with self.assertRaises(Cancelled):
             _launch_options(UI(), Codespaces(run=github), self.root, 'main', 'existing-space')
         self.assertEqual(prompts, ['Reuse this codespace with these existing resource settings?'])
+
+
+# Serves ssh://git@github.com/<owner>/<repo>.git from $FAKE_GITHUB, so a GitHub
+# origin needs no network: Git runs `<command> host "git-upload-pack '/path'"`.
+FAKE_SSH = '''import os, shlex, sys
+service, path = shlex.split(sys.argv[-1])
+os.execvp('git', ['git', service.removeprefix('git-'), os.path.join(os.environ['FAKE_GITHUB'], path.lstrip('/'))])
+'''
+
+
+class SetupFromDefaultBranchTests(unittest.TestCase):
+    """A GitHub origin served offline; the owner's checkout sits on a feature branch."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name).resolve()
+        ssh = base / 'bin/fake-ssh.py'
+        ssh.parent.mkdir()
+        ssh.write_text(FAKE_SSH)
+        self.state = base / 'state'
+        self.env = dict(os.environ, HOME=str(base / 'home'), XDG_CONFIG_HOME=str(base / 'config'),
+                        XDG_CACHE_HOME=str(base / 'cache'), XDG_STATE_HOME=str(self.state),
+                        GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1', GIT_SSH_VARIANT='simple',
+                        GIT_SSH_COMMAND=f'{shlex.quote(sys.executable)} -I {shlex.quote(str(ssh))}',
+                        FAKE_GITHUB=str(base / 'github'))
+        (base / 'home').mkdir()
+        environment = patch.dict(os.environ, self.env)
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.origin = base / 'github/owner/project.git'
+        self.origin.parent.mkdir(parents=True)
+        subprocess.check_call(['git', 'init', '--quiet', '--bare', '-b', 'main', str(self.origin)])
+        self.root = base / 'project'
+        self.root.mkdir()
+        self.git('init', '--quiet', '-b', 'main')
+        self.git('config', 'user.name', 'Test User')
+        self.git('config', 'user.email', 'test@example.com')
+        (self.root / 'package.json').write_text('{"engines":{"node":"24"}}\n')
+        self.git('add', '.')
+        self.git('commit', '--quiet', '-m', 'Initial')
+        self.git('remote', 'add', 'origin', 'ssh://git@github.com/owner/project.git')
+        self.git('push', '--quiet', '-u', 'origin', 'main')
+        self.clone = base / 'other-machine'
+
+    def git(self, *args):
+        return subprocess.check_output(['git', '-C', str(self.root), *args], text=True).strip()
+
+    def cli(self, *args):
+        return subprocess.run([sys.executable, '-m', 'devcontainer_setup', '--project', str(self.root), *args],
+                              cwd=SOURCE, env=self.env, capture_output=True, text=True)
+
+    def push_to_main(self, files):
+        """Advance origin's main from another clone, as another machine would."""
+        if not self.clone.exists():
+            subprocess.check_call(['git', 'clone', '--quiet', str(self.origin), str(self.clone)])
+        for name, text in files.items():
+            (self.clone / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.clone / name).write_text(text)
+        run = ['git', '-C', str(self.clone), '-c', 'user.name=Other', '-c', 'user.email=other@example.com']
+        subprocess.check_call([*run, 'add', '.'])
+        subprocess.check_call([*run, 'commit', '--quiet', '-m', 'Remote work'])
+        subprocess.check_call([*run, 'push', '--quiet', 'origin', 'HEAD:refs/heads/main'])
+        return subprocess.check_output([*run, 'rev-parse', 'HEAD'], text=True).strip()
+
+    def checkout_feature(self):
+        # Feature-only files would show in anything rendered from this checkout.
+        self.git('switch', '--quiet', '-c', 'feature/local')
+        (self.root / 'Taskfile.yml').write_text("version: '3'\ntasks:\n  feature-only:\n    cmds: [echo feature]\n")
+        (self.root / 'go.mod').write_text('module example.com/feature\n\ngo 1.26\n')
+        self.git('add', '.')
+        self.git('commit', '--quiet', '-m', 'Feature work')
+        (self.root / 'package.json').write_text('{"engines":{"node":"24"},"private":true}\n')
+        (self.root / 'scratch.txt').write_text('untracked owner work\n')
+
+    def snapshot(self):
+        files = {path.relative_to(self.root).as_posix(): path.read_bytes() for path in self.root.rglob('*')
+                 if path.is_file() and '.git' not in path.relative_to(self.root).parts}
+        return (self.git('branch', '--show-current'), self.git('rev-parse', 'HEAD'),
+                self.git('status', '--porcelain', '--untracked-files=all'), self.git('ls-files', '--stage'),
+                files, self.git('stash', 'list'))
+
+    def worktree_root(self):
+        from devcontainer_setup.project_sync.state import discover_project
+        return self.state / 'devcontainer-setup/setup-worktrees' / discover_project(self.root).project_id
+
+    def assert_nothing_left(self):
+        self.assertEqual(self.git('branch', '--list', 'setup/*'), '')
+        self.assertEqual(self.git('worktree', 'list', '--porcelain').count('\nworktree '), 0)
+        self.assertEqual(subprocess.check_output(['git', '-C', str(self.origin), 'for-each-ref', 'refs/heads/setup'],
+                                                 text=True), '')
+        self.assertFalse((self.worktree_root() / 'setup-devcontainer').exists())
+
+    def ui(self, answers, seen):
+        case = self
+
+        class UI:
+            def multi(self, title, options, selected):
+                return selected
+
+            def input(self, title, value=''):
+                return answers.get(title, value)
+
+            def confirm(self, title, default=True):
+                seen.setdefault('confirms', []).append(title)
+                return answers.get(title, False)
+
+            def choose(self, title, options, selected=None):
+                if title == 'Review setup':
+                    seen['worktrees'] = case.git('worktree', 'list', '--porcelain')
+                if title not in answers:
+                    raise AssertionError(f'Unexpected choice: {title}')
+                return answers[title]
+        return UI
+
+    def interact(self, answers, ref='a' * 40, ui=None, **kwargs):
+        import contextlib
+        import io
+        from devcontainer_setup.__main__ import interactive
+        from devcontainer_setup.discovery import scan
+        seen = self.seen = {}
+        output = io.StringIO()
+        with patch('devcontainer_setup.__main__.Gum', ui or self.ui(answers, seen)), \
+                patch('devcontainer_setup.__main__._ensure_runner'), \
+                patch('devcontainer_setup.__main__.repository_access', return_value=True), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            try:
+                seen['result'] = interactive(self.root, scan(self.root), {}, ref, None, **kwargs)
+            finally:
+                seen['output'] = output.getvalue()
+        return seen
+
+    COMMIT_ONLY = {'After setup': 'Commit only (no Codespace)', 'Review setup': 'Continue',
+                   'Commit these setup files?': True}
+
+    def test_rendered_files_come_from_the_worktree(self):
+        from devcontainer_setup.__main__ import integrate_taskfile
+        from devcontainer_setup.discovery import scan
+        self.checkout_feature()
+        # Control: this checkout's own render would carry both feature-only signals.
+        files = {}
+        integrate_taskfile(self.root, files)
+        self.assertIn(b'feature-only', files['Taskfile.yml'])
+        self.assertTrue(scan(self.root)['runtimes']['go']['selected'])
+        before = self.snapshot()
+        result = self.cli('--dry-run')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('+++ b/Taskfile.yml', result.stdout)
+        self.assertNotIn('feature-only', result.stdout)
+        self.assertNotIn('devcontainers/features/go:1', result.stdout)
+        self.assertIn('devcontainers/features/node:1', result.stdout)
+        self.assertEqual(self.snapshot(), before)
+        self.assert_nothing_left()
+
+    def test_dry_run_removes_its_worktree_on_error(self):
+        # Only origin's main has the unresolved pins; this checkout has none.
+        self.push_to_main({'package.json': '{"packageManager":"pnpm@9.15.4"}\n',
+                           'nested/package.json': '{"packageManager":"pnpm@10.2.1"}\n'})
+        self.checkout_feature()
+        before = self.snapshot()
+        result = self.cli('--dry-run')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('package-manager version', result.stderr)
+        self.assertEqual(self.snapshot(), before)
+        self.assert_nothing_left()
+
+    def test_review_names_the_setup_branch_and_cancel_leaves_nothing(self):
+        from devcontainer_setup.ui import Cancelled
+        self.checkout_feature()
+        before = self.snapshot()
+        with self.assertRaises(Cancelled):
+            self.interact({'After setup': 'Commit only (no Codespace)', 'Review setup': 'Cancel'})
+        self.assertIn('Branch: setup/devcontainer (from origin/main)', self.seen['output'])
+        self.assertIn(f'worktree {self.worktree_root() / "setup-devcontainer"}\n', self.seen['worktrees'])
+        self.assertEqual(self.snapshot(), before)
+        self.assert_nothing_left()
+
+    def test_cancel_after_apply_keeps_the_cancellation_and_names_the_cleanup(self):
+        from devcontainer_setup.ui import Cancelled
+        self.checkout_feature()
+        before = self.snapshot()
+        # Worktrees share this hook; its rewrite leaves the worktree with staged changes.
+        hook = self.root / '.git/hooks/pre-commit'
+        hook.write_text('#!/bin/sh\nprintf "# hook\\n" >> .gitignore\ngit add .gitignore\n')
+        hook.chmod(0o755)
+        with self.assertRaises(Cancelled):
+            self.interact(self.COMMIT_ONLY)
+        self.assertIn('Commit the hook-updated setup files shown above?', self.seen['confirms'])
+        self.assertIn('run by hand:', self.seen['output'])
+        self.assertIn('worktree remove', self.seen['output'])
+        worktree = self.worktree_root() / 'setup-devcontainer'
+        self.assertTrue(worktree.exists())  # Reported, never silently deleted.
+        self.assertEqual(self.git('rev-parse', 'refs/heads/setup/devcontainer'),
+                         subprocess.check_output(['git', '-C', str(self.origin), 'rev-parse', 'main'], text=True).strip())
+        self.assertEqual(self.snapshot(), before)
+
+    def test_commit_only_commits_in_the_worktree_and_keeps_the_branch(self):
+        self.checkout_feature()
+        before, main = self.snapshot(), self.push_to_main({'remote.txt': 'newer main\n'})
+        seen = self.interact(self.COMMIT_ONLY)
+        self.assertEqual(seen['result'], 0, seen['output'])
+        self.assertIn('Branch: setup/devcontainer (from origin/main)', seen['output'])
+        self.assertIn(f'worktree {self.worktree_root() / "setup-devcontainer"}\n', seen['worktrees'])
+        sha = self.git('rev-parse', 'refs/heads/setup/devcontainer')
+        self.assertEqual(self.git('rev-parse', f'{sha}^'), main)
+        self.assertIn('.devcontainer/devcontainer.json', self.git('show', '--name-only', '--format=', sha))
+        self.assertNotIn('feature-only', self.git('show', f'{sha}:Taskfile.yml'))
+        self.assertNotIn('devcontainers/features/go:1', self.git('show', f'{sha}:.devcontainer/devcontainer.json'))
+        self.assertEqual(self.git('show', '-s', '--format=%B', sha), 'Configure project devcontainer')
+        self.assertIn('setup/devcontainer', seen['output'].split(f'Setup commit: {sha}')[1])
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.git('worktree', 'list', '--porcelain').count('\nworktree '), 0)
+        self.assertFalse((self.worktree_root() / 'setup-devcontainer').exists())
+        self.assertEqual(subprocess.check_output(['git', '-C', str(self.origin), 'for-each-ref', 'refs/heads/setup'],
+                                                 text=True), '')
+
+    def test_first_setup_writes_no_settings_file_the_checkout_does_not_ignore(self):
+        self.checkout_feature()
+        before = self.snapshot()
+        seen = self.interact(dict(self.COMMIT_ONLY, **{'Apply dotfiles inside the container?': True,
+                                                       'Dotfiles repository': 'owner/dotfiles'}))
+        self.assertEqual(seen['result'], 0, seen['output'])
+        self.assertEqual(self.snapshot(), before)
+        self.assertIn('DOTFILES_REPO=owner/dotfiles', seen['output'])
+        self.assertNotIn('could not be saved', seen['output'])
+
+    def test_revision_gate_reads_origin_default(self):
+        from devcontainer_setup.ui import Cancelled
+        marker = {'customizations': {'devcontainerSetup': {'sourceRef': 'c' * 40}}}
+        self.push_to_main({'.devcontainer/devcontainer.json': json.dumps(marker) + '\n'})
+        self.checkout_feature()
+        with self.assertRaisesRegex(ValueError, 'origin/main.*--upgrade'):
+            self.interact({})
+        self.assert_nothing_left()
+        class FirstQuestionCancels:
+            def __getattr__(self, name):
+                raise Cancelled()
+        with self.assertRaises(Cancelled):
+            self.interact({}, ui=FirstQuestionCancels, upgrade=True)
+        self.assert_nothing_left()
+
+    def test_no_origin_keeps_current_flow(self):
+        self.git('remote', 'remove', 'origin')
+        for branch in ('main', 'feature/local'):
+            with self.subTest(branch=branch):
+                if branch != 'main':
+                    self.git('switch', '--quiet', '-c', branch, 'main')
+                seen = self.interact(dict(self.COMMIT_ONLY, **{'Apply dotfiles inside the container?': True,
+                                                               'Dotfiles repository': 'owner/dotfiles'}))
+                self.assertEqual(seen['result'], 0, seen['output'])
+                expected = 'setup/devcontainer' if branch == 'main' else branch
+                self.assertIn(f'Branch: {expected}\n', seen['output'])
+                self.assertEqual(self.git('branch', '--show-current'), expected)
+                self.assertIn('.devcontainer/devcontainer.json', self.git('show', '--name-only', '--format=', 'HEAD'))
+                self.assertEqual((self.root / '.devcontainer/devcontainer.env').read_text(), 'DOTFILES_REPO=owner/dotfiles\n')
+                self.assertEqual(self.git('status', '--porcelain', '--untracked-files=all'), '')
+                self.assertFalse((self.state / 'devcontainer-setup/setup-worktrees').exists())
+                self.assertEqual(self.git('worktree', 'list', '--porcelain').count('\nworktree '), 0)
+                if branch == 'main':
+                    self.git('switch', '--quiet', 'main')
+                    self.git('clean', '-fdxq')
 
 
 if __name__ == '__main__':

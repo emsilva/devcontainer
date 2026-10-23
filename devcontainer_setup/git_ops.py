@@ -7,7 +7,10 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
+import shlex
 import subprocess
+import sys
 import tempfile
 
 
@@ -22,13 +25,25 @@ def git(project: Path, *args: str, check: bool = True) -> str:
     return result.stdout.strip()
 
 
+def _succeeds(project: Path, *args: str) -> bool:
+    return subprocess.run(['git', '-C', str(project), *args], capture_output=True, text=True).returncode == 0
+
+
+SETUP_BRANCH = re.compile(r'setup/devcontainer(?:-[1-9][0-9]*)?')
+
+
+def default_branch(project: Path) -> str:
+    # Local origin/HEAD only: never `remote set-head` against the network.
+    head = git(project, 'symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD', check=False)
+    return head.removeprefix('refs/remotes/origin/') if head.startswith('refs/remotes/origin/') else 'main'
+
+
 def proposed_branch(project: Path) -> str:
+    """The commit branch without a GitHub origin: the current one, or a new one off a default."""
     current = git(project, 'branch', '--show-current')
     if not current:
         raise ValueError('Detached HEAD: choose a working branch before setup.')
-    default = git(project, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD', check=False)
-    default = default.removeprefix('origin/') or 'main'
-    if current not in {default, 'main', 'master'}:
+    if current not in {default_branch(project), 'main', 'master'}:
         return current
     candidate = 'setup/devcontainer'
     number = 2
@@ -36,6 +51,129 @@ def proposed_branch(project: Path) -> str:
         candidate = f'setup/devcontainer-{number}'
         number += 1
     return candidate
+
+
+def next_setup_branch(project: Path) -> str:
+    result = subprocess.run(['git', '-C', str(project), 'ls-remote', 'origin', 'refs/heads/setup/devcontainer',
+                             'refs/heads/setup/devcontainer-*'], capture_output=True, text=True)
+    if result.returncode:
+        raise ValueError('Cannot list setup branches on origin; check your access to origin, then run setup again.')
+    taken = {line.split('\t', 1)[1].removeprefix('refs/heads/') for line in result.stdout.splitlines() if '\t' in line}
+    candidate = 'setup/devcontainer'
+    number = 2
+    while candidate in taken or _succeeds(project, 'rev-parse', '--verify', '--quiet', f'refs/heads/{candidate}'):
+        candidate = f'setup/devcontainer-{number}'
+        number += 1
+    return candidate
+
+
+def _fetch_default(project: Path, default: str) -> bool:
+    # Only origin <default>, into its tracking ref even under a narrow fetch refspec.
+    return _succeeds(project, 'fetch', '--quiet', '--no-tags', '--no-recurse-submodules', 'origin',
+                     f'+refs/heads/{default}:refs/remotes/origin/{default}')
+
+
+def _worktrees(project: Path) -> dict[Path, str]:
+    """Registered worktrees and the branch each holds ('' when detached)."""
+    found, path = {}, None
+    for line in git(project, 'worktree', 'list', '--porcelain').splitlines():
+        if line.startswith('worktree '):
+            path = Path(line.removeprefix('worktree ')).resolve()
+            found[path] = ''
+        elif line.startswith('branch ') and path:
+            found[path] = line.removeprefix('branch refs/heads/')
+    return found
+
+
+def setup_worktree(project: Path, root: Path) -> tuple[Path, str]:
+    """Cut a new setup branch from a freshly fetched origin/<default> into a worktree under root."""
+    default = default_branch(project)
+    if not _fetch_default(project, default):
+        raise ValueError(f'Cannot fetch {default} from origin; check that origin has a {default} branch '
+                         'you can read, then run setup again.')
+    start = git(project, 'rev-parse', '--verify', f'refs/remotes/origin/{default}^{{commit}}')
+    branch = next_setup_branch(project)
+    root = Path(root)
+    for path, held in _worktrees(project).items():
+        if path.is_relative_to(root.resolve()) and SETUP_BRANCH.fullmatch(held):
+            # A crashed run's worktree may hold work; it is the owner's to inspect.
+            print(f'Note: an earlier setup left the worktree {path} on {held}. Inspect it, then remove it with '
+                  f'git -C {shlex.quote(str(project))} worktree remove {shlex.quote(str(path))}', file=sys.stderr)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = root / branch.replace('/', '-')
+    if path.exists() or path.is_symlink():
+        path = Path(tempfile.mkdtemp(prefix=path.name + '-', dir=root))
+    git(project, 'worktree', 'add', '--quiet', '--no-track', '-b', branch, str(path), start)
+    return path, branch
+
+
+def _manual(project: Path, steps: list[str]) -> str:
+    return 'run by hand: ' + ' && '.join(f'git -C {shlex.quote(str(project))} {step}' for step in steps)
+
+
+def _remove_worktree(project: Path, path: Path, branch: str, steps: list[str]) -> None:
+    if not SETUP_BRANCH.fullmatch(branch):
+        raise ValueError(f'Refusing to remove {branch}: setup removes only setup/devcontainer[-N] branches.')
+    held = _worktrees(project).get(Path(path).resolve())
+    if held is None:
+        return  # Already removed.
+    if held != branch:
+        raise ValueError(f'{path} holds {held or "a detached HEAD"}, not {branch}; refusing to remove it '
+                         'as the setup/devcontainer worktree.')
+    if not _succeeds(project, 'worktree', 'remove', str(path)):
+        # A plain retry would refuse again: the hand-run step forces it once inspected.
+        raise ValueError(f'Could not remove the setup worktree {path}; nothing else was changed. Inspect it, then '
+                         + _manual(project, [f'worktree remove --force {shlex.quote(str(path))}', *steps[1:]]))
+
+
+def remove_worktree(project: Path, path: Path, branch: str) -> None:
+    """Remove a setup worktree and keep its branch, which holds the setup commit."""
+    _remove_worktree(project, path, branch, [f'worktree remove {shlex.quote(str(path))}'])
+
+
+def remove_setup_worktree(project: Path, path: Path, branch: str, *, remote: bool) -> None:
+    """Remove the worktree, then the branch locally and (if remote) on origin, then verify origin."""
+    steps = [f'worktree remove {shlex.quote(str(path))}', f'branch -D {branch}']
+    if remote:
+        steps.append(f'push origin --delete {branch}')
+    _remove_worktree(project, path, branch, steps)
+    # -D: the name is guarded above and the branch is this run's own; `-d` would judge
+    # it against whatever the owner's checkout has out.
+    if (_succeeds(project, 'rev-parse', '--verify', '--quiet', f'refs/heads/{branch}')
+            and not _succeeds(project, 'branch', '-D', branch)):
+        raise ValueError(f'Removed the setup worktree, but could not delete branch {branch}; '
+                         + _manual(project, steps[1:]))
+    if not remote:
+        return
+    failed = f'Deleted {branch} locally, but not on origin; ' + _manual(project, steps[2:])
+    listed = _remote_head(project, branch)
+    # GitHub may already have deleted a merged head branch.
+    if listed is None or (listed and not _succeeds(project, 'push', '--quiet', 'origin', '--delete',
+                                                   f'refs/heads/{branch}')):
+        raise ValueError(failed)
+    if _remote_head(project, branch) != '':
+        raise ValueError(f'Could not confirm origin no longer has {branch}; ' + _manual(project, steps[2:]))
+
+
+def _remote_head(project: Path, branch: str) -> str | None:
+    """`git ls-remote --heads origin <branch>`: '' when absent, None when origin cannot be read."""
+    result = subprocess.run(['git', '-C', str(project), 'ls-remote', '--heads', 'origin', f'refs/heads/{branch}'],
+                            capture_output=True, text=True)
+    return None if result.returncode else result.stdout.strip()
+
+
+def fast_forward_checkout(project: Path, default: str) -> bool:
+    """Fast-forward the owner's checkout only when it is on <default> and clean; else change nothing."""
+    status = subprocess.run(['git', '-C', str(project), 'status', '--porcelain', '--untracked-files=all'],
+                            capture_output=True, text=True)
+    if (status.returncode or status.stdout.strip() or not _succeeds(project, 'check-ref-format', '--branch', default)
+            or git(project, 'branch', '--show-current', check=False) != default):
+        return False
+    if not _fetch_default(project, default):
+        return False
+    # --no-overwrite-ignore: an ignored local file (devcontainer.env, say) is never replaced.
+    return _succeeds(project, 'merge', '--ff-only', '--quiet', '--no-autostash', '--no-overwrite-ignore',
+                     f'refs/remotes/origin/{default}')
 
 
 def _digest(data: bytes) -> str:

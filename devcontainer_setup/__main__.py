@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -16,7 +17,8 @@ from urllib.parse import urlsplit
 
 from .codespaces import Codespaces
 from .discovery import scan
-from .git_ops import GitPlan, ReviewChanged, git, proposed_branch
+from .git_ops import (GitPlan, ReviewChanged, default_branch, git, proposed_branch, remove_setup_worktree,
+                      remove_worktree, setup_worktree)
 from .preferences import load_preferences, save_preferences
 from .releases import fetch_release
 from .render import render, validate
@@ -388,12 +390,65 @@ def _repository(project: Path) -> str:
     return repo
 
 
+def _state_root() -> Path:
+    state_home = os.environ.get('XDG_STATE_HOME', '')
+    return Path(state_home) if state_home and Path(state_home).is_absolute() else Path.home() / '.local/state'
+
+
+def _check_revision(metadata: dict, ref: str, upgrade: bool, default: str | None = None) -> None:
+    if metadata and metadata.get('sourceRef') != ref and not upgrade:
+        if default:
+            raise ValueError(f'origin/{default} uses a different generator revision. Run its installed task from an '
+                             f'up-to-date {default} checkout, or use --upgrade to review updating it.')
+        raise ValueError('This project uses a different generator revision. Run its installed task, or use --upgrade to review updating it.')
+
+
+@contextmanager
+def setup_checkout(project: Path):
+    """Yield (checkout, default) to render and commit in: with a GitHub origin, a temporary
+    worktree on a new setup branch cut from origin/<default>; else the owner's checkout and None."""
+    if not _github_repository(project):
+        yield project, None
+        return
+    from .project_sync.state import discover_project
+    default = default_branch(project)
+    root = _state_root() / 'devcontainer-setup/setup-worktrees' / discover_project(project).project_id
+    worktree, branch = setup_worktree(project, root)
+    start = git(project, 'rev-parse', f'refs/heads/{branch}')
+    try:
+        yield worktree, default
+    except BaseException:
+        _close_setup_worktree(project, worktree, branch, start, failing=True)
+        raise
+    _close_setup_worktree(project, worktree, branch, start)
+
+
+def _close_setup_worktree(project: Path, worktree: Path, branch: str, start: str, failing: bool = False) -> None:
+    """Keep a branch that holds a setup commit; drop one that holds nothing."""
+    try:
+        if git(project, 'rev-parse', '--verify', '--quiet', f'refs/heads/{branch}', check=False) == start:
+            remove_setup_worktree(project, worktree, branch, remote=False)
+            return
+        remove_worktree(project, worktree, branch)
+        print(f'Setup commit is on branch {branch}; your checkout and its branch are unchanged.', flush=True)
+    except ValueError as error:
+        if not failing:
+            raise
+        # Never mask the error or cancellation that ended setup.
+        print(f'Setup: {error}', file=sys.stderr)
+
+
 def _preferences_after_commit(project: Path, preferences: dict) -> None:
     try:
         saved = save_preferences(preferences)
         print(f'Preferences saved: {saved}', flush=True)
         if preferences['apply_dotfiles']:
             path = project / '.devcontainer/devcontainer.env'
+            if not git(project, 'check-ignore', '.devcontainer/devcontainer.env', check=False):
+                # Personal settings may hold tokens: only where Git already ignores them.
+                print(f'Add DOTFILES_REPO={preferences["dotfiles_repo"]} to .devcontainer/devcontainer.env '
+                      'once this checkout has the setup files.', flush=True)
+                return
             if path.is_symlink():
                 raise ValueError('Local dotfiles settings path is a symlink; not overwritten.')
             if path.exists():
@@ -597,81 +652,88 @@ def setup_continuity(project: Path, ui, codespace: str | None) -> None:
               'Run task work:cs on your Mac to finish connecting.', file=sys.stderr)
 
 
-def interactive(project: Path, found: dict, metadata: dict, ref: str, resume: str | None) -> int:
+def interactive(project: Path, found: dict, metadata: dict, ref: str, resume: str | None,
+                upgrade: bool = False) -> int:
     ui, api = Gum(), Codespaces()
     preferences = load_preferences()
-    chosen = defaults(found, preferences, metadata)
     if not _github_repository(project):
         print(f'Note: {NO_GITHUB_ORIGIN} Commit-only setup works without it.', file=sys.stderr, flush=True)
-    while True:
-        chosen = _select(ui, found, chosen, preferences)
-        branch = proposed_branch(project)
-        launch = _launch_options(ui, api, project, branch, resume)
-        chosen['ssh'] = bool(launch)
-        files = render(project, SOURCE, chosen, ref)
-        integrate_taskfile(project, files)
-        integrate_continuity(project, files, chosen.get('continuity', False))
-        check_candidate(files, project)
-        plan = GitPlan(project, files, branch=branch)
-        if not plan.changed:
-            plan.branch = plan.start_branch
-        print(f'\nProject: {project}\nBranch: {plan.branch}\nRuntimes: {chosen["runtimes"]}'
-              f'\nTools: {", ".join(chosen["tools"]) or "baseline only"}'
-              f'\nAgents: Codex, Claude Code, OpenCode (baseline); dotfiles: {preferences["dotfiles_repo"] if chosen["dotfiles"] else "disabled"}'
-              f'\nFiles: {", ".join(plan.changed) or "already configured"}', flush=True)
-        generated_config = json.loads(files['.devcontainer/devcontainer.json'])
-        marker = generated_config['customizations']['devcontainerSetup']
-        for detail in marker.get('dependencies', {}).values():
-            print(f'Dependency: {detail}', flush=True)
-        for detail in marker.get('pinningLimitations', {}).values():
-            print(f'Version note: {detail}', flush=True)
-        if launch:
-            print(f'Launch: {launch["machine"]}, idle {launch["idle_timeout"]}, {launch["client"]}', flush=True)
+    with setup_checkout(project) as (source, default):
+        if default:
+            # What reaches the default branch is computed from it, never from this checkout.
+            found, metadata = scan(source), _metadata(source)
+            _check_revision(metadata, ref, upgrade, default)
+        chosen = defaults(found, preferences, metadata)
         while True:
-            action = ui.choose('Review setup', ['View diff', 'Change answers', 'Continue', 'Cancel'], 'Continue')
-            if action == 'View diff':
-                print(plan.diff() or 'No project changes.', flush=True)
+            chosen = _select(ui, found, chosen, preferences)
+            branch = git(source, 'branch', '--show-current') if default else proposed_branch(project)
+            launch = _launch_options(ui, api, project, branch, resume)
+            chosen['ssh'] = bool(launch)
+            files = render(source, SOURCE, chosen, ref)
+            integrate_taskfile(source, files)
+            integrate_continuity(source, files, chosen.get('continuity', False))
+            check_candidate(files, source)
+            # The worktree is on its setup branch already.
+            plan = GitPlan(source, files, branch=None if default else branch)
+            if not plan.changed:
+                plan.branch = plan.start_branch
+            origin = f' (from origin/{default})' if default else ''
+            print(f'\nProject: {project}\nBranch: {plan.branch}{origin}\nRuntimes: {chosen["runtimes"]}'
+                  f'\nTools: {", ".join(chosen["tools"]) or "baseline only"}'
+                  f'\nAgents: Codex, Claude Code, OpenCode (baseline); dotfiles: {preferences["dotfiles_repo"] if chosen["dotfiles"] else "disabled"}'
+                  f'\nFiles: {", ".join(plan.changed) or "already configured"}', flush=True)
+            generated_config = json.loads(files['.devcontainer/devcontainer.json'])
+            marker = generated_config['customizations']['devcontainerSetup']
+            for detail in marker.get('dependencies', {}).values():
+                print(f'Dependency: {detail}', flush=True)
+            for detail in marker.get('pinningLimitations', {}).values():
+                print(f'Version note: {detail}', flush=True)
+            if launch:
+                print(f'Launch: {launch["machine"]}, idle {launch["idle_timeout"]}, {launch["client"]}', flush=True)
+            while True:
+                action = ui.choose('Review setup', ['View diff', 'Change answers', 'Continue', 'Cancel'], 'Continue')
+                if action == 'View diff':
+                    print(plan.diff() or 'No project changes.', flush=True)
+                else:
+                    break
+            if action == 'Change answers':
+                continue
+            if action == 'Cancel':
+                raise Cancelled()
+            prompt = (f'Commit setup files, push {plan.branch}, and create/open the selected codespace?'
+                      if launch else 'Commit these setup files?' if plan.changed else 'Save these personal preferences?')
+            if not ui.confirm(prompt):
+                raise Cancelled()
+            _ensure_runner(ref)
+            plan.apply()
+            while True:
+                try:
+                    sha = plan.commit()
+                    break
+                except ReviewChanged as error:
+                    print(error, file=sys.stderr)
+                    plan.accept_hook_changes()
+                    errors = validate(source)
+                    if errors:
+                        raise ValueError('Commit hooks changed generated invariants; fix the generator before retrying:\n' + '\n'.join(errors))
+                    print(plan.diff(), flush=True)
+                    if not ui.confirm('Commit the hook-updated setup files shown above?', False):
+                        raise Cancelled()
+            print(f'Setup commit: {sha}', flush=True)
+            _preferences_after_commit(project, preferences)
+            if launch:
+                repo = launch.pop('repo')
+                receipt = _state_root() / 'devcontainer-setup' / (hashlib.sha256(f'{repo}:{plan.branch}'.encode()).hexdigest()[:16] + '.json')
+                config = json.loads(files['.devcontainer/devcontainer.json'])
+                name = api.launch(plan, repo, dotfiles_repo=preferences['dotfiles_repo'] if chosen['dotfiles'] else None,
+                                  receipt=receipt, workspace=config.get('workspaceFolder'),
+                                  machine_profile=_machine_profile(project) if chosen['dotfiles'] else None, **launch)
             else:
-                break
-        if action == 'Change answers':
-            continue
-        if action == 'Cancel':
-            raise Cancelled()
-        prompt = (f'Commit setup files, push {plan.branch}, and create/open the selected codespace?'
-                  if launch else 'Commit these setup files?' if plan.changed else 'Save these personal preferences?')
-        if not ui.confirm(prompt):
-            raise Cancelled()
-        _ensure_runner(ref)
-        plan.apply()
-        while True:
-            try:
-                sha = plan.commit()
-                break
-            except ReviewChanged as error:
-                print(error, file=sys.stderr)
-                plan.accept_hook_changes()
-                errors = validate(project)
-                if errors:
-                    raise ValueError('Commit hooks changed generated invariants; fix the generator before retrying:\n' + '\n'.join(errors))
-                print(plan.diff(), flush=True)
-                if not ui.confirm('Commit the hook-updated setup files shown above?', False):
-                    raise Cancelled()
-        print(f'Setup commit: {sha}', flush=True)
-        _preferences_after_commit(project, preferences)
-        if launch:
-            repo = launch.pop('repo')
-            state_home = os.environ.get('XDG_STATE_HOME', '')
-            state = Path(state_home) if state_home and Path(state_home).is_absolute() else Path.home() / '.local/state'
-            receipt = state / 'devcontainer-setup' / (hashlib.sha256(f'{repo}:{plan.branch}'.encode()).hexdigest()[:16] + '.json')
-            config = json.loads(files['.devcontainer/devcontainer.json'])
-            name = api.launch(plan, repo, dotfiles_repo=preferences['dotfiles_repo'] if chosen['dotfiles'] else None,
-                              receipt=receipt, workspace=config.get('workspaceFolder'),
-                              machine_profile=_machine_profile(project) if chosen['dotfiles'] else None, **launch)
-        else:
-            name = None
-        if chosen.get('continuity'):
-            setup_continuity(project, ui, name)
-        return 0
+                name = None
+            break
+    if chosen.get('continuity'):
+        setup_continuity(project, ui, name)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -699,16 +761,20 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         metadata, ref = _metadata(project), source_ref()
         if args.dry_run:
-            chosen = defaults(found, load_preferences(), metadata)
-            conflicts = [str(conflict) for entry in [*found['runtimes'].values(), *found['package_managers'].values()]
-                         for conflict in entry['conflicts']]
-            if conflicts:
-                raise ValueError('Resolve these recommendations interactively:\n' + '\n'.join(conflicts))
-            files = render(project, SOURCE, chosen, ref)
-            integrate_taskfile(project, files)
-            integrate_continuity(project, files, chosen.get('continuity', False))
-            check_candidate(files, project)
-            print(GitPlan(project, files).diff())
+            with setup_checkout(project) as (source, default):
+                if default:
+                    found, metadata = scan(source), _metadata(source)
+                chosen = defaults(found, load_preferences(), metadata)
+                conflicts = [str(conflict) for entry in [*found['runtimes'].values(), *found['package_managers'].values()]
+                             for conflict in entry['conflicts']]
+                if conflicts:
+                    raise ValueError('Resolve these recommendations interactively:\n' + '\n'.join(conflicts))
+                files = render(source, SOURCE, chosen, ref)
+                integrate_taskfile(source, files)
+                integrate_continuity(source, files, chosen.get('continuity', False))
+                check_candidate(files, source)
+                diff = GitPlan(source, files).diff()
+            print(diff)
             return 0
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise ValueError('Interactive setup requires a terminal. Use --scan, --dry-run, or --check for read-only commands.')
@@ -716,9 +782,8 @@ def main(argv: list[str] | None = None) -> int:
             result = upgrade_handoff(project, ref, args.resume)
             if result is not None:
                 return result
-        if metadata and metadata.get('sourceRef') != ref and not (args.upgrade or args.upgrade_loaded):
-            raise ValueError('This project uses a different generator revision. Run its installed task, or use --upgrade to review updating it.')
-        return interactive(project, found, metadata, ref, args.resume)
+        _check_revision(metadata, ref, args.upgrade or args.upgrade_loaded)
+        return interactive(project, found, metadata, ref, args.resume, upgrade=args.upgrade or args.upgrade_loaded)
     except Cancelled:
         print('Setup cancelled. No push or codespace creation performed.', file=sys.stderr)
         return 130

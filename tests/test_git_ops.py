@@ -1,3 +1,6 @@
+import contextlib
+import io
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -6,11 +9,17 @@ from unittest.mock import patch
 
 import devcontainer_setup.git_ops as operations
 
-from devcontainer_setup.git_ops import GitPlan, ReviewChanged, proposed_branch
+from devcontainer_setup.git_ops import (GitPlan, ReviewChanged, default_branch, fast_forward_checkout,
+                                        next_setup_branch, proposed_branch, remove_setup_worktree,
+                                        remove_worktree, setup_worktree)
 
 
 def git(root, *args):
     return subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
+
+
+def run(root, *args):
+    return subprocess.run(['git', '-C', str(root), *args], capture_output=True, text=True)
 
 
 class GitPlanTests(unittest.TestCase):
@@ -300,6 +309,282 @@ class GitPlanTests(unittest.TestCase):
         self.assertEqual(git(self.root, 'config', '--get-all', 'remote.origin.fetch'), narrow)
         self.assertEqual(git(self.root, 'config', 'branch.setup/devcontainer.remote'), 'origin')
         self.assertEqual(git(self.root, 'config', 'branch.setup/devcontainer.merge'), 'refs/heads/setup/devcontainer')
+
+
+class SetupWorktreeTests(unittest.TestCase):
+    """Fixture repos with a local bare origin; the owner's Git config never applies."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        isolated = patch.dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
+        isolated.start()
+        self.addCleanup(isolated.stop)
+        self.root = self.base / 'state/setup-worktrees/project'
+        self.project = self.make_project('project')
+        self.clones = 0
+
+    def make_project(self, name):
+        project, origin = self.base / name, self.base / f'{name}.git'
+        git(self.base, 'init', '--quiet', '--bare', '-b', 'main', str(origin))
+        project.mkdir()
+        git(project, 'init', '--quiet', '-b', 'main')
+        git(project, 'config', 'user.name', 'Test User')
+        git(project, 'config', 'user.email', 'test@example.com')
+        (project / 'app.txt').write_text('original\n')
+        git(project, 'add', 'app.txt')
+        git(project, 'commit', '--quiet', '-m', 'Initial')
+        git(project, 'remote', 'add', 'origin', str(origin))
+        git(project, 'push', '--quiet', '-u', 'origin', 'main')
+        return project
+
+    def origin(self, project):
+        return Path(git(project, 'remote', 'get-url', 'origin'))
+
+    def push_to_origin(self, project, name, text='remote\n', ref='refs/heads/main'):
+        """Commit on origin from another clone, as another machine would; return the new SHA."""
+        self.clones += 1
+        clone = self.base / f'clone-{self.clones}'
+        git(self.base, 'clone', '--quiet', str(self.origin(project)), str(clone))
+        git(clone, 'config', 'user.name', 'Other User')
+        git(clone, 'config', 'user.email', 'other@example.com')
+        (clone / name).write_text(text)
+        git(clone, 'add', '-f', name)
+        git(clone, 'commit', '--quiet', '-m', f'Add {name}')
+        git(clone, 'push', '--quiet', 'origin', f'HEAD:{ref}')
+        return git(clone, 'rev-parse', 'HEAD')
+
+    def snapshot(self, project):
+        files = {path.relative_to(project).as_posix(): path.read_bytes() for path in project.rglob('*')
+                 if path.is_file() and '.git' not in path.relative_to(project).parts}
+        heads = [line for line in git(project, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads').splitlines()
+                 if not line.startswith('refs/heads/setup/')]
+        return {'branch': git(project, 'branch', '--show-current'), 'head': git(project, 'rev-parse', 'HEAD'),
+                'status': git(project, 'status', '--porcelain', '--untracked-files=all'),
+                'index': git(project, 'ls-files', '--stage'), 'files': files, 'heads': heads,
+                'stash': git(project, 'stash', 'list')}
+
+    def recorded(self):
+        """Record each Git command the helpers run, minus `git -C <project>`."""
+        calls, real = [], subprocess.run
+
+        def record(args, **kwargs):
+            if args[:2] == ['git', '-C']:
+                calls.append(tuple(args[3:]))
+            return real(args, **kwargs)
+        return calls, patch.object(operations.subprocess, 'run', side_effect=record)
+
+    def test_default_branch_reads_origin_head_without_the_network(self):
+        git(self.project, 'remote', 'set-url', 'origin', str(self.base / 'unreachable.git'))
+        calls, recording = self.recorded()
+        with recording:
+            self.assertEqual(default_branch(self.project), 'main')
+            git(self.project, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/trunk')
+            self.assertEqual(default_branch(self.project), 'trunk')
+        self.assertTrue(calls)
+        self.assertFalse([call for call in calls if call[0] in {'remote', 'ls-remote', 'fetch'}], calls)
+
+    def test_setup_branch_is_cut_from_origin_default_not_current(self):
+        project = self.project
+        git(project, 'switch', '--quiet', '-c', 'feature/local')
+        (project / 'feature.txt').write_text('unpushed\n')
+        git(project, 'add', 'feature.txt')
+        git(project, 'commit', '--quiet', '-m', 'Unpushed feature')
+        (project / 'app.txt').write_text('owner edit\n')
+        (project / 'notes.txt').write_text('untracked owner work\n')
+        stale = git(project, 'rev-parse', 'refs/remotes/origin/main')
+        fresh = self.push_to_origin(project, 'remote.txt')
+        self.push_to_origin(project, 'other.txt', ref='refs/heads/other')
+        git(self.origin(project), 'tag', 'v1', fresh)
+        before, published = self.snapshot(project), git(self.origin(project), 'for-each-ref')
+
+        path, branch = setup_worktree(project, self.root)
+
+        self.assertEqual(branch, 'setup/devcontainer')
+        self.assertEqual(path, self.root / 'setup-devcontainer')
+        self.assertNotEqual(stale, fresh)
+        self.assertEqual(git(path, 'rev-parse', 'HEAD'), fresh)
+        self.assertEqual(git(path, 'branch', '--show-current'), branch)
+        self.assertEqual((path / 'app.txt').read_text(), 'original\n')
+        self.assertTrue((path / 'remote.txt').exists())
+        self.assertFalse((path / 'feature.txt').exists())
+        self.assertFalse((path / 'notes.txt').exists())
+        self.assertEqual(self.snapshot(project), before)
+        self.assertEqual((project / 'notes.txt').read_text(), 'untracked owner work\n')
+        # Fetches only origin <default>, sets no upstream and never pushes.
+        self.assertEqual(git(project, 'rev-parse', 'refs/remotes/origin/main'), fresh)
+        self.assertNotEqual(run(project, 'rev-parse', '--verify', 'refs/remotes/origin/other').returncode, 0)
+        self.assertEqual(git(project, 'tag', '--list'), '')
+        self.assertNotEqual(run(project, 'config', f'branch.{branch}.merge').returncode, 0)
+        self.assertEqual(git(self.origin(project), 'for-each-ref'), published)
+
+    def test_next_setup_branch_skips_local_and_remote_names(self):
+        project = self.project
+        self.assertEqual(next_setup_branch(project), 'setup/devcontainer')
+        git(project, 'branch', 'setup/devcontainer')
+        git(project, 'push', '--quiet', 'origin', 'main:refs/heads/setup/devcontainer-2')
+        git(project, 'push', '--quiet', 'origin', 'main:refs/heads/other/setup/devcontainer-3')
+        # Only origin knows the name now; a local tracking ref must not be needed.
+        git(project, 'update-ref', '-d', 'refs/remotes/origin/setup/devcontainer-2')
+        self.assertEqual(next_setup_branch(project), 'setup/devcontainer-3')
+
+    def test_setup_worktree_never_reuses_or_deletes_a_leftover(self):
+        project = self.project
+        first, first_branch = setup_worktree(project, self.root)  # A crashed run leaves this behind.
+        (first / 'half-done.txt').write_text('leftover\n')
+        stray = self.root / 'setup-devcontainer-2'
+        stray.mkdir()
+        (stray / 'keep.txt').write_text('stray\n')
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            second, second_branch = setup_worktree(project, self.root)
+        self.assertEqual(second_branch, 'setup/devcontainer-2')
+        self.assertNotIn(second, (first, stray))
+        self.assertEqual(second.parent, self.root)
+        self.assertEqual(git(second, 'branch', '--show-current'), second_branch)
+        self.assertEqual((stray / 'keep.txt').read_text(), 'stray\n')
+        self.assertEqual((first / 'half-done.txt').read_text(), 'leftover\n')
+        self.assertEqual(git(first, 'branch', '--show-current'), first_branch)
+        self.assertIn(str(first), error.getvalue())
+        self.assertIn(first_branch, error.getvalue())
+
+    def commit_in(self, path, name='setup.txt'):
+        (path / name).write_text('setup\n')
+        git(path, 'add', name)
+        git(path, 'commit', '--quiet', '-m', 'Setup commit')
+        return git(path, 'rev-parse', 'HEAD')
+
+    def test_remove_setup_worktree_deletes_branch_after_worktree(self):
+        project, origin = self.project, self.origin(self.project)
+        git(project, 'push', '--quiet', 'origin', 'main:refs/heads/setup/devcontainer-9')
+        git(project, 'branch', 'setup/devcontainer-9')
+        path, branch = setup_worktree(project, self.root)
+        self.commit_in(path)
+        git(path, 'push', '--quiet', 'origin', f'HEAD:refs/heads/{branch}')
+        calls, recording = self.recorded()
+        with recording:
+            remove_setup_worktree(project, path, branch, remote=True)
+        steps = [next(index for index, call in enumerate(calls) if call[:len(prefix)] == prefix)
+                 for prefix in (('worktree', 'remove'), ('branch', '-D'), ('push',))]
+        self.assertEqual(steps, sorted(steps), calls)
+        self.assertEqual(calls[-1][0], 'ls-remote', calls)
+        self.assertIn(branch, calls[-1][-1])
+        self.assertFalse(path.exists())
+        self.assertNotIn(str(path), git(project, 'worktree', 'list'))
+        self.assertNotEqual(run(project, 'rev-parse', '--verify', f'refs/heads/{branch}').returncode, 0)
+        self.assertEqual(git(origin, 'for-each-ref', '--format=%(refname)', f'refs/heads/{branch}'), '')
+        # Never any other branch.
+        self.assertTrue(git(project, 'rev-parse', '--verify', 'refs/heads/setup/devcontainer-9'))
+        self.assertTrue(git(origin, 'rev-parse', '--verify', 'refs/heads/setup/devcontainer-9'))
+        self.assertTrue(git(origin, 'rev-parse', '--verify', 'refs/heads/main'))
+        self.assertEqual(git(project, 'branch', '--show-current'), 'main')
+
+    def test_remove_setup_worktree_without_remote_makes_no_network_call(self):
+        project = self.project
+        path, branch = setup_worktree(project, self.root)
+        git(path, 'push', '--quiet', 'origin', f'HEAD:refs/heads/{branch}')
+        calls, recording = self.recorded()
+        with recording:
+            remove_setup_worktree(project, path, branch, remote=False)
+        self.assertFalse([call for call in calls if call[0] in {'ls-remote', 'push', 'fetch'}], calls)
+        self.assertFalse(path.exists())
+        self.assertNotEqual(run(project, 'rev-parse', '--verify', f'refs/heads/{branch}').returncode, 0)
+        self.assertTrue(git(self.origin(project), 'rev-parse', '--verify', f'refs/heads/{branch}'))
+
+    def test_remove_setup_worktree_accepts_a_branch_origin_already_deleted(self):
+        path, branch = setup_worktree(self.project, self.root)
+        remove_setup_worktree(self.project, path, branch, remote=True)
+        self.assertFalse(path.exists())
+        self.assertNotEqual(run(self.project, 'rev-parse', '--verify', f'refs/heads/{branch}').returncode, 0)
+
+    def test_remove_setup_worktree_refuses_any_other_branch(self):
+        project = self.project
+        path, branch = setup_worktree(project, self.root)
+        git(project, 'branch', 'setup/devcontainer-2')
+        # Real branches each refusal must leave alone (setup/devcontainer/extra cannot sit beside
+        # setup/devcontainer, so it is refused by name only).
+        for name in ('owner-work', 'feature/setup/devcontainer', 'setup/devcontainer-x', 'setup/devcontainer-0'):
+            git(project, 'branch', name)
+            git(project, 'push', '--quiet', 'origin', f'{name}:refs/heads/{name}')
+        before = (git(project, 'worktree', 'list'), git(project, 'for-each-ref'),
+                  git(self.origin(project), 'for-each-ref'))
+        invalid = ('main', 'owner-work', 'feature/setup/devcontainer', 'setup/devcontainer-x',
+                   'setup/devcontainer-0', 'setup/devcontainer/extra')
+        # Against the setup worktree and against a path that is no worktree at all.
+        cases = [(name, target) for name in invalid for target in (path, self.base / 'no-such-worktree')]
+        cases.append(('setup/devcontainer-2', path))  # A valid name, but not the branch this worktree holds.
+        for name, target in cases:
+            with self.subTest(name=name, target=target), self.assertRaisesRegex(ValueError, 'setup/devcontainer'):
+                remove_setup_worktree(project, target, name, remote=True)
+        self.assertEqual((git(project, 'worktree', 'list'), git(project, 'for-each-ref'),
+                          git(self.origin(project), 'for-each-ref')), before)
+        self.assertTrue(path.exists())
+
+    def test_remove_setup_worktree_failure_keeps_state_and_names_the_commands(self):
+        project = self.project
+        path, branch = setup_worktree(project, self.root)
+        (path / 'untracked.txt').write_text('not committed\n')
+        with self.assertRaises(ValueError) as caught:
+            remove_setup_worktree(project, path, branch, remote=True)
+        message = str(caught.exception)
+        for step in ('worktree remove', f'branch -D {branch}', f'push origin --delete {branch}'):
+            self.assertIn(step, message)
+        self.assertEqual((path / 'untracked.txt').read_text(), 'not committed\n')
+        self.assertTrue(git(project, 'rev-parse', '--verify', f'refs/heads/{branch}'))
+        # A later step's failure names only what is left to run.
+        (path / 'untracked.txt').unlink()
+        git(project, 'remote', 'set-url', 'origin', str(self.base / 'unreachable.git'))
+        with self.assertRaises(ValueError) as caught:
+            remove_setup_worktree(project, path, branch, remote=True)
+        message = str(caught.exception)
+        self.assertIn(f'push origin --delete {branch}', message)
+        self.assertNotIn('worktree remove', message)
+        self.assertNotIn('branch -D', message)
+        self.assertFalse(path.exists())
+
+    def test_remove_worktree_keeps_the_setup_commit(self):
+        path, branch = setup_worktree(self.project, self.root)
+        sha = self.commit_in(path)
+        remove_worktree(self.project, path, branch)
+        self.assertFalse(path.exists())
+        self.assertNotIn(str(path), git(self.project, 'worktree', 'list'))
+        self.assertEqual(git(self.project, 'rev-parse', f'refs/heads/{branch}'), sha)
+
+    def test_fast_forward_only_when_clean_on_default(self):
+        for case in ('clean', 'dirty', 'untracked', 'feature', 'diverged', 'ignored'):
+            with self.subTest(case=case):
+                project = self.make_project(f'ff-{case}')
+                if case == 'ignored':
+                    (project / '.gitignore').write_text('local.env\n')
+                    git(project, 'add', '.gitignore')
+                    git(project, 'commit', '--quiet', '-m', 'Ignore local settings')
+                    git(project, 'push', '--quiet', 'origin', 'main')
+                incoming = self.push_to_origin(project, 'local.env' if case == 'ignored' else 'remote.txt',
+                                               'tracked upstream\n')
+                if case == 'dirty':
+                    (project / 'app.txt').write_text('owner edit\n')
+                elif case == 'untracked':
+                    (project / 'notes.txt').write_text('owner notes\n')
+                elif case == 'feature':
+                    git(project, 'switch', '--quiet', '-c', 'feature/local')
+                elif case == 'diverged':
+                    (project / 'app.txt').write_text('local commit\n')
+                    git(project, 'commit', '--quiet', '-am', 'Local only')
+                elif case == 'ignored':
+                    (project / 'local.env').write_text('PERSONAL_PAT=owner secret\n')
+                before = self.snapshot(project)
+                local_main = git(project, 'rev-parse', 'refs/heads/main')
+                if case == 'clean':
+                    self.assertTrue(fast_forward_checkout(project, 'main'))
+                    self.assertEqual(git(project, 'rev-parse', 'HEAD'), incoming)
+                    self.assertEqual(git(project, 'status', '--porcelain', '--untracked-files=all'), '')
+                    continue
+                self.assertFalse(fast_forward_checkout(project, 'main'))
+                self.assertEqual(self.snapshot(project), before)
+                self.assertEqual(git(project, 'rev-parse', 'refs/heads/main'), local_main)
+                if case == 'ignored':
+                    self.assertEqual((project / 'local.env').read_text(), 'PERSONAL_PAT=owner secret\n')
 
 
 if __name__ == '__main__':
