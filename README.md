@@ -45,7 +45,7 @@ small helpers, and a Taskfile include. Personal preferences live in
 | `codex resume` / `claude --resume` | Choose a native conversation |
 | `task work:cs` | Connect Codespace Herdr and sync scratch and project conversations |
 | `task work:disconnect` | Disconnect this project's Codespace from the local Herdr UI |
-| `task work:status` / `task work:stop` | Read offline sync summary / stop this project’s worker |
+| `task work:status` / `task work:stop` | Read offline sync summary / stop this project’s worker and its keeper |
 | `task work:status -- --json` | Inspect cycle, receipt and publication detail |
 | `task work:cs:armed` | Connect as `work:cs`, then arm restart after GitHub's 12-hour stop |
 | `task work:hold -- 09:30` / `-- off` | Hold restarts and resume prompts until a local time / end the hold |

@@ -194,7 +194,7 @@ def resume_text(rid: str, stopped_at: float, back_at: float) -> str:
         what = f'Planned restart {rid}: stopped at {_hhmmz(stopped_at)}'
     else:
         what = f"Automatic restart {rid}: GitHub's 12-hour stop at {_hhmmz(stopped_at)}"
-    return (f'{SENTENCE} ({what}, back at {_hhmmz(back_at)}. Restored agents came back with --resume and '
+    return (f'{SENTENCE}. ({what}, back at {_hhmmz(back_at)}. Restored agents came back with --resume and '
             "without their launch flags, so check each worker's model, effort and sandbox before dispatching "
             'to it.)')
 

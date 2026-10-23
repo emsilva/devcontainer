@@ -148,15 +148,17 @@ worker has a GET-only GitHub API capability and cannot restart a Codespace or
 spend credits. The keeper of an armed project is the one background process that
 can start a Codespace. It does so only after a stop it classified as GitHub's
 12-hour stop, at most 2 restarts in any 24 hours and at least 30 minutes apart,
-and never during a hold. It then ends any stale Herdr proxy, waits up to 10
-minutes for Herdr, and sends the project's one `lead-*` agent the resume message.
-Every other outcome, and every stop it does not restart except your own, gets
-one Mac notification that names what to run. `task work:cs:stop` records your
-stop first, so it is never restarted. `task work:cs:restart` restarts with you
-present, outside the budget; for an armed project the keeper then restores Herdr
-and tells the lead. Both use the armed account, or the active gh account for an
-unarmed project, and refuse while `GH_TOKEN` or `GITHUB_TOKEN` is set. Run
-`task work:cs` (or `task work:cs:armed`) again after a Mac reboot.
+never during a hold and never for a stop that began in one. It then ends any
+stale Herdr proxy, waits up to 10 minutes for Herdr, and sends the project's one
+`lead-*` agent the resume message, unless a hold began meanwhile. Every other
+outcome, a Codespace that something else started, and every stop it does not
+restart except your own, gets one Mac notification that names what to run.
+`task work:cs:stop` records your stop first, so it is never restarted, even when
+GitHub refuses the request. `task work:cs:restart` restarts with you present,
+outside the budget; for an armed project the keeper then restores Herdr and
+tells the lead. Both run on your Mac, use the armed account, or the active gh
+account for an unarmed project, and refuse while `GH_TOKEN` or `GITHUB_TOKEN` is
+set. Run `task work:cs` (or `task work:cs:armed`) again after a Mac reboot.
 
 Connections wait up to 45 seconds for a successful SSH handshake and separately
 up to 45 seconds for the saved Herdr machine's remote API after startup. Only

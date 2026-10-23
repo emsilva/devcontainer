@@ -525,6 +525,9 @@ class Keeper:
             # Someone else started it during the wait: not this keeper's restart, so no resume.
             last['outcome'] = 'started elsewhere'
             _LOG.info('Restart %s: the Codespace came back without an accepted start request from the keeper', rid)
+            self._notify(key, f"{self.project} was started by something else after GitHub's 12-hour stop; the "
+                              f'keeper sent no start request that brought it up ({rid}), so its lead was not told '
+                              'to resume. See task work:status.')
             return True
         anchor = {'at': result['posted_at'], 'source': 'keeper'}
         _LOG.info('Anchor %s from keeper', _utc(anchor['at']))
@@ -605,7 +608,9 @@ class Keeper:
             if isinstance(hold, (int, float)) and hold > self.now():
                 # No resume prompts during a hold either (spec 6.8).
                 return outcome('on hold, lead not told', f'; restarts are on hold until {arming.format_time(hold)}, '
-                                                         'so its lead was not told to resume.')
+                                                         'so its lead was not told to resume; tell it yourself. '
+                                                         'task work:hold -- off ends the hold, and task work:status '
+                                                         'shows the restart.')
             self._tick('resuming')
             told = restore.resume(herdr, rid, restore.resume_text(rid, stopped_at, back_at), now=self.now,
                                   sleep=self._pause, tick=self._tick)

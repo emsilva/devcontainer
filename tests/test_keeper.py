@@ -606,7 +606,21 @@ class KeeperStepTests(unittest.TestCase):
         self.run_steps(k, [T0, T0 + 60])
         self.assertEqual(herdr.prompts, [])
         self.assertEqual(len(self.notes), 1)
-        self.assertIn('on hold until', self.notes[0])
+        self.assertIn('restarts are on hold until', self.notes[0])
+        self.assertIn('so its lead was not told to resume; tell it yourself. task work:hold -- off ends the hold, '
+                      'and task work:status shows the restart.', self.notes[0])
+
+    def test_a_codespace_something_else_started_is_notified_once(self):
+        # Started during the wait for Shutdown: the keeper sent no start request, so no resume either.
+        herdr = FakeHerdr()
+        stops, readings = self.lifetime([up(T0 + LIFE, last_used_at=T0 + LIFE - 5)])
+        k = self.keeper(readings, herdr=herdr)
+        self.run_steps(k, [T0] + stops + [stops[2] + 60 * i for i in range(1, 4)])
+        self.assertEqual((self.api.posts, herdr.prompts), (0, []))
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn("proj was started by something else after GitHub's 12-hour stop; the keeper sent no start "
+                      'request that brought it up (' + lifecycle.new_rid(stops[2]) + '), so its lead was not told to '
+                      'resume. See task work:status.', self.notes[0])
 
     def test_owner_stop_is_logged_only(self):
         arming.record_owner_stop(self.state, T0 + 3600)
