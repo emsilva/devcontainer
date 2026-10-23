@@ -85,13 +85,21 @@ for agent in codex claude opencode; do
     continue
   fi
   case "$agent" in
-    codex) url=https://chatgpt.com/codex/install.sh; shell='sh' ;;
-    claude) url=https://claude.ai/install.sh; shell='bash' ;;
-    opencode) url=https://opencode.ai/install; shell='bash' ;;
+    # The documented Codex URL has returned 404 for hours (openai/codex#56254);
+    # the same script is published beside the releases and on GitHub Releases.
+    codex) urls='https://chatgpt.com/codex/install.sh https://releases.openai.com/codex/install.sh https://github.com/openai/codex/releases/latest/download/install.sh'; shell='sh' ;;
+    claude) urls=https://claude.ai/install.sh; shell='bash' ;;
+    opencode) urls=https://opencode.ai/install; shell='bash' ;;
   esac
   installer="$temporary/$agent.sh"
-  curl --fail --location --silent --show-error "$url" -o "$installer"
-  [ -s "$installer" ] || { echo "Empty $agent installer" >&2; exit 1; }
+  for url in $urls; do
+    if curl --fail --location --silent --show-error "$url" -o "$installer" && [ -s "$installer" ]; then
+      break
+    fi
+    # Never run what a failed download left behind.
+    rm -f "$installer"
+  done
+  [ -s "$installer" ] || { echo "Could not download the $agent installer from $urls" >&2; exit 1; }
   "$shell" -n "$installer"
   case "$agent" in
     # Hide old global/npm Codex commands from vendor conflict detection so it

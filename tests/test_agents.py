@@ -8,6 +8,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / '.devcontainer/scripts/install-agents.sh'
+CODEX_INSTALLERS = ('https://chatgpt.com/codex/install.sh', 'https://releases.openai.com/codex/install.sh',
+                    'https://github.com/openai/codex/releases/latest/download/install.sh')
 
 
 class AgentInstallTests(unittest.TestCase):
@@ -29,9 +31,10 @@ url='' out=''
 while [ "$#" -gt 0 ]; do
   case "$1" in -o) out="$2"; shift 2;; https:*) url="$1"; shift;; *) shift;; esac
 done
-[ "${FAIL_DOWNLOAD:-}" != "$url" ] || { echo 'exit 0' > "$out"; exit 22; }
+case " ${FAIL_DOWNLOAD:-} " in *" $url "*) echo 'exit 0' > "$out"; exit 22;; esac
 case "$url" in
- https://chatgpt.com/codex/install.sh) name=codex;;
+ https://chatgpt.com/codex/install.sh|https://releases.openai.com/codex/install.sh) name=codex;;
+ https://github.com/openai/codex/releases/latest/download/install.sh) name=codex;;
  https://claude.ai/install.sh) name=claude;;
  https://opencode.ai/install) name=opencode;;
  *) exit 90;;
@@ -136,11 +139,28 @@ chmod +x "$HOME/{directory}/{name}"
         self.assertEqual(profile.read_text(), '# user profile\n')
 
     def test_download_install_and_validation_failures_propagate(self):
-        for env in ({'FAIL_DOWNLOAD': 'https://chatgpt.com/codex/install.sh'},
+        for env in ({'FAIL_DOWNLOAD': ' '.join(CODEX_INSTALLERS)}, {'FAIL_DOWNLOAD': 'https://claude.ai/install.sh'},
                     {'FAIL_INSTALL': 'codex'}, {'FAIL_INSTALL': 'claude'},
                     {'FAIL_INSTALL': 'opencode'}, {'FAIL_CHECK': 'codex'}):
             with self.subTest(env=env):
                 self.assertNotEqual(self.run_helper('--update', **env).returncode, 0)
+
+    def test_codex_falls_back_to_the_release_hosted_installers(self):
+        # The documented URL has returned 404 for hours (openai/codex#56254); the same script is published twice more.
+        self.assert_ok(self.run_helper())
+        self.assertNotIn(CODEX_INSTALLERS[1], self.log.read_text())
+        for failing in range(1, len(CODEX_INSTALLERS)):
+            with self.subTest(failing=failing):
+                self.log.unlink()
+                self.assert_ok(self.run_helper('--update', FAIL_DOWNLOAD=' '.join(CODEX_INSTALLERS[:failing])))
+                calls = self.log.read_text()
+                for url in CODEX_INSTALLERS[:failing + 1]:
+                    self.assertIn(url, calls)
+                self.assertEqual(calls.count('install codex'), 1)
+        result = self.run_helper('--update', FAIL_DOWNLOAD=' '.join(CODEX_INSTALLERS))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Could not download the codex installer', result.stderr)
+        self.assertNotIn('install codex', self.log.read_text().split(CODEX_INSTALLERS[-1])[-1])
 
     def test_refuses_root_and_unknown_arguments_before_network(self):
         self.write(self.bin / 'id', '#!/bin/sh\necho 0\n')
