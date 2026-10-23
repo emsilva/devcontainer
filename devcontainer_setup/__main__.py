@@ -648,7 +648,7 @@ def setup_continuity(project: Path, ui, codespace: str | None) -> None:
               'Run task work:cs on your Mac to finish connecting.', file=sys.stderr)
 
 
-def interactive(project: Path, found: dict, metadata: dict, ref: str, resume: str | None,
+def interactive(project: Path, found: dict | None, metadata: dict | None, ref: str, resume: str | None,
                 upgrade: bool = False) -> int:
     ui, api = Gum(), Codespaces()
     preferences = load_preferences()
@@ -753,11 +753,13 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError('\n'.join(errors))
             print('Selected devcontainer configuration is valid.')
             return 0
-        found = scan(project)
         if args.scan:
-            print(json.dumps(found, indent=2))
+            print(json.dumps(scan(project), indent=2))
             return 0
-        metadata, ref = _metadata(project), source_ref()
+        # With a GitHub origin what reaches main is computed from main: only its worktree is read.
+        github = _github_repository(project)
+        found, metadata = (None, None) if github else (scan(project), _metadata(project))
+        ref, upgrade = source_ref(), args.upgrade or args.upgrade_loaded
         if args.dry_run:
             with setup_checkout(project) as (source, default):
                 if default:
@@ -780,8 +782,9 @@ def main(argv: list[str] | None = None) -> int:
             result = upgrade_handoff(project, ref, args.resume)
             if result is not None:
                 return result
-        _check_revision(metadata, ref, args.upgrade or args.upgrade_loaded)
-        return interactive(project, found, metadata, ref, args.resume, upgrade=args.upgrade or args.upgrade_loaded)
+        if not github:
+            _check_revision(metadata, ref, upgrade)
+        return interactive(project, found, metadata, ref, args.resume, upgrade=upgrade)
     except Cancelled:
         print('Setup cancelled. No push or codespace creation performed.', file=sys.stderr)
         return 130

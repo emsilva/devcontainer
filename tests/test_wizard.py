@@ -655,6 +655,45 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
         self.assert_nothing_left()
 
+    def test_owner_branch_config_neither_blocks_nor_shapes_a_github_run(self):
+        import contextlib
+        import io
+        from devcontainer_setup.__main__ import main
+        from devcontainer_setup.ui import Cancelled
+
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        class FirstQuestionCancels:
+            def __getattr__(self, name):
+                raise Cancelled()
+        self.checkout_feature()
+        config = self.root / '.devcontainer/devcontainer.json'
+        config.parent.mkdir()
+        stale = json.dumps({'customizations': {'devcontainerSetup': {'sourceRef': 'c' * 40}}}) + '\n'
+        # Exists only on this feature branch; main has no devcontainer.json at all.
+        for label, text in (('malformed', '{not json\n'), ('stale', stale)):
+            with self.subTest(label):
+                config.write_text(text)
+                self.git('add', str(config))
+                self.git('commit', '--quiet', '-m', f'Feature-only {label} configuration')
+                before = self.snapshot()
+                result = self.cli('--dry-run')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn('not json', result.stdout)
+                self.assertNotIn('c' * 40, result.stdout)
+                output = Terminal()
+                with patch('devcontainer_setup.__main__.Gum', FirstQuestionCancels), \
+                        patch.object(sys, 'stdin', Terminal()), \
+                        contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                    self.assertEqual(main(['--project', str(self.root)]), 130, output.getvalue())
+                self.assertNotIn('generator revision', output.getvalue())
+                self.assertNotIn('Cannot read existing devcontainer configuration', output.getvalue())
+                self.assertEqual(self.snapshot(), before)
+                self.assert_nothing_left()
+
+
     def test_dry_run_failing_inside_render_leaves_nothing(self):
         import contextlib
         import io
