@@ -29,7 +29,7 @@ class FakeAPI:
 
     def __init__(self, readings, name='cs-1', status=200):
         self.name, self.readings, self.reads, self.posts, self.status = name, list(readings), 0, 0, status
-        self.token_read_ok = True
+        self.token_usable = True
 
     def read(self):
         item = self.readings[min(self.reads, len(self.readings) - 1)]
@@ -322,7 +322,7 @@ class KeeperStepTests(unittest.TestCase):
     def test_a_hold_or_owner_stop_during_the_wait_refuses_at_the_post(self):
         reasons = {'hold': 'on hold until', 'owner': 'you stopped it at', 'disarm': 'not armed',
                    'repair': 'the paired Codespace is not the armed one; run task work:cs:armed',
-                   'token': 'the GitHub token for octo could not be read; run gh auth status --hostname github.com'}
+                   'token': 'no GitHub token for octo could be read; run gh auth status --hostname github.com'}
         for change, reason in reasons.items():
             with self.subTest(change=change):
                 self.setUp()
@@ -339,7 +339,7 @@ class KeeperStepTests(unittest.TestCase):
                     elif change == 'repair':
                         self.bind('cs-2')
                     else:
-                        self.api.token_read_ok = False  # this reading used the last good token
+                        self.api.token_usable = False  # neither a fresh read nor a last good token
                     return down(self.clock)
                 # Classified while ShuttingDown; the start routine waits, and the change lands meanwhile.
                 anchor = T0 - 3600
@@ -354,18 +354,96 @@ class KeeperStepTests(unittest.TestCase):
                 self.assertIn('was not restarted: ' + reason, self.notes[0])
                 self.assertIn('not restarted', self.runtime()['last_restart']['outcome'])
 
-    def test_a_failed_token_read_or_unwritable_ledger_refuses_before_any_post(self):
-        # Spec 6.4 step 4: each check refuses and its notice names it and what to run.
-        stops, readings = self.lifetime([down(T0 + LIFE), up(T0 + LIFE + 60, last_used_at=T0 + LIFE)])
-        k = self.keeper(readings, herdr=FakeHerdr())
-        self.run_steps(k, [T0] + stops[:2])
-        self.api.token_read_ok = False
-        self.run_steps(k, stops[2:])
+    def test_a_failed_token_read_with_the_last_good_token_still_restarts(self):
+        # R36: D10's in-memory fallback counts. Through the real LifecycleAPI: one good token read,
+        # then every read fails (a locked keychain), and the restart still POSTs with that token.
+        from datetime import datetime, timezone
+        self.clock = time.time()
+        anchor = self.clock - LIFE - 30
+        codespace, calls, reads = {'state': 'Available'}, [], iter(['tok'])
+
+        def reader():
+            try:
+                return next(reads)
+            except StopIteration:
+                raise ValueError('keychain locked') from None
+
+        def upstream(method, url, token):
+            calls.append((method, url.rsplit('/', 1)[-1], token))
+            if method == 'POST':
+                codespace['state'] = 'Available'
+                return 202, b''
+            return 200, json.dumps({'name': 'cs-1', 'state': codespace['state'], 'pending_operation': False,
+                                    'last_used_at': datetime.fromtimestamp(anchor, timezone.utc).isoformat()}).encode()
+        api = lifecycle.LifecycleAPI('cs-1', 'octo', upstream=upstream, token_reader=reader)
+        herdr = FakeHerdr()
+        k = keeper.Keeper(self.state, api=api, notifier=lambda title, text: self.notes.append(text) or True,
+                          herdr=herdr, now=lambda: self.clock, sleep=self.advance, end_proxies=lambda *args: [])
+        k.step()
+        codespace['state'] = 'Shutdown'
+        for _ in range(3):
+            self.advance(60)
+            k.step()
+        self.assertEqual([call for call in calls if call[0] == 'POST'], [('POST', 'start', 'tok')])
+        self.assertEqual(len(herdr.prompts), 1)
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn('proj restarted after GitHub', self.notes[0])
+
+    def test_a_token_refusal_is_retried_each_pass_until_it_restarts(self):
+        # R36: with no token ever read the stop is refused once, with one notice, and asked again on
+        # each later pass; once a token is readable the same stop restarts, within the budget.
+        herdr = FakeHerdr()
+        stops, readings = self.lifetime()
+        later = [stops[2] + 60 * i for i in range(1, 5)]
+        readings += [down(at) for at in later] + [down(later[-1] + 5), up(later[-1] + 70, last_used_at=later[-1])]
+        k = self.keeper(readings, herdr=herdr)
+        self.api.token_usable = False
+        self.run_steps(k, [T0] + stops + later[:3])
         self.assertEqual(self.api.posts, 0)
-        self.assertIn('was not restarted: the GitHub token for octo could not be read; run gh auth status '
-                      '--hostname github.com', self.notes[0])
-        self.setUp()
-        self.clock = T0
+        self.assertEqual(self.runtime()['down']['kind'], 'LIFETIME')
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn('was not restarted: no GitHub token for octo could be read; run gh auth status --hostname '
+                      'github.com, and the keeper tries again each minute while it stays stopped', self.notes[0])
+        self.api.token_usable = True
+        self.run_steps(k, later[3:])
+        rows = lifecycle.Ledger(self.state / keeper.LEDGER).rows()
+        self.assertEqual([(row['kind'], row['rid']) for row in rows],
+                         [('intent', lifecycle.new_rid(later[3])), ('result', lifecycle.new_rid(later[3]))])
+        self.assertEqual(self.api.posts, 1)
+        self.assertEqual(len(herdr.prompts), 1)
+        self.assertEqual(self.runtime()['anchor']['source'], 'keeper')
+        self.assertEqual(len(self.notes), 1)  # one notice per stop
+
+    def test_a_token_refusal_survives_a_keeper_replacement(self):
+        # An upgrade replaces the keeper within minutes; the stop is still asked again.
+        stops, readings = self.lifetime()
+        k = self.keeper(readings, herdr=FakeHerdr())
+        self.api.token_usable = False
+        self.run_steps(k, [T0] + stops)
+        self.assertIs(self.runtime()['down']['token_wait'], True)
+        at = stops[2] + 60
+        replacement = self.keeper([down(at), down(at + 5), up(at + 70, last_used_at=at)], herdr=FakeHerdr())
+        self.run_steps(replacement, [at])
+        self.assertEqual(self.api.posts, 1)
+        self.assertEqual(len(self.notes), 1)
+
+    def test_a_token_refusal_ends_at_a_final_refusal(self):
+        stops, readings = self.lifetime()
+        later = [stops[2] + 60 * i for i in range(1, 6)]
+        k = self.keeper(readings + [down(at) for at in later], herdr=FakeHerdr())
+        self.api.token_usable = False
+        self.run_steps(k, [T0] + stops + later[:1])
+        arming.write(self.state, dict(arming.read(self.state), hold_until=later[-1] + 3600))
+        self.run_steps(k, later[1:2])
+        self.api.token_usable = True
+        arming.write(self.state, dict(arming.read(self.state), hold_until=None))
+        self.run_steps(k, later[2:])
+        self.assertEqual(self.api.posts, 0)
+        self.assertEqual(len(self.notes), 1)
+        self.assertNotIn('token_wait', self.runtime()['down'])
+
+    def test_an_unwritable_ledger_refuses_before_any_post(self):
+        # Spec 6.4 step 4: the check refuses and its notice names it and what to run.
         stops, readings = self.lifetime([down(T0 + LIFE), up(T0 + LIFE + 60, last_used_at=T0 + LIFE)])
         k = self.keeper(readings, herdr=FakeHerdr())
         with patch.object(lifecycle.Ledger, 'append', side_effect=PermissionError('read-only')):

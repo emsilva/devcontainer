@@ -36,6 +36,7 @@ DOWN = ('ShuttingDown', 'Shutdown')
 TITLE = 'Codespace recovery'
 NOTICE_DAYS = 7
 PENDING_FRESH = 30 * 60  # a planned restart is restored only this soon after it came back
+NO_TOKEN = 'no GitHub token for '  # the one refusal asked again on later passes (R36)
 _LOG = logging.getLogger('project-sync-keeper')
 
 
@@ -254,6 +255,8 @@ class Keeper:
                 runtime['down']['kind'] = watch['kind']
             if isinstance(watch.get('hold_at_stop'), (int, float)):
                 runtime['down']['hold_at_stop'] = watch['hold_at_stop']
+            if watch.get('token_wait') is True:
+                runtime['down']['token_wait'] = True
             if isinstance(old.get('last_up_at'), (int, float)):
                 runtime['last_up_at'] = old['last_up_at']
         last = old.get('last_ok')
@@ -357,6 +360,8 @@ class Keeper:
                     watch['kind'] = 'LIFETIME'  # its restart is under way; never a second rid for it
                 elif watch['count'] >= lifecycle.DOWN_READINGS and not watch.get('kind'):
                     due = self._classify(value, watch)
+                elif watch['count'] >= lifecycle.DOWN_READINGS and watch.get('token_wait'):
+                    due = self._ask_again(watch)
             else:
                 watch['count'] = 0
         self.previous = reading.state, reading.at
@@ -449,9 +454,30 @@ class Keeper:
                 due = lifecycle.new_rid(self.now())
             else:
                 self._refused(key, watch['first_at'], reason)
+                self._wait_for_token(watch, reason)
         # Only now: a raise above leaves the stop unclassified, so the next readings retry it.
         watch['kind'] = kind
         return due
+
+    def _wait_for_token(self, watch, reason):
+        # R36: no usable token is not final; the stop is asked again each pass until it restarts
+        # or a final refusal applies. Its one notice has gone already.
+        if reason.startswith(NO_TOKEN):
+            watch['token_wait'] = True
+        else:
+            watch.pop('token_wait', None)
+
+    def _ask_again(self, watch):
+        try:
+            reason = self._start_refusal(None, watch)
+        except OSError:
+            reason = 'the restart ledger is unreadable'
+        if reason is None:
+            watch.pop('token_wait', None)
+            return lifecycle.new_rid(self.now())
+        self._refused('stop-' + repr(watch['first_at']), watch['first_at'], reason)  # once per stop
+        self._wait_for_token(watch, reason)
+        return None
 
     def _start_refusal(self, rid, watch):
         """The gate, read afresh: arming, hold and budget, no hold when the stop began (D5),
@@ -464,10 +490,6 @@ class Keeper:
         reason = lifecycle.gate(arming=value, rows=[row for row in rows if row['rid'] != rid], now=self.now())
         # The pairing, as each pass checks it: a re-pair during the wait never starts the old one.
         reason = reason or self._refusal(value)
-        if reason is None and getattr(self.api, 'token_read_ok', True) is False:
-            # The reading just made used the last good token (D10); a start request needs a read that works.
-            reason = (f'the GitHub token for {value.get("gh_user")} could not be read; run gh auth status '
-                      '--hostname github.com')
         held = watch.get('hold_at_stop')
         if reason is None and isinstance(held, (int, float)):
             reason = 'it stopped during your hold until ' + arming.format_time(held)
@@ -477,7 +499,16 @@ class Keeper:
             reason = 'you stopped it at ' + arming.format_time(owner)
         if reason is None and value.get('codespace') != self.api.name:
             reason = 'the armed Codespace changed; run task work:cs:armed'
+        if reason is None and not self._token_usable():
+            # Last, so any final refusal wins over this one, which later passes ask again (R36).
+            reason = (f'{NO_TOKEN}{value.get("gh_user")} could be read; run gh auth status --hostname github.com, '
+                      'and the keeper tries again each minute while it stays stopped')
         return reason
+
+    def _token_usable(self):
+        # D10 (R36): a fresh read or the last good token counts. This check always follows a GET that
+        # answered; a client that reports nothing about its token is taken to hold one by that answer.
+        return getattr(self.api, 'token_usable', None) is not False
 
     def _refused(self, key, stop_at, reason):
         self._notify(key, f"{self.project} stopped at {arming.format_time(stop_at)} for GitHub's 12-hour limit "
@@ -524,6 +555,7 @@ class Keeper:
         if result['outcome'] == 'refused':
             last['outcome'] = 'not restarted: ' + result['reason']
             self._refused(key, stop_at, result['reason'])
+            self._wait_for_token(watch, result['reason'])
             return False
         if result['outcome'] != 'available':
             return self._failed(key, last, _start_detail(result))

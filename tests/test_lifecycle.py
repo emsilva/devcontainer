@@ -336,13 +336,13 @@ class LifecycleAPITests(unittest.TestCase):
             used.append(token)
             return 200, json.dumps({'name': self.NAME, 'state': 'Available'}).encode()
         api = lifecycle.LifecycleAPI(self.NAME, upstream=upstream, token_reader=reader)
-        self.assertIsNone(api.token_read_ok)
+        self.assertIs(api.token_usable, False)
         self.assertTrue(api.read().ok)
-        self.assertIs(api.token_read_ok, True)
+        self.assertIs(api.token_usable, True)
         self.assertTrue(api.read().ok)
         self.assertEqual(used, ['good', 'good'])
-        # The read went through on the last good token, but the token read itself failed (spec 6.4 step 4).
-        self.assertIs(api.token_read_ok, False)
+        # The token read failed, but the last good token is still in hand: usable (D10, R36).
+        self.assertIs(api.token_usable, True)
 
     def test_no_token_ever_means_no_request(self):
         def reader():

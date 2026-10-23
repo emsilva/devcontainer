@@ -128,17 +128,18 @@ class LifecycleAPI:
         self._reader = token_reader or (lambda: github_token(
             dict(os.environ, **({'DEVCONTAINER_GH_USER': gh_user} if gh_user else {}))))
         self._token = None
-        self.token_read_ok = None  # whether the latest token read worked; the gate asks (spec 6.4 step 4)
+
+    @property
+    def token_usable(self):
+        """A token in hand, from a fresh read or the last good one (D10); the gate asks (spec 6.4 step 4)."""
+        return bool(self._token)
 
     def _fetch(self):
         # Read per call. The last good token only covers a reader that fails later
         # (spec D10); a reader that never worked raises its fixed-text error.
         try:
-            token = self._reader()
-            self.token_read_ok = bool(token)
-            self._token = token or self._token
+            self._token = self._reader() or self._token
         except ValueError as error:
-            self.token_read_ok = False
             if not self._token:
                 if self._gh_user:
                     raise self._no_token(timed_out=isinstance(error, TokenTimeout)) from None
