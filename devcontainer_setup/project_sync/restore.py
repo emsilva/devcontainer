@@ -129,9 +129,39 @@ class Herdr:
                           '--lines', str(lines)) or ''
 
 
-def wait_reachable(herdr: Herdr, *, now=time.time, sleep=time.sleep) -> float | None:
-    """When the machine first reads reachable, polling every POLL s for REACH_WAIT; else None."""
-    deadline = now() + REACH_WAIT
+class _Ticked:
+    """A Herdr whose every call is followed by tick(): each one may take its whole timeout."""
+
+    def __init__(self, herdr, tick):
+        self.herdr, self.tick = herdr, tick
+
+    def _after(self, value):
+        self.tick()
+        return value
+
+    def reachable(self):
+        return self._after(self.herdr.reachable())
+
+    def agents(self):
+        return self._after(self.herdr.agents())
+
+    def prompt(self, name, text):
+        return self._after(self.herdr.prompt(name, text))
+
+    def read(self, name, lines=80):
+        return self._after(self.herdr.read(name, lines))
+
+
+def _ticked(herdr, tick):
+    return _Ticked(herdr, tick) if tick else herdr
+
+
+def wait_reachable(herdr: Herdr, *, now=time.time, sleep=time.sleep, tick=None) -> float | None:
+    """When the machine first reads reachable, polling every POLL s for REACH_WAIT; else None.
+
+    `tick`, when given, runs after each Herdr call, as the keeper's heartbeat.
+    """
+    herdr, deadline = _ticked(herdr, tick), now() + REACH_WAIT
     while True:
         if herdr.reachable():
             return now()
@@ -194,8 +224,12 @@ def _proven(herdr, name, rid, now, sleep):
             return False
 
 
-def resume(herdr: Herdr, rid: str, text: str, *, now=time.time, sleep=time.sleep) -> str:
-    """Spec 6.6: 'delivered', 'resent', 'no-lead', 'busy' or 'undelivered'. Never logs the screen."""
+def resume(herdr: Herdr, rid: str, text: str, *, now=time.time, sleep=time.sleep, tick=None) -> str:
+    """Spec 6.6: 'delivered', 'resent', 'no-lead', 'busy' or 'undelivered'. Never logs the screen.
+
+    `tick`, when given, runs after each Herdr call, as the keeper's heartbeat.
+    """
+    herdr = _ticked(herdr, tick)
     found = lead(herdr.agents())
     if found is None:
         return 'no-lead'

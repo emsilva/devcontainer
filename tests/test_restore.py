@@ -276,6 +276,33 @@ class ResumeTests(unittest.TestCase):
         self.assertGreaterEqual(clock.t - 1_000_000.0, restore.IDLE_WAIT)
         self.assertLess(clock.t - 1_000_000.0, restore.IDLE_WAIT + 2 * restore.SETTLE)
 
+    def test_every_herdr_call_is_followed_by_a_tick(self):
+        # Each call may take its whole 60 s timeout; the keeper's heartbeat follows each one.
+        clock, log = Clock(), []
+
+        class Counting(FakeHerdr):
+            def reachable(self):
+                log.append('call')
+                return True
+
+            def agents(self):
+                log.append('call')
+                return super().agents()
+
+            def prompt(self, name, text):
+                log.append('call')
+                return super().prompt(name, text)
+
+            def read(self, name, lines=80):
+                log.append('call')
+                return super().read(name, lines)
+        herdr = Counting(clock, ['idle'])
+        restore.wait_reachable(herdr, now=clock.now, sleep=clock.sleep, tick=lambda: log.append('tick'))
+        self.assertEqual(restore.resume(herdr, 'r-012820Z', 'text', now=clock.now, sleep=clock.sleep,
+                                        tick=lambda: log.append('tick')), 'undelivered')
+        self.assertGreater(log.count('call'), 10)
+        self.assertEqual(log, ['call', 'tick'] * log.count('call'))
+
     def test_resume_without_exactly_one_lead_sends_nothing(self):
         clock = Clock()
         two = FakeHerdr(clock, agents=[{'name': 'lead-other', 'agent_status': 'idle'}])

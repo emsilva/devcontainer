@@ -440,6 +440,36 @@ class KeeperStepTests(unittest.TestCase):
                 self.assertLessEqual(self.api.posts, 1)
                 self.assertEqual(self.runtime()['phase'], 'watching')
 
+    def test_the_heartbeat_keeps_up_with_a_slow_herdr(self):
+        # The reviewer's heartbeat_slow_herdr: every Herdr call takes its whole 60 s timeout on the
+        # longest resume path. The worst gap between heartbeats stays about one call.
+        test = self
+
+        class Slow(FakeHerdr):
+            def reachable(self):
+                test.advance(60)
+                return True
+
+            def agents(self):
+                test.advance(60)
+                return [{'name': 'lead-proj', 'agent_status': 'idle'}]
+
+            def prompt(self, name, text):
+                test.advance(60)
+                return super().prompt(name, text)
+
+            def read(self, name, lines=80):
+                test.advance(60)
+                return ''
+        stops, readings = self.lifetime([down(T0 + LIFE), up(T0 + LIFE + 60, last_used_at=T0 + LIFE)])
+        k = self.keeper(readings, herdr=Slow(works=False))
+        beats, real = [], k.beat
+        k.beat = lambda phase=None: (beats.append(self.clock), real(phase))[1]
+        self.run_steps(k, [T0] + stops)
+        self.assertEqual(self.runtime()['last_restart']['resume'], 'undelivered')
+        beats = [at for at in beats if at >= stops[0]]
+        self.assertLessEqual(max(b - a for a, b in zip(beats, beats[1:])), 70)
+
     def test_a_restart_that_raises_notifies_once_and_is_never_retried(self):
         stops, readings = self.lifetime([RuntimeError('token ghp_secret')])
         k = self.keeper(readings, herdr=FakeHerdr())

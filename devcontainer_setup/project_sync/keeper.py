@@ -587,11 +587,15 @@ class Keeper:
         try:
             if self.keepalive is not None:
                 self.runtime['keepalive'] = self.keepalive.ensure(True)
+                self._tick()
             ended = self.end_proxies(self.api.name, self.state, stopped_at)
             if ended:
                 _LOG.info('Ended Herdr proxies older than the stop (#46): %s', ' '.join(map(str, ended)))
+            self._tick()
             herdr = self.herdr or self._machine()
-            herdr_at = restore.wait_reachable(herdr, now=self.now, sleep=self._pause) if herdr else None
+            # Each Herdr call may take its 60 s timeout, so the heartbeat follows every one.
+            herdr_at = (restore.wait_reachable(herdr, now=self.now, sleep=self._pause, tick=self._tick)
+                        if herdr else None)
             if herdr_at is None:
                 _LOG.info('Restore %s: Herdr not reachable', rid)
                 return outcome('Herdr not reachable', ', but its Herdr machine is not reachable; open the Herdr TUI '
@@ -604,7 +608,7 @@ class Keeper:
                                                          'so its lead was not told to resume.')
             self._tick('resuming')
             told = restore.resume(herdr, rid, restore.resume_text(rid, stopped_at, back_at), now=self.now,
-                                  sleep=self._pause)
+                                  sleep=self._pause, tick=self._tick)
             last['resume'] = told
             name = (restore.lead(herdr.agents()) or {}).get('name') if told != 'no-lead' else None
             who = f'its lead {name}' if name else 'its lead'
