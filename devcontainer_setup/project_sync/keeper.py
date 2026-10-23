@@ -350,9 +350,10 @@ class Keeper:
         else:
             if watch['first_at'] is None:
                 watch['first_at'] = reading.at  # the stop's first non-Available reading
-                hold = value.get('hold_until')
-                if isinstance(hold, (int, float)) and hold > reading.at:
-                    # D5: a stop that began in a hold is never restarted, whatever the hold does later.
+                hold, since = value.get('hold_until'), self.runtime.get('last_up_at')
+                # D5 (R38): a hold active anywhere since the last Available reading, where the stop
+                # may have begun, counts, though it ended before this first good reading (Mac asleep).
+                if isinstance(hold, (int, float)) and hold > (since if isinstance(since, (int, float)) else reading.at):
                     watch['hold_at_stop'] = hold
             if reading.state in DOWN:
                 watch['count'] += 1

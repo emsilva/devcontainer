@@ -319,6 +319,29 @@ class KeeperStepTests(unittest.TestCase):
         self.assertEqual(self.api.posts, 0)
         self.assertIn('stopped during your hold', self.notes[0])
 
+    def test_a_stop_in_a_hold_first_read_after_the_hold_ends_is_never_restarted(self):
+        # R38 (the re-reviewer's hold_gap): GitHub's stop falls inside a hold that ends 5 min later,
+        # and the first good reading comes 30 min after the stop, the Mac asleep or every GET failing.
+        anchor = T0 - 3600
+        mark = anchor + LIFE
+        for mode in ('asleep', 'failed GETs'):
+            with self.subTest(mode=mode):
+                self.setUp()
+                self.clock = T0
+                arming.write(self.state, dict(arming.read(self.state), hold_until=mark + 300))
+                before = [mark - 600 - 60 * i for i in range(3)][::-1]
+                gap = [mark + 60 * i for i in range(30)] if mode == 'failed GETs' else []
+                after = [mark + 1800 + 60 * i for i in range(40)]
+                readings = ([up(T0, last_used_at=anchor)] + [up(at, last_used_at=anchor) for at in before]
+                            + [failed(at) for at in gap] + [down(at) for at in after])
+                k = self.keeper(readings, herdr=FakeHerdr())
+                self.run_steps(k, [T0] + before + gap + after)
+                self.assertEqual(self.api.posts, 0)
+                self.assertEqual(len(self.notes), 1)
+                self.assertIn('was not restarted: it stopped during your hold until '
+                              + arming.format_time(mark + 300), self.notes[0])
+                self.assertEqual(self.runtime()['down']['hold_at_stop'], mark + 300)
+
     def test_a_hold_or_owner_stop_during_the_wait_refuses_at_the_post(self):
         reasons = {'hold': 'on hold until', 'owner': 'you stopped it at', 'disarm': 'not armed',
                    'repair': 'the paired Codespace is not the armed one; run task work:cs:armed',
