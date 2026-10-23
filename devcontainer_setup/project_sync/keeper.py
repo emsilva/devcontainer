@@ -348,6 +348,8 @@ class Keeper:
         if reading.state == 'Available':
             self._up(reading)
         else:
+            if watch.get('token_wait') and self._unseen_since(reading, watch):
+                watch = self._afresh(watch)
             if watch['first_at'] is None:
                 watch['first_at'] = reading.at  # the stop's first non-Available reading
                 hold, since = value.get('hold_until'), self.runtime.get('last_up_at')
@@ -394,7 +396,9 @@ class Keeper:
             return None
         rid = rows[-1]['rid']
         stale = self.now() - rows[-1]['at'] > lifecycle.SHUTDOWN_WAIT + lifecycle.AVAILABLE_WAIT
-        if reading.state != 'Shutdown' or stale:
+        # A start request since the intent that this keeper did not send: its stop is another one.
+        started = reading.last_used_at is not None and reading.last_used_at > rows[-1]['at']
+        if reading.state != 'Shutdown' or stale or started:
             self.ledger.append('result', rid, interrupted=True, state=reading.state)
             _LOG.info('Restart %s was interrupted; the Codespace is %s, so nothing is posted', rid, reading.state)
             last = self.runtime.get('last_restart')
@@ -459,6 +463,22 @@ class Keeper:
         # Only now: a raise above leaves the stop unclassified, so the next readings retry it.
         watch['kind'] = kind
         return due
+
+    def _unseen_since(self, reading, watch):
+        # A reading gap that could hide a run, or a start request after the stop began.
+        seen_at = self.previous[1]
+        return ((seen_at is not None and reading.at - seen_at > HEARTBEAT_STALE)
+                or (reading.last_used_at is not None and reading.last_used_at > watch['first_at']))
+
+    def _afresh(self, watch):
+        # R38: the token wait is dropped with no POST, and the stop is classified from scratch, as a
+        # fresh keeper would see it: no anchor, no last Available reading, a new watch.
+        _LOG.info('Token wait for the stop first seen %s dropped after a gap or an unseen start; '
+                  'it is classified afresh', _utc(watch['first_at']))
+        for key in ('anchor', 'last_up_at'):
+            self.runtime.pop(key, None)
+        self.runtime['down'] = {'count': 0, 'first_at': None}
+        return self.runtime['down']
 
     def _wait_for_token(self, watch, reason):
         # R36: no usable token is not final; the stop is asked again each pass until it restarts

@@ -463,6 +463,34 @@ class KeeperStepTests(unittest.TestCase):
         self.assertIn('tries again each minute', self.notes[0])
         self.assertIn('proj restarted after GitHub', self.notes[1])
 
+    def test_a_token_wait_after_a_gap_or_an_unseen_start_is_classified_afresh(self):
+        # The re-reviewer's r36_retry E: while the token wait lasts the Mac sleeps 3 h, something else
+        # starts the Codespace and it stops for another reason; the token is back on wake. The wait
+        # is dropped, with no POST, and the stop is classified from scratch, as a fresh keeper would.
+        for case in ('gap and an unseen start', 'gap only', 'unseen start only'):
+            with self.subTest(case=case):
+                self.setUp()
+                self.clock = T0
+                stops, readings = self.lifetime()
+                k = self.keeper(readings, herdr=FakeHerdr())
+                self.api.token_usable = False
+                self.run_steps(k, [T0] + stops)
+                self.assertIs(self.runtime()['down']['token_wait'], True)
+                wake = stops[2] + (3 * 3600 if case != 'unseen start only' else 60)
+                started = stops[2] + 1800 if case != 'gap only' else None
+                if case == 'unseen start only':
+                    started = stops[2] + 30
+                self.api.token_usable = True
+                self.api.readings += [Reading(wake + 60 * i, True, 'Shutdown', False, started) for i in range(5)]
+                self.run_steps(k, [wake + 60 * i for i in range(5)])
+                self.assertEqual(self.api.posts, 0)
+                watch = self.runtime()['down']
+                self.assertNotIn('token_wait', watch)
+                self.assertEqual((watch['first_at'], watch['kind']), (wake, 'OTHER'))
+                self.assertEqual(len(self.notes), 2)
+                self.assertIn('tries again each minute', self.notes[0])
+                self.assertIn('for a reason other than the 12-hour limit', self.notes[1])
+
     def test_a_token_refusal_ends_at_a_final_refusal(self):
         stops, readings = self.lifetime()
         later = [stops[2] + 60 * i for i in range(1, 6)]
@@ -615,6 +643,29 @@ class KeeperStepTests(unittest.TestCase):
                 self.assertEqual(rows[1]['state'], state)
                 # The interrupted rid still counts toward the budget.
                 self.assertEqual(lifecycle.restart_rids(rows, T0), ['r-000001Z'])
+
+    def test_an_open_intent_is_closed_when_something_else_started_it_since(self):
+        # The re-reviewer's intent_paths B: the keeper dies between intent and POST; something else
+        # starts the Codespace, it stops for another reason, and a replacement reads it Shutdown.
+        stops, readings = self.lifetime([down(T0 + LIFE)])
+        k = self.keeper(readings, herdr=FakeHerdr())
+
+        def killed():
+            raise keeper._Shutdown()
+        self.api.post_start = killed
+        with self.assertRaises(keeper._Shutdown):
+            self.run_steps(k, [T0] + stops)
+        intent_at = lifecycle.Ledger(self.state / keeper.LEDGER).rows()[0]['at']
+        at = intent_at + 40 * 60  # inside the start routine's span, so only the unseen start closes it
+        self.clock = at  # replaced 40 min later, as work:cs:armed would
+        later = self.keeper([Reading(at + 60 * i, True, 'Shutdown', False, intent_at + 120) for i in range(10)],
+                            herdr=FakeHerdr())
+        self.run_steps(later, [at + 60 * i for i in range(10)])
+        self.assertEqual(self.api.posts, 0)
+        rows = lifecycle.Ledger(self.state / keeper.LEDGER).rows()
+        self.assertEqual([(row['kind'], row.get('interrupted')) for row in rows], [('intent', None), ('result', True)])
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn('for a reason other than the 12-hour limit', self.notes[0])
 
     def test_an_interrupted_rid_in_shutdown_continues_within_its_posts(self):
         ledger = lifecycle.Ledger(self.state / keeper.LEDGER, now=lambda: T0 - 60)
