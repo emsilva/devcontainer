@@ -15,10 +15,11 @@ import sys
 import tempfile
 from urllib.parse import urlsplit
 
-from .codespaces import Codespaces
+from .codespaces import RERUN, Codespaces, migrate_receipt, receipt_path
 from .discovery import scan
-from .git_ops import (GitPlan, ReviewChanged, default_branch, git, proposed_branch, remove_setup_worktree,
-                      remove_worktree, setup_worktree)
+from .git_ops import (GitPlan, ReviewChanged, default_branch, default_contains, fast_forward_checkout, git,
+                      is_ancestor, merged_setup_branches, proposed_branch, remove_setup_worktree, remove_worktree,
+                      setup_worktree)
 from .preferences import load_preferences, save_preferences
 from .releases import fetch_release
 from .render import render, validate
@@ -566,6 +567,7 @@ COMMIT_ONLY = 'Commit only (no Codespace)'
 
 
 def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume: str | None) -> dict | None:
+    """Codespace choices for branch (the default branch, with a GitHub origin)."""
     action = ui.choose('After setup', [LAUNCH_BROWSER, LAUNCH_VSCODE, COMMIT_ONLY],
                        LAUNCH_BROWSER if resume or _github_repository(project) else COMMIT_ONLY)
     if action == COMMIT_ONLY:
@@ -573,14 +575,20 @@ def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume
     try:
         repo = _repository(project)
         if not resume:
-            spaces = api.existing(repo, branch)
+            # Every codespace of the repository is shown, so a second one is never created silently.
+            spaces = api.existing(repo)
             if spaces:
-                choices = ['Create a new codespace', *[f'Reuse {space["name"]}' for space in spaces]]
-                choice = ui.choose('Existing codespaces for this branch', choices)
+                ref = {space['name']: space.get('git_status', {}).get('ref') for space in spaces}
+                choices = ['Create a new codespace', *[f'Reuse {name}' if ref[name] == branch
+                                                       else f'Reuse {name} (on {ref[name]})' for name in ref]]
+                choice = ui.choose('Existing codespaces for this repository', choices)
                 if choice.startswith('Reuse '):
-                    resume = choice.removeprefix('Reuse ')
+                    resume = choice.removeprefix('Reuse ').split(' ')[0]
         if resume:
-            settings = api.resource_settings(api.get(resume))
+            data = api.get(resume)
+            settings = api.resource_settings(data)
+            if data.get('git_status', {}).get('ref') != branch:
+                raise ValueError(f'Move {resume} to {branch} first; it is on {data.get("git_status", {}).get("ref")}.')
             print(f'Existing codespace {resume}: {json.dumps(settings, sort_keys=True)}', flush=True)
             if not ui.confirm('Reuse this codespace with these existing resource settings?'):
                 raise Cancelled()
@@ -591,8 +599,8 @@ def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume
                     'retention': (f"{settings['retention_period_minutes']}m"
                                   if settings['retention_period_minutes'] is not None else None),
                     'client': 'browser' if action.endswith('browser') else 'vscode', 'resume': resume}
-        # Before approval the local branch/configuration may not exist on GitHub.
-        # Offer repository machines now; launch rechecks the committed, pushed SHA.
+        # Before approval the configuration is not on GitHub yet.
+        # Offer repository machines now; launch rechecks them at the merged SHA.
         machines = api.machines(repo)
         if not machines:
             raise ValueError('No available Codespaces machines for this repository/account.')
@@ -650,12 +658,98 @@ def setup_continuity(project: Path, ui, codespace: str | None) -> None:
               'Run task work:cs on your Mac to finish connecting.', file=sys.stderr)
 
 
+SETUP_TITLE = 'Configure project devcontainer'
+MERGE_MESSAGE = 'Reviewed and merged with task devcontainer:setup.'
+
+
+def _open_setup_prs(prs: list[dict]) -> str:
+    if len(prs) == 1:
+        return f'Setup PR #{prs[0]["number"]} ({prs[0]["head"]["ref"]}) is open. {RERUN}'
+    listed = ', '.join(f'#{pr["number"]} ({pr["head"]["ref"]})' for pr in prs)
+    return (f'Setup PRs {listed} are open. Merge one and close the others, '
+            'then run task devcontainer:setup again to create the Codespace.')
+
+
+def _launch_on_default(api: Codespaces, project: Path, repo: str, default: str, sha: str, launch: dict | None,
+                       preferences: dict, merged: str | None = None, worktree: Path | None = None):
+    """Once sha is on <default>: verify it, prune merged setup branches, fast-forward the checkout
+    when safe, then create or reuse the codespace on <default>. Returns (codespace, config)."""
+    from .project_sync.state import discover_project, setup_worktree_root
+    if not default_contains(project, default, sha):
+        raise ValueError(f'Cannot confirm that origin/{default} contains the setup merge {sha[:12]}; no codespace was '
+                         'created. Check origin, then run task devcontainer:setup again to create the Codespace.')
+    root = setup_worktree_root(discover_project(project))
+    paths = {merged: worktree} if merged else {}
+    for branch in dict.fromkeys([*paths, *merged_setup_branches(project, default)]):
+        try:
+            remove_setup_worktree(project, paths.get(branch) or root / branch.replace('/', '-'), branch,
+                                  remote=True, root=root)
+        except ValueError as error:
+            # Never blocks the codespace; the error names what to run by hand.
+            print(f'Setup: {error}', file=sys.stderr, flush=True)
+    if not fast_forward_checkout(project, default) and not is_ancestor(project, sha, 'HEAD'):
+        # Never a branch switch, a merge into a feature branch or a rebase.
+        print(f'Your checkout lacks the new setup files until you merge or pull {default}.', flush=True)
+    config = json.loads(git(project, 'show', f'{sha}:.devcontainer/devcontainer.json'))
+    if not launch:
+        return None, config
+    state_home = os.environ.get('XDG_STATE_HOME', '')
+    state = Path(state_home) if state_home and Path(state_home).is_absolute() else Path.home() / '.local/state'
+    if launch.get('resume'):
+        migrate_receipt(state, repo, default, launch['resume'])
+    dotfiles = preferences['dotfiles_repo'] if preferences['apply_dotfiles'] else None
+    name = api.launch(repo, default, sha, dotfiles_repo=dotfiles, receipt=receipt_path(state, repo, default),
+                      workspace=config.get('workspaceFolder'),
+                      machine_profile=_machine_profile(project) if dotfiles else None, **launch)
+    return name, config
+
+
+def _merge_and_launch(ui, api: Codespaces, project: Path, repo: str, default: str, number: int, branch: str,
+                      worktree: Path | None, launch: dict | None, preferences: dict):
+    """One confirmation, GitHub's merge, then the codespace on <default>."""
+    user = api.user()
+    if not ui.confirm(f'Merge PR #{number} into {default} as {user}? '
+                      'Required reviews are bypassed if your account is allowed to.'):
+        raise ValueError(f'PR #{number} is open. {RERUN}')
+    sha = api.merge_pr(repo, number, f'{SETUP_TITLE} (#{number})', MERGE_MESSAGE)
+    return _launch_on_default(api, project, repo, default, sha, launch, preferences, merged=branch, worktree=worktree)
+
+
+def _resume_setup_pr(ui, api: Codespaces, project: Path, repo: str, default: str, prs: list[dict],
+                     resume: str | None, preferences: dict) -> int:
+    """A rerun resumes the one open setup PR instead of opening another."""
+    if len(prs) != 1:
+        raise ValueError(_open_setup_prs(prs))
+    (pr,) = prs
+    print(f'Setup PR #{pr["number"]} is open: {pr["title"]} ({pr["head"]["ref"]} into {default}).', flush=True)
+    launch = _launch_options(ui, api, project, default, resume)
+    if launch:
+        launch.pop('repo')
+    name, config = _merge_and_launch(ui, api, project, repo, default, pr['number'], pr['head']['ref'], None,
+                                     launch, preferences)
+    if config.get('customizations', {}).get('devcontainerSetup', {}).get('selections', {}).get('continuity'):
+        setup_continuity(project, ui, name)
+    return 0
+
+
 def interactive(project: Path, found: dict | None, metadata: dict | None, ref: str, resume: str | None,
                 upgrade: bool = False) -> int:
     ui, api = Gum(), Codespaces()
     preferences = load_preferences()
-    if not _github_repository(project):
+    github = _github_repository(project)
+    if not github:
         print(f'Note: {NO_GITHUB_ORIGIN} Commit-only setup works without it.', file=sys.stderr, flush=True)
+    else:
+        default = default_branch(project)
+        try:
+            pending = api.setup_prs(github, default)
+        except ValueError as error:
+            # Commit only needs no GitHub; a launch checks again before it pushes.
+            pending = []
+            print(f'Note: cannot check GitHub for an open setup PR: {error}', file=sys.stderr, flush=True)
+        if pending:
+            return _resume_setup_pr(ui, api, project, github, default, pending, resume, preferences)
+    pull = None
     with setup_checkout(project) as (source, default):
         if default:
             # What reaches the default branch is computed from it, never from this checkout.
@@ -665,7 +759,7 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
         while True:
             chosen = _select(ui, found, chosen, preferences)
             branch = git(source, 'branch', '--show-current') if default else proposed_branch(project)
-            launch = _launch_options(ui, api, project, branch, resume)
+            launch = _launch_options(ui, api, project, default or branch, resume)
             chosen['ssh'] = bool(launch)
             files = render(source, SOURCE, chosen, ref)
             integrate_taskfile(source, files)
@@ -676,16 +770,15 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
             if not plan.changed:
                 plan.branch = plan.start_branch
             origin = f' (from origin/{default})' if default else ''
-            print(f'\nProject: {project}\nBranch: {plan.branch}{origin}\nRuntimes: {chosen["runtimes"]}'
-                  f'\nTools: {", ".join(chosen["tools"]) or "baseline only"}'
-                  f'\nAgents: Codex, Claude Code, OpenCode (baseline); dotfiles: {preferences["dotfiles_repo"] if chosen["dotfiles"] else "disabled"}'
-                  f'\nFiles: {", ".join(plan.changed) or "already configured"}', flush=True)
-            generated_config = json.loads(files['.devcontainer/devcontainer.json'])
-            marker = generated_config['customizations']['devcontainerSetup']
-            for detail in marker.get('dependencies', {}).values():
-                print(f'Dependency: {detail}', flush=True)
-            for detail in marker.get('pinningLimitations', {}).values():
-                print(f'Version note: {detail}', flush=True)
+            marker = json.loads(files['.devcontainer/devcontainer.json'])['customizations']['devcontainerSetup']
+            # Also the PR body: no local path, no launch choices.
+            summary = [f'Branch: {plan.branch}{origin}', f'Runtimes: {chosen["runtimes"]}',
+                       f'Tools: {", ".join(chosen["tools"]) or "baseline only"}',
+                       f'Agents: Codex, Claude Code, OpenCode (baseline); dotfiles: {preferences["dotfiles_repo"] if chosen["dotfiles"] else "disabled"}',
+                       f'Files: {", ".join(plan.changed) or "already configured"}',
+                       *[f'Dependency: {detail}' for detail in marker.get('dependencies', {}).values()],
+                       *[f'Version note: {detail}' for detail in marker.get('pinningLimitations', {}).values()]]
+            print(f'\nProject: {project}\n' + '\n'.join(summary), flush=True)
             if launch:
                 print(f'Launch: {launch["machine"]}, idle {launch["idle_timeout"]}, {launch["client"]}', flush=True)
             while True:
@@ -698,8 +791,9 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
                 continue
             if action == 'Cancel':
                 raise Cancelled()
-            prompt = (f'Commit setup files, push {plan.branch}, and create/open the selected codespace?'
-                      if launch else 'Commit these setup files?' if plan.changed else 'Save these personal preferences?')
+            prompt = (f'Commit setup files, push {plan.branch} and open a PR into {default}?' if launch and plan.changed
+                      else f'Create or open the selected codespace on {default}?' if launch
+                      else 'Commit these setup files?' if plan.changed else 'Save these personal preferences?')
             if not ui.confirm(prompt):
                 raise Cancelled()
             _ensure_runner(ref)
@@ -719,18 +813,21 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
                         raise Cancelled()
             print(f'Setup commit: {sha}', flush=True)
             _preferences_after_commit(project, preferences)
-            if launch:
-                repo = launch.pop('repo')
-                state_home = os.environ.get('XDG_STATE_HOME', '')
-                state = Path(state_home) if state_home and Path(state_home).is_absolute() else Path.home() / '.local/state'
-                receipt = state / 'devcontainer-setup' / (hashlib.sha256(f'{repo}:{plan.branch}'.encode()).hexdigest()[:16] + '.json')
-                config = json.loads(files['.devcontainer/devcontainer.json'])
-                name = api.launch(plan, repo, dotfiles_repo=preferences['dotfiles_repo'] if chosen['dotfiles'] else None,
-                                  receipt=receipt, workspace=config.get('workspaceFolder'),
-                                  machine_profile=_machine_profile(project) if chosen['dotfiles'] else None, **launch)
-            else:
-                name = None
+            if launch and plan.changed:
+                # Never a second setup branch or PR while one is open.
+                if open_prs := api.setup_prs(launch['repo'], default):
+                    raise ValueError(_open_setup_prs(open_prs))
+                plan.push()
+                pull = api.open_pr(launch['repo'], plan.branch, default, SETUP_TITLE, '\n'.join(summary)), plan.branch, source
             break
+    name = None
+    if launch:
+        repo = launch.pop('repo')
+        if pull:
+            name, _ = _merge_and_launch(ui, api, project, repo, default, *pull, launch, preferences)
+        else:
+            # Already configured: origin/<default> carries the setup files; nothing is pushed.
+            name, _ = _launch_on_default(api, project, repo, default, sha, launch, preferences)
     if chosen.get('continuity'):
         setup_continuity(project, ui, name)
     return 0

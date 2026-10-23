@@ -9,9 +9,9 @@ from unittest.mock import patch
 
 import devcontainer_setup.git_ops as operations
 
-from devcontainer_setup.git_ops import (GitPlan, ReviewChanged, default_branch, fast_forward_checkout,
-                                        next_setup_branch, proposed_branch, remove_setup_worktree,
-                                        remove_worktree, setup_worktree)
+from devcontainer_setup.git_ops import (GitPlan, ReviewChanged, default_branch, default_contains,
+                                        fast_forward_checkout, merged_setup_branches, next_setup_branch,
+                                        proposed_branch, remove_setup_worktree, remove_worktree, setup_worktree)
 
 
 def git(root, *args):
@@ -682,6 +682,23 @@ class SetupWorktreeTests(unittest.TestCase):
         path, branch = setup_worktree(project, self.root)
         self.assertEqual(git(path, 'rev-parse', 'HEAD'), git(origin, 'rev-parse', 'trunk'))
         self.assertEqual(git(project, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/setup'), branch)
+
+    def test_merged_setup_branches_skip_held_and_unmerged_ones(self):
+        project = self.project
+        merged_path, merged = setup_worktree(project, self.root)
+        self.commit_in(merged_path)
+        git(merged_path, 'push', '--quiet', 'origin', f'HEAD:refs/heads/{merged}')
+        remove_worktree(project, merged_path, merged, root=self.root)
+        sha = self.merge_on_origin(project, merged)
+        held_path, held = setup_worktree(project, self.root)       # a leftover worktree, at the cut point
+        kept_path, kept = setup_worktree(project, self.root)       # Commit only: a commit not on main
+        self.commit_in(kept_path, 'kept.txt')
+        remove_worktree(project, kept_path, kept, root=self.root)
+        git(project, 'branch', 'setup/devcontainerX', 'main')      # not a setup name
+        self.assertTrue(default_contains(project, 'main', sha))
+        self.assertFalse(default_contains(project, 'main', git(project, 'rev-parse', kept)))
+        self.assertEqual(merged_setup_branches(project, 'main'), [merged])
+        self.assertTrue(held_path.exists())
 
     def test_fast_forward_only_when_clean_on_default(self):
         for case in ('clean', 'dirty', 'untracked', 'feature', 'detached', 'diverged', 'ignored'):

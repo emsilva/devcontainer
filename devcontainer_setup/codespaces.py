@@ -1,7 +1,8 @@
-"""GitHub Codespaces boundary; allocation happens only after confirmed push."""
+"""GitHub Codespaces boundary; allocation happens only after the setup is on the default branch."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,11 @@ import shlex
 import subprocess
 import tempfile
 import time
+from urllib.parse import urlencode
+
+from .git_ops import SETUP_BRANCH
+
+RERUN = 'Merge it, then run task devcontainer:setup again to create the Codespace.'
 
 
 def _with_github(command: str) -> str:
@@ -25,12 +31,15 @@ class Codespaces:
     def __init__(self, run=subprocess.run):
         self.run = run
 
-    def command(self, *args: str, json_output: bool = False, timeout: float | None = None, input: str | None = None):
+    def _gh(self, *args: str, timeout: float | None = None, input: str | None = None):
         try:
             extra = {} if input is None else {'input': input}
-            result = self.run(['gh', *args], capture_output=True, text=True, timeout=timeout, **extra)
+            return self.run(['gh', *args], capture_output=True, text=True, timeout=timeout, **extra)
         except FileNotFoundError as error:
             raise ValueError('GitHub CLI is required: install gh and run gh auth login.') from error
+
+    def command(self, *args: str, json_output: bool = False, timeout: float | None = None, input: str | None = None):
+        result = self._gh(*args, timeout=timeout, input=input)
         if result.returncode:
             raise ValueError(result.stderr.strip() or result.stdout.strip() or 'GitHub operation failed.')
         if json_output:
@@ -92,11 +101,86 @@ class Codespaces:
         if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo):
             raise ValueError('Select a GitHub repository in owner/repo form.')
 
-    def existing(self, repo: str, branch: str) -> list[dict]:
+    def existing(self, repo: str, branch: str | None = None) -> list[dict]:
+        """This account's codespaces for repo; only those on branch when one is given."""
         pages = self.command('api', 'user/codespaces?per_page=100', '--paginate', '--slurp', json_output=True)
         return [space for page in pages for space in page.get('codespaces', [])
                 if space.get('repository', {}).get('full_name', '').lower() == repo.lower()
-                and space.get('git_status', {}).get('ref') == branch]
+                and branch in (None, space.get('git_status', {}).get('ref'))]
+
+    def user(self) -> str:
+        """The active gh account; setup never switches it."""
+        data = self.command('api', 'user', json_output=True)
+        login = data.get('login') if isinstance(data, dict) else None
+        if not isinstance(login, str) or not re.fullmatch(r'[A-Za-z0-9-]+', login):
+            raise ValueError('GitHub returned no account name; check gh auth status.')
+        return login
+
+    def setup_prs(self, repo: str, base: str) -> list[dict]:
+        """Open PRs into base from this repository's setup/devcontainer[-N] branches."""
+        self._repository(repo)
+        query = urlencode({'state': 'open', 'base': base, 'per_page': 100})
+        pages = self.command('api', f'repos/{repo}/pulls?{query}', '--paginate', '--slurp', json_output=True)
+        return [pr for page in pages for pr in page
+                if SETUP_BRANCH.fullmatch(pr.get('head', {}).get('ref', ''))
+                and ((pr['head'].get('repo') or {}).get('full_name') or '').lower() == repo.lower()]
+
+    def open_pr(self, repo: str, head: str, base: str, title: str, body: str) -> int:
+        """Open a PR from head into base, or reuse the one already open for head."""
+        self._repository(repo)
+        query = urlencode({'state': 'open', 'head': f'{repo.split("/")[0]}:{head}', 'base': base})
+        found = self.command('api', f'repos/{repo}/pulls?{query}', json_output=True)
+        if found:
+            return int(found[0]['number'])
+        # REST, not gh pr create: the body goes as sent, and the repo never comes from the cwd.
+        created = self.command('api', '--method', 'POST', f'repos/{repo}/pulls', '--input', '-', json_output=True,
+                               input=json.dumps({'title': title, 'head': head, 'base': base, 'body': body}))
+        return int(created['number'])
+
+    def _checks_running(self, repo: str, sha: str) -> bool:
+        status = self.command('api', f'repos/{repo}/commits/{sha}/status', json_output=True)
+        # With no statuses at all GitHub still reports "pending"; only a counted one is running.
+        if status.get('state') == 'pending' and status.get('total_count', 0) > 0:
+            return True
+        runs = self.command('api', f'repos/{repo}/commits/{sha}/check-runs?per_page=100', json_output=True)
+        return any(run.get('status') != 'completed' for run in runs.get('check_runs', []))
+
+    def merge_pr(self, repo: str, number: int, title: str, message: str, *,
+                 wait: float = 900, sleep=time.sleep) -> str:
+        """Merge through REST with a verbatim title and message (gh pr merge adds a co-author
+        stub); GitHub decides whether it may. Returns the merge commit."""
+        self._repository(repo)
+        pr = self.command('api', f'repos/{repo}/pulls/{number}', json_output=True)
+        head, waited = pr['head']['sha'], 0
+        while not pr.get('merged'):
+            body = {'merge_method': 'merge', 'commit_title': title, 'commit_message': message, 'sha': head}
+            result = self._gh('api', '--method', 'PUT', f'repos/{repo}/pulls/{number}/merge', '--input', '-',
+                              input=json.dumps(body))
+            if not result.returncode:
+                return json.loads(result.stdout)['sha']
+            reason = self._reason(result)
+            pr = self.command('api', f'repos/{repo}/pulls/{number}', json_output=True)
+            if pr.get('merged'):
+                break
+            if (pr.get('state') != 'open' or pr['head']['sha'] != head or waited >= wait
+                    or not self._checks_running(repo, head)):
+                raise ValueError(f'PR #{number} is open: {reason}. {RERUN}')
+            waited += 30
+            print(f'PR #{number}: required checks are still running; merging again in 30s '
+                  f'({waited // 60}:{waited % 60:02d} of {int(wait) // 60} min).', flush=True)
+            sleep(30)
+        return pr['merge_commit_sha']
+
+    @staticmethod
+    def _reason(result) -> str:
+        """GitHub's own message for a refused call, from gh's error body or its stderr line."""
+        try:
+            message = json.loads(result.stdout).get('message')
+        except (ValueError, AttributeError):
+            message = None
+        if not isinstance(message, str) or not message.strip():
+            message = re.sub(r'^gh: |\s*\(HTTP \d+\)$', '', result.stderr.strip()) or 'GitHub refused the merge'
+        return message.strip().rstrip('.')
 
     def get(self, name: str) -> dict:
         if not re.fullmatch(r'[A-Za-z0-9-]+', name):
@@ -182,38 +266,40 @@ class Codespaces:
         except OSError as error:
             raise ValueError(f'Cannot store launch receipt at {path}: {error}') from error
 
-    def launch(self, plan, repo: str, machine: str | None, idle_timeout: str | None,
+    def launch(self, repo: str, branch: str, sha: str, machine: str | None, idle_timeout: str | None,
                client: str, dotfiles_repo: str | None, receipt: Path,
                *, resume: str | None = None, location: str | None = None,
                retention: str | None = None, workspace: str | None = None,
                machine_profile: dict | None = None) -> str:
+        """Create (or reuse) a codespace on branch, which must contain sha, the merged setup."""
         self._repository(repo)
         self._preflight_receipt(receipt)
-        sha = plan.push()
         folder = workspace or f'/workspaces/{repo.split("/")[1]}'
         if not folder.startswith('/') or '${' in folder:
             raise ValueError('Resolve the custom workspace path before remote validation.')
         name = resume
+        if name:
+            # Refused before anything changes: there is nothing to resume.
+            data = self.get(name)
+            if data.get('repository', {}).get('full_name', '').lower() != repo.lower():
+                raise ValueError('The selected codespace belongs to a different repository.')
+            ref = data.get('git_status', {}).get('ref')
+            if ref != branch:
+                raise ValueError(f'Move {name} to {branch} first; it is on {ref}.')
+            settings = self.resource_settings(data)
+            requested = {'machine': machine, 'idle_timeout_minutes': self._minutes(idle_timeout),
+                         'location': location, 'retention_period_minutes': self._minutes(retention)}
+            for key, value in requested.items():
+                if value is not None and value != settings[key]:
+                    raise ValueError(f'The existing codespace has {key}={settings[key]!r}; '
+                                     f'requested {value!r} was not applied. Review its actual resource settings.')
         try:
-            if name:
-                data = self.get(name)
-                if (data.get('repository', {}).get('full_name', '').lower() != repo.lower()
-                        or data.get('git_status', {}).get('ref') != plan.branch):
-                    raise ValueError('The selected codespace belongs to a different repository or branch.')
-                settings = self.resource_settings(data)
-                requested = {'machine': machine, 'idle_timeout_minutes': self._minutes(idle_timeout),
-                             'location': location, 'retention_period_minutes': self._minutes(retention)}
-                for key, value in requested.items():
-                    if value is not None and value != settings[key]:
-                        raise ValueError(f'The existing codespace has {key}={settings[key]!r}; '
-                                         f'requested {value!r} was not applied. Review its actual resource settings.')
-
-            else:
+            if not name:
                 available = self.machines(repo, sha)
                 if machine not in {entry['name'] for entry in available}:
-                    raise ValueError(f'Selected machine {machine} is unavailable for the pushed configuration; '
-                                     'setup is committed and pushed. Rerun to choose an available machine.')
-                args = ['codespace', 'create', '--repo', repo, '--branch', plan.branch,
+                    raise ValueError(f'Selected machine {machine} is unavailable for the merged configuration; '
+                                     f'setup is on {branch}. Rerun to choose an available machine.')
+                args = ['codespace', 'create', '--repo', repo, '--branch', branch,
                         '--machine', machine, '--idle-timeout', idle_timeout,
                         '--devcontainer-path', '.devcontainer/devcontainer.json']
                 if location:
@@ -227,7 +313,7 @@ class Codespaces:
                 name = created
                 settings = {'machine': machine, 'idle_timeout_minutes': self._minutes(idle_timeout),
                             'location': location, 'retention_period_minutes': self._minutes(retention)}
-            record = {'codespace': name, 'repository': repo, 'branch': plan.branch,
+            record = {'codespace': name, 'repository': repo, 'branch': branch,
                       'commit': sha, **settings, 'client': client,
                       'validated_commit': None, 'rebuild_pending': bool(resume)}
             if resume and receipt.exists():
@@ -238,7 +324,7 @@ class Codespaces:
                 if not isinstance(previous, dict):
                     raise ValueError(f'Invalid launch receipt {receipt}; preserve it before retrying.')
                 if (previous.get('codespace') == name and previous.get('repository') == repo
-                        and previous.get('branch') == plan.branch):
+                        and previous.get('branch') == branch):
                     record['validated_commit'] = previous.get('validated_commit')
                     record['rebuild_pending'] = not (
                         previous.get('validated_commit') == sha
@@ -249,32 +335,34 @@ class Codespaces:
             self.wait(name)
             if resume:
                 actual_branch = self._read_ssh(name, f'cd {shlex.quote(folder)} && git branch --show-current')
-                if actual_branch != plan.branch:
-                    raise ValueError('The existing codespace is on a different branch. Preserve it before reuse.')
+                if actual_branch != branch:
+                    raise ValueError(f'Move {name} to {branch} first; it is on {actual_branch}.')
                 dirty = self._read_ssh(name, f'cd {shlex.quote(folder)} && git status --porcelain --untracked-files=all')
                 if dirty:
                     raise ValueError(f'The existing codespace has user changes. Preserve them before reuse:\n{dirty}')
-            revision_command = f'cd {shlex.quote(folder)} && git rev-parse HEAD'
-            current = self._read_ssh(name, revision_command)
-            if resume and current != sha:
+            # The branch may have moved past the merge (another PR merged since); it must contain it.
+            contains_command = (f'cd {shlex.quote(folder)} && if git merge-base --is-ancestor {shlex.quote(sha)} HEAD; '
+                                'then echo yes; else echo no; fi')
+            contains = self._read_ssh(name, contains_command) == 'yes'
+            if resume and not contains:
                 # Arm before changing checkout HEAD so an interrupted rebuild
                 # cannot be mistaken for an already up-to-date environment.
                 record['rebuild_pending'] = True
                 self._save_receipt(receipt, record)
                 # A fast-forward is the only permitted update; divergence fails closed.
                 command = (f'cd {shlex.quote(folder)} && '
-                           f'test "$(git branch --show-current)" = {shlex.quote(plan.branch)} && '
+                           f'test "$(git branch --show-current)" = {shlex.quote(branch)} && '
                            f'test -z "$(git status --porcelain)" && '
-                           f'git fetch origin {shlex.quote(plan.branch)} && '
+                           f'git fetch origin {shlex.quote(branch)} && '
                            f'git merge-base --is-ancestor HEAD {shlex.quote(sha)} && git merge --ff-only {shlex.quote(sha)}')
                 self.command('codespace', 'ssh', '--codespace', name, '--', _with_github(command))
             if resume and record['rebuild_pending']:
                 previous_container = self._container_identity(name)
                 self.command('codespace', 'rebuild', '--codespace', name)
                 self._wait_rebuilt(name, previous_container)
-                current = self._read_ssh(name, revision_command)
-            if current != sha:
-                raise ValueError('The codespace is not at the reviewed commit; inspect its Git state before resuming.')
+                contains = self._read_ssh(name, contains_command) == 'yes'
+            if not contains:
+                raise ValueError('The codespace does not contain the reviewed commit; inspect its Git state before resuming.')
             self._read_ssh(name, f'cd {shlex.quote(folder)} && bash .devcontainer/scripts/validate-selected.sh')
             record['validated_commit'] = sha
             record['rebuild_pending'] = False
@@ -285,6 +373,34 @@ class Codespaces:
         except (ValueError, OSError, subprocess.TimeoutExpired) as error:
             if not name:
                 raise ValueError(str(error)) from error
-            raise ValueError(f'{error}\nCommit and push are preserved. Resume with: '
+            raise ValueError(f'{error}\nSetup is on {branch}. Resume with: '
                              f'task devcontainer:setup -- --resume {name}') from error
         return name
+
+
+def receipt_path(state_root: Path, repo: str, branch: str) -> Path:
+    """Where the launch receipt for repo's codespace on branch lives under the state home."""
+    return Path(state_root) / 'devcontainer-setup' / (hashlib.sha256(f'{repo}:{branch}'.encode()).hexdigest()[:16] + '.json')
+
+
+def migrate_receipt(state_root: Path, repo: str, default: str, codespace: str) -> Path | None:
+    """Copy the receipt a retired setup branch left for codespace, which the caller saw on default,
+    to default's path with that branch; the old file stays beside it. Returns the new path, if any."""
+    target = receipt_path(state_root, repo, default)
+    if target.exists() or target.is_symlink():
+        return None
+    found = []
+    for path in (Path(state_root) / 'devcontainer-setup').glob('*.json'):
+        try:
+            values = json.loads(path.read_text()) if path.is_file() and not path.is_symlink() else None
+        except (ValueError, OSError):
+            continue
+        branch = values.get('branch') if isinstance(values, dict) else None
+        if (isinstance(branch, str) and branch != default and values.get('repository') == repo
+                and values.get('codespace') == codespace and path == receipt_path(state_root, repo, branch)):
+            found.append((path.stat().st_mtime, path, values))
+    if not found:
+        return None
+    _, _, values = max(found, key=lambda entry: entry[0])
+    Codespaces._save_receipt(target, dict(values, branch=default))
+    return target

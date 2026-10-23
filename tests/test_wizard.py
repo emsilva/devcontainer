@@ -297,7 +297,7 @@ class WizardCliTests(unittest.TestCase):
                 class UI:
                     def choose(self, title, options, selected=None):
                         if title == 'After setup': return 'Push and open a Codespace in the browser'
-                        if title == 'Existing codespaces for this branch': return 'Reuse existing-space'
+                        if title == 'Existing codespaces for this repository': return 'Reuse existing-space'
                         raise AssertionError(f'Unexpected creation prompt: {title}')
                     def confirm(self, title, default=True): return True
                 output = io.StringIO()
@@ -493,10 +493,43 @@ class WizardCliTests(unittest.TestCase):
                 return False
         def github(args, **kwargs):
             return subprocess.CompletedProcess(args, 0,
-                '{"machine":{"name":"actual-machine"},"idle_timeout_minutes":30}', '')
+                '{"machine":{"name":"actual-machine"},"idle_timeout_minutes":30,"git_status":{"ref":"main"}}', '')
         with self.assertRaises(Cancelled):
             _launch_options(UI(), Codespaces(run=github), self.root, 'main', 'existing-space')
         self.assertEqual(prompts, ['Reuse this codespace with these existing resource settings?'])
+
+    def test_codespace_on_another_branch_is_listed_and_refused(self):
+        import contextlib
+        import io
+        from devcontainer_setup.__main__ import _launch_options
+        from devcontainer_setup.codespaces import Codespaces
+        self.git('remote', 'add', 'origin', 'https://github.com/owner/project.git')
+        old = {'name': 'old-space', 'repository': {'full_name': 'owner/project'}, 'git_status': {'ref': 'setup/devcontainer'},
+               'machine': {'name': 'standardLinux32gb'}, 'idle_timeout_minutes': 30}
+        for resume in (None, 'old-space'):
+            with self.subTest(resume=resume):
+                menus, prompts = [], []
+                def github(args, **kwargs):
+                    if args[1:3] != ['api', 'user/codespaces?per_page=100'] and args[1:3] != ['api', 'user/codespaces/old-space']:
+                        self.fail(f'Nothing is created or allocated: {args}')
+                    payload = [{'codespaces': [old]}] if '?' in args[2] else old
+                    return subprocess.CompletedProcess(args, 0, json.dumps(payload), '')
+                class UI:
+                    def choose(self, title, options, selected=None):
+                        menus.append((title, options))
+                        return 'Push and open a Codespace in the browser' if title == 'After setup' else options[-1]
+                    def confirm(self, title, default=True):
+                        prompts.append(title)
+                        return True
+                error_output = io.StringIO()
+                with contextlib.redirect_stderr(error_output), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertIsNone(_launch_options(UI(), Codespaces(run=github), self.root, 'main', resume))
+                if not resume:
+                    self.assertEqual(menus[1], ('Existing codespaces for this repository',
+                                                ['Create a new codespace', 'Reuse old-space (on setup/devcontainer)']))
+                self.assertIn('Launch unavailable: Move old-space to main first; it is on setup/devcontainer.',
+                              error_output.getvalue())
+                self.assertEqual(prompts, ['Continue with commit only?'])
 
 
 # Serves ssh://git@github.com/<owner>/<repo>.git from $FAKE_GITHUB, so a GitHub
@@ -504,6 +537,109 @@ class WizardCliTests(unittest.TestCase):
 FAKE_SSH = '''import os, shlex, sys
 service, path = shlex.split(sys.argv[-1])
 os.execvp('git', ['git', service.removeprefix('git-'), os.path.join(os.environ['FAKE_GITHUB'], path.lstrip('/'))])
+'''
+
+
+# GitHub's REST and Codespaces calls, offline: PRs live in a state file and merge into
+# the bare origin with Git itself; every call's argv and stdin are recorded there.
+FAKE_GH = r'''#!{python} -I
+import json, os, pathlib, re, subprocess, sys
+from urllib.parse import parse_qs, urlsplit
+state_path, origin = pathlib.Path(os.environ['FAKE_GH_STATE']), os.environ['FAKE_GH_ORIGIN']
+args = sys.argv[1:]
+stdin = sys.stdin.read() if '--input' in args else None
+state = json.loads(state_path.read_text())
+state['calls'].append({{'args': args, 'stdin': stdin}})
+MACHINE = {{'name': 'standardLinux32gb', 'cpus': 4, 'memory_in_bytes': 16 * 1024**3, 'storage_in_bytes': 32 * 1024**3}}
+
+
+def git(*command, env=None):
+    return subprocess.run(['git', '--git-dir', origin, *command], capture_output=True, text=True, env=env)
+
+
+def reply(value, code=0, error=''):
+    state_path.write_text(json.dumps(state))
+    print(value if isinstance(value, str) else json.dumps(value))
+    sys.stderr.write(error)
+    sys.exit(code)
+
+
+def merge(pr, body):
+    base = git('rev-parse', 'refs/heads/' + pr['base']['ref']).stdout.strip()
+    tree = git('merge-tree', '--write-tree', base, pr['head']['sha']).stdout.split()[0]
+    env = dict(os.environ, GIT_AUTHOR_NAME='GitHub', GIT_AUTHOR_EMAIL='noreply@github.com',
+               GIT_COMMITTER_NAME='GitHub', GIT_COMMITTER_EMAIL='noreply@github.com')
+    sha = git('commit-tree', tree, '-p', base, '-p', pr['head']['sha'], '-m', body['commit_title'],
+              '-m', body['commit_message'], env=env).stdout.strip()
+    git('update-ref', 'refs/heads/' + pr['base']['ref'], sha, base)
+    pr.update(state='closed', merged=True, merge_commit_sha=sha)
+    return sha
+
+
+if args[0] == 'api':
+    method, endpoint, skip = 'GET', None, False
+    for index, arg in enumerate(args[1:], 1):
+        if skip:
+            skip = False
+        elif arg in ('--method', '--input', '-f', '-F'):
+            method = args[index + 1] if arg == '--method' else method
+            skip = True
+        elif not arg.startswith('-') and endpoint is None:
+            endpoint = arg
+    path, query = urlsplit(endpoint).path, parse_qs(urlsplit(endpoint).query)
+    prs = state['prs']
+    if path == 'user':
+        reply({{'login': 'octo'}})
+    if path == 'user/codespaces':
+        reply([{{'codespaces': state['codespaces']}}])
+    if path.startswith('user/codespaces/'):
+        reply(next(space for space in state['codespaces'] if space['name'] == path.rsplit('/', 1)[1]))
+    if path == 'repos/owner/project/codespaces/machines':
+        reply({{'machines': [MACHINE], 'total_count': 1}})
+    if path == 'repos/owner/project/pulls' and method == 'POST':
+        body = json.loads(stdin)
+        sha = git('rev-parse', 'refs/heads/' + body['head']).stdout.strip()
+        pr = {{'number': len(prs) + 1, 'title': body['title'], 'body': body['body'], 'state': 'open', 'merged': False,
+              'merge_commit_sha': None, 'base': {{'ref': body['base']}},
+              'head': {{'ref': body['head'], 'sha': sha, 'repo': {{'full_name': 'owner/project'}}}}}}
+        prs.append(pr)
+        reply(pr)
+    if path == 'repos/owner/project/pulls' and state.get('list_failures'):
+        state['list_failures'] -= 1
+        reply('', 1, 'gh: Could not resolve to a Repository (HTTP 502)\n')
+    if path == 'repos/owner/project/pulls':
+        found = [pr for pr in prs if pr['state'] == query['state'][0] and pr['base']['ref'] == query['base'][0]
+                 and ('head' not in query or 'owner:' + pr['head']['ref'] == query['head'][0])]
+        reply([found] if '--slurp' in args else found)
+    match = re.fullmatch(r'repos/owner/project/pulls/(\d+)(/merge)?', path)
+    if match:
+        pr = next(pr for pr in prs if pr['number'] == int(match[1]))
+        if not match[2]:
+            reply(pr)
+        if state.get('refusal'):
+            reply({{'message': state['refusal']}}, 1, 'gh: ' + state['refusal'] + ' (HTTP 405)\n')
+        if state.get('phantom_merge'):
+            pr.update(state='closed', merged=True, merge_commit_sha='f' * 40)
+            reply({{'sha': 'f' * 40, 'merged': True, 'message': 'Pull Request successfully merged'}})
+        reply({{'sha': merge(pr, json.loads(stdin)), 'merged': True, 'message': 'Pull Request successfully merged'}})
+    if path.endswith('/status'):
+        reply({{'state': 'pending', 'total_count': 0, 'statuses': []}})
+    if path.endswith('/check-runs'):
+        reply({{'total_count': 0, 'check_runs': []}})
+if args[:2] == ['codespace', 'create']:
+    state['codespaces'].append({{'name': 'new-space', 'state': 'Available', 'machine': {{'name': MACHINE['name']}},
+                                'idle_timeout_minutes': 30, 'retention_period_minutes': None, 'location': None,
+                                'repository': {{'full_name': 'owner/project'}},
+                                'git_status': {{'ref': args[args.index('--branch') + 1]}}}})
+    reply('new-space')
+if args[:2] == ['codespace', 'ssh']:
+    contains = re.search(r'--is-ancestor (\S+) HEAD; then', args[-1])
+    if contains:
+        reply('yes' if git('merge-base', '--is-ancestor', contains[1], 'refs/heads/main').returncode == 0 else 'no')
+    reply('main' if 'branch --show-current' in args[-1] else '')
+if args[:2] == ['codespace', 'code']:
+    reply('')
+reply('', 1, 'fake gh: unsupported ' + ' '.join(args) + '\n')
 '''
 
 
@@ -524,6 +660,14 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
                         GIT_SSH_COMMAND=f'{shlex.quote(sys.executable)} -I {shlex.quote(str(ssh))}',
                         FAKE_GITHUB=str(base / 'github'))
         (base / 'home').mkdir()
+        # Every GitHub call reaches only this fake, never the real gh.
+        gh = base / 'bin/gh'
+        gh.write_text(FAKE_GH.format(python=sys.executable))
+        gh.chmod(0o700)
+        self.gh_state = base / 'gh-state.json'
+        self.gh_state.write_text(json.dumps({'calls': [], 'prs': [], 'codespaces': []}))
+        self.env.update(PATH=f'{gh.parent}{os.pathsep}{os.environ["PATH"]}', FAKE_GH_STATE=str(self.gh_state),
+                        FAKE_GH_ORIGIN=str(base / 'github/owner/project.git'))
         environment = patch.dict(os.environ, self.env)
         environment.start()
         self.addCleanup(environment.stop)
@@ -609,6 +753,7 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
                 return answers.get(title, False)
 
             def choose(self, title, options, selected=None):
+                seen.setdefault('choices', []).append(title)
                 if title == 'Review setup':
                     seen['worktrees'] = case.git('worktree', 'list', '--porcelain')
                 if title not in answers:
@@ -635,6 +780,42 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
 
     COMMIT_ONLY = {'After setup': 'Commit only (no Codespace)', 'Review setup': 'Continue',
                    'Commit these setup files?': True}
+    LAUNCH = {'After setup': 'Push and open a Codespace in the browser',
+              'Codespaces machine': '4 cores / 16 GB RAM / 32 GB disk (standardLinux32gb)',
+              'Stop when idle for': '30m', 'Review setup': 'Continue',
+              'Commit setup files, push setup/devcontainer and open a PR into main?': True}
+    MERGE = 'Merge PR #1 into main as octo? Required reviews are bypassed if your account is allowed to.'
+    RERUN = 'Merge it, then run task devcontainer:setup again to create the Codespace.'
+
+    def gh(self, **changes):
+        state = json.loads(self.gh_state.read_text())
+        if changes:
+            state.update(changes)
+            self.gh_state.write_text(json.dumps(state))
+        return state
+
+    def origin_git(self, *args):
+        return subprocess.check_output(['git', '--git-dir', str(self.origin), *args], text=True).strip()
+
+    def first(self, calls, *prefix):
+        return next(index for index, call in enumerate(calls) if call['args'][:len(prefix)] == list(prefix))
+
+    def assert_created_on_main_at(self, calls, sha):
+        create = calls[self.first(calls, 'codespace', 'create')]['args']
+        self.assertEqual(create[create.index('--branch') + 1], 'main')
+        machines = [call['args'] for call in calls if 'repos/owner/project/codespaces/machines' in call['args']]
+        self.assertIn(f'ref={sha}', machines[-1])
+        from devcontainer_setup.codespaces import receipt_path
+        receipt = json.loads(receipt_path(self.state, 'owner/project', 'main').read_text())
+        self.assertEqual((receipt['codespace'], receipt['branch'], receipt['commit']), ('new-space', 'main', sha))
+        self.assertEqual(calls[-1]['args'], ['codespace', 'code', '--codespace', 'new-space', '--web'])
+
+    def decline_merge(self):
+        """A first launch run whose merge the owner declines: PR #1 stays open."""
+        with self.assertRaises(ValueError) as caught:
+            self.interact(dict(self.LAUNCH, **{self.MERGE: False}))
+        self.assertEqual(str(caught.exception), f'PR #1 is open. {self.RERUN}')
+        return len(self.gh()['calls'])
 
     def test_rendered_files_come_from_the_worktree(self):
         from devcontainer_setup.__main__ import integrate_taskfile
@@ -817,6 +998,189 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         with self.assertRaises(Cancelled):
             self.interact({}, ui=FirstQuestionCancels, upgrade=True)
         self.assert_nothing_left()
+
+    def test_launch_merges_the_setup_pr_then_creates_the_codespace_on_main(self):
+        self.checkout_feature()
+        before, main = self.snapshot(), self.origin_git('rev-parse', 'main')
+        seen = self.interact(dict(self.LAUNCH, **{self.MERGE: True}))
+        self.assertEqual(seen['result'], 0, seen['output'])
+        calls, (pr,) = self.gh()['calls'], self.gh()['prs']
+        merged = self.origin_git('rev-parse', 'main')
+        self.assertEqual(self.origin_git('log', '-1', '--format=%P', merged).split(), [main, pr['head']['sha']])
+        self.assertEqual(self.git('rev-parse', f'{pr["head"]["sha"]}^'), main)
+        body = json.loads(calls[self.first(calls, 'api', '--method', 'POST', 'repos/owner/project/pulls')]['stdin'])
+        self.assertEqual((body['title'], body['head'], body['base']),
+                         ('Configure project devcontainer', 'setup/devcontainer', 'main'))
+        self.assertIn('Branch: setup/devcontainer (from origin/main)', body['body'])
+        self.assertIn('Files: ', body['body'])
+        self.assertNotIn(str(self.root), body['body'])
+        self.assertNotIn('Launch:', body['body'])
+        merge = self.first(calls, 'api', '--method', 'PUT', 'repos/owner/project/pulls/1/merge')
+        self.assertEqual(json.loads(calls[merge]['stdin']),
+                         {'merge_method': 'merge', 'commit_title': 'Configure project devcontainer (#1)',
+                          'commit_message': 'Reviewed and merged with task devcontainer:setup.',
+                          'sha': pr['head']['sha']})
+        for stamp in ('co-authored-by', 'generated with', 'noreply@anthropic.com', '\U0001f916'):
+            self.assertNotIn(stamp, json.dumps(calls, ensure_ascii=False).lower())
+        self.assertFalse(any(call['args'][:2] == ['pr', 'merge'] for call in calls))
+        self.assertLess(self.first(calls, 'api', '--method', 'POST'), merge)
+        self.assertLess(merge, self.first(calls, 'codespace', 'create'))
+        self.assert_created_on_main_at(calls, merged)
+        self.assert_nothing_left()
+        # A feature-branch checkout is never switched, merged into or rebased.
+        self.assertEqual(self.snapshot(), before)
+        self.assertIn('Your checkout lacks the new setup files until you merge or pull main.', seen['output'])
+
+    def test_cancelled_merge_leaves_pr_open_and_no_codespace(self):
+        reason = 'At least 1 approving review is required by reviewers with write access.'
+        for label in ('declined', 'refused'):
+            with self.subTest(label):
+                self.setUp()
+                self.checkout_feature()
+                before, main = self.snapshot(), self.origin_git('rev-parse', 'main')
+                if label == 'refused':
+                    self.gh(refusal=reason)
+                with self.assertRaises(ValueError) as caught:
+                    self.interact(dict(self.LAUNCH, **{self.MERGE: label == 'refused'}))
+                expected = f'PR #1 is open: {reason.rstrip(".")}. {self.RERUN}' if label == 'refused' else f'PR #1 is open. {self.RERUN}'
+                self.assertEqual(str(caught.exception), expected)
+                (pr,) = self.gh()['prs']
+                self.assertEqual(pr['state'], 'open')
+                self.assertEqual(self.origin_git('rev-parse', 'refs/heads/setup/devcontainer'), pr['head']['sha'])
+                self.assertEqual(self.git('rev-parse', 'refs/heads/setup/devcontainer'), pr['head']['sha'])
+                self.assertEqual(self.origin_git('rev-parse', 'main'), main)
+                self.assertFalse(any(call['args'][:1] == ['codespace'] for call in self.gh()['calls']))
+                self.assertEqual(list((self.state / 'devcontainer-setup').glob('*.json')), [])
+                self.assertEqual(self.git('worktree', 'list', '--porcelain').count('\nworktree '), 0)
+                self.assertEqual(self.snapshot(), before)
+
+    def test_rerun_resumes_the_open_setup_pr(self):
+        from devcontainer_setup.git_ops import GitPlan
+        # A clean checkout on main: the merge fast-forwards it.
+        main, start = self.origin_git('rev-parse', 'main'), self.decline_merge()
+        head = self.gh()['prs'][0]['head']['sha']
+        with patch.object(GitPlan, 'push', side_effect=AssertionError('a second setup branch was pushed')), \
+                patch('devcontainer_setup.__main__.setup_worktree', side_effect=AssertionError('a worktree was cut')):
+            seen = self.interact(dict(self.LAUNCH, **{self.MERGE: True}))
+        self.assertEqual(seen['result'], 0, seen['output'])
+        self.assertIn('Setup PR #1 is open: Configure project devcontainer (setup/devcontainer into main).', seen['output'])
+        self.assertNotIn('Review setup', seen['choices'])
+        calls = self.gh()['calls'][start:]
+        self.assertFalse(any(call['args'][:3] == ['api', '--method', 'POST'] for call in calls))
+        self.assertEqual(len(self.gh()['prs']), 1)
+        merged = self.origin_git('rev-parse', 'main')
+        self.assertEqual(self.origin_git('log', '-1', '--format=%P', merged).split(), [main, head])
+        self.assert_created_on_main_at(calls, merged)
+        self.assert_nothing_left()
+        self.assertEqual((self.git('branch', '--show-current'), self.git('rev-parse', 'HEAD')), ('main', merged))
+        self.assertEqual(self.git('status', '--porcelain', '--untracked-files=all'), '')
+        self.assertTrue((self.root / '.devcontainer/devcontainer.json').is_file())
+        self.assertNotIn('lacks the new setup files', seen['output'])
+
+    def test_two_open_setup_prs_are_refused(self):
+        prs = [{'number': number, 'title': 'Configure project devcontainer', 'state': 'open', 'merged': False,
+                'base': {'ref': 'main'}, 'head': {'ref': head, 'sha': 'c' * 40, 'repo': {'full_name': 'owner/project'}}}
+               for number, head in ((1, 'setup/devcontainer'), (2, 'setup/devcontainer-2'))]
+        self.gh(prs=prs)
+        before = self.snapshot()
+        with self.assertRaises(ValueError) as caught:
+            self.interact(self.LAUNCH)
+        self.assertIn('#1 (setup/devcontainer), #2 (setup/devcontainer-2)', str(caught.exception))
+        self.assertTrue(str(caught.exception).endswith('then run task devcontainer:setup again to create the Codespace.'))
+        self.assertEqual(self.seen.get('choices', []), [])
+        self.assertEqual([call['args'][:3] for call in self.gh()['calls']],
+                         [['api', 'repos/owner/project/pulls?state=open&base=main&per_page=100', '--paginate']])
+        self.assertFalse(self.worktree_root().exists())
+        self.assertEqual(self.snapshot(), before)
+
+    def test_already_merged_goes_straight_to_create(self):
+        from devcontainer_setup.git_ops import GitPlan
+        self.decline_merge()
+        # The owner merges PR #1 on GitHub, then runs setup again.
+        subprocess.run(['gh', 'api', '--method', 'PUT', 'repos/owner/project/pulls/1/merge', '--input', '-'], check=True,
+                       input=json.dumps({'commit_title': 'Merge pull request #1', 'commit_message': 'By hand'}),
+                       capture_output=True, text=True)
+        merged, start = self.origin_git('rev-parse', 'main'), len(self.gh()['calls'])
+        # Pulled already, with untracked work: no fast-forward, and nothing is missing either.
+        self.git('pull', '--quiet', '--ff-only', 'origin', 'main')
+        (self.root / 'scratch.txt').write_text('untracked owner work\n')
+        before = self.snapshot()
+        with patch.object(GitPlan, 'push', side_effect=AssertionError('an empty setup branch was pushed')):
+            seen = self.interact(dict(self.LAUNCH, **{'Create or open the selected codespace on main?': True}))
+        self.assertEqual(seen['result'], 0, seen['output'])
+        self.assertIn('Files: already configured', seen['output'])
+        self.assertNotIn('lacks the new setup files', seen['output'])
+        self.assertEqual(self.snapshot(), before)
+        calls = self.gh()['calls'][start:]
+        self.assertFalse(any(call['args'][:2] == ['api', '--method'] for call in calls))
+        self.assert_created_on_main_at(calls, merged)
+        # The merged setup branch is pruned locally and on origin.
+        self.assert_nothing_left()
+
+    def test_no_codespace_until_origin_contains_the_merge(self):
+        self.checkout_feature()
+        self.gh(phantom_merge=True)
+        with self.assertRaisesRegex(ValueError, 'Cannot confirm that origin/main contains the setup merge ffffffffffff'):
+            self.interact(dict(self.LAUNCH, **{self.MERGE: True}))
+        self.assertFalse(any(call['args'][:1] == ['codespace'] for call in self.gh()['calls']))
+        # Nothing is pruned on an unconfirmed merge.
+        self.assertTrue(self.origin_git('rev-parse', '--verify', 'refs/heads/setup/devcontainer'))
+        self.assertTrue(self.git('rev-parse', '--verify', 'refs/heads/setup/devcontainer'))
+
+    def test_cleanup_failure_after_merge_never_blocks_the_codespace(self):
+        self.checkout_feature()
+        # Leaves an untracked file in the worktree after a good commit, so its removal refuses.
+        hook = self.root / '.git/hooks/post-commit'
+        hook.write_text('#!/bin/sh\necho cache > hook-cache.txt\n')
+        hook.chmod(0o755)
+        seen = self.interact(dict(self.LAUNCH, **{self.MERGE: True}))
+        self.assertEqual(seen['result'], 0, seen['output'])
+        # The post-merge cleanup names every step left to run, the remote delete included.
+        self.assertIn('worktree remove --force', seen['output'])
+        self.assertIn('push origin --delete setup/devcontainer', seen['output'])
+        self.assert_created_on_main_at(self.gh()['calls'], self.origin_git('rev-parse', 'main'))
+
+    def test_no_second_setup_pr_when_the_first_check_failed(self):
+        from devcontainer_setup.git_ops import GitPlan
+        self.checkout_feature()
+        prs = [{'number': 1, 'title': 'Configure project devcontainer', 'state': 'open', 'merged': False,
+                'base': {'ref': 'main'}, 'head': {'ref': 'setup/devcontainer-7', 'sha': 'c' * 40,
+                                                   'repo': {'full_name': 'owner/project'}}}]
+        self.gh(prs=prs, list_failures=1)
+        with patch.object(GitPlan, 'push', side_effect=AssertionError('a second setup branch was pushed')), \
+                self.assertRaises(ValueError) as caught:
+            self.interact(self.LAUNCH)
+        self.assertIn('Note: cannot check GitHub for an open setup PR', self.seen['output'])
+        self.assertEqual(str(caught.exception), f'Setup PR #1 (setup/devcontainer-7) is open. {self.RERUN}')
+        self.assertEqual(len(self.gh()['prs']), 1)
+
+    def test_reuse_carries_the_retired_setup_branch_receipt(self):
+        from devcontainer_setup.__main__ import _launch_on_default
+        from devcontainer_setup.codespaces import Codespaces, receipt_path
+        old = receipt_path(self.state, 'owner/project', 'setup/devcontainer')
+        values = {'codespace': 'old-space', 'repository': 'owner/project', 'branch': 'setup/devcontainer',
+                  'commit': 'c' * 40, 'validated_commit': 'c' * 40, 'rebuild_pending': False}
+        Codespaces._save_receipt(old, values)
+        self.push_to_main({'.devcontainer/devcontainer.json': json.dumps({'workspaceFolder': '/workspaces/kept'}) + '\n'})
+        launched = []
+
+        class API:
+            def launch(self, *args, **kwargs):
+                launched.append((args, kwargs))
+                return 'old-space'
+        sha = self.origin_git('rev-parse', 'main')
+        launch = {'machine': 'standardLinux32gb', 'idle_timeout': '30m', 'client': 'browser', 'resume': 'old-space'}
+        preferences = {'apply_dotfiles': False, 'dotfiles_repo': ''}
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(_launch_on_default(API(), self.root, 'owner/project', 'main', sha, launch, preferences)[0], 'old-space')
+        ((args, kwargs),) = launched
+        self.assertEqual(args, ('owner/project', 'main', sha))
+        self.assertEqual(kwargs['receipt'], receipt_path(self.state, 'owner/project', 'main'))
+        self.assertEqual(kwargs['workspace'], '/workspaces/kept')
+        self.assertEqual(json.loads(kwargs['receipt'].read_text()), dict(values, branch='main'))
+        self.assertEqual(json.loads(old.read_text()), values)
 
     def test_no_origin_keeps_current_flow(self):
         self.git('remote', 'remove', 'origin')

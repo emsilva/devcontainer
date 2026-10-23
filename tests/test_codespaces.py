@@ -1,13 +1,18 @@
+import contextlib
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
-from devcontainer_setup.codespaces import Codespaces
+from devcontainer_setup.codespaces import Codespaces, migrate_receipt, receipt_path
 
 
 MACHINE = {'name': 'standardLinux32gb', 'display_name': '4 cores, 16 GB RAM',
@@ -25,7 +30,9 @@ class FakeGitHub:
         self.ssh_failures = []
         self.fail_validation = False
         self.remote_dirty = ''
-        self.remote_branch = 'setup/devcontainer'
+        self.remote_branch = 'main'
+        self.api_ref = 'main'
+        self.descendants = set()
         self.api_dirty = False
         self.ssh_timeouts = []
         self.fail_rebuild_once = False
@@ -49,7 +56,7 @@ class FakeGitHub:
                 output = json.dumps({'machines': [MACHINE], 'total_count': 1})
             elif endpoint.startswith('user/codespaces/new-space'):
                 output = json.dumps({'name': 'new-space', 'state': 'Available',
-                    **self.resource, 'repository': {'full_name': 'owner/project'}, 'git_status': {'ref': 'setup/devcontainer',
+                    **self.resource, 'repository': {'full_name': 'owner/project'}, 'git_status': {'ref': self.api_ref,
                     'has_uncommitted_changes': self.api_dirty, 'has_unpushed_changes': self.api_dirty}})
         if args[1:3] == ['codespace', 'ssh']:
             self.ssh_timeouts.append(kwargs.get('timeout'))
@@ -58,7 +65,11 @@ class FakeGitHub:
                 if isinstance(failure, Exception):
                     raise failure
                 return subprocess.CompletedProcess(args, 255, '', failure)
-            if args[-1].endswith('git rev-parse HEAD'):
+            contains = re.search(r'git merge-base --is-ancestor (\S+) HEAD; then', args[-1])
+            if contains:
+                target = contains[1]
+                output = 'yes\n' if self.remote_sha == target or self.remote_sha in self.descendants else 'no\n'
+            elif args[-1].endswith('git rev-parse HEAD'):
                 output = self.remote_sha + '\n'
             elif args[-1].endswith('git branch --show-current'):
                 output = self.remote_branch + '\n'
@@ -92,11 +103,7 @@ class CodespacesTests(unittest.TestCase):
         self.assertIn('GET', args)
 
     def launch(self):
-        class Plan:
-            branch = 'setup/devcontainer'
-            def push(self):
-                return 'a' * 40
-        return self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+        return self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                                None, self.receipt)
 
     def test_available_codespace_retries_transient_ssh_tunnel_failure(self):
@@ -138,27 +145,60 @@ class CodespacesTests(unittest.TestCase):
                 self.launch()
         sleep.assert_not_called()
 
-    def test_launch_pushes_before_allocation_and_opens_selected_client(self):
+    def test_codespace_created_on_default_branch_at_merge_sha(self):
+        # Another PR merged after the setup merge: main's head contains the merge commit, not equals it.
+        self.runner.remote_sha = 'f' * 40
+        self.runner.descendants = {'f' * 40}
         calls = self.runner.calls
-        class Plan:
-            branch = 'setup/devcontainer'
-            def push(self):
-                calls.append(['push-verified'])
-                return 'a' * 40
-        name = self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+        name = self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                                'emsilva/dotfiles', self.receipt)
         self.assertEqual(name, 'new-space')
-        self.assertEqual(calls[0], ['push-verified'])
         machine_request = next(c for c in calls if c[:2] == ['gh', 'api'] and c[2].endswith('/machines'))
         self.assertIn('ref=' + 'a' * 40, machine_request)
         self.assertFalse(any(arg.startswith('devcontainer_path=') for arg in machine_request))
         create = next(c for c in calls if c[1:3] == ['codespace', 'create'])
-        self.assertIn('setup/devcontainer', create)
+        self.assertEqual(create[create.index('--branch') + 1], 'main')
         self.assertIn(MACHINE['name'], create)
         self.assertNotIn('--default-permissions', create)
         self.assertNotIn('--status', create)
+        self.assertFalse(any('push' in arg for call in calls for arg in call))
         self.assertEqual(calls[-1], ['gh', 'codespace', 'code', '--codespace', 'new-space', '--web'])
-        self.assertEqual(json.loads(self.receipt.read_text())['codespace'], 'new-space')
+        receipt = json.loads(self.receipt.read_text())
+        self.assertEqual((receipt['codespace'], receipt['branch'], receipt['commit'], receipt['validated_commit']),
+                         ('new-space', 'main', 'a' * 40, 'a' * 40))
+
+    def test_reuse_refuses_codespace_on_other_branch(self):
+        self.runner.api_ref = 'setup/devcontainer'
+        with self.assertRaises(ValueError) as caught:
+            self.resume()
+        self.assertEqual(str(caught.exception), 'Move new-space to main first; it is on setup/devcontainer.')
+        self.assertFalse(any(c[1] == 'codespace' for c in self.runner.calls))
+        self.assertFalse(self.receipt.exists())
+
+    def test_receipt_migrates_from_retired_setup_branch(self):
+        state = Path(self.tmp.name) / 'state'
+        old = receipt_path(state, 'owner/project', 'setup/devcontainer')
+        digest = hashlib.sha256(b'owner/project:setup/devcontainer').hexdigest()[:16]
+        self.assertEqual(old, state / 'devcontainer-setup' / f'{digest}.json')
+        values = {'codespace': 'new-space', 'repository': 'owner/project', 'branch': 'setup/devcontainer',
+                  'commit': 'c' * 40, 'validated_commit': 'c' * 40, 'rebuild_pending': False}
+        self.api._save_receipt(old, values)
+        # Neither another codespace's receipt nor another repository's is copied.
+        self.api._save_receipt(receipt_path(state, 'owner/project', 'setup/devcontainer-2'),
+                               dict(values, codespace='other-space', branch='setup/devcontainer-2'))
+        self.api._save_receipt(receipt_path(state, 'owner/other', 'setup/devcontainer'),
+                               dict(values, repository='owner/other', commit='d' * 40))
+        self.assertIsNone(migrate_receipt(state, 'owner/project', 'main', 'missing-space'))
+        new = migrate_receipt(state, 'owner/project', 'main', 'new-space')
+        self.assertEqual(new, receipt_path(state, 'owner/project', 'main'))
+        self.assertEqual(json.loads(new.read_text()), dict(values, branch='main'))
+        self.assertEqual(json.loads(old.read_text()), values)  # Kept beside it.
+        self.assertIsNone(migrate_receipt(state, 'owner/project', 'main', 'new-space'))  # Never overwritten.
+        # The rewritten branch is what lets reuse trust the validated image: no rebuild.
+        self.runner.remote_sha = 'c' * 40
+        self.api.launch('owner/project', 'main', 'c' * 40, MACHINE['name'], '30m', 'browser',
+                        None, new, resume='new-space')
+        self.assertFalse(any(c[1:3] == ['codespace', 'rebuild'] for c in self.runner.calls))
 
     def test_personalization_quotes_repo_as_one_remote_argument(self):
         repo = "owner/dotfiles'; touch /tmp/should-not-exist; '"
@@ -185,43 +225,21 @@ class CodespacesTests(unittest.TestCase):
 
     def test_failed_personalization_keeps_receipt_and_includes_resume(self):
         self.runner.fail_personalization = True
-        class Plan:
-            branch = 'setup/devcontainer'
-            def push(self):
-                return 'a' * 40
         with self.assertRaisesRegex(ValueError, '--resume new-space'):
-            self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+            self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                             'emsilva/dotfiles', self.receipt)
         self.assertTrue(self.receipt.exists())
         self.assertFalse(any('delete' in c for c in self.runner.calls))
 
     def test_unavailable_selected_machine_never_creates(self):
-        class Plan:
-            branch = 'setup/devcontainer'
-            def push(self):
-                return 'a' * 40
         with self.assertRaisesRegex(ValueError, 'machine'):
-            self.api.launch(Plan(), 'owner/project', 'no-longer-available', '30m', 'browser',
+            self.api.launch('owner/project', 'main', 'a' * 40, 'no-longer-available', '30m', 'browser',
                             None, self.receipt)
         self.assertFalse(any(c[1:3] == ['codespace', 'create'] for c in self.runner.calls))
 
-    def test_push_failure_never_creates(self):
-        class Plan:
-            branch = 'setup/devcontainer'
-            def push(self):
-                raise ValueError('diverged')
-        with self.assertRaisesRegex(ValueError, 'diverged'):
-            self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
-                            None, self.receipt)
-        self.assertEqual(self.runner.calls, [])
-
     def test_reuse_uses_supported_rebuild_command_and_never_creates(self):
         self.runner.remote_sha = 'b' * 40
-        class Plan:
-            branch = 'setup/devcontainer'
-            def push(self):
-                return 'a' * 40
-        self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+        self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                         None, self.receipt, resume='new-space')
         self.assertIn(['gh', 'codespace', 'rebuild', '--codespace', 'new-space'], self.runner.calls)
         self.assertFalse(any(c[1:3] == ['codespace', 'create'] for c in self.runner.calls))
@@ -230,11 +248,7 @@ class CodespacesTests(unittest.TestCase):
         # A non-login codespace SSH shell has no GITHUB_TOKEN, so git fetch and
         # a dotfiles clone cannot authenticate there.
         self.runner.remote_sha = 'b' * 40
-        class Plan:
-            branch = 'setup/devcontainer'
-            def push(self):
-                return 'a' * 40
-        self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+        self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                         'emsilva/dotfiles', self.receipt, resume='new-space')
         remote = [c[-1] for c in self.runner.calls if c[1:3] == ['codespace', 'ssh']]
         fetch = next(command for command in remote if 'git fetch' in command)
@@ -245,35 +259,23 @@ class CodespacesTests(unittest.TestCase):
 
     def test_retry_of_current_codespace_skips_rebuild(self):
         self.api._save_receipt(self.receipt, {'codespace': 'new-space', 'repository': 'owner/project',
-            'branch': 'setup/devcontainer', 'commit': 'a' * 40,
+            'branch': 'main', 'commit': 'a' * 40,
             'validated_commit': 'a' * 40, 'rebuild_pending': False})
-        class Plan:
-            branch = 'setup/devcontainer'
-            def push(self):
-                return 'a' * 40
-        self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+        self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                         None, self.receipt, resume='new-space')
         self.assertFalse(any(c[1:3] == ['codespace', 'rebuild'] for c in self.runner.calls))
 
     def test_matching_checkout_without_validated_image_requires_rebuild(self):
-        class Plan:
-            branch = 'setup/devcontainer'
-            def push(self):
-                return 'a' * 40
-        self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+        self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                         None, self.receipt, resume='new-space')
         self.assertEqual(sum(c[1:3] == ['codespace', 'rebuild'] for c in self.runner.calls), 1)
         self.assertEqual(json.loads(self.receipt.read_text())['validated_commit'], 'a' * 40)
 
     def test_previous_image_receipt_cannot_certify_a_new_checked_out_commit(self):
         self.api._save_receipt(self.receipt, {'codespace': 'new-space', 'repository': 'owner/project',
-            'branch': 'setup/devcontainer', 'commit': 'b' * 40,
+            'branch': 'main', 'commit': 'b' * 40,
             'validated_commit': 'b' * 40, 'rebuild_pending': False})
-        class Plan:
-            branch = 'setup/devcontainer'
-            def push(self):
-                return 'a' * 40
-        self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+        self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                         None, self.receipt, resume='new-space')
         self.assertEqual(sum(c[1:3] == ['codespace', 'rebuild'] for c in self.runner.calls), 1)
 
@@ -283,36 +285,24 @@ class CodespacesTests(unittest.TestCase):
             self.launch()
         self.assertIsNone(json.loads(self.receipt.read_text()).get('validated_commit'))
         self.runner.fail_validation = False
-        class Plan:
-            branch = 'setup/devcontainer'
-            def push(self):
-                return 'a' * 40
-        self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+        self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                         None, self.receipt, resume='new-space')
         self.assertEqual(sum(c[1:3] == ['codespace', 'rebuild'] for c in self.runner.calls), 1)
 
     def test_resume_checks_live_git_instead_of_stale_api_dirty_flags(self):
         self.runner.api_dirty = True
-        class Plan:
-            branch = 'setup/devcontainer'
-            def push(self):
-                return 'a' * 40
-        self.assertEqual(self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+        self.assertEqual(self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                          None, self.receipt, resume='new-space'), 'new-space')
 
     def test_failed_rebuild_is_retried_even_after_git_already_advanced(self):
         self.runner.remote_sha = 'b' * 40
         self.runner.fail_rebuild_once = True
-        class Plan:
-            branch = 'setup/devcontainer'
-            def push(self):
-                return 'a' * 40
         with self.assertRaisesRegex(ValueError, 'temporary rebuild API failure'):
-            self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+            self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                             None, self.receipt, resume='new-space')
         self.assertTrue(json.loads(self.receipt.read_text()).get('rebuild_pending'))
         self.assertEqual(self.runner.remote_sha, 'a' * 40)
-        self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+        self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                         None, self.receipt, resume='new-space')
         self.assertEqual(sum(c[1:3] == ['codespace', 'rebuild'] for c in self.runner.calls), 2)
         self.assertFalse(json.loads(self.receipt.read_text())['rebuild_pending'])
@@ -320,60 +310,40 @@ class CodespacesTests(unittest.TestCase):
     def test_rebuild_waits_for_new_container_when_api_still_says_available(self):
         self.runner.remote_sha = 'b' * 40
         self.runner.identity_sequence = [100, 100, 101]
-        class Plan:
-            branch = 'setup/devcontainer'
-            def push(self):
-                return 'a' * 40
         with patch('devcontainer_setup.codespaces.time.sleep'):
-            self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+            self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                             None, self.receipt, resume='new-space')
         self.assertEqual(self.runner.identity_sequence, [])
 
     def test_resume_preserves_actual_remote_changes_even_when_api_says_clean(self):
         self.runner.remote_dirty = ' M source.py\n'
-        class Plan:
-            branch = 'setup/devcontainer'
-            def push(self):
-                return 'a' * 40
         with self.assertRaisesRegex(ValueError, 'source.py'):
-            self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+            self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                             None, self.receipt, resume='new-space')
         self.assertFalse(any('git fetch' in call[-1] for call in self.runner.calls))
         self.assertFalse(any(call[1:3] == ['codespace', 'rebuild'] for call in self.runner.calls))
 
     def test_resume_preserves_remote_branch_when_api_ref_is_stale(self):
         self.runner.remote_branch = 'user-work'
-        class Plan:
-            branch = 'setup/devcontainer'
-            def push(self):
-                return 'a' * 40
-        with self.assertRaisesRegex(ValueError, 'branch'):
-            self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+        with self.assertRaisesRegex(ValueError, 'Move new-space to main first; it is on user-work'):
+            self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                             None, self.receipt, resume='new-space')
         self.assertFalse(any('git fetch' in call[-1] for call in self.runner.calls))
 
-    def test_remote_revision_must_equal_reviewed_commit_before_opening(self):
+    def test_remote_revision_must_contain_reviewed_commit_before_opening(self):
         self.runner.remote_sha = 'b' * 40
-        class Plan:
-            branch = 'setup/devcontainer'
-            def push(self):
-                return 'a' * 40
         with self.assertRaisesRegex(ValueError, 'reviewed commit'):
-            self.api.launch(Plan(), 'owner/project', MACHINE['name'], '30m', 'browser',
+            self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                             None, self.receipt)
         self.assertFalse(any(c[1:3] == ['codespace', 'code'] for c in self.runner.calls))
         self.assertTrue(self.receipt.exists())
 
 
     def resume(self, **options):
-        class Plan:
-            branch = 'setup/devcontainer'
-            def push(self):
-                return 'a' * 40
         values = dict(machine=MACHINE['name'], idle_timeout='30m', client='browser',
                       dotfiles_repo=None, receipt=self.receipt, resume='new-space')
         values.update(options)
-        return self.api.launch(Plan(), 'owner/project', **values)
+        return self.api.launch('owner/project', 'main', 'a' * 40, **values)
 
     def test_invalid_receipt_path_refused_before_allocation(self):
         for path in (Path(self.tmp.name), Path(self.tmp.name) / 'file/launch.json'):
@@ -432,6 +402,150 @@ class CodespacesTests(unittest.TestCase):
         self.assertEqual(record['idle_timeout_minutes'], 30)
         self.assertEqual(record['retention_period_minutes'], 10080)
         self.assertEqual(record['location'], 'EastUs')
+
+
+RERUN = 'Merge it, then run task devcontainer:setup again to create the Codespace.'
+
+
+class FakePulls:
+    """gh api for one pull request: records argv and stdin; refuses and holds checks as told."""
+
+    def __init__(self):
+        self.calls, self.inputs = [], []
+        self.listed = []
+        self.pr = {'number': 7, 'title': 'Configure project devcontainer', 'state': 'open', 'merged': False,
+                   'merge_commit_sha': None, 'base': {'ref': 'main'},
+                   'head': {'ref': 'setup/devcontainer', 'sha': 'c' * 40, 'repo': {'full_name': 'owner/project'}}}
+        self.refusals = []         # GitHub's message for each refused merge, in order
+        self.json_errors = True    # gh prints the error body on stdout as well as its stderr line
+        self.status = []           # (state, total_count) per status read; then ('success', 1)
+        self.runs = []             # check-run statuses per check-runs read; then none
+        self.merged_by_hand = False
+
+    def __call__(self, args, **kwargs):
+        self.calls.append(args)
+        self.inputs.append(kwargs.get('input'))
+        endpoint = next(arg for arg in args[2:] if arg.startswith('repos/') or arg == 'user')
+        path = endpoint.split('?')[0]
+        if path.endswith('/merge'):
+            if self.refusals:
+                message = self.refusals.pop(0)
+                if self.merged_by_hand:
+                    self.pr.update(merged=True, state='closed', merge_commit_sha='e' * 40)
+                body = json.dumps({'message': message, 'status': '405'}) if self.json_errors else ''
+                return subprocess.CompletedProcess(args, 1, body, f'gh: {message} (HTTP 405)\n')
+            return self.reply(args, {'sha': 'd' * 40, 'merged': True, 'message': 'Pull Request successfully merged'})
+        if path.endswith('/status'):
+            state, total = self.status.pop(0) if self.status else ('success', 1)
+            return self.reply(args, {'state': state, 'total_count': total, 'statuses': []})
+        if path.endswith('/check-runs'):
+            runs = self.runs.pop(0) if self.runs else []
+            return self.reply(args, {'total_count': len(runs), 'check_runs': [{'status': run} for run in runs]})
+        if path == 'repos/owner/project/pulls/7':
+            return self.reply(args, self.pr)
+        if path == 'repos/owner/project/pulls' and '--method' in args:
+            return self.reply(args, dict(self.pr, number=8))
+        if path == 'repos/owner/project/pulls':
+            return self.reply(args, self.listed)
+        return subprocess.CompletedProcess(args, 1, '', f'unexpected {args}')
+
+    @staticmethod
+    def reply(args, value):
+        return subprocess.CompletedProcess(args, 0, json.dumps(value), '')
+
+    def merges(self):
+        return [index for index, call in enumerate(self.calls) if call[1:4] == ['api', '--method', 'PUT']]
+
+
+class PullRequestTests(unittest.TestCase):
+    def setUp(self):
+        self.pulls = FakePulls()
+        self.api = Codespaces(run=self.pulls)
+
+    def merge(self, **options):
+        return self.api.merge_pr('owner/project', 7, 'Configure project devcontainer (#7)',
+                                 'Reviewed and merged with task devcontainer:setup.', **options)
+
+    def test_merge_uses_rest_with_verbatim_message(self):
+        self.assertEqual(self.merge(sleep=self.fail), 'd' * 40)
+        (index,) = self.pulls.merges()
+        self.assertEqual(self.pulls.calls[index],
+                         ['gh', 'api', '--method', 'PUT', 'repos/owner/project/pulls/7/merge', '--input', '-'])
+        self.assertEqual(json.loads(self.pulls.inputs[index]),
+                         {'merge_method': 'merge', 'commit_title': 'Configure project devcontainer (#7)',
+                          'commit_message': 'Reviewed and merged with task devcontainer:setup.', 'sha': 'c' * 40})
+        sent = json.dumps(self.pulls.calls) + ''.join(text for text in self.pulls.inputs if text)
+        self.assertNotIn('Co-authored-by', sent)
+        self.assertFalse(any(call[1:3] == ['pr', 'merge'] for call in self.pulls.calls))
+
+    def test_merge_waits_for_pending_checks_then_merges(self):
+        reason = 'Required status check "ci" is expected.'
+        self.pulls.refusals = [reason, reason]
+        # A pending commit status, then no statuses (GitHub still says "pending") but a queued check run.
+        self.pulls.status, self.pulls.runs = [('pending', 1), ('pending', 0)], [['completed', 'queued']]
+        sleeps, output = [], io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(self.merge(sleep=sleeps.append), 'd' * 40)
+        self.assertEqual(sleeps, [30, 30])
+        self.assertEqual(len(self.pulls.merges()), 3)
+        self.assertEqual(len([line for line in output.getvalue().splitlines() if 'PR #7' in line]), 2)
+
+    def test_merge_stops_waiting_after_its_limit(self):
+        reason = 'Required status check "ci" is expected.'
+        self.pulls.refusals = [reason] * 10
+        self.pulls.status = [('pending', 1)] * 10
+        sleeps = []
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(ValueError) as caught:
+            self.merge(wait=90, sleep=sleeps.append)
+        self.assertEqual(sleeps, [30, 30, 30])
+        self.assertEqual(str(caught.exception), f'PR #7 is open: Required status check "ci" is expected. {RERUN}')
+
+    def test_merge_refusal_reports_github_reason_and_rerun(self):
+        reason = 'At least 1 approving review is required by reviewers with write access.'
+        for json_errors in (True, False):
+            with self.subTest(json_errors=json_errors):
+                self.setUp()
+                self.pulls.json_errors = json_errors
+                self.pulls.refusals = [reason]
+                # No statuses at all: GitHub reports "pending" with a zero count; nothing is running.
+                self.pulls.status = [('pending', 0)]
+                with self.assertRaises(ValueError) as caught:
+                    self.merge(sleep=self.fail)
+                self.assertEqual(str(caught.exception), f'PR #7 is open: {reason.rstrip(".")}. {RERUN}')
+                self.assertEqual(len(self.pulls.merges()), 1)
+
+    def test_merge_returns_merge_commit_when_already_merged(self):
+        self.pulls.pr.update(merged=True, state='closed', merge_commit_sha='e' * 40)
+        self.assertEqual(self.merge(sleep=self.fail), 'e' * 40)
+        self.assertEqual(self.pulls.merges(), [])
+        # Merged by hand while setup was trying: GitHub's refusal is followed by the merged state.
+        self.setUp()
+        self.pulls.refusals, self.pulls.merged_by_hand = ['Pull Request is not mergeable'], True
+        self.assertEqual(self.merge(sleep=self.fail), 'e' * 40)
+
+    def test_open_pr_reuses_existing(self):
+        self.pulls.listed = [dict(self.pulls.pr, number=5)]
+        self.assertEqual(self.api.open_pr('owner/project', 'setup/devcontainer', 'main',
+                                          'Configure project devcontainer', 'Files: Taskfile.yml'), 5)
+        query = parse_qs(urlsplit(self.pulls.calls[0][2]).query)
+        self.assertEqual((query['head'], query['base'], query['state']), (['owner:setup/devcontainer'], ['main'], ['open']))
+        self.assertFalse(any('POST' in call for call in self.pulls.calls))
+        self.pulls.listed = []
+        self.assertEqual(self.api.open_pr('owner/project', 'setup/devcontainer', 'main',
+                                          'Configure project devcontainer', 'Files: Taskfile.yml'), 8)
+        self.assertEqual(self.pulls.calls[-1], ['gh', 'api', '--method', 'POST', 'repos/owner/project/pulls', '--input', '-'])
+        self.assertEqual(json.loads(self.pulls.inputs[-1]), {'title': 'Configure project devcontainer', 'head': 'setup/devcontainer',
+                                                             'base': 'main', 'body': 'Files: Taskfile.yml'})
+
+    def test_open_setup_prs_are_only_setup_heads_from_this_repository(self):
+        head = self.pulls.pr['head']
+        self.pulls.listed = [[dict(self.pulls.pr, number=3), dict(self.pulls.pr, number=4, head=dict(head, ref='setup/devcontainer-2')),
+                              dict(self.pulls.pr, number=5, head=dict(head, ref='feature/setup/devcontainer')),
+                              dict(self.pulls.pr, number=6, head=dict(head, repo={'full_name': 'fork/project'})),
+                              dict(self.pulls.pr, number=9, head=dict(head, repo=None))]]
+        self.assertEqual([pr['number'] for pr in self.api.setup_prs('owner/project', 'main')], [3, 4])
+        query = parse_qs(urlsplit(self.pulls.calls[0][2]).query)
+        self.assertEqual((query['base'], query['state']), (['main'], ['open']))
 
 
 if __name__ == '__main__':

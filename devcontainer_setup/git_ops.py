@@ -209,6 +209,25 @@ def remove_setup_worktree(project: Path, path: Path, branch: str, *, remote: boo
                          + _manual(project, [f'ls-remote --heads origin {branch}']).removeprefix('run by hand: '))
 
 
+def is_ancestor(project: Path, ancestor: str, descendant: str) -> bool:
+    return _succeeds(project, 'merge-base', '--is-ancestor', ancestor, descendant)
+
+
+def default_contains(project: Path, default: str, sha: str) -> bool:
+    """Whether a freshly fetched origin/<default> contains sha."""
+    return _fetch_default(project, default) and is_ancestor(project, sha, f'refs/remotes/origin/{default}')
+
+
+def merged_setup_branches(project: Path, default: str) -> list[str]:
+    """Local setup branches whose tips are on refs/remotes/origin/<default> (fetch it first).
+    A branch some worktree holds is left out: a leftover worktree is the owner's to inspect."""
+    held = set(_worktrees(project).values())
+    names = git(project, 'for-each-ref', '--format=%(refname)', 'refs/heads/setup/').splitlines()
+    return [name.removeprefix('refs/heads/') for name in names
+            if SETUP_BRANCH.fullmatch(name.removeprefix('refs/heads/')) and name.removeprefix('refs/heads/') not in held
+            and is_ancestor(project, name, f'refs/remotes/origin/{default}')]
+
+
 def fast_forward_checkout(project: Path, default: str) -> bool:
     """Fast-forward the owner's checkout only when it is on <default> and clean; otherwise change
     nothing in it. Either way it may update refs/remotes/origin/<default>."""
