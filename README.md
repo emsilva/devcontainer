@@ -101,8 +101,11 @@ sync to the new one with `task work:cs -- --rebind <codespace>` (or
 old binding is paused and kept, not deleted. Herdr moves too: its connection to the
 old Codespace ends, and it asks once to install itself on the new one.
 
-Put temporary project files in `.scratch/` and shared notes in `.scratch/memory/`.
-Scratch sync runs automatically in both directions; conflicts are preserved for
+A Codespace can be deleted at any time, so keep anything you would need again in
+`.scratch/`: working files in `.scratch/tmp/` and shared notes in `.scratch/memory/`.
+Leave regenerable output such as screenshots and builds in `tmp/`, because scratch
+sync copies everything it holds. Project instructions tell agents the same,
+including agents working in Git worktrees. Scratch sync runs automatically in both directions; conflicts are preserved for
 resolution. Project instructions tell agents to read shared notes. Claude's
 project-local auto-memory directory also lives under scratch; global profiles,
 settings, sign-in, databases, and personal memory libraries stay on each host.

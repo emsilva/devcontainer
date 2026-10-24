@@ -4,7 +4,7 @@ import tempfile
 import tomllib
 import unittest
 
-from devcontainer_setup.project_sync.notes import integrate_notes
+from devcontainer_setup.project_sync.notes import _NOTES, _block, integrate_notes
 
 
 class NotesTests(unittest.TestCase):
@@ -54,6 +54,24 @@ class NotesTests(unittest.TestCase):
         self.assertEqual(again['AGENTS.md'], b'User prefix\n' + files['AGENTS.md'] + b'\nUser suffix\n')
         self.assertEqual(again['CLAUDE.md'], files['CLAUDE.md'])
         self.assertEqual(again['.codex/config.toml'], files['.codex/config.toml'])
+
+    def test_instructions_keep_needed_files_where_they_survive_a_deleted_codespace(self):
+        files = self.generate()
+        for name in ('AGENTS.md', 'CLAUDE.md'):
+            with self.subTest(name=name):
+                self.assertIn(b'`.scratch/tmp/`', files[name])
+                self.assertIn(b'--git-common-dir', files[name])
+
+    def test_unedited_older_block_is_replaced_in_place_and_surrounding_text_kept(self):
+        old = _block('project-notes', b'## Project memory\n\nAn older body.\n')
+        self.put('AGENTS.md', b'User prefix\n' + old + b'\nUser suffix\n')
+        self.put('CLAUDE.md', old)
+        files = self.generate()
+        block = _block('project-notes', _NOTES)
+        self.assertEqual(files['AGENTS.md'], b'User prefix\n' + block + b'\nUser suffix\n')
+        self.assertEqual(files['CLAUDE.md'], block)
+        self.install(files)
+        self.assertEqual(self.generate()['AGENTS.md'], files['AGENTS.md'])
 
     def test_edited_duplicate_or_malformed_blocks_refuse_without_partial_candidates(self):
         files = self.generate()

@@ -65,6 +65,12 @@ this workflow. Claude's project-local settings route auto-memory to
 auto-memory enable/disable choice. A conflicting custom memory directory is
 reported and preserved. No global profile or memory settings are changed.
 
+The same guidance treats a Codespace as disposable: anything worth keeping goes
+in `.scratch/` as it is made, with working files in `.scratch/tmp/`. Agents in a
+Git worktree write to the main checkout's `.scratch/`, since only that one syncs.
+`tmp/` holds only regenerable output. Setup replaces an unedited guidance block
+when the wording changes; an edited block stops for review.
+
 Before changing Claude's memory path, setup copies and verifies this repository's
 existing native memory index and topic files. The originals remain intact.
 Already redirected empty scratch directories are backfilled too. Conflicting

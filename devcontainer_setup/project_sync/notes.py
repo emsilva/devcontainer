@@ -20,6 +20,20 @@ Keep notes scoped to this project. Do not copy global memory, credentials,
 tokens, native agent databases, or unrelated project information into scratch.
 The scratch contents are ignored by Git and may synchronize between paired
 checkouts. Preserve existing notes and resolve conflicting facts explicitly.
+
+## Working files
+
+A Codespace can be deleted at any time, and everything in it that is not
+pushed or in `.scratch/` is lost with it. Keep anything you would need again
+in `.scratch/` as you work, not at the end: plans, briefs, reports, results,
+and state. Put working files in `.scratch/tmp/`. Use `tmp/` and `/tmp` only
+for output you can regenerate, such as screenshots, builds, and dependency
+trees; keep those out of `.scratch/`, which copies everything it holds. This
+applies even where other instructions name `./tmp`.
+
+In a Git worktree, use the main checkout's `.scratch/`; the worktree's own copy
+is not synchronized. The main checkout is the parent of:
+`git rev-parse --path-format=absolute --git-common-dir`
 '''
 _IGNORE = b'*\n!.gitignore\n!README.md\n'
 _README = b'''# Project scratch
@@ -56,6 +70,16 @@ def _owned(data: bytes, kind: str, toml: bool = False) -> bool:
 
 def _append(data: bytes, block: bytes) -> bytes:
     return data + (b'\n\n' if data and not data.endswith(b'\n') else b'\n' if data else b'') + block
+
+
+def _refresh(data: bytes, kind: str, body: bytes) -> bytes:
+    """Replace an unedited managed block in place so upgrades carry new guidance."""
+    if not _owned(data, kind):
+        return _append(data, _block(kind, body))
+    label = f'<!-- devcontainer-setup:{kind}'.encode()
+    end = label + b' end -->\n'
+    start, stop = data.index(label), data.index(end) + len(end)
+    return data[:start] + _block(kind, body) + data[stop:]
 
 
 def _read(project: Path, name: str, files: dict[str, bytes]) -> bytes:
@@ -141,7 +165,7 @@ def integrate_notes(project: Path, files: dict[str, bytes], enabled: bool) -> No
     additions = {}
     for name in ('AGENTS.md', 'CLAUDE.md'):
         data = _read(project, name, files)
-        additions[name] = data if _owned(data, 'project-notes') else _append(data, _block('project-notes', _NOTES))
+        additions[name] = _refresh(data, 'project-notes', _NOTES)
     additions['.codex/config.toml'] = _policy(_read(project, '.codex/config.toml', files))
     for name, desired in (('.scratch/.gitignore', _IGNORE), ('.scratch/README.md', _README)):
         data = _read(project, name, files)
