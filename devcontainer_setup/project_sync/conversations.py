@@ -342,6 +342,24 @@ def _claude_entry(project, store, sid, path, *, state, scopes):
     return {sid: kept}, dict(schema=SCHEMA, agent='claude', session_id=sid, project_id=project.project_id, identity=project.identity, source_root=origin, scope_roots=approved, cutoff=dict(turn_id=cutoff, bytes=len(kept)), files=[dict(session_id=sid, path=path.name, size=len(kept), sha256=digest, blob=digest, scope_roots=approved, origin_root=origin)], title=sessions._catalog_metadata(kept, 'claude', path)['title'], updated_at=path.stat().st_mtime)
 
 
+def _claude_entrypoint(path):
+    """The first entrypoint a Claude transcript records, read from a bounded prefix."""
+    with _parent(sessions._safe(path)) as (parent, name):
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        with os.fdopen(fd, 'rb') as source:
+            for _ in range(64):
+                line = source.readline(1024 * 1024)
+                if not line.endswith(b'\n'):
+                    return None
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    return None
+                if isinstance(row, dict) and isinstance(row.get('entrypoint'), str):
+                    return row['entrypoint']
+    return None
+
+
 def _import_aliases(project, state):
     aliases = set()
     if state is not None:
@@ -395,6 +413,8 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
             approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, first, store)))
             if meta.get('cwd') not in approved:
                 continue
+            if meta.get('source') == 'exec':
+                continue  # Headless runs are not conversations; the picker hides them (#49).
             retained, entry = _codex_entry(project, store, sid, index, state=state, scopes=scopes)
         except (ValueError, OSError) as exc:
             issue('codex', sid, exc)
@@ -414,6 +434,8 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
             sid = path.stem
             try:
                 sessions.session_uuid(sid)
+                if (_claude_entrypoint(path) or '').startswith('sdk-'):
+                    continue  # Agent SDK and claude -p runs are not conversations.
                 retained, entry = _claude_entry(project, store, sid, path, state=state, scopes=scopes)
             except (ValueError, OSError) as exc:
                 issue('claude', sid, exc)

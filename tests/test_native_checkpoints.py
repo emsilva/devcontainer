@@ -184,6 +184,24 @@ class NativeCheckpointTests(NativeFixture):
         result = self.capture()
         self.assertIn('Unsupported', result['issues'][0]['reason'])
 
+    def test_sdk_and_exec_runs_are_not_conversations(self):
+        # Nobody resumes these from the native picker, and Codex hides exec runs
+        # from it (#49): skip them like out-of-scope sessions, not as issues.
+        conversation = self.claude()
+        for entrypoint in ('sdk-py', 'sdk-cli'):
+            run = str(uuid.uuid4())
+            conversation.with_name(run + '.jsonl').write_bytes(lines(
+                dict(json.loads(line), entrypoint=entrypoint, sessionId=run)
+                for line in conversation.read_bytes().splitlines()))
+        self.codex()
+        headless = str(uuid.uuid4())
+        path = self.codex(headless)
+        path.write_bytes(path.read_bytes().replace(b'"source": "cli"', b'"source": "exec"', 1))
+        result = self.capture()
+        self.assertEqual(result['issues'], [])
+        self.assertEqual(sorted((entry['agent'], entry['session_id']) for entry in result['entries']),
+                         sorted([('claude', self.sid), ('codex', self.sid)]))
+
     def test_failed_put_is_an_issue_at_its_session_position(self):
         sid = str(uuid.uuid4())
         self.codex(sid)
@@ -208,6 +226,50 @@ class NativeCheckpointTests(NativeFixture):
         self.assertEqual(result['issues'], [])
         self.assertEqual(self.store.read(result['entries'][0]['files'][0]['blob']), original)
         self.assertEqual(result['entries'][0]['agent'], 'claude')
+
+    def test_claude_metadata_records_are_kept_and_working_paths_stay_in_scope(self):
+        root, inside = str(self.project.root), str(self.project.root / '.claude/worktrees/feature')
+        def session(worktree):
+            return self.claude(rows=[
+                dict(type='permission-mode', permissionMode='bypassPermissions'),
+                dict(type='user', message=dict(role='user', content='Word?'), uuid=str(uuid.uuid4())),
+                dict(type='ai-title', aiTitle='Project word'),
+                dict(type='worktree-state', worktreeSession=dict(originalCwd=root, worktreePath=worktree, worktreeName='feature',
+                                                                 worktreeBranch='feature', sessionId=self.sid)),
+                dict(type='relocated', relocatedCwd=worktree),
+                dict(type='file-history-delta', messageId=str(uuid.uuid4()), snapshotMessageId=str(uuid.uuid4()),
+                     trackingPath=inside + '/notes.md', timestamp='2026-10-24T12:00:00Z',
+                     backup=dict(backupFileName=None, version=1, backupTime='2026-10-24T12:00:00Z', realParentDir=inside)),
+                dict(type='assistant', message=dict(role='assistant', content=[dict(type='text', text='ORCHID')], stop_reason='end_turn'), uuid=str(uuid.uuid4()))])
+        session(inside)
+        result = self.capture()
+        self.assertEqual(result['issues'], [])
+        self.assertEqual([entry['agent'] for entry in result['entries']], ['claude'])
+        for field, outside in (('worktree', '/elsewhere/feature'),):
+            session(outside)
+            result = self.capture()
+            self.assertEqual(result['entries'], [])
+            self.assertIn('another project checkout', result['issues'][0]['reason'])
+
+    def test_claude_inline_attachments_from_every_current_shape_are_kept(self):
+        # Shapes measured across the Mac's transcripts on 2026-10-24: fields that
+        # only some Claude Code versions write are typed when present.
+        def session(*attachments):
+            return self.claude(rows=[dict(type='user', message=dict(role='user', content='Word?'), uuid=str(uuid.uuid4()))]
+                               + [dict(type='attachment', attachment=a, uuid=str(uuid.uuid4())) for a in attachments]
+                               + [dict(type='assistant', message=dict(role='assistant', content=[dict(type='text', text='ORCHID')], stop_reason='end_turn'), uuid=str(uuid.uuid4()))])
+        names = dict(addedLines=['a'], addedNames=['a'], readdedNames=[], removedNames=[], wireHiddenNames=[])
+        session(dict(type='deferred_tools_delta', **names, pendingMcpServers=['p'], surfacedNames=['s'],
+                     failedMcpServers=[dict(name='m', error='down')], surfacedDefinitions=[dict(name='t', definition={}, listing='x')]),
+                dict(type='prompt_snapshot', systemPrompt=['You are'], reminderFold=True),
+                dict(type='instructions', files=[dict(type='AutoMem', path=str(self.project.root / 'MEMORY.md'), content='index')]))
+        result = self.capture()
+        self.assertEqual(result['issues'], [])
+        self.assertEqual(len(result['entries']), 1)
+        session(dict(type='deferred_tools_delta', **dict(names, surfacedNames='not-a-list')))
+        result = self.capture()
+        self.assertEqual(result['entries'], [])
+        self.assertIn('attachment shape', result['issues'][0]['reason'])
 
     def test_claude_sidecars_refuse_until_atomic_dependency_closure_proven(self):
         path = self.claude()

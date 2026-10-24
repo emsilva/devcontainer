@@ -17,7 +17,7 @@ from .state import _parent as _state_parent
 
 MAX_BYTES = 256 * 1024 * 1024
 CODEX_RECORDS = {'session_meta', 'response_item', 'event_msg', 'turn_context', 'compacted', 'world_state', 'token_usage_record'}
-CLAUDE_RECORDS = {'user', 'assistant', 'system', 'summary', 'progress', 'queue-operation', 'file-history-snapshot', 'custom-title', 'agent-name', 'agent-color', 'pr-link', 'last-prompt', 'saved_hook_context', 'bridge-pointer', 'attachment', 'atis-latch', 'api-request-shape', 'api-request-blob', 'api-request', 'cost-state', 'mode'}
+CLAUDE_RECORDS = {'user', 'assistant', 'system', 'summary', 'progress', 'queue-operation', 'file-history-snapshot', 'custom-title', 'agent-name', 'agent-color', 'pr-link', 'last-prompt', 'saved_hook_context', 'bridge-pointer', 'attachment', 'atis-latch', 'api-request-shape', 'api-request-blob', 'api-request', 'cost-state', 'mode', 'ai-title', 'permission-mode', 'relocated', 'worktree-state', 'file-history-delta'}
 MEMORY_MARKERS = (b'<memory_summary>', b'<memory_context>', b'<memory_citation>', b'<oai-mem-citation>', b'========= MEMORY_SUMMARY BEGINS', b'/.codex/memories/', b'\\.codex\\memories\\')
 
 
@@ -169,11 +169,19 @@ def _validate_codex_scope(rows, roots):
 CLAUDE_INLINE_FIELDS = {
     'hook_success': (('command', 'content', 'stdout', 'stderr', 'hookName', 'hookEvent', 'toolUseID'), ()),
     'hook_additional_context': (('hookName', 'hookEvent', 'toolUseID'), ('content',)),
-    'deferred_tools_delta': ((), ('addedLines', 'addedNames', 'readdedNames', 'removedNames', 'wireHiddenNames', 'pendingMcpServers', 'failedMcpServers', 'needsAuthMcpServers')),
+    'deferred_tools_delta': ((), ('addedLines', 'addedNames', 'readdedNames', 'removedNames', 'wireHiddenNames')),
     'mcp_instructions_delta': ((), ('addedBlocks', 'addedNames', 'removedNames')),
     'instructions': ((), ()),
-    'prompt_snapshot': (('contextRendering',), ('systemPrompt',)),
+    'prompt_snapshot': ((), ('systemPrompt',)),
     'thinking_drop': (('model', 'querySource'), ('blockHashes',)),
+}
+# Fields only some Claude Code versions write: typed when present. 'strs' is a list
+# of strings, 'dicts' a list of objects (measured 2026-10-24).
+CLAUDE_INLINE_OPTIONAL = {
+    'deferred_tools_delta': {'pendingMcpServers': 'strs', 'needsAuthMcpServers': 'strs', 'surfacedNames': 'strs',
+                             'removedByBlock': 'strs', 'failedMcpServers': 'dicts', 'surfacedDefinitions': 'dicts',
+                             'retractedTools': 'dicts'},
+    'prompt_snapshot': {'contextRendering': 'str'},
 }
 
 
@@ -221,6 +229,11 @@ def _validate_claude_inline(attachment):
     valid = (all(isinstance(attachment.get(key), str) for key in strings)
              and all(isinstance(attachment.get(key), list)
                      and all(isinstance(value, str) for value in attachment[key]) for key in lists))
+    for key, shape in CLAUDE_INLINE_OPTIONAL.get(kind, {}).items():
+        if key in attachment:
+            value = attachment[key]
+            valid = valid and (isinstance(value, str) if shape == 'str' else
+                               isinstance(value, list) and all(isinstance(item, str if shape == 'strs' else dict) for item in value))
     if kind == 'thinking_drop':
         _validate_claude_thinking_drop(attachment)
     elif kind == 'hook_success':
@@ -228,12 +241,12 @@ def _validate_claude_inline(attachment):
         valid = (valid and type(duration) in (int, float) and 0 <= duration < float('inf')
                  and type(attachment.get('exitCode')) is int)
     elif kind == 'deferred_tools_delta':
-        valid = valid and type(attachment.get('toolSearchAbsent')) is bool
+        valid = valid and type(attachment.get('toolSearchAbsent', False)) is bool
     elif kind == 'instructions':
         files = attachment.get('files')
         valid = (valid and isinstance(files, list)
                  and all(isinstance(item, dict) and isinstance(item.get('path'), str)
-                         and isinstance(item.get('content'), str) and item.get('type') in ('User', 'Project') for item in files))
+                         and isinstance(item.get('content'), str) and item.get('type') in ('User', 'Project', 'AutoMem') for item in files))
     elif kind == 'prompt_snapshot':
         flags = ('echoWireToolInputs', 'reminderFold', 'inlineTools', 'keptReminders', 'systemTurns', 'toolChangeHeader')
         valid = valid and all(type(attachment[key]) is bool for key in flags if key in attachment)
@@ -288,6 +301,20 @@ def _validate_claude(rows, sid, roots, *, child=False):
                     _scoped_roots(directory, roots, child=True)
             elif attachment['type'] in CLAUDE_INLINE_FIELDS:
                 _validate_claude_inline(attachment)
+        elif kind in ('relocated', 'worktree-state'):
+            # These move where the session works, so they stay in scope like cwd.
+            state = row.get('worktreeSession') if kind == 'worktree-state' else row
+            if not isinstance(state, dict):
+                raise ValueError('Invalid Claude working-directory record')
+            required = ('relocatedCwd',) if kind == 'relocated' else ('worktreePath',)
+            for key in required + ('originalCwd', 'preEnterOriginalCwd'):
+                if key in required or key in state:
+                    _scoped_roots(state.get(key), roots, child=True)
+        elif kind in ('ai-title', 'permission-mode', 'file-history-delta'):
+            # Bookkeeping, like file-history-snapshot: shape only.
+            field = {'ai-title': 'aiTitle', 'permission-mode': 'permissionMode', 'file-history-delta': 'trackingPath'}[kind]
+            if not isinstance(row.get(field), str):
+                raise ValueError('Invalid Claude metadata record')
         elif kind in ('api-request-shape', 'api-request-blob'):
             key, value, known = ('shapeHash', row.get('shape'), shapes) if kind == 'api-request-shape' else ('hash', row.get('message'), blobs)
             if not isinstance(value, dict):
