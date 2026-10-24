@@ -63,12 +63,7 @@ def transfer(source_store, destination, snapshot_id, *, source, identity=None):
     if isinstance(destination, RemoteStore):
         missing = destination.missing(digests)
     else:
-        missing = []
-        for digest in digests:
-            try:
-                destination.read(digest)
-            except FileNotFoundError:
-                missing.append(digest)
+        missing = [digest for digest in digests if destination.present(digest) is None]
     bodies = (source_store.read_many(missing) if isinstance(source_store, RemoteStore)
               else ((digest, source_store.read(digest)) for digest in missing))
     if isinstance(destination, RemoteStore):
@@ -224,29 +219,38 @@ def stopped_message(state):
 
 
 COLLECT_INTERVAL = 86400
+COLLECT_RETRY = 3600
 
 
 def _collect(state, endpoint, cycle):
-    """Once a day, after both directions hold this cycle's receipts, drop what neither store still needs (#50)."""
+    """Once a day, after both directions hold this cycle's receipts, drop what neither store still needs (#50).
+
+    Housekeeping: nothing here fails the cycle. A side that fails is retried within the hour.
+    """
     from . import sync_cycle
     marker = state / 'checkpoint-collection.json'
     try:
-        last = read_json(marker).get('at', 0)
-    except (FileNotFoundError, ValueError):
-        last = 0
-    if (not isinstance(last, (int, float)) or time.time() - last < COLLECT_INTERVAL
-            or not all(sync_cycle.receipt_matches(row['receipt'], row['snapshot_id'])
-                       for row in cycle['directions'].values())):
-        return
-    record = {'at': time.time()}
-    for side, run in (('desktop', lambda: Store(state).collect(apply=True)),
-                      ('codespace', lambda: endpoint.call('collect'))):
         try:
-            record[side] = run()
-        except (OSError, ValueError, KeyError, TypeError) as error:
-            # An older Codespace has no collect operation; neither side stops the cycle.
-            record[side] = {'error': type(error).__name__}
-    atomic_write(marker, json.dumps(record, sort_keys=True).encode() + b'\n')
+            due = read_json(marker).get('retry_at', 0)
+        except (FileNotFoundError, ValueError):
+            due = 0
+        if (not isinstance(due, (int, float)) or time.time() < due
+                or not all(sync_cycle.receipt_matches(row['receipt'], row['snapshot_id'])
+                           for row in cycle['directions'].values())):
+            return
+        record = {'at': time.time()}
+        for side, run in (('desktop', lambda: Store(state).collect(apply=True)),
+                          ('codespace', lambda: endpoint.call('collect'))):
+            try:
+                record[side] = run()
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                # An older Codespace has no collect operation.
+                record[side] = {'error': type(error).__name__}
+        failed = any('error' in record[side] for side in ('desktop', 'codespace'))
+        record['retry_at'] = record['at'] + (COLLECT_RETRY if failed else COLLECT_INTERVAL)
+        atomic_write(marker, json.dumps(record, sort_keys=True).encode() + b'\n')
+    except (OSError, ValueError):
+        pass
 
 
 def sync_project_data(connection, project, state, remote_root, *, env=None, historical_roots=(), progress=None):

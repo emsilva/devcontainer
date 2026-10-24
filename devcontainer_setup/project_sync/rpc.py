@@ -70,10 +70,11 @@ class LocalEndpoint:
         if operation == 'has_blobs':
             missing, sizes = [], {}
             for digest in _digests(values['digests']):
-                try:
-                    sizes[digest] = len(self.store.read(digest))
-                except FileNotFoundError:
+                size = self.store.present(digest)
+                if size is None:
                     missing.append(digest)
+                else:
+                    sizes[digest] = size
             return {'missing': missing, 'sizes': sizes}
         if operation == 'get_blobs':
             blobs, size = {}, 0

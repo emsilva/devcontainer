@@ -165,6 +165,18 @@ class ReplicationTests(unittest.TestCase):
         record = json.loads((self.store.state / 'checkpoint-collection.json').read_text())
         self.assertEqual((record['desktop']['objects'], record['codespace']['objects']), (1, 1))
 
+    def test_failed_collection_is_retried_soon_and_never_fails_the_sync(self):
+        self.conversation(self.local_env, text='LOCAL')
+        with patch.object(Store, 'collect', side_effect=OSError('disk')):
+            result = replication.sync_project_data(self.connection, self.project, self.store.state, str(self.root), env=self.local_env)
+        self.assertIn(result['outcome'], ('complete', 'degraded'))
+        record = json.loads((self.store.state / 'checkpoint-collection.json').read_text())
+        self.assertEqual(record['desktop'], {'error': 'OSError'})
+        self.assertLess(record['retry_at'] - time.time(), replication.COLLECT_RETRY + 5)
+        with patch.object(replication, 'atomic_write', side_effect=OSError('no space')):
+            (self.store.state / 'checkpoint-collection.json').unlink()
+            replication.sync_project_data(self.connection, self.project, self.store.state, str(self.root), env=self.local_env)
+
     def historical_checkout(self):
         legacy = self.base / 'legacy'
         subprocess.run(['git', 'clone', '-q', str(self.root), str(legacy)], check=True)

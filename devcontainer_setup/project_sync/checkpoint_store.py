@@ -13,7 +13,6 @@ from .state import _parent, _regular, atomic_write, locked, read_json
 
 
 _DIGEST = re.compile(r'[0-9a-f]{64}')
-_DIGESTS = re.compile(rb'[0-9a-f]{64}')
 KEEP_DAYS = 7
 # A capture or transfer puts its objects before it saves their manifest.
 GRACE_SECONDS = 86400
@@ -45,6 +44,18 @@ def _references(value):
     elif isinstance(value, (list, tuple)):
         for child in value:
             yield from _references(child)
+
+
+def _strings(value):
+    """Every digest-shaped string in a JSON value; extra matches only keep more."""
+    if isinstance(value, dict):
+        for child in value.values():
+            yield from _strings(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _strings(child)
+    elif isinstance(value, str) and _DIGEST.fullmatch(value):
+        yield value
 
 
 class Store:
@@ -92,6 +103,19 @@ class Store:
 
     def read(self, digest: str) -> bytes:
         return self._read(self._path('objects', digest), digest)
+
+    def present(self, digest: str) -> int | None:
+        """The size of a stored object, which is about to be referenced again; None when absent."""
+        path = self._path('objects', digest)
+        with locked(self.root / 'store.lock', blocking=True):
+            try:
+                with _parent(path, private=True) as (parent, name):
+                    info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    # Restart its collection grace, as a put of the same content would.
+                    os.utime(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                return None
+        return info.st_size
 
     def _verify(self, manifest: dict) -> None:
         for digest in set(_references(manifest)):
@@ -150,17 +174,22 @@ class Store:
         with locked(self.root / 'store.lock', blocking=True):
             named = set()
             for source in sorted(_SOURCES):
-                receipt = self.latest(source)
-                if receipt is not None:
-                    named.add(receipt['snapshot_id'])
+                try:
+                    named.add(_digest(read_json(self._receipt(source))['snapshot_id']))
+                except FileNotFoundError:
+                    pass
             manifests = self._entries('manifests')
             kept = {digest for digest, info in manifests.items()
                     if digest in named or info.st_mtime >= now - keep_days * 86400}
-            # Raises before anything is deleted when a kept manifest cannot be read.
-            live = {blob for digest in kept for blob in _references(self.load(digest))}
+            # Manifest text only, never blob bodies. Raises before anything is
+            # deleted when a kept or named manifest cannot be read.
+            live = set()
+            for digest in kept | named:
+                data = self._read(self._path('manifests', digest), digest)
+                live.update(_references(json.loads(data)))
             # Published conversations keep proving their source against these blobs.
             for receipt in (self.state / 'conversation-imports').glob('*/receipt.json'):
-                live.update(match.decode() for match in _DIGESTS.findall(receipt.read_bytes()))
+                live.update(_strings(read_json(receipt)))
             doomed = [('manifests', digest, info) for digest, info in manifests.items() if digest not in kept]
             doomed += [('objects', digest, info) for digest, info in self._entries('objects').items()
                        if digest not in live and info.st_mtime < now - grace_seconds]

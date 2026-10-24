@@ -36,7 +36,8 @@ class StoreTests(unittest.TestCase):
         for family, digest in (('manifests', stale), ('manifests', received), ('objects', old),
                                ('objects', named), ('objects', loose)):
             self.age(family, digest, 8)
-        planned = self.store.collect()
+        with mock.patch.object(self.store, 'read', side_effect=AssertionError('collect reads no blob bodies')):
+            planned = self.store.collect()
         self.assertEqual((planned['manifests'], planned['objects'], planned['applied']), (1, 2, False))
         self.assertEqual(self.store.read(old), b'old')  # A dry run deletes nothing.
         done = self.store.collect(apply=True)
@@ -59,12 +60,20 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.collect(apply=True)['objects'], 0)
         self.assertEqual(self.store.read(digest), b'unchanged session')
 
+    def test_finding_content_present_restarts_its_grace(self):
+        # A transfer skips blobs the destination has, then saves a manifest naming them.
+        digest = self.store.put(b'already there')
+        self.age('objects', digest, 8)
+        self.assertEqual(self.store.present(digest), len(b'already there'))
+        self.assertIsNone(self.store.present('c' * 64))
+        self.assertEqual(self.store.collect(apply=True)['objects'], 0)
+
     def test_collect_spares_blobs_an_import_receipt_names(self):
         source = self.store.put(b'published source')
         self.age('objects', source, 8)
-        receipt = self.path / 'conversation-imports' / ('b' * 64) / 'receipt.json'
-        receipt.parent.mkdir(parents=True)
-        receipt.write_text(json.dumps({'files': [{'sha256': source, 'destination': '/x'}]}))
+        from devcontainer_setup.project_sync.state import atomic_write
+        atomic_write(self.path / 'conversation-imports' / ('b' * 64) / 'receipt.json',
+                     json.dumps({'files': [{'sha256': source, 'destination': '/x'}]}).encode())
         self.assertEqual(self.store.collect(apply=True)['objects'], 0)
         self.assertEqual(self.store.read(source), b'published source')
 
