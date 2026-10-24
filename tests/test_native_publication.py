@@ -677,3 +677,44 @@ class PublicationTests(NativeFixture):
         captured=self.api.capture_conversations(project,self.store,state=self.root/'cross-state',env=env)
         self.assertEqual(captured,dict(schema=1,entries=[],issues=[]))
         for path,original in originals.items():self.assertEqual(path.read_bytes(),original)
+
+    def test_claude_session_ending_below_the_root_round_trips_between_checkouts(self):
+        # A session's root is the checkout it worked in, not its last shell directory (#40).
+        import subprocess
+        from devcontainer_setup.project_sync.state import discover_project
+        from devcontainer_setup.project_sync.sessions import claude_namespace
+        def turn(cwd, sid, text):
+            return [dict(type='user', sessionId=sid, cwd=cwd, version='2.1.302', uuid=str(uuid.uuid4()), message=dict(role='user', content=text)),
+                    dict(type='assistant', sessionId=sid, cwd=cwd, version='2.1.302', uuid=str(uuid.uuid4()),
+                         message=dict(role='assistant', content=[dict(type='text', text='Done')], stop_reason='end_turn'))]
+        source = str(self.project.root)
+        for below in ('web', '.claude/worktrees/feature'):
+            with self.subTest(below=below):
+                sid = str(uuid.uuid4())
+                path = Path(self.env['CLAUDE_CONFIG_DIR']) / 'projects' / claude_namespace(self.project.root) / (sid + '.jsonl')
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(lines(turn(source, sid, 'Start') + turn(source + '/' + below, sid, 'Work below')))
+                entry = next(e for e in self.capture()['entries'] if e['session_id'] == sid)
+                self.assertEqual(entry['source_root'], source)
+                root = self.root / ('other-' + below.replace('/', '-'))
+                subprocess.run(['git', 'init', '-q', str(root)], check=True)
+                subprocess.run(['git', '-C', str(root), 'remote', 'add', 'origin', self.project.remote], check=True)
+                other = discover_project(root)
+                env = dict(self.env, CODEX_HOME=str(root / '.codex-home'), CLAUDE_CONFIG_DIR=str(root / '.claude-home'))
+                state = root / '.state'
+                self.store.load = lambda _: dict(schema=2, project=dict(project_id=other.project_id, identity=other.identity), conversations=dict(entries=[entry], issues=[]))
+                result = self.api.publish_conversations(other, self.store, 'checkpoint', state=state, env=env)
+                self.assertEqual(result['issues'], [])
+                self.assertEqual(len(result['imported']), 1)
+                imported = result['imported'][0]['session_id']
+                published = Path(env['CLAUDE_CONFIG_DIR']) / 'projects' / claude_namespace(root) / (imported + '.jsonl')
+                with published.open('ab') as output:
+                    output.write(lines(turn(str(root) + '/' + below, imported, 'Continue below')))
+                captured = self.api.capture_conversations(other, self.store, state=state, env=env)
+                self.assertEqual(captured['issues'], [])
+                back = next(e for e in captured['entries'] if e['session_id'] == imported)
+                self.assertEqual(back['source_root'], str(root))
+                self.store.load = lambda _: dict(schema=2, project=dict(project_id=self.project.project_id, identity=self.project.identity), conversations=dict(entries=[back], issues=[]))
+                result = self.api.publish_conversations(self.project, self.store, 'checkpoint', state=self.root / ('back-' + below.replace('/', '-')), env=self.env)
+                self.assertEqual(result['issues'], [])
+                self.assertEqual(len(result['imported']), 1)

@@ -57,6 +57,7 @@ Claude native resumes verify original conversation content and fresh notes in
 actual requests to a synthetic loopback provider. Historical bytes remain an
 exact prefix. Current native request shape/blob/message references and complete
 request digests are validated, including repeated cross-host continuations.
+(2026-10-24, #40: no longer validated; capture copies request records as they are.)
 Claude auto memory is disabled only for the managed process; prompt snapshots
 are rebuilt so newly synchronized notes take effect on resume.
 
@@ -101,7 +102,8 @@ tested. A shortened continuous-sync idle experiment was inconclusive: the API
 kept the existing 30-minute setting after a requested update to five minutes,
 so that experiment does not prove an idle deadline with the worker connected.
 Native Codex subagent trees, compressed histories, and unrecognized
-native records/sidecars are explicit refusals. Managed locks are advisory: a
+native records/sidecars are explicit refusals (2026-10-24, #40: Claude records
+and sidecars no longer refuse; sidecars are not carried yet, #52). Managed locks are advisory: a
 plain native CLI can bypass the managed workflow. No claim is made that future
 daily CLI releases preserve the tested formats or option semantics.
 

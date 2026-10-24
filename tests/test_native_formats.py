@@ -126,6 +126,18 @@ class NativeFormatTests(unittest.TestCase):
             bad = copy.deepcopy(rows); bad[2]['attachment']['snapshot']['workingDirectory'] = outside
             with self.subTest(workingDirectory=outside), self.assertRaisesRegex(ValueError, 'another project checkout'):
                 sessions._validate_claude(bad, self.sid, [self.root])
+        # --add-dir records its directories here; another project's must not export.
+        added = copy.deepcopy(rows); added[2]['attachment']['snapshot']['additionalWorkingDirectories'] = [self.root + '/web']
+        sessions._validate_claude(added, self.sid, [self.root])
+        added[2]['attachment']['snapshot']['additionalWorkingDirectories'] = ['/workspaces/other']
+        with self.assertRaisesRegex(ValueError, 'another project checkout'):
+            sessions._validate_claude(added, self.sid, [self.root])
+        for cwd in (self.root + '/../other', 'workspaces/project', None, 1):
+            bad = copy.deepcopy(rows); bad[1]['cwd'] = cwd
+            with self.subTest(cwd=cwd), self.assertRaisesRegex(ValueError, 'scope'):
+                sessions._validate_claude(bad, self.sid, [self.root])
+        with self.assertRaisesRegex(ValueError, 'Cannot establish Claude project scope'):
+            sessions._validate_claude([dict(type='user', sessionId=self.sid), environment], self.sid, [self.root])
 
     def thinking_drop(self):
         return dict(type='thinking_drop', model='fixture-model', querySource='fixture-query', requestId='fixture-request',

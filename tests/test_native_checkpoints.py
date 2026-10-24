@@ -307,7 +307,7 @@ class NativeCheckpointTests(NativeFixture):
         self.assertEqual(len(result['entries']), 1)
 
     def test_claude_side_folders_and_task_lists_do_not_block_the_conversation(self):
-        # The transcript resumes on its own; side folders are not carried yet (#40).
+        # The transcript resumes on its own; side folders are not carried yet (#52).
         path = self.claude()
         side = path.with_suffix('') / 'subagents/agent-A.jsonl'
         side.parent.mkdir(parents=True)
@@ -388,7 +388,7 @@ class NativeRestoreTests(NativeFixture):
 
 
 class ContinuedClaudeTests(NativeFixture):
-    def test_native_string_blob_verifies_canonical_text_block_hash_and_request_digest(self):
+    def test_native_request_records_are_kept_byte_for_byte_even_when_inconsistent(self):
         import copy
         def digest(value):return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
         shape = dict(system=[dict(type='text', text='Project system prompt')], tools=[])
