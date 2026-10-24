@@ -360,6 +360,38 @@ def _claude_entrypoint(path):
     return None
 
 
+def _finished_workers(home, scopes):
+    """Sessions a herd record shows as over: its worker closed, its pane reused or its context reset.
+
+    The record is the herd tooling's herd.jsonl beside the lead's transcript. Only
+    the current session of a launch still open is live.
+    """
+    over = set()
+    for root in scopes:
+        path = home / 'projects' / sessions.claude_namespace(root) / 'herd.jsonl'
+        if not path.is_file() or path.is_symlink():
+            continue
+        launches, known = {}, set()
+        for row in _rows(_stable_prefix(path)):
+            lid, kind = row.get('launch_id'), row.get('type')
+            if not isinstance(lid, str) or kind not in ('launch', 'dispatch', 'reported', 'close'):
+                raise ValueError('Invalid herd record row')
+            if kind == 'launch':
+                for other in launches.values():
+                    if other['pane'] == row.get('pane_id'):
+                        other['open'] = False
+                launches[lid] = dict(pane=row.get('pane_id'), session=row.get('session_id'), open=True)
+            elif lid not in launches:
+                raise ValueError('Herd record row names an unknown launch')
+            elif kind == 'dispatch' and (row.get('reset') or row.get('session_id')):
+                launches[lid]['session'] = row.get('session_id')
+            elif kind == 'close':
+                launches[lid]['open'] = False
+            known.update(value for value in (row.get('session_id'),) if isinstance(value, str))
+        over |= known - {launch['session'] for launch in launches.values() if launch['open']}
+    return over
+
+
 def _import_aliases(project, state):
     aliases = set()
     if state is not None:
@@ -388,12 +420,21 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
             issue(entry['agent'], entry['session_id'], exc)
             return
         result['entries'].append(entry)
+    home = sessions.native_home('claude', env)
+    try:
+        finished = _finished_workers(home, scopes)
+    except (ValueError, OSError) as exc:
+        # Capturing too much is recoverable; dropping a live session is not.
+        finished = set()
+        issue('herd', None, 'Unreadable herd record; capturing every session: ' + str(exc))
     try:
         index = sessions._codex_index(sessions.native_home('codex', env))
     except (ValueError, OSError) as exc:
         index = {}
         issue('codex', None, exc)
     for sid, path in index.items():
+        if sid in finished:
+            continue
         try:
             # Identify scope from the first line before validating content so
             # unrelated personal histories neither export nor flood warnings.
@@ -421,7 +462,6 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
             continue
         keep(retained, entry)
         del retained  # Hold one session's retained bytes at a time.
-    home = sessions.native_home('claude', env)
     aliases = _import_aliases(project, state)
     for root in scopes:
         directory = home / 'projects' / sessions.claude_namespace(root)
@@ -429,9 +469,9 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
             issue('claude', None, ValueError('Symlink native project store'))
             continue
         for path in directory.glob('*.jsonl'):
-            if str(path) in aliases:
-                continue
             sid = path.stem
+            if str(path) in aliases or sid in finished or not re.fullmatch(r'[0-9a-f-]{36}', sid):
+                continue  # Not a transcript (herd.jsonl and the like), or a finished worker's.
             try:
                 sessions.session_uuid(sid)
                 if (_claude_entrypoint(path) or '').startswith('sdk-'):

@@ -202,6 +202,36 @@ class NativeCheckpointTests(NativeFixture):
         self.assertEqual(sorted((entry['agent'], entry['session_id']) for entry in result['entries']),
                          sorted([('claude', self.sid), ('codex', self.sid)]))
 
+    def herd(self, *rows):
+        from devcontainer_setup.project_sync.sessions import claude_namespace
+        path = Path(self.env['CLAUDE_CONFIG_DIR']) / 'projects' / claude_namespace(self.project.root) / 'herd.jsonl'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(lines(rows))
+        return path
+
+    def test_a_closed_herd_workers_sessions_are_not_captured(self):
+        # A closed worker's result is its report; its transcript is never resumed.
+        live, reset, closed, reused, lead = (str(uuid.uuid4()) for _ in range(5))
+        for sid in (live, reset, closed, reused, lead):
+            self.codex(sid)
+        launch = dict(type='launch', at='2026-10-24T00:00:00Z', kind='codex')
+        self.herd(dict(launch, launch_id='a', pane_id='p1', session_id=reset),
+                  dict(type='dispatch', at='2026-10-24T00:01:00Z', launch_id='a', reset='new', session_id=live),
+                  dict(launch, launch_id='b', pane_id='p2', session_id=closed),
+                  dict(type='close', at='2026-10-24T00:02:00Z', launch_id='b', reason='done'),
+                  dict(launch, launch_id='c', pane_id='p3', session_id=reused),
+                  dict(launch, launch_id='d', pane_id='p3', session_id=None))
+        result = self.capture()
+        self.assertEqual(result['issues'], [])
+        self.assertEqual(sorted(entry['session_id'] for entry in result['entries']), sorted([live, lead]))
+
+    def test_an_unreadable_herd_record_captures_everything_and_says_so(self):
+        self.codex()
+        self.herd(dict(type='launch'))
+        result = self.capture()
+        self.assertEqual([entry['session_id'] for entry in result['entries']], [self.sid])
+        self.assertEqual([(issue['session_id'], 'herd record' in issue['reason']) for issue in result['issues']], [(None, True)])
+
     def test_failed_put_is_an_issue_at_its_session_position(self):
         sid = str(uuid.uuid4())
         self.codex(sid)
