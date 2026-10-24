@@ -309,11 +309,8 @@ def _codex_entry(project, store, sid, index, *, state, scopes):
 
 
 def _claude_entry(project, store, sid, path, *, state, scopes):
-    if any(path.with_suffix('').rglob('*')):
-        raise ValueError('Claude subagent dependency closure is not proven for live checkpoints')
-    home = path.parents[2]
-    if any((home / 'tasks' / sid).glob('*')):
-        raise ValueError('Claude task dependency closure is not proven for live checkpoints')
+    # The transcript resumes on its own. Its side folders (subagents, large tool
+    # results) and task list stay on this host for now (#40).
     data = _stable_prefix(path)
     rows = _rows(data)
     end, cutoff = 0, None
@@ -335,8 +332,6 @@ def _claude_entry(project, store, sid, path, *, state, scopes):
         sessions._version('claude', version)
     if _stable_prefix(path, len(kept)) != kept:
         raise ValueError('Claude prefix changed during checkpoint')
-    if any(path.with_suffix('').rglob('*')) or any((home / 'tasks' / sid).glob('*')):
-        raise ValueError('Claude live dependency closure changed during checkpoint')
     origin = next(row['cwd'] for row in reversed(valid) if 'cwd' in row)
     digest = hashlib.sha256(kept).hexdigest()
     return {sid: kept}, dict(schema=SCHEMA, agent='claude', session_id=sid, project_id=project.project_id, identity=project.identity, source_root=origin, scope_roots=approved, cutoff=dict(turn_id=cutoff, bytes=len(kept)), files=[dict(session_id=sid, path=path.name, size=len(kept), sha256=digest, blob=digest, scope_roots=approved, origin_root=origin)], title=sessions._catalog_metadata(kept, 'claude', path)['title'], updated_at=path.stat().st_mtime)

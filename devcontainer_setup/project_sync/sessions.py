@@ -1,8 +1,6 @@
 """Validated native transcript formats; no custody or same-ID import protocol."""
 from __future__ import annotations
 
-import copy
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,7 +15,6 @@ from .state import _parent as _state_parent
 
 MAX_BYTES = 256 * 1024 * 1024
 CODEX_RECORDS = {'session_meta', 'response_item', 'event_msg', 'turn_context', 'compacted', 'world_state', 'token_usage_record'}
-CLAUDE_RECORDS = {'user', 'assistant', 'system', 'summary', 'progress', 'queue-operation', 'file-history-snapshot', 'custom-title', 'agent-name', 'agent-color', 'pr-link', 'last-prompt', 'saved_hook_context', 'bridge-pointer', 'attachment', 'atis-latch', 'api-request-shape', 'api-request-blob', 'api-request', 'cost-state', 'mode', 'ai-title', 'permission-mode', 'relocated', 'worktree-state', 'file-history-delta'}
 MEMORY_MARKERS = (b'<memory_summary>', b'<memory_context>', b'<memory_citation>', b'<oai-mem-citation>', b'========= MEMORY_SUMMARY BEGINS', b'/.codex/memories/', b'\\.codex\\memories\\')
 
 
@@ -114,8 +111,10 @@ def _records(data, agent):
             row = json.loads(line)
         except (ValueError, UnicodeError) as exc:
             raise ValueError('Malformed native JSONL record') from exc
-        allowed = CODEX_RECORDS if agent == 'codex' else CLAUDE_RECORDS
-        if not isinstance(row, dict) or row.get('type') not in allowed:
+        # Claude Code adds record types with most releases, so any type passes;
+        # the memory check here and the scope check on every cwd apply to all rows.
+        if (not isinstance(row, dict) or not isinstance(row.get('type'), str)
+                or (agent == 'codex' and row['type'] not in CODEX_RECORDS)):
             raise ValueError('Unsupported native record type')
         if personal_memory(row):
             raise ValueError('Native global memory context prevents strict project-only export')
@@ -166,142 +165,33 @@ def _validate_codex_scope(rows, roots):
 
 # These known attachments carry their complete historical payload inline.
 # Their commands, paths, instruction text and tool schemas are never resolved.
-CLAUDE_INLINE_FIELDS = {
-    'hook_success': (('command', 'content', 'stdout', 'stderr', 'hookName', 'hookEvent', 'toolUseID'), ()),
-    'hook_additional_context': (('hookName', 'hookEvent', 'toolUseID'), ('content',)),
-    'deferred_tools_delta': ((), ('addedLines', 'addedNames', 'readdedNames', 'removedNames', 'wireHiddenNames')),
-    'mcp_instructions_delta': ((), ('addedBlocks', 'addedNames', 'removedNames')),
-    'instructions': ((), ()),
-    'prompt_snapshot': ((), ('systemPrompt',)),
-    'thinking_drop': (('model', 'querySource'), ('blockHashes',)),
-}
-# Fields only some Claude Code versions write: typed when present. 'strs' is a list
-# of strings, 'items' a list of strings or objects (measured 2026-10-24 across the
-# Mac's transcripts: failedMcpServers, surfacedDefinitions and retractedTools hold objects).
-CLAUDE_INLINE_OPTIONAL = {
-    'deferred_tools_delta': {'pendingMcpServers': 'strs', 'needsAuthMcpServers': 'strs', 'surfacedNames': 'strs',
-                             'removedByBlock': 'strs', 'failedMcpServers': 'items', 'surfacedDefinitions': 'items',
-                             'retractedTools': 'items'},
-    'prompt_snapshot': {'contextRendering': 'str'},
-}
+def _validate_claude(rows, sid, roots):
+    """Check what bounds a Claude transcript: its session and where it worked.
 
-
-def _validate_claude_thinking_drop(attachment):
-    """Validate inline provider-transformation telemetry, not reasoning custody."""
-    def integer(value, minimum=0):
-        return type(value) is int and value >= minimum
-    valid = (integer(attachment.get('thinkingBlocksSent'))
-             and integer(attachment.get('thinkingTurnsSent'))
-             and type(attachment.get('firstReportForThreadInProcess')) is bool
-             and all(isinstance(attachment[key], str) for key in ('requestId', 'requestedBehavior') if key in attachment))
-    change, dropped = attachment.get('clientChange'), attachment.get('newlyDropped')
-    valid = (valid and isinstance(change, dict)
-             and all(isinstance(change.get(key), str) for key in ('kinds', 'baseline'))
-             and type(change.get('firstChangedMessageIndex')) is int
-             and ('callNumber' not in change or integer(change['callNumber'])))
-    reasons = {'prefix_mismatch', 'model_mismatch', 'other'}
-    valid = (valid and isinstance(dropped, dict)
-             and integer(dropped.get('blockCount'), 1) and integer(dropped.get('turnCount'), 1)
-             and dropped['turnCount'] <= dropped['blockCount']
-             and isinstance(dropped.get('reason'), str) and dropped['reason'] in reasons)
-    if valid:
-        positions = [dropped.get(key) for key in ('first', 'last')]
-        counts = dropped.get('reasonCounts')
-        hashes = attachment.get('blockHashes')
-        valid = (all(isinstance(position, dict) and all(integer(position.get(key)) for key in ('messageIndex', 'blockIndex')) for position in positions)
-                 and isinstance(counts, dict)
-                 and all(key in reasons and integer(value) for key, value in counts.items())
-                 and sum(counts.values()) == dropped['blockCount']
-                 and isinstance(hashes, list) and all(isinstance(value, str) and re.fullmatch(r'[0-9a-z]{1,13}', value) for value in hashes)
-                 # Native c2r adds one hash per counted drop after resolving its
-                 # request block identity; these are not checkpoint blob hashes.
-                 and len(hashes) == dropped['blockCount'])
-        if valid:
-            first, last = positions
-            valid = (first['messageIndex'], first['blockIndex']) <= (last['messageIndex'], last['blockIndex'])
-    if not valid:
-        raise ValueError('Invalid Claude thinking-drop telemetry')
-
-
-def _validate_claude_inline(attachment):
-    """Check known inline shapes without mutating or following provenance."""
-    kind = attachment['type']
-    strings, lists = CLAUDE_INLINE_FIELDS[kind]
-    valid = (all(isinstance(attachment.get(key), str) for key in strings)
-             and all(isinstance(attachment.get(key), list)
-                     and all(isinstance(value, str) for value in attachment[key]) for key in lists))
-    for key, shape in CLAUDE_INLINE_OPTIONAL.get(kind, {}).items():
-        if key in attachment:
-            value = attachment[key]
-            valid = valid and (isinstance(value, str) if shape == 'str' else
-                               isinstance(value, list) and all(isinstance(item, str if shape == 'strs' else (str, dict)) for item in value))
-    if kind == 'thinking_drop':
-        _validate_claude_thinking_drop(attachment)
-    elif kind == 'hook_success':
-        duration = attachment.get('durationMs')
-        valid = (valid and type(duration) in (int, float) and 0 <= duration < float('inf')
-                 and type(attachment.get('exitCode')) is int)
-    elif kind == 'deferred_tools_delta':
-        valid = valid and type(attachment.get('toolSearchAbsent', False)) is bool
-    elif kind == 'instructions':
-        files = attachment.get('files')
-        valid = (valid and isinstance(files, list)
-                 and all(isinstance(item, dict) and isinstance(item.get('path'), str)
-                         and isinstance(item.get('content'), str) and item.get('type') in ('User', 'Project', 'AutoMem') for item in files))
-    elif kind == 'prompt_snapshot':
-        flags = ('echoWireToolInputs', 'reminderFold', 'inlineTools', 'keptReminders', 'systemTurns', 'toolChangeHeader')
-        valid = valid and all(type(attachment[key]) is bool for key in flags if key in attachment)
-        if 'cliPrefix' in attachment:
-            valid = valid and isinstance(attachment['cliPrefix'], str)
-        if 'tools' in attachment:
-            tools = attachment['tools']
-            valid = (valid and isinstance(tools, list)
-                     and all(isinstance(tool, dict) and isinstance(tool.get('name'), str)
-                             and isinstance(tool.get('description'), str) and isinstance(tool.get('schema'), dict) for tool in tools))
-    if not valid:
-        raise ValueError('Invalid Claude inline attachment shape')
-
-
-def _validate_claude(rows, sid, roots, *, child=False):
-    """Validate inline native request dependencies and structural checkout scope."""
-    shapes, blobs, previous = {}, {}, []
+    Claude Code changes record, attachment and request-cache formats between
+    releases, so those are copied as they are. Memory markers are refused in
+    _records; this checks the session ID and that every working directory is the
+    project or below it, as for Codex.
+    """
     scoped = False
     for row in rows:
         if 'sessionId' in row and row['sessionId'] != sid:
             raise ValueError('Wrong Claude session ID')
         if 'cwd' in row:
-            _scoped_roots(row['cwd'], roots, child=child)
+            _scoped_roots(row['cwd'], roots, child=True)
             scoped = True
         kind = row['type']
-        if kind in ('user', 'assistant'):
-            message = row.get('message')
-            if isinstance(message, dict) and message.get('role') == kind:
-                content = message.get('content')
-                if isinstance(content, str):
-                    content = [dict(type='text', text=content)]
-                if isinstance(content, list):
-                    if any(isinstance(part, dict) and part.get('type') == 'tool_use'
-                           and part.get('name') in {'Agent', 'Task', 'TaskCreate', 'TaskUpdate', 'TaskGet', 'TaskList', 'TodoWrite'}
-                           for part in content):
-                        raise ValueError('Claude agent/task dependency closure is not proven for live checkpoints')
-                    normalized = dict(role=kind, content=content)
-                    digest = hashlib.sha256(json.dumps(normalized, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
-                    blobs[digest] = normalized
-        elif kind == 'attachment':
+        if kind == 'attachment':
             attachment = row.get('attachment')
-            supported = {'environment', 'model', 'total_tokens_reminder', 'session_context', 'date', 'credential_org', 'advisor_tool'} | CLAUDE_INLINE_FIELDS.keys()
-            if (not isinstance(attachment, dict) or not isinstance(attachment.get('type'), str)
-                    or attachment['type'] not in supported):
+            if not isinstance(attachment, dict) or not isinstance(attachment.get('type'), str):
                 raise ValueError('Unsupported Claude attachment dependency')
             if attachment['type'] == 'environment':
                 snapshot = attachment.get('snapshot')
                 if not isinstance(snapshot, dict) or not isinstance(snapshot.get('additionalWorkingDirectories', []), list):
                     raise ValueError('Unsupported Claude environment project scope')
-                _scoped_roots(snapshot.get('workingDirectory'), roots, child=child)
+                _scoped_roots(snapshot.get('workingDirectory'), roots, child=True)
                 for directory in snapshot.get('additionalWorkingDirectories', []):
                     _scoped_roots(directory, roots, child=True)
-            elif attachment['type'] in CLAUDE_INLINE_FIELDS:
-                _validate_claude_inline(attachment)
         elif kind in ('relocated', 'worktree-state'):
             # These move where the session works, so they stay in scope like cwd.
             state = row.get('worktreeSession') if kind == 'worktree-state' else row
@@ -313,53 +203,6 @@ def _validate_claude(rows, sid, roots, *, child=False):
             for key in required + ('originalCwd', 'preEnterOriginalCwd'):
                 if key in required or state.get(key) is not None:
                     _scoped_roots(state.get(key), roots, child=True)
-        elif kind in ('ai-title', 'permission-mode', 'file-history-delta'):
-            # Bookkeeping, like file-history-snapshot: shape only.
-            field = {'ai-title': 'aiTitle', 'permission-mode': 'permissionMode', 'file-history-delta': 'trackingPath'}[kind]
-            if not isinstance(row.get(field), str):
-                raise ValueError('Invalid Claude metadata record')
-        elif kind in ('api-request-shape', 'api-request-blob'):
-            key, value, known = ('shapeHash', row.get('shape'), shapes) if kind == 'api-request-shape' else ('hash', row.get('message'), blobs)
-            if not isinstance(value, dict):
-                raise ValueError('Invalid Claude request dependency')
-            candidates = [value]
-            if kind == 'api-request-blob' and isinstance(value.get('content'), str):
-                # Native resumed request caches may compact text blocks to a
-                # string on disk while hashing the original block representation.
-                # Preserve every other field and still verify the recorded hash.
-                candidates.append(dict(value, content=[dict(type='text', text=value['content'])]))
-            matched = next((candidate for candidate in candidates if row.get(key) == hashlib.sha256(json.dumps(candidate, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()), None)
-            if matched is None:
-                raise ValueError('Invalid Claude request dependency digest')
-            known[row[key]] = matched
-        elif kind == 'api-request':
-            keep, tail = row.get('keep'), row.get('tail')
-            if (not isinstance(row.get('shapeHash'), str) or row['shapeHash'] not in shapes or type(keep) is not int or not 0 <= keep <= len(previous)
-                    or not isinstance(tail, list) or any(not isinstance(digest, str) or digest not in blobs for digest in tail)):
-                raise ValueError('Missing or invalid Claude request dependency')
-            previous = previous[:keep] + tail
-            params, controls = row.get('params'), row.get('cacheControl', [])
-            if not isinstance(params, dict) or not isinstance(controls, list):
-                raise ValueError('Invalid Claude request dependency parameters')
-            request = copy.deepcopy(dict(params, **shapes[row['shapeHash']], messages=[blobs[digest] for digest in previous]))
-            try:
-                for control in controls:
-                    path, value = control['path'], control['value']
-                    if not isinstance(path, list) or not path or not isinstance(value, dict):
-                        raise ValueError('Invalid Claude request dependency cache control')
-                    target = request
-                    for part in path:
-                        if not isinstance(part, str) and (type(part) is not int or part < 0):
-                            raise ValueError('Invalid Claude request dependency cache path')
-                        target = target[part]
-                    if not isinstance(target, dict):
-                        raise ValueError('Invalid Claude request dependency cache target')
-                    target['cache_control'] = value
-            except (KeyError, IndexError, TypeError) as exc:
-                raise ValueError('Unresolved Claude request dependency cache path') from exc
-            digest = hashlib.sha256(json.dumps(request, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
-            if row.get('requestDigest') != digest:
-                raise ValueError('Invalid Claude request digest')
     if not scoped:
         raise ValueError('Cannot establish Claude project scope')
 
