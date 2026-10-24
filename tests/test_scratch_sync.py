@@ -204,6 +204,8 @@ class ScratchTests(unittest.TestCase):
                 def __exit__(self, *args): pass
                 def ssh_config(self, path): pass  # Native SSH is replaced by private local Mutagen endpoints.
                 def python(self, code, payload=b'', timeout=60):
+                    if code == workspace._HERDR_PROBE:
+                        return b'herdr fixture\n'
                     if payload and json.loads(payload)['request']['operation'] == 'publish':
                         return b'{"ok":false,"error":"publication refused"}'
                     try:
@@ -236,7 +238,8 @@ class ScratchTests(unittest.TestCase):
                     time.sleep(.02)
                 return m.status(state)
             observations = []
-            def open_herdr(project, owner, selected_root):
+            def open_herdr(project, owner, selected_root, **options):
+                self.assertEqual(options, {'remote_herdr': 'herdr fixture'})
                 self.assertEqual(selected_root, str(remote))
                 self.assertEqual(m.inspect_sync(root, state)['phase'], 'synchronized')
                 self.assertEqual((remote / '.scratch/note.md').read_text(), 'scratch payload')
@@ -256,6 +259,7 @@ class ScratchTests(unittest.TestCase):
                         patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), \
                         patch('devcontainer_setup.project_sync.ssh_hosts.refresh_ssh'), \
                         patch('devcontainer_setup.project_sync.herdr.open_remote', side_effect=open_herdr), \
+                        patch('devcontainer_setup.project_sync.restore.end_proxies_elsewhere', return_value=[]), \
                         patch.object(replication, 'sync_project_data', side_effect=exchange):
                     # Discovery/configure and retarget remain read-only for the remote checkout.
                     m.configure(root, state, 'fixture', str(remote))
