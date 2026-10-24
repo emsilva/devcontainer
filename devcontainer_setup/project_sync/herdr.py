@@ -164,7 +164,7 @@ def disconnect_remote(project) -> int:
     return 0
 
 
-def open_remote(project, state: Path, remote_root: str) -> int:
+def open_remote(project, state: Path, remote_root: str, herdr_installed: bool | None = None) -> int:
     """Connect the project's saved machine and open local Herdr when needed."""
     state = Path(state)
     alias, session = configure_ssh(project, state), _session(project)
@@ -176,11 +176,13 @@ def open_remote(project, state: Path, remote_root: str) -> int:
     binding = state / 'scratch.json'
     codespace = read_json(binding).get('codespace') if binding.exists() else None
     matches = _matching_machines(alias, session)
-    # A profile saved for another Codespace reaches a remote Herdr that the new
-    # one lacks; only setup installs it (it asks first), saving a fresh profile.
+    # Only setup installs Herdr on a Codespace (it asks first), saving a fresh
+    # profile. A Codespace without Herdr gets one; when that was not read, a
+    # profile saved for another Codespace counts as lacking it.
     previous = receipt.get('codespace')
-    replaced = ({row['id'] for row in matches}
-                if None not in (previous, codespace) and previous != codespace else set())
+    lacking = herdr_installed is False or (
+        herdr_installed is None and None not in (previous, codespace) and previous != codespace)
+    replaced = {row['id'] for row in matches} if lacking else set()
     if not matches or replaced:
         result = subprocess.call(['herdr', 'machine', 'add', alias, '--label', project.root.name + ' (Codespace)',
                                   '--remote-session', session])

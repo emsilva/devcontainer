@@ -153,6 +153,20 @@ def _ready(project, state, timeout=120):
     raise ValueError('Waiting for current scratch connection timed out; inspect task work:status and scratch:logs')
 
 
+# Only Herdr setup installs Herdr on a Codespace, so whether it is there is read, not inferred.
+_HERDR_PROBE = ("import os,shutil;print('yes' if shutil.which('herdr',path=os.pathsep.join("
+                "[os.environ.get('PATH',''),os.path.expanduser('~/.local/bin')])) else 'no')")
+
+
+def _remote_herdr(connection):
+    """Whether the Codespace has Herdr; None when that cannot be read."""
+    try:
+        answer = connection.python(_HERDR_PROBE, timeout=30)
+    except ValueError:
+        return None
+    return {b'yes': True, b'no': False}.get(answer.strip()) if isinstance(answer, bytes) else None
+
+
 def remote(project, state, armed=None, rebind=None):
     """Connect the project; `armed(primary)` runs once the worker is ready, before Herdr opens."""
     if os.environ.get('CODESPACES') == 'true':
@@ -176,6 +190,7 @@ def remote(project, state, armed=None, rebind=None):
         binding = read_json(binding_path) if binding_path.exists() else None
         with CodespaceConnection(name, state=state) as connection:
             _verify_roots(connection, primary, [remote_root])
+            herdr_installed = _remote_herdr(connection)
             old_roots = [value.get(k) for k in ('remote_root', 'remote_active_root')]
             old_roots += value.get('verified_remote_historical_roots', [])
             local_candidates = list(value.get('verified_local_historical_roots', []))
@@ -202,9 +217,6 @@ def remote(project, state, armed=None, rebind=None):
                          codespace=name, active_host='codespace')
         # Retarget first: if it fails, the registry still matches the binding it kept.
         scratch.retarget(primary.root, state, name, remote_root)
-        if moved:
-            # Point the alias at the new Codespace before Herdr's old proxy leaves.
-            configure_ssh(primary, state)
         if updated != value:
             atomic_write(state / 'workspace-history' / (str(time.time_ns()) + '.json'),
                          json.dumps(value, sort_keys=True).encode() + b'\n')
@@ -213,6 +225,14 @@ def remote(project, state, armed=None, rebind=None):
         scratch.start(primary.root, state)
         runtime = _ready(primary, state)
         configure_ssh(primary, state)
+        # The worker has repointed the alias, so Herdr reconnects to this Codespace.
+        from .restore import end_proxies_elsewhere
+        ended = end_proxies_elsewhere(name, state)
+        if ended:
+            print('Ended Herdr’s connection to the Codespace this project left; it reconnects to ' + name + '.', flush=True)
+        elif ended is None:
+            print('Could not read processes to check Herdr’s connection; if Herdr still shows the old '
+                  'Codespace, run task work:cs again.', flush=True)
     history = (runtime or {}).get('conversations', {}).get('outcome', 'pending')
     if history != 'complete':
         print('Conversation history is ' + history + '; inspect task work:status.')
@@ -220,7 +240,7 @@ def remote(project, state, armed=None, rebind=None):
         # Outside workspace-control.lock, which arming takes for its own write,
         # and before Herdr, whose TUI would otherwise hold the step back.
         armed(primary)
-    return open_remote(primary, state, remote_root)
+    return open_remote(primary, state, remote_root, herdr_installed=herdr_installed)
 
 
 def status(project, state):

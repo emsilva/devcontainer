@@ -96,6 +96,32 @@ class ProxyTests(unittest.TestCase):
                         lambda *a, **k: (_ for _ in ()).throw(subprocess.TimeoutExpired('ps', 10))):
             self.assertEqual(restore.stale_proxies('cs-1', Path(STATE), before, run=failure), [])
 
+    def test_proxies_elsewhere_are_this_projects_proxies_serving_another_codespace(self):
+        rows = [f'  101 {etime(900)} {PROXY} cs-old {STATE}',
+                f'  102 {etime(5)} {PROXY} cs-older {STATE}',
+                f'  201 {etime(900)} {PROXY} cs-new {STATE}',
+                f'  301 {etime(900)} {PROXY} cs-old {STATE}-other',
+                f'  401 {etime(900)} gh codespace ssh -c cs-old --stdio -- -i key {STATE}',
+                'garbage line']
+        self.assertEqual(restore.proxies_elsewhere('cs-new', Path(STATE), run=listed(rows)), [101, 102])
+        for failure in (lambda *a, **k: subprocess.CompletedProcess(a, 1, '', ''),
+                        lambda *a, **k: (_ for _ in ()).throw(subprocess.TimeoutExpired('ps', 10))):
+            self.assertIsNone(restore.proxies_elsewhere('cs-new', Path(STATE), run=failure))
+            self.assertIsNone(restore.end_proxies_elsewhere('cs-new', Path(STATE), run=failure))
+
+    def test_end_proxies_elsewhere_signals_only_the_proxies_it_lists_for_another_codespace(self):
+        def decoy():
+            child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+            self.addCleanup(child.wait)
+            self.addCleanup(child.kill)
+            return child
+        old, current = decoy(), decoy()
+        rows = [f'{old.pid} {etime(900)} {PROXY} cs-old {STATE}', f'{current.pid} {etime(900)} {PROXY} cs-new {STATE}']
+        self.assertEqual(restore.end_proxies_elsewhere('cs-new', Path(STATE), run=listed(rows)), [old.pid])
+        self.assertEqual(old.wait(timeout=5), -15)
+        time.sleep(.2)
+        self.assertIsNone(current.poll())
+
     def test_elapsed_time_parses_every_ps_shape(self):
         for text, seconds in (('00:05', 5), ('59:59', 3599), ('01:00:00', 3600), ('23:59:59', 86399),
                               ('1-00:00:00', 86400), ('12-03:04:05', 12 * 86400 + 3 * 3600 + 245)):
