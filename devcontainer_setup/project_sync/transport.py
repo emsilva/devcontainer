@@ -21,6 +21,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 SUPPORTED_GH = '2.102.0'
 LIVENESS_INTERVAL = 30
 LIVENESS_DOWN = 3
+BINDING_INTERVAL = 1
 
 
 def _name(name):
@@ -238,12 +239,28 @@ def herdr_stdio(codespace: str, state: str | Path) -> int:
                     env=api.child_env(), stderr=subprocess.DEVNULL, start_new_session=True)
             # gh --stdio can outlive a stopped Codespace and pin the SSH master;
             # end it once the Codespace is clearly not Available.
-            down = 0
+            down, seen = 0, None
+            check_at = time.monotonic() + LIVENESS_INTERVAL
             while True:
                 try:
-                    return child.wait(timeout=LIVENESS_INTERVAL)
+                    return child.wait(timeout=min(BINDING_INTERVAL, LIVENESS_INTERVAL))
                 except subprocess.TimeoutExpired:
                     pass
+                # A rebind retires this Codespace: leaving ends Herdr's SSH master,
+                # so Herdr reconnects through the alias, which rebind repoints first.
+                # The binding is re-read only when its file changes, and an
+                # unreadable binding is not a rebind.
+                try:
+                    info = os.stat(state / 'scratch.json')
+                    if (info.st_ino, info.st_mtime_ns) != seen:
+                        seen = (info.st_ino, info.st_mtime_ns)
+                        if read_json(state / 'scratch.json').get('codespace') != name:
+                            return 1
+                except (OSError, ValueError):
+                    pass
+                if time.monotonic() < check_at:
+                    continue
+                check_at = time.monotonic() + LIVENESS_INTERVAL
                 cs_state = codespace_state(name, token)
                 down = down + 1 if cs_state not in (None, 'Available') else 0
                 if down >= LIVENESS_DOWN:

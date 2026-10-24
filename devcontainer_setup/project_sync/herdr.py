@@ -173,22 +173,37 @@ def open_remote(project, state: Path, remote_root: str) -> int:
         receipt = read_json(receipt_path)
     except FileNotFoundError:
         receipt = {}
+    binding = state / 'scratch.json'
+    codespace = read_json(binding).get('codespace') if binding.exists() else None
     matches = _matching_machines(alias, session)
-    if not matches:
+    # A profile saved for another Codespace reaches a remote Herdr that the new
+    # one lacks; only setup installs it (it asks first), saving a fresh profile.
+    previous = receipt.get('codespace')
+    replaced = ({row['id'] for row in matches}
+                if None not in (previous, codespace) and previous != codespace else set())
+    if not matches or replaced:
         result = subprocess.call(['herdr', 'machine', 'add', alias, '--label', project.root.name + ' (Codespace)',
                                   '--remote-session', session])
         if result:
             return result
-        matches = _matching_machines(alias, session)
+        found = _matching_machines(alias, session)
+        matches = [row for row in found if row['id'] not in replaced]
         if not matches:
-            raise ValueError('Herdr setup did not save the expected project machine')
+            raise ValueError('Herdr setup did not save the expected project machine'
+                             + ('; existing profile kept' if replaced else ''))
+        for row in found:
+            if row['id'] in replaced:
+                result = subprocess.call(['herdr', 'machine', 'remove', row['id']])
+                if result:
+                    return result
     machine = next((row for row in matches if row.get('id') == receipt.get('machine_id')), matches[0])
     machine_id = machine.get('id')
     if not machine.get('enabled'):
         result = subprocess.call(['herdr', 'machine', 'enable', machine_id])
         if result:
             return result
-    atomic_write(receipt_path, json.dumps({'machine_id': machine_id, 'alias': alias, 'session': session}).encode() + b'\n')
+    atomic_write(receipt_path, json.dumps({'machine_id': machine_id, 'alias': alias, 'session': session,
+                                           'codespace': codespace}).encode() + b'\n')
     _workspace(project, remote_root, ['--machine', machine_id])
     print('Codespace connected. Select its Codespace group in Herdr.')
     if os.environ.get('HERDR_ENV') == '1':

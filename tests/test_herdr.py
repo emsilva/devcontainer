@@ -91,6 +91,71 @@ request_path = "request.wav"
                                   '--remote-session', 'project-' + 'a' * 24])
         self.assertEqual(len(calls), 1)
 
+    def bind(self, codespace, receipt):
+        from devcontainer_setup.project_sync.state import atomic_write
+        atomic_write(self.state / 'scratch.json', json.dumps({'codespace': codespace}).encode())
+        atomic_write(self.state / 'herdr-machine.json', json.dumps(receipt).encode())
+
+    def test_a_replaced_codespace_gets_a_fresh_machine_and_retires_the_old_profile(self):
+        session = 'project-' + 'a' * 24
+        self.bind('new-space', {'machine_id': 'old-id', 'alias': 'alias', 'session': session, 'codespace': 'old-space'})
+        old = {'id': 'old-id', 'target': 'alias', 'session': session, 'enabled': True}
+        new = {'id': 'new-id', 'target': 'alias', 'session': session, 'enabled': True}
+        calls = []
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr.subprocess, 'run', side_effect=[completed([old]), completed([old, new]),
+                    completed({'result': {'workspaces': []}}),
+                    completed({'result': {'workspace': {'workspace_id': 'w'}}}), completed({'result': {}})]) as run, \
+                mock.patch.object(herdr.subprocess, 'call', side_effect=lambda args, **_: calls.append(args) or 0):
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote'), 0)
+        # The old profile's remote Herdr lives on the old Codespace; only setup installs it on the new one.
+        self.assertEqual(calls, [['herdr', 'machine', 'add', 'alias', '--label', 'repo (Codespace)', '--remote-session', session],
+                                 ['herdr', 'machine', 'remove', 'old-id']])
+        self.assertEqual(run.call_args_list[2].args[0][:3], ['herdr', '--machine', 'new-id'])
+        receipt = read_json(self.state / 'herdr-machine.json')
+        self.assertEqual((receipt['machine_id'], receipt['codespace']), ('new-id', 'new-space'))
+
+    def test_setup_that_saves_no_new_machine_keeps_the_old_profile(self):
+        session = 'project-' + 'a' * 24
+        self.bind('new-space', {'machine_id': 'old-id', 'alias': 'alias', 'session': session, 'codespace': 'old-space'})
+        old = {'id': 'old-id', 'target': 'alias', 'session': session, 'enabled': True}
+        calls = []
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr.subprocess, 'run', side_effect=[completed([old]), completed([old])]), \
+                mock.patch.object(herdr.subprocess, 'call', side_effect=lambda args, **_: calls.append(args) or 0):
+            with self.assertRaisesRegex(ValueError, 'existing profile kept'):
+                herdr.open_remote(self.project, self.state, '/remote')
+        self.assertEqual([args[:3] for args in calls], [['herdr', 'machine', 'add']])
+        self.assertEqual(read_json(self.state / 'herdr-machine.json')['codespace'], 'old-space')
+
+    def test_a_missing_binding_never_counts_as_a_replaced_codespace(self):
+        from devcontainer_setup.project_sync.state import atomic_write
+        session = 'project-' + 'a' * 24
+        atomic_write(self.state / 'herdr-machine.json', json.dumps(
+            {'machine_id': 'kept-id', 'alias': 'alias', 'session': session, 'codespace': 'old-space'}).encode())
+        machine = {'id': 'kept-id', 'target': 'alias', 'session': session, 'enabled': True}
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr.subprocess, 'run', side_effect=[completed([machine]),
+                    completed({'result': {'workspaces': []}}),
+                    completed({'result': {'workspace': {'workspace_id': 'w'}}}), completed({'result': {}})]), \
+                mock.patch.object(herdr.subprocess, 'call', return_value=0) as call:
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote'), 0)
+        call.assert_not_called()
+
+    def test_a_receipt_from_before_codespace_tracking_adopts_the_current_machine(self):
+        session = 'project-' + 'a' * 24
+        self.bind('current-space', {'machine_id': 'kept-id', 'alias': 'alias', 'session': session})
+        machine = {'id': 'kept-id', 'target': 'alias', 'session': session, 'enabled': True}
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr.subprocess, 'run', side_effect=[completed([machine]),
+                    completed({'result': {'workspaces': []}}),
+                    completed({'result': {'workspace': {'workspace_id': 'w'}}}), completed({'result': {}})]), \
+                mock.patch.object(herdr.subprocess, 'call', return_value=0) as call:
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote'), 0)
+        call.assert_not_called()
+        receipt = read_json(self.state / 'herdr-machine.json')
+        self.assertEqual((receipt['machine_id'], receipt['codespace']), ('kept-id', 'current-space'))
+
     def test_remote_outside_herdr_opens_local_ui_for_the_saved_codespace_group(self):
         machine = {'id': 'existing-id', 'target': 'alias', 'session': 'project-' + 'a' * 24, 'enabled': True}
         with mock.patch.dict(os.environ, {'HERDR_ENV': ''}), \

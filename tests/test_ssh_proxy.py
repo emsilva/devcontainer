@@ -75,6 +75,35 @@ else:
         with self.assertRaises(ProcessLookupError): os.kill(child['pid'], 0)
         self.assertEqual(len(made), 4)
 
+    def test_proxy_leaves_once_the_binding_names_another_codespace(self):
+        # A rebind retires this Codespace; a lingering proxy would keep Herdr's
+        # SSH master, and the old Codespace, alive.
+        binding = self.state / 'scratch.json'
+        reads = []
+        def fake(url, token):
+            reads.append(url)
+            if len(reads) == 2:
+                atomic_write(binding, b'{"codespace":"replacement"}')
+            return 200, b'{"name":"fixture","state":"Available"}'
+        with mock.patch.dict(os.environ, dict(self.env, TEST_MODE='hang', TEST_HANG_LIMIT='3'), clear=True), \
+                mock.patch.object(transport, 'LIVENESS_INTERVAL', 0.05), mock.patch.object(transport, '_upstream', fake):
+            code = transport.herdr_stdio('fixture', self.state)
+        self.assertEqual(code, 1)
+        child = json.loads((self.state / 'child.json').read_text())
+        with self.assertRaises(ProcessLookupError): os.kill(child['pid'], 0)
+        self.assertLess(len(reads), 10)
+
+    def test_an_unreadable_binding_does_not_end_a_live_proxy(self):
+        reads = []
+        def fake(url, token):
+            reads.append(url)
+            if len(reads) == 2:
+                (self.state / 'scratch.json').unlink()
+            return 200, b'{"name":"fixture","state":"Available"}'
+        with mock.patch.dict(os.environ, dict(self.env, TEST_MODE='hang', TEST_HANG_LIMIT='1'), clear=True), \
+                mock.patch.object(transport, 'LIVENESS_INTERVAL', 0.05), mock.patch.object(transport, '_upstream', fake):
+            self.assertEqual(transport.herdr_stdio('fixture', self.state), 3)
+
     def test_failed_read_resets_the_down_count(self):
         code, made = self.run_proxy(['Shutdown', 'error', 'Shutdown', 'Shutdown', 'Shutdown'])
         self.assertNotEqual(code, 0)

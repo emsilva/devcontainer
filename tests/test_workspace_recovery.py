@@ -170,16 +170,20 @@ class ExistingCheckoutTests(unittest.TestCase):
                       codespace=None)
         scratch._write(self.state / scratch.CONFIG, dict(version=1, identity=self.project.identity,
                          root=str(self.root), codespace='space', remote_root=self.original))
-        verified = []
+        verified, order = [], []
         with patch.object(workspace, '_prerequisites'), \
                 patch.object(workspace, '_choose_pairing', return_value=('new-space', self.original)) as choose, \
                 patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection()), \
                 patch.object(workspace, '_verify_roots', side_effect=lambda _c, _p, roots: verified.append(list(roots)) or list(roots)), \
-                patch.object(scratch, 'retarget') as retarget, patch.object(scratch, 'start'), \
-                patch.object(workspace, '_ready', return_value={}), patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), \
+                patch.object(scratch, 'retarget', side_effect=lambda *_: order.append('retarget')) as retarget, \
+                patch.object(scratch, 'start', side_effect=lambda *_: order.append('worker')), \
+                patch.object(workspace, '_ready', return_value={}), \
+                patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh', side_effect=lambda *_: order.append('ssh')), \
                 patch('devcontainer_setup.project_sync.herdr.open_remote', return_value=0):
             self.assertEqual(workspace.remote(self.project, self.state, rebind='new-space'), 0)
         self.assertEqual(choose.call_args.kwargs['rebind'], 'new-space')
+        # The alias names the new Codespace before Herdr's old proxy leaves and reconnects.
+        self.assertEqual(order, ['retarget', 'ssh', 'worker', 'ssh'])
         # The old Codespace's checkouts do not exist on the new one, so they are not verified there.
         self.assertEqual(verified, [[self.original]])
         value = read_json(self.state / 'workspace.json')

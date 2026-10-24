@@ -202,6 +202,9 @@ def remote(project, state, armed=None, rebind=None):
                          codespace=name, active_host='codespace')
         # Retarget first: if it fails, the registry still matches the binding it kept.
         scratch.retarget(primary.root, state, name, remote_root)
+        if moved:
+            # Point the alias at the new Codespace before Herdr's old proxy leaves.
+            configure_ssh(primary, state)
         if updated != value:
             atomic_write(state / 'workspace-history' / (str(time.time_ns()) + '.json'),
                          json.dumps(value, sort_keys=True).encode() + b'\n')
