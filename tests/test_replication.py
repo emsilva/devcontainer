@@ -148,6 +148,23 @@ class ReplicationTests(unittest.TestCase):
         self.assertFalse(any(c['request']['operation'] == 'restore' for c in self.connection.calls))
         self.assertTrue(all('project_files' not in c['modules'] for c in self.connection.calls))
 
+    def test_a_cycle_that_received_both_ways_collects_both_stores_once_a_day(self):
+        self.conversation(self.local_env, text='LOCAL'); self.conversation(self.connection.env, text='REMOTE')
+        loose = []
+        for store in (self.store, self.remote_store):
+            digest = store.put(b'loose ' + str(store.root).encode())
+            when = time.time() - 8 * 86400
+            os.utime(store.root / 'objects' / digest, (when, when))
+            loose.append((store, digest))
+        replication.sync_project_data(self.connection, self.project, self.store.state, str(self.root), env=self.local_env)
+        for store, digest in loose:
+            with self.assertRaises(FileNotFoundError):
+                store.read(digest)
+        replication.sync_project_data(self.connection, self.project, self.store.state, str(self.root), env=self.local_env)
+        self.assertEqual(sum(c['request']['operation'] == 'collect' for c in self.connection.calls), 1)
+        record = json.loads((self.store.state / 'checkpoint-collection.json').read_text())
+        self.assertEqual((record['desktop']['objects'], record['codespace']['objects']), (1, 1))
+
     def historical_checkout(self):
         legacy = self.base / 'legacy'
         subprocess.run(['git', 'clone', '-q', str(self.root), str(legacy)], check=True)

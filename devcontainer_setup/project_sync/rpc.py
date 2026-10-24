@@ -15,7 +15,7 @@ BATCH_BYTES = 32 * 1024 * 1024
 BATCH_ITEMS = 1024
 SINGLE_BYTES = 256 * 1024 * 1024
 OPERATIONS = {'capture', 'manifest', 'blob', 'put_blob', 'has_blobs', 'get_blobs',
-              'put_blobs', 'save', 'acknowledge', 'publish'}
+              'put_blobs', 'save', 'acknowledge', 'publish', 'collect'}
 
 
 def _digest(value):
@@ -111,6 +111,8 @@ class LocalEndpoint:
             return {'data': base64.b64encode(data).decode()}
         if operation == 'put_blob':
             return {'digest': self.store.put(_decode(values['data'], SINGLE_BYTES))}
+        if operation == 'collect':
+            return self.store.collect(apply=True)
         if operation == 'save':
             manifest = values['manifest']
             from .replication import validate_manifest

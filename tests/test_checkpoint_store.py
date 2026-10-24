@@ -22,6 +22,64 @@ class StoreTests(unittest.TestCase):
         self.path = Path(self.tmp.name).resolve() / 'devcontainer-setup/projects' / ('a' * 24)
         self.store = checkpoint_store.Store(self.path)
 
+    def age(self, family, digest, days):
+        path = self.path / 'checkpoints' / family / digest
+        when = path.stat().st_mtime - days * 86400
+        os.utime(path, (when, when))
+
+    def test_collect_keeps_named_and_recent_manifests_and_what_they_reference(self):
+        old, recent, named, loose, fresh = (self.store.put(name.encode()) for name in ('old', 'recent', 'named', 'loose', 'fresh'))
+        stale = self.store.save({'files': [{'blob': old}]})
+        kept = self.store.save({'files': [{'blob': recent}]})
+        received = self.store.save({'files': [{'blob': named}]})
+        self.store.acknowledge(received, source='codespace')
+        for family, digest in (('manifests', stale), ('manifests', received), ('objects', old),
+                               ('objects', named), ('objects', loose)):
+            self.age(family, digest, 8)
+        planned = self.store.collect()
+        self.assertEqual((planned['manifests'], planned['objects'], planned['applied']), (1, 2, False))
+        self.assertEqual(self.store.read(old), b'old')  # A dry run deletes nothing.
+        done = self.store.collect(apply=True)
+        self.assertEqual((done['manifests'], done['objects'], done['bytes']), (1, 2, len(b'old') + len(b'loose')))
+        for digest in (old, loose):
+            with self.assertRaises(FileNotFoundError):
+                self.store.read(digest)
+        with self.assertRaises(FileNotFoundError):
+            self.store.load(stale)
+        for digest, body in ((recent, b'recent'), (named, b'named'), (fresh, b'fresh')):
+            self.assertEqual(self.store.read(digest), body)
+        self.assertEqual(self.store.load(kept), {'files': [{'blob': recent}]})
+        self.assertEqual(self.store.latest('codespace')['snapshot_id'], received)
+
+    def test_putting_existing_content_again_restarts_its_grace(self):
+        # A capture re-puts unchanged sessions before it saves their manifest.
+        digest = self.store.put(b'unchanged session')
+        self.age('objects', digest, 8)
+        self.store.put(b'unchanged session')
+        self.assertEqual(self.store.collect(apply=True)['objects'], 0)
+        self.assertEqual(self.store.read(digest), b'unchanged session')
+
+    def test_collect_spares_blobs_an_import_receipt_names(self):
+        source = self.store.put(b'published source')
+        self.age('objects', source, 8)
+        receipt = self.path / 'conversation-imports' / ('b' * 64) / 'receipt.json'
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps({'files': [{'sha256': source, 'destination': '/x'}]}))
+        self.assertEqual(self.store.collect(apply=True)['objects'], 0)
+        self.assertEqual(self.store.read(source), b'published source')
+
+    def test_collect_deletes_nothing_when_a_kept_manifest_cannot_be_read(self):
+        body = self.store.put(b'body')
+        loose = self.store.put(b'loose')
+        self.age('objects', loose, 8)
+        snapshot = self.store.save({'files': [{'blob': body}]})
+        path = self.path / 'checkpoints/manifests' / snapshot
+        path.chmod(0o600)
+        path.write_bytes(b'{"corrupt": true}')
+        with self.assertRaises(ValueError):
+            self.store.collect(apply=True)
+        self.assertEqual(self.store.read(loose), b'loose')
+
     def test_content_addressed_private_immutable_deduplicated_objects(self):
         body = b'\x00private binary\xff'
         digest = self.store.put(body)

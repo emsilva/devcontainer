@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import time
 from pathlib import Path
 
 from .checkpoint_store import Store
+from .state import atomic_write, read_json
 from .rpc import BATCH_BYTES, BATCH_ITEMS, SINGLE_BYTES, _decode, _digests
 
 
@@ -221,6 +223,32 @@ def stopped_message(state):
     return 'Codespace is ' + state + '; no start request was allowed.'
 
 
+COLLECT_INTERVAL = 86400
+
+
+def _collect(state, endpoint, cycle):
+    """Once a day, after both directions hold this cycle's receipts, drop what neither store still needs (#50)."""
+    from . import sync_cycle
+    marker = state / 'checkpoint-collection.json'
+    try:
+        last = read_json(marker).get('at', 0)
+    except (FileNotFoundError, ValueError):
+        last = 0
+    if (not isinstance(last, (int, float)) or time.time() - last < COLLECT_INTERVAL
+            or not all(sync_cycle.receipt_matches(row['receipt'], row['snapshot_id'])
+                       for row in cycle['directions'].values())):
+        return
+    record = {'at': time.time()}
+    for side, run in (('desktop', lambda: Store(state).collect(apply=True)),
+                      ('codespace', lambda: endpoint.call('collect'))):
+        try:
+            record[side] = run()
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            # An older Codespace has no collect operation; neither side stops the cycle.
+            record[side] = {'error': type(error).__name__}
+    atomic_write(marker, json.dumps(record, sort_keys=True).encode() + b'\n')
+
+
 def sync_project_data(connection, project, state, remote_root, *, env=None, historical_roots=(), progress=None):
     """Exchange independent directions; acknowledge custody before native publication."""
     from .conversations import publish_conversations
@@ -308,4 +336,5 @@ def sync_project_data(connection, project, state, remote_root, *, env=None, hist
                  local_publication=cycle['directions']['codespace_to_desktop']['publication'],
                  remote_publication=cycle['directions']['desktop_to_codespace']['publication'])
     sync_cycle.emit(cycle, progress)
+    _collect(state, endpoint, cycle)
     return cycle

@@ -7,11 +7,16 @@ import json
 import os
 from pathlib import Path
 import re
+import time
 
 from .state import _parent, _regular, atomic_write, locked, read_json
 
 
 _DIGEST = re.compile(r'[0-9a-f]{64}')
+_DIGESTS = re.compile(rb'[0-9a-f]{64}')
+KEEP_DAYS = 7
+# A capture or transfer puts its objects before it saves their manifest.
+GRACE_SECONDS = 86400
 _SOURCES = {'local', 'codespace', 'desktop'}
 
 
@@ -75,6 +80,9 @@ class Store:
             else:
                 if existing != data:
                     raise ValueError('Immutable checkpoint content differs')
+                # Reused content is in use again: restart its collection grace.
+                with _parent(path, private=True) as (parent, name):
+                    os.utime(name, dir_fd=parent, follow_symlinks=False)
         return digest
 
     def put(self, data: bytes) -> str:
@@ -133,3 +141,41 @@ class Store:
             raise ValueError('Checkpoint acknowledgement has no timezone')
         self.load(receipt['snapshot_id'])
         return receipt
+
+    def collect(self, *, apply: bool = False, keep_days: float = KEEP_DAYS,
+                grace_seconds: float = GRACE_SECONDS) -> dict:
+        """Remove manifests no receipt names that are older than keep_days, then the
+        objects nothing kept refers to. A dry run (the default) only counts them."""
+        now = time.time()
+        with locked(self.root / 'store.lock', blocking=True):
+            named = set()
+            for source in sorted(_SOURCES):
+                receipt = self.latest(source)
+                if receipt is not None:
+                    named.add(receipt['snapshot_id'])
+            manifests = self._entries('manifests')
+            kept = {digest for digest, info in manifests.items()
+                    if digest in named or info.st_mtime >= now - keep_days * 86400}
+            # Raises before anything is deleted when a kept manifest cannot be read.
+            live = {blob for digest in kept for blob in _references(self.load(digest))}
+            # Published conversations keep proving their source against these blobs.
+            for receipt in (self.state / 'conversation-imports').glob('*/receipt.json'):
+                live.update(match.decode() for match in _DIGESTS.findall(receipt.read_bytes()))
+            doomed = [('manifests', digest, info) for digest, info in manifests.items() if digest not in kept]
+            doomed += [('objects', digest, info) for digest, info in self._entries('objects').items()
+                       if digest not in live and info.st_mtime < now - grace_seconds]
+            if apply:
+                for family, digest, _ in doomed:
+                    with _parent(self._path(family, digest), private=True) as (parent, name):
+                        os.unlink(name, dir_fd=parent)
+        return {'manifests': sum(family == 'manifests' for family, _, _ in doomed),
+                'objects': sum(family == 'objects' for family, _, _ in doomed),
+                'bytes': sum(info.st_size for family, _, info in doomed if family == 'objects'),
+                'applied': apply}
+
+    def _entries(self, family: str) -> dict:
+        directory = self.root / family
+        if not directory.is_dir():
+            return {}
+        return {entry.name: entry.stat(follow_symlinks=False) for entry in os.scandir(directory)
+                if _DIGEST.fullmatch(entry.name) and entry.is_file(follow_symlinks=False)}
