@@ -78,8 +78,10 @@ history ancestors after checking identity/scope. Snapshot complete JSONL records
 with digests and Git/project metadata; recognize compressed files explicitly or
 refuse them with a concrete explanation. Preserve historical message bytes.
 For Claude, retain session IDs and structural events and place the transcript
-under the destination project's native directory. Subagent/task state must be
-preserved when supported and otherwise cause an explicit refusal.
+under the destination project's native directory. Amended 2026-10-24 (#40): a
+Claude transcript is checked only for project scope, memory markers and session
+identity; record, attachment and request-cache formats are copied as they are.
+Subagent/task state is not carried yet (#52); the transcript syncs without it.
 
 Import accepts absent files, identical files, or a proven append-only descendant.
 It preserves a compatible destination that is already ahead and refuses

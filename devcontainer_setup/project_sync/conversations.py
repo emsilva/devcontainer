@@ -310,7 +310,7 @@ def _codex_entry(project, store, sid, index, *, state, scopes):
 
 def _claude_entry(project, store, sid, path, *, state, scopes):
     # The transcript resumes on its own. Its side folders (subagents, large tool
-    # results) and task list stay on this host for now (#40).
+    # results) and task list stay on this host for now (#52).
     data = _stable_prefix(path)
     rows = _rows(data)
     end, cutoff = 0, None
@@ -332,7 +332,10 @@ def _claude_entry(project, store, sid, path, *, state, scopes):
         sessions._version('claude', version)
     if _stable_prefix(path, len(kept)) != kept:
         raise ValueError('Claude prefix changed during checkpoint')
-    origin = next(row['cwd'] for row in reversed(valid) if 'cwd' in row)
+    last = next(row['cwd'] for row in reversed(valid) if 'cwd' in row)
+    # The checkout the session worked in, not its last shell directory, which
+    # may be below it: publication checks this against the scope roots exactly.
+    origin = max((root for root in approved if last == root or Path(last).is_relative_to(root)), key=len)
     digest = hashlib.sha256(kept).hexdigest()
     return {sid: kept}, dict(schema=SCHEMA, agent='claude', session_id=sid, project_id=project.project_id, identity=project.identity, source_root=origin, scope_roots=approved, cutoff=dict(turn_id=cutoff, bytes=len(kept)), files=[dict(session_id=sid, path=path.name, size=len(kept), sha256=digest, blob=digest, scope_roots=approved, origin_root=origin)], title=sessions._catalog_metadata(kept, 'claude', path)['title'], updated_at=path.stat().st_mtime)
 
@@ -576,7 +579,7 @@ def _preflight(project, store, entry):
             raise ValueError('Native dependency closure or completed-turn cutoff mismatch')
     else:
         if len(by_id) != 1:
-            raise ValueError('Unproven Claude live dependency closure')
+            raise ValueError('A Claude checkpoint holds exactly one transcript')
         final = by_id[sid][2][-1]
         if final.get('type') != 'assistant' or final.get('uuid') != cutoff.get('turn_id') or final.get('message', {}).get('stop_reason') not in ('end_turn', 'stop_sequence'):
             raise ValueError('Invalid Claude completed-turn cutoff')

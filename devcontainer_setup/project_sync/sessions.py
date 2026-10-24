@@ -163,8 +163,6 @@ def _validate_codex_scope(rows, roots):
             structural(payload.get('thread_settings', {}))
 
 
-# These known attachments carry their complete historical payload inline.
-# Their commands, paths, instruction text and tool schemas are never resolved.
 def _validate_claude(rows, sid, roots):
     """Check what bounds a Claude transcript: its session and where it worked.
 
