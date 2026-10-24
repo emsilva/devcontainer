@@ -45,6 +45,13 @@ def _with_github(command: str) -> str:
     return shlex.join(['bash', '-lc', command])
 
 
+# GitHub's recovery container sets GITHUB_TOKEN but configures no git credential
+# helper, so a fetch that may run there takes the token itself.
+_TOKEN_GIT = 'git ' + shlex.join([
+    '-c', 'credential.helper=', '-c',
+    'credential.helper=!f() { test "$1" = get && echo username=x-access-token && echo "password=$GITHUB_TOKEN"; }; f'])
+
+
 class Codespaces:
     def __init__(self, run=subprocess.run):
         self.run = run
@@ -401,7 +408,7 @@ class Codespaces:
                 command = (f'cd {shlex.quote(folder)} && '
                            f'test "$(git branch --show-current)" = {shlex.quote(branch)} && '
                            f'test -z "$(git status --porcelain)" && '
-                           f'git fetch origin {shlex.quote(branch)} && '
+                           f'{_TOKEN_GIT} fetch origin {shlex.quote(branch)} && '
                            f'git merge-base --is-ancestor HEAD {shlex.quote(sha)} && git merge --ff-only {shlex.quote(sha)}')
                 self.command('codespace', 'ssh', '--codespace', name, '--', _with_github(command))
             if resume and record['rebuild_pending']:

@@ -269,11 +269,29 @@ class CodespacesTests(unittest.TestCase):
         self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                         'emsilva/dotfiles', self.receipt, resume='new-space')
         remote = [c[-1] for c in self.runner.calls if c[1:3] == ['codespace', 'ssh']]
-        fetch = next(command for command in remote if 'git fetch' in command)
+        fetch = next(command for command in remote if ' fetch origin ' in command)
         dotfiles = next(command for command in remote if 'load-dotfiles' in command)
         for command in (fetch, dotfiles):
             self.assertEqual(shlex.split(command)[:2], ['bash', '-lc'], command)
         self.assertEqual(shlex.split(shlex.split(dotfiles)[2]), ['load-dotfiles', 'emsilva/dotfiles'])
+
+    def test_fetch_authenticates_from_the_login_token_without_a_configured_helper(self):
+        # GitHub's recovery container sets GITHUB_TOKEN but configures no git
+        # credential helper, and the resume fetch runs there before the rebuild.
+        self.runner.remote_sha = 'b' * 40
+        self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
+                        None, self.receipt, resume='new-space')
+        fetch = next(c[-1] for c in self.runner.calls if c[1:3] == ['codespace', 'ssh'] and ' fetch origin ' in c[-1])
+        words = shlex.split(shlex.split(fetch)[2])
+        end = words.index('fetch')
+        start = max(i for i, word in enumerate(words[:end]) if word == 'git')
+        with tempfile.TemporaryDirectory() as home:
+            env = {'PATH': os.environ['PATH'], 'HOME': home, 'GIT_CONFIG_NOSYSTEM': '1',
+                   'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_TERMINAL_PROMPT': '0', 'GITHUB_TOKEN': 'login-token'}
+            result = subprocess.run(['git', *words[start + 1:end], 'credential', 'fill'], env=env, cwd=home,
+                                    input='protocol=https\nhost=github.com\n\n', capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('password=login-token\n', result.stdout)
 
     def test_retry_of_current_codespace_skips_rebuild(self):
         self.api._save_receipt(self.receipt, {'codespace': 'new-space', 'repository': 'owner/project',
@@ -338,7 +356,7 @@ class CodespacesTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'source.py'):
             self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                             None, self.receipt, resume='new-space')
-        self.assertFalse(any('git fetch' in call[-1] for call in self.runner.calls))
+        self.assertFalse(any(' fetch origin ' in call[-1] for call in self.runner.calls))
         self.assertFalse(any(call[1:3] == ['codespace', 'rebuild'] for call in self.runner.calls))
 
     def test_resume_preserves_remote_branch_when_api_ref_is_stale(self):
@@ -346,7 +364,7 @@ class CodespacesTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Move new-space to main first; it is on user-work'):
             self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                             None, self.receipt, resume='new-space')
-        self.assertFalse(any('git fetch' in call[-1] for call in self.runner.calls))
+        self.assertFalse(any(' fetch origin ' in call[-1] for call in self.runner.calls))
 
     def test_remote_revision_must_contain_reviewed_commit_before_opening(self):
         self.runner.remote_sha = 'b' * 40
