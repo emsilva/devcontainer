@@ -638,12 +638,21 @@ def setup_continuity(project: Path, ui, codespace: str | None) -> None:
     from .project_sync.codespaces import Codespaces as ProjectCodespaces
     try:
         discovered = discover_project(project)
-        service = ProjectCodespaces(discovered, state_dir(discovered))
+        state = state_dir(discovered)
+        service = ProjectCodespaces(discovered, state)
         if os.environ.get('CODESPACES') == 'true':
             print('Run task work:cs on your Mac to connect scratch and conversation sync for this Codespace.', flush=True)
             return
         binding = service.binding()
-        if binding and binding['codespace'] == codespace:
+        if binding and binding['codespace'] != codespace:
+            # Moving a pairing is the owner's explicit step; work:cs retires the old binding.
+            from .project_sync import arming
+            command = 'task work:cs:armed' if arming.read(state).get('armed') else 'task work:cs'
+            print(f'Setup is preserved. Scratch sync needs attention: it is still paired with '
+                  f'{binding["codespace"]}.\nTo move it to {codespace}, run on your Mac: '
+                  f'{command} -- --rebind {codespace}', file=sys.stderr)
+            return
+        if binding:
             root = binding['remote_root']
         else:
             roots = service.roots(codespace)

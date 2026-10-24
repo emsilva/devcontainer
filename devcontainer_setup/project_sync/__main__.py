@@ -41,6 +41,8 @@ def parser():
     work.add_argument('--port', type=_port, action='append', default=[], help=argparse.SUPPRESS)
     work.add_argument('--no-port', type=_port, action='append', default=[], help=argparse.SUPPRESS)
     work.add_argument('--json', action='store_true', help='Full offline status detail as JSON')
+    work.add_argument('--rebind', metavar='CODESPACE',
+                      help='Move scratch and conversation sync to another Codespace of this repository')
     sync = groups.add_parser('scratch', help='Advanced scratch synchronization controls').add_subparsers(dest='action', required=True)
     configure = sync.add_parser('configure')
     configure.add_argument('--codespace', required=True)
@@ -292,11 +294,17 @@ def run(args):
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise ValueError('Work entrypoints require a terminal; use task work:status for scripts')
         if args.armed:
-            return workspace.remote(project, state, armed=lambda primary: _armed(primary, state, args))
+            return workspace.remote(project, state, armed=lambda primary: _armed(primary, state, args),
+                                    rebind=args.rebind)
         if args.codespace_stop or args.codespace_restart:
             return _owner_power(project, state, restart=args.codespace_restart)
         if args.codespace:
-            return workspace.remote(project, state)
+            from . import arming
+            if args.rebind is not None and arming.read(state).get('armed'):
+                # Moving only the sync would leave automatic restart on the old Codespace.
+                raise ValueError('This project is armed; move it with task work:cs:armed -- --rebind '
+                                 + args.rebind + ' so restart moves too')
+            return workspace.remote(project, state, rebind=args.rebind)
     if args.action == 'configure':
         _print(scratch.configure(project.root, state, args.codespace, args.remote_root))
     elif args.action == 'start':
@@ -318,7 +326,11 @@ def run(args):
 
 def main(argv=None):
     try:
-        return run(parser().parse_args(argv))
+        commands = parser()
+        args = commands.parse_args(argv)
+        if getattr(args, 'rebind', None) is not None and not (args.codespace or args.armed):
+            commands.error('--rebind works only with task work:cs or task work:cs:armed')
+        return run(args)
     except (OSError, ValueError) as error:
         print(str(error), file=sys.stderr)
         return 1

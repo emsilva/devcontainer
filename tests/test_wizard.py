@@ -428,6 +428,31 @@ class WizardCliTests(unittest.TestCase):
                 if not inside:
                     self.assertIn('No Codespace was opened', output.getvalue())
 
+    def test_a_replaced_codespace_ending_names_the_rebind_command(self):
+        import contextlib
+        import io
+        from devcontainer_setup.__main__ import setup_continuity
+        from devcontainer_setup.project_sync import arming
+        state = Path(self.tmp.name).resolve() / 'sync-state'
+        state.mkdir()
+        for armed, command in ((False, 'task work:cs -- --rebind new-space'),
+                               (True, 'task work:cs:armed -- --rebind new-space')):
+            with self.subTest(armed=armed):
+                arming.write(state, {'schema': 1, 'armed': armed})
+                errors = io.StringIO()
+                with patch.dict(os.environ, CODESPACES=''), patch('devcontainer_setup.project_sync.state.discover_project'), \
+                        patch('devcontainer_setup.project_sync.state.state_dir', return_value=state), \
+                        patch('devcontainer_setup.project_sync.codespaces.Codespaces') as cls, \
+                        contextlib.redirect_stderr(errors):
+                    cls.return_value.binding.return_value = {'codespace': 'old-space', 'remote_root': '/workspaces/project'}
+                    setup_continuity(self.root, None, 'new-space')
+                # The wizard never moves a pairing itself; work:cs retires the old binding.
+                cls.return_value.roots.assert_not_called()
+                cls.return_value.pair.assert_not_called()
+                self.assertIn('Scratch sync needs attention', errors.getvalue())
+                self.assertIn('old-space', errors.getvalue())
+                self.assertIn(command, errors.getvalue())
+
     def test_machine_profile_is_the_macs_minus_mac_only_parts(self):
         from devcontainer_setup.__main__ import _machine_profile
         home = Path(self.tmp.name) / 'home'

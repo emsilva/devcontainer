@@ -95,6 +95,11 @@ run `codex` or `claude` in the existing project checkout. On your Mac, run the s
 commands in your local checkout. Use `codex resume` or `claude --resume` to choose
 a conversation through the native picker.
 
+`task work:cs` always reconnects the paired Codespace. After setup replaces it, move
+sync to the new one with `task work:cs -- --rebind <codespace>` (or
+`task work:cs:armed -- --rebind <codespace>`); setup prints the exact command. The
+old binding is paused and kept, not deleted.
+
 Put temporary project files in `.scratch/` and shared notes in `.scratch/memory/`.
 Scratch sync runs automatically in both directions; conflicts are preserved for
 resolution. Project instructions tell agents to read shared notes. Claude's

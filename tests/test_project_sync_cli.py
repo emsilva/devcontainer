@@ -393,6 +393,37 @@ class ProjectSyncCLITests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)['phase'], 'stopped')
         self.assertFalse(self.state.exists())
 
+    def test_rebind_reaches_the_connecting_actions_and_nothing_else(self):
+        from unittest.mock import patch
+        from devcontainer_setup.project_sync import workspace
+        from devcontainer_setup.project_sync.__main__ import run
+        for action in ('--codespace', '--armed'):
+            with self.subTest(action=action), patch.object(workspace, 'remote', return_value=0) as remote, \
+                    patch.dict(os.environ, XDG_STATE_HOME=str(self.state)), \
+                    patch('sys.stdin.isatty', return_value=True), patch('sys.stdout.isatty', return_value=True):
+                args = parser().parse_args(['--project', str(self.root), 'work', action, '--rebind', 'new-space'])
+                self.assertEqual(run(args), 0)
+            self.assertEqual(remote.call_args.kwargs['rebind'], 'new-space')
+        for value in ('new-space', ''):
+            result = self.run_cli('work', '--status', '--rebind', value)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('--rebind', result.stderr)
+
+    def test_plain_rebind_of_an_armed_project_is_refused_before_it_connects(self):
+        from unittest.mock import patch
+        from devcontainer_setup.project_sync import arming, workspace
+        from devcontainer_setup.project_sync.__main__ import run
+        from devcontainer_setup.project_sync.state import discover_project, state_dir
+        state = state_dir(discover_project(self.root), self.env)
+        state.mkdir(parents=True)
+        arming.write(state, {'schema': 1, 'armed': True, 'codespace': 'old-space'})
+        with patch.object(workspace, 'remote') as remote, patch.dict(os.environ, XDG_STATE_HOME=str(self.state)), \
+                patch('sys.stdin.isatty', return_value=True), patch('sys.stdout.isatty', return_value=True):
+            args = parser().parse_args(['--project', str(self.root), 'work', '--codespace', '--rebind', 'new-space'])
+            with self.assertRaisesRegex(ValueError, 'task work:cs:armed -- --rebind new-space'):
+                run(args)
+        remote.assert_not_called()
+
     def test_armed_requires_a_terminal(self):
         result = self.run_cli('work', '--armed')
         self.assertEqual(result.returncode, 1)

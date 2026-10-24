@@ -43,25 +43,30 @@ def _ordinary(root):
             and not any(ord(c) < 32 for c in root))
 
 
-def _choose_pairing(project, state, value):
+def _choose_pairing(project, state, value, rebind=None):
     from .codespaces import Codespaces
     from .terminal import Gum
+    from .transport import _name
     primary = _project(value['local_root'], project.identity)
     service = Codespaces(primary, state)
     binding_path = Path(state) / scratch.CONFIG
     binding = read_json(binding_path) if binding_path.exists() else None
-    if binding:
-        if binding.get('identity') != project.identity:
-            raise ValueError('Codespace pairing belongs to another project')
-        name = binding['codespace']
+    if binding and binding.get('identity') != project.identity:
+        raise ValueError('Codespace pairing belongs to another project')
+    if rebind is not None or binding:
+        # A rebind names the new Codespace; retarget retires the old binding later.
+        name = _name(rebind) if rebind is not None else binding['codespace']
+        new = not binding or name != binding['codespace']
         row = service._api('GET', 'user/codespaces/' + name, service._api_env())
         if row.get('name') != name or not service._matches_repository(row):
-            raise ValueError('Paired Codespace repository differs')
+            raise ValueError(('No Codespace ' + name + ' for this repository; existing binding preserved')
+                             if new else 'Paired Codespace repository differs')
         if row.get('state') != 'Available':
             service.start_codespace(name)
         # Verify even a saved original: old registries may point at generated
-        # worktrees, or the checkout may have been removed or repurposed.
-        roots = service.roots(name, accept_new=False)
+        # worktrees, or the checkout may have been removed or repurposed. Only an
+        # explicit move to a new host, like configure, is trust on first use.
+        roots = service.roots(name, accept_new=new)
     else:
         spaces = service.spaces()
         if not spaces:
@@ -148,7 +153,7 @@ def _ready(project, state, timeout=120):
     raise ValueError('Waiting for current scratch connection timed out; inspect task work:status and scratch:logs')
 
 
-def remote(project, state, armed=None):
+def remote(project, state, armed=None, rebind=None):
     """Connect the project; `armed(primary)` runs once the worker is ready, before Herdr opens."""
     if os.environ.get('CODESPACES') == 'true':
         raise ValueError('Run task work:cs on your Mac to connect the project')
@@ -164,9 +169,11 @@ def remote(project, state, armed=None):
         _prerequisites()
         print('Connecting Codespace…', flush=True)
         # Selection/verification precedes any controller/binding changes.
-        name, remote_root = _choose_pairing(primary, state, value)
+        name, remote_root = _choose_pairing(primary, state, value, rebind=rebind)
         if not _ordinary(remote_root):
             raise ValueError('Choose a verified ordinary Codespace checkout')
+        binding_path = state / scratch.CONFIG
+        binding = read_json(binding_path) if binding_path.exists() else None
         with CodespaceConnection(name, state=state) as connection:
             _verify_roots(connection, primary, [remote_root])
             old_roots = [value.get(k) for k in ('remote_root', 'remote_active_root')]
@@ -177,7 +184,9 @@ def remote(project, state, armed=None):
                                  if root not in old_roots and Path(root).is_dir()]
             old_roots += [root for root in value.get('verified_historical_roots', [])
                           if root not in local_candidates]
-            historical = _verify_roots(connection, primary, [r for r in old_roots if r and r != remote_root])
+            # The old Codespace's checkouts do not exist on a new one; local history still moves.
+            moved = binding is not None and binding.get('codespace') != name
+            historical = [] if moved else _verify_roots(connection, primary, [r for r in old_roots if r and r != remote_root])
             local_old = value.get('local_active_root')
             local_history = []
             for local_root in dict.fromkeys([local_old, *local_candidates]):
@@ -191,11 +200,12 @@ def remote(project, state, armed=None):
                          verified_local_historical_roots=sorted(set(local_history)),
                          verified_remote_historical_roots=sorted(set(historical)),
                          codespace=name, active_host='codespace')
-            if updated != value:
-                atomic_write(state / 'workspace-history' / (str(time.time_ns()) + '.json'),
-                             json.dumps(value, sort_keys=True).encode() + b'\n')
-            _write(state, updated)
+        # Retarget first: if it fails, the registry still matches the binding it kept.
         scratch.retarget(primary.root, state, name, remote_root)
+        if updated != value:
+            atomic_write(state / 'workspace-history' / (str(time.time_ns()) + '.json'),
+                         json.dumps(value, sort_keys=True).encode() + b'\n')
+        _write(state, updated)
         print('Starting scratch and conversation synchronization…', flush=True)
         scratch.start(primary.root, state)
         runtime = _ready(primary, state)
