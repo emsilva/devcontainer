@@ -63,39 +63,30 @@ class NativeFormatTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     sessions._validate_claude(parsed, self.sid, [self.root])
 
-    def test_inline_claude_attachments_reject_malformed_known_shapes(self):
-        broken = [dict(type=['hook_success']), dict(type={'name': 'prompt_snapshot'})]
+    def test_claude_format_details_pass_and_only_malformed_records_refuse(self):
+        # Claude Code changes these shapes between releases; they bound no path,
+        # memory or session, so sync copies them as they are (#40).
+        malformed = []
         for good in self.inline_attachments():
             for key, value in good.items():
                 if key == 'type': continue
-                missing = copy.deepcopy(good); missing.pop(key)
-                # Fields only some Claude Code versions write are optional, but typed when present
-                # (measured 2026-10-24: real records omit these).
-                optional = {'prompt_snapshot': set(good) - {'type', 'systemPrompt'},
-                            'deferred_tools_delta': {'pendingMcpServers', 'failedMcpServers', 'needsAuthMcpServers', 'toolSearchAbsent'}}
-                if key not in optional.get(good['type'], ()):
-                    broken.append(missing)
-                malformed = copy.deepcopy(good)
-                malformed[key] = 1 if isinstance(value, bool) else (False if isinstance(value, (int, float)) else None)
-                broken.append(malformed)
-        for kind, key in ((0, 'durationMs'), (0, 'exitCode')):
-            bad = self.inline_attachments()[kind]; bad[key] = True; broken.append(bad)
-        for duration in (-1, float('nan'), float('inf')):
-            bad = self.inline_attachments()[0]; bad['durationMs'] = duration; broken.append(bad)
-        for bad_file in (dict(path='historic', type='Project'), dict(path='historic', content='inline', type='Future'), dict(path=123, content='inline', type='User')):
-            bad = self.inline_attachments()[4]; bad['files'] = [bad_file]; broken.append(bad)
-        for bad_tool in (dict(name='tool', description='inline', schema=[]), dict(name='tool', schema={}), 'external-tool-reference'):
-            bad = self.inline_attachments()[5]; bad['tools'] = [bad_tool]; broken.append(bad)
-        for kind in (1, 2, 3, 5):
-            bad = self.inline_attachments()[kind]
-            key = {1: 'content', 2: 'addedNames', 3: 'addedBlocks', 5: 'systemPrompt'}[kind]
-            bad[key] = ['inline', {}]; broken.append(bad)
-        for attachment in broken:
-            with self.subTest(kind=attachment['type']), self.assertRaises(ValueError):
-                rows = [dict(type='user', sessionId=self.sid, cwd=self.root), dict(type='attachment', attachment=attachment)]
-                sessions._validate_claude(rows, self.sid, [self.root])
+                missing = copy.deepcopy(good); missing.pop(key); malformed.append(missing)
+                changed = copy.deepcopy(good); changed[key] = None; malformed.append(changed)
+        drop = self.thinking_drop(); drop['newlyDropped'] = 'future'; malformed.append(drop)
+        rows = [dict(type='user', sessionId=self.sid, cwd=self.root)]
+        for attachment in malformed:
+            with self.subTest(kind=attachment['type']):
+                sessions._validate_claude(rows + [dict(type='attachment', attachment=attachment)], self.sid, [self.root])
+        for row in (dict(type='ai-title', aiTitle=None), dict(type='permission-mode'), dict(type='file-history-delta', trackingPath=1)):
+            with self.subTest(kind=row['type']):
+                sessions._validate_claude(rows + [row], self.sid, [self.root])
+        for attachment in (dict(type=['hook_success']), dict(type={'name': 'prompt_snapshot'}), dict(content='no kind'), 'inline'):
+            with self.subTest(attachment=attachment), self.assertRaisesRegex(ValueError, 'attachment'):
+                sessions._validate_claude(rows + [dict(type='attachment', attachment=attachment)], self.sid, [self.root])
+        with self.assertRaisesRegex(ValueError, 'session ID'):
+            sessions._validate_claude(rows + [dict(type='user', sessionId=str(uuid.uuid4()), cwd=self.root)], self.sid, [self.root])
 
-    def test_inline_attachments_keep_memory_unknown_dependency_and_request_refusals(self):
+    def test_inline_attachments_and_agent_calls_pass_but_memory_refuses(self):
         for attachment in self.inline_attachments():
             attachment['unknownPreservedField'] = '<oai-mem-citation>private</oai-mem-citation>'
             data = (json.dumps(dict(type='attachment', attachment=attachment)) + '\n').encode().replace(b'<', b'\\u003c')
@@ -103,14 +94,38 @@ class NativeFormatTests(unittest.TestCase):
                 sessions._records(data, 'claude')
         rows = self.requests()
         inline = [dict(type='attachment', attachment=value) for value in self.inline_attachments()]
-        for bad in (dict(type='attachment', attachment=dict(type='future-inline-variant', content='inline')),
-                    dict(type='assistant', message=dict(role='assistant', content=[dict(type='tool_use', name='Agent', id='child', input={})])),
-                    dict(type='api-request', shapeHash='0'*64, keep=0, tail=[], params={}, requestDigest='0'*64)):
-            with self.subTest(kind=bad['type']), self.assertRaises(ValueError):
-                sessions._validate_claude(rows + inline + [bad], self.sid, [self.root])
-        corrupted = copy.deepcopy(rows); corrupted[-1]['requestDigest'] = '0'*64
-        with self.assertRaisesRegex(ValueError, 'digest'):
-            sessions._validate_claude(corrupted + inline, self.sid, [self.root])
+        # New attachment kinds and agent/task calls arrive with Claude Code releases.
+        for good in (dict(type='attachment', attachment=dict(type='future-inline-variant', content='inline')),
+                     dict(type='assistant', message=dict(role='assistant', content=[dict(type='tool_use', name='Agent', id='child', input={})]))):
+            with self.subTest(kind=good['type']):
+                sessions._validate_claude(rows + inline + [good], self.sid, [self.root])
+
+    def test_unknown_claude_records_pass_but_keep_scope_and_memory_refusals(self):
+        rows = self.requests()
+        sessions._validate_claude(rows + [dict(type='future-record', cwd=self.root, note='newer release')], self.sid, [self.root])
+        self.assertEqual(sessions._records(b'{"type":"future-record","note":"kept"}\n', 'claude')[0]['note'], 'kept')
+        with self.assertRaisesRegex(ValueError, 'scope|project'):
+            sessions._validate_claude(rows + [dict(type='future-record', cwd='/unrelated')], self.sid, [self.root])
+        with self.assertRaisesRegex(ValueError, 'memory'):
+            sessions._records(b'{"type":"future-record","note":"\\u003coai-mem-citation\\u003eprivate"}\n', 'claude')
+        for data in (b'{"note":"no type"}\n', b'["not a record"]\n'):
+            with self.subTest(data=data), self.assertRaisesRegex(ValueError, 'record type'):
+                sessions._records(data, 'claude')
+        with self.assertRaisesRegex(ValueError, 'record type'):
+            sessions._records(b'{"type":"future-record","payload":{}}\n', 'codex')
+
+    def test_claude_sessions_may_work_below_the_project_root_but_not_beside_it(self):
+        worktree = self.root + '/.claude/worktrees/feature'
+        environment = dict(type='attachment', attachment=dict(type='environment', snapshot=dict(workingDirectory=worktree, additionalWorkingDirectories=[])))
+        rows = [dict(type='user', sessionId=self.sid, cwd=self.root), dict(type='user', sessionId=self.sid, cwd=worktree + '/web'), environment]
+        sessions._validate_claude(rows, self.sid, [self.root])
+        for outside in (self.root + '-other', '/workspaces'):
+            bad = copy.deepcopy(rows); bad[1]['cwd'] = outside
+            with self.subTest(cwd=outside), self.assertRaisesRegex(ValueError, 'another project checkout'):
+                sessions._validate_claude(bad, self.sid, [self.root])
+            bad = copy.deepcopy(rows); bad[2]['attachment']['snapshot']['workingDirectory'] = outside
+            with self.subTest(workingDirectory=outside), self.assertRaisesRegex(ValueError, 'another project checkout'):
+                sessions._validate_claude(bad, self.sid, [self.root])
 
     def thinking_drop(self):
         return dict(type='thinking_drop', model='fixture-model', querySource='fixture-query', requestId='fixture-request',
@@ -120,101 +135,41 @@ class NativeFormatTests(unittest.TestCase):
                     clientChange=dict(kinds='none', firstChangedMessageIndex=-1, baseline='none', callNumber=1))
 
     def test_thinking_drop_preserves_telemetry_and_original_thinking_without_lookup(self):
-        variants = [self.thinking_drop() for _ in range(4)]
-        variants[1].pop('requestId'); variants[1]['clientChange'].pop('callNumber')
-        variants[2]['requestedBehavior'] = 'fixture-behavior'
-        variants[3].update(thinkingBlocksSent=0, thinkingTurnsSent=0)
-        for attachment in variants:
-            with self.subTest(optional_fields=sorted(attachment)):
-                attachment['futureField'] = dict(historicalPath='/unrelated/provenance', value='preserved')
-                rows = self.requests() + [dict(type='attachment', attachment=attachment),
-                        dict(type='assistant', message=dict(role='assistant', content=[dict(type='thinking', thinking='synthetic thinking', signature='synthetic-signature'), dict(type='redacted_thinking', data='synthetic-redacted'), dict(type='text', text='Answer')]))]
-                original = copy.deepcopy(rows)
-                data = b''.join(json.dumps(row).encode() + b'\n' for row in rows)
-                with patch.object(Path, 'read_bytes', side_effect=AssertionError('telemetry requires no blob/file lookup')), patch.object(sessions.subprocess, 'run', side_effect=AssertionError('telemetry is not executable')):
-                    parsed = sessions._records(data, 'claude')
-                    try:
-                        sessions._validate_claude(parsed, self.sid, [self.root])
-                    except ValueError as error:
-                        self.fail(str(error))
-                self.assertEqual(parsed, original)
-                self.assertEqual(rows, original)
-
-    def test_thinking_drop_rejects_malformed_nested_shapes_counters_hashes(self):
-        defects = []
-        for key, value in self.thinking_drop().items():
-            if key == 'type': continue
-            if key != 'requestId':
-                bad = self.thinking_drop(); bad.pop(key); defects.append(bad)
-            bad = self.thinking_drop(); bad[key] = None; defects.append(bad)
-        for key in ('thinkingBlocksSent', 'thinkingTurnsSent'):
-            for value in (-1, True, 1.5):
-                bad = self.thinking_drop(); bad[key] = value; defects.append(bad)
-        for key in ('blockCount', 'turnCount'):
-            for value in (0, -1, True, 1.5):
-                bad = self.thinking_drop(); bad['newlyDropped'][key] = value; defects.append(bad)
-        for key in ('first', 'last'):
-            for index in ('messageIndex', 'blockIndex'):
-                for value in (-1, True, 1.5, None):
-                    bad = self.thinking_drop(); bad['newlyDropped'][key][index] = value; defects.append(bad)
-            bad = self.thinking_drop(); bad['newlyDropped'][key] = []; defects.append(bad)
-        for counts in ({'future_reason': 2}, {'prefix_mismatch': True, 'other': 1}, {'other': -2}, {'other': 1}, {'other': 3}, []):
-            bad = self.thinking_drop(); bad['newlyDropped']['reasonCounts'] = counts; defects.append(bad)
-        for hashes in (None, [], ['0abc123'], ['0abc123', 'zz9', 'third'], ['UPPER', 'zz9'], ['abcdefghijklmn', 'zz9'], ['bad/hash', 'zz9'], ['', 'zz9'], [123, 'zz9']):
-            bad = self.thinking_drop(); bad['blockHashes'] = hashes; defects.append(bad)
-        for key in ('kinds', 'firstChangedMessageIndex', 'baseline', 'callNumber'):
-            bad = self.thinking_drop(); bad['clientChange'][key] = True; defects.append(bad)
-        bad = self.thinking_drop(); bad['clientChange']['callNumber'] = -1; defects.append(bad)
-        bad = self.thinking_drop(); bad['newlyDropped']['turnCount'] = 3; defects.append(bad)
-        bad = self.thinking_drop(); bad['newlyDropped']['first']['messageIndex'] = 101; defects.append(bad)
-        bad = self.thinking_drop(); bad['newlyDropped']['first']['blockIndex'] = 5; defects.append(bad)
-        bad = self.thinking_drop(); bad['newlyDropped']['reason'] = 'future_reason'; defects.append(bad)
-        bad = self.thinking_drop(); bad['requestedBehavior'] = []; defects.append(bad)
-        bad = self.thinking_drop(); bad['firstReportForThreadInProcess'] = 1; defects.append(bad)
-        for number, attachment in enumerate(defects):
-            with self.subTest(defect=number), self.assertRaises(ValueError):
-                sessions._validate_claude(self.requests() + [dict(type='attachment', attachment=attachment)], self.sid, [self.root])
-
-    def test_thinking_drop_keeps_privacy_scope_request_and_external_dependency_refusals(self):
         attachment = self.thinking_drop()
+        attachment['futureField'] = dict(historicalPath='/unrelated/provenance', value='preserved')
+        rows = self.requests() + [dict(type='attachment', attachment=attachment),
+                dict(type='assistant', message=dict(role='assistant', content=[dict(type='thinking', thinking='synthetic thinking', signature='synthetic-signature'), dict(type='redacted_thinking', data='synthetic-redacted'), dict(type='text', text='Answer')]))]
+        original = copy.deepcopy(rows)
+        data = b''.join(json.dumps(row).encode() + b'\n' for row in rows)
+        with patch.object(Path, 'read_bytes', side_effect=AssertionError('telemetry requires no blob/file lookup')), patch.object(sessions.subprocess, 'run', side_effect=AssertionError('telemetry is not executable')):
+            parsed = sessions._records(data, 'claude')
+            sessions._validate_claude(parsed, self.sid, [self.root])
+        self.assertEqual(parsed, original)
+        self.assertEqual(rows, original)
         attachment['futureField'] = '<oai-mem-citation>private</oai-mem-citation>'
         data = (json.dumps(dict(type='attachment', attachment=attachment)) + '\n').encode().replace(b'<', b'\\u003c')
         with self.assertRaisesRegex(ValueError, 'memory'):
             sessions._records(data, 'claude')
-        rows = self.requests() + [dict(type='attachment', attachment=self.thinking_drop())]
-        for extra, reason in ((dict(type='attachment', attachment=dict(type='future-thinking-report')), 'attachment dependency'),
-                              (dict(type='assistant', message=dict(role='assistant', content=[dict(type='tool_use', name='Agent', input={})])), 'agent/task'),
-                              (dict(type='user', cwd='/unrelated'), 'scope|project')):
-            with self.subTest(reason=reason), self.assertRaisesRegex(ValueError, reason):
-                sessions._validate_claude(rows + [extra], self.sid, [self.root])
-        rows[5]['requestDigest'] = '0'*64
-        with self.assertRaisesRegex(ValueError, 'digest'):
-            sessions._validate_claude(rows, self.sid, [self.root])
 
-    def test_claude_request_shape_blob_delta_and_cache_control_are_validated(self):
+    def test_claude_request_records_are_copied_without_checking_their_chain(self):
+        # The chain is Claude Code's own cache bookkeeping; its format moves with
+        # each release (one unresolved tail digest per lead session, 2026-10-24).
         rows = self.requests()
-        sessions._validate_claude(rows, self.sid, [self.root])
-        for defect in ('missing_shape', 'missing_blob', 'hash', 'keep', 'scope', 'digest', 'cache_path'):
+        for defect in ('missing_shape', 'missing_blob', 'hash', 'keep', 'digest', 'cache_path', 'scope'):
             broken = copy.deepcopy(rows)
             if defect == 'missing_shape': broken.pop(3)
             elif defect == 'missing_blob': broken.pop(4)
             elif defect == 'hash': broken[4]['message']['content'][0]['text'] = 'Different'
             elif defect == 'keep': broken[5]['keep'] = 1
-            elif defect == 'scope': broken[1]['attachment']['snapshot']['workingDirectory'] = '/unrelated'
             elif defect == 'digest': broken[5]['requestDigest'] = '0' * 64
-            else: broken[5]['cacheControl'][0]['path'] = ['system', 99]
-            with self.subTest(defect=defect), self.assertRaises(ValueError):
-                sessions._validate_claude(broken, self.sid, [self.root])
-
-    def test_claude_resume_resolves_native_messages_without_explicit_blob_rows(self):
-        rows = self.requests()[:6]
-        assistant = dict(role='assistant', content=[dict(type='text', text='Earlier project reply')])
-        user = dict(role='user', content=[dict(type='text', text='Resume this project')])
-        rows.extend([dict(type='assistant', sessionId=self.sid, cwd=self.root, message=dict(assistant, id='native-message', model='native-model')), dict(type='user', sessionId=self.sid, cwd=self.root, message=dict(role='user', content='Resume this project')), dict(type='mode', sessionId=self.sid, mode='default')])
-        messages = [rows[4]['message'], assistant, user]
-        request = dict(rows[3]['shape'], messages=messages)
-        rows.append(dict(type='api-request', sessionId=self.sid, shapeHash=rows[3]['shapeHash'], keep=0, tail=[digest(message) for message in messages], params={}, cacheControl=[], requestDigest=digest(request)))
-        sessions._validate_claude(rows, self.sid, [self.root])
+            elif defect == 'cache_path': broken[5]['cacheControl'][0]['path'] = ['system', 99]
+            else: broken[1]['attachment']['snapshot']['workingDirectory'] = '/unrelated'
+            with self.subTest(defect=defect):
+                if defect == 'scope':
+                    with self.assertRaisesRegex(ValueError, 'another project checkout'):
+                        sessions._validate_claude(broken, self.sid, [self.root])
+                else:
+                    sessions._validate_claude(broken, self.sid, [self.root])
 
     def test_structural_codex_scope_cannot_escape_project(self):
         variants = [dict(type='turn_context', payload=dict(cwd='/another-project')), dict(type='turn_context', payload=dict(cwd=self.root + '/../another-project')), dict(type='event_msg', payload=dict(type='thread_settings_applied', thread_settings=dict(cwd='/another-project'))), dict(type='world_state', payload=dict(full=True, state=dict(environments=dict(environments=dict(local=dict(cwd='/another-project')))))), dict(type='turn_context', payload=dict(cwd=self.root, runtime_workspace_roots=['/another-project']))]

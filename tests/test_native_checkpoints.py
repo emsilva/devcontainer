@@ -300,25 +300,34 @@ class NativeCheckpointTests(NativeFixture):
         result = self.capture()
         self.assertEqual(result['issues'], [])
         self.assertEqual(len(result['entries']), 1)
+        # A field a later release retypes is copied as it is, not refused (#40).
         session(dict(type='deferred_tools_delta', **dict(names, surfacedNames='not-a-list')))
         result = self.capture()
-        self.assertEqual(result['entries'], [])
-        self.assertIn('attachment shape', result['issues'][0]['reason'])
+        self.assertEqual(result['issues'], [])
+        self.assertEqual(len(result['entries']), 1)
 
-    def test_claude_sidecars_refuse_until_atomic_dependency_closure_proven(self):
+    def test_claude_side_folders_and_task_lists_do_not_block_the_conversation(self):
+        # The transcript resumes on its own; side folders are not carried yet (#40).
         path = self.claude()
         side = path.with_suffix('') / 'subagents/agent-A.jsonl'
         side.parent.mkdir(parents=True)
         side.write_bytes(path.read_bytes())
+        tasks = Path(self.env['CLAUDE_CONFIG_DIR']) / 'tasks' / self.sid / '1.json'
+        tasks.parent.mkdir(parents=True)
+        tasks.write_text('{}')
         result = self.capture()
-        self.assertEqual(result['entries'], [])
-        self.assertIn('subagent', result['issues'][0]['reason'])
+        self.assertEqual(result['issues'], [])
+        self.assertEqual([item['path'] for item in result['entries'][0]['files']], [path.name])
 
-    def test_claude_agent_tool_refuses_unproven_child_even_without_sidecars(self):
-        self.claude(rows=[dict(type='assistant', message=dict(role='assistant', content=[dict(type='tool_use', name='Agent', id='tool-fixture', input={})], stop_reason='tool_use'), uuid=str(uuid.uuid4())), dict(type='assistant', message=dict(role='assistant', content=[dict(type='text', text='Finished parent')], stop_reason='end_turn'), uuid=str(uuid.uuid4()))])
+    def test_claude_lead_sessions_with_agents_tasks_and_new_shapes_are_captured(self):
+        calls = [dict(type='tool_use', name=name, id='tool-' + name, input={}) for name in ('Agent', 'TaskCreate', 'TodoWrite')]
+        self.claude(rows=[dict(type='assistant', message=dict(role='assistant', content=calls, stop_reason='tool_use'), uuid=str(uuid.uuid4())),
+                          dict(type='attachment', attachment=dict(type='skill_listing', content='Available skills')),
+                          dict(type='future-record', note='Written by a newer Claude Code'),
+                          dict(type='assistant', message=dict(role='assistant', content=[dict(type='text', text='Finished parent')], stop_reason='end_turn'), uuid=str(uuid.uuid4()))])
         result = self.capture()
-        self.assertEqual(result['entries'], [])
-        self.assertIn('dependency', result['issues'][0]['reason'])
+        self.assertEqual(result['issues'], [])
+        self.assertEqual(len(result['entries']), 1)
 
     def test_capture_never_calls_native_writer_or_quiescence(self):
         self.codex(); self.claude()
@@ -393,11 +402,12 @@ class ContinuedClaudeTests(NativeFixture):
         captured = self.capture()
         self.assertEqual(captured['issues'], [])
         self.assertEqual(self.store.read(captured['entries'][0]['files'][0]['blob']), original)
+        # A chain Claude Code wrote inconsistently is still copied byte for byte.
         rows[2]['message']['output_config']['effort'] = 'high'
-        self.claude(rows=rows)
+        changed = self.claude(rows=rows).read_bytes()
         captured = self.capture()
-        self.assertEqual(captured['entries'], [])
-        self.assertIn('digest', captured['issues'][0]['reason'])
+        self.assertEqual(captured['issues'], [])
+        self.assertEqual(self.store.read(captured['entries'][0]['files'][0]['blob']), changed)
 
     def forked_fixture(self):
         import copy
