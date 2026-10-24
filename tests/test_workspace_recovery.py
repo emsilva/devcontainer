@@ -174,7 +174,7 @@ class ExistingCheckoutTests(unittest.TestCase):
                          root=str(self.root), codespace='space', remote_root=self.original))
         verified, order = [], []
         self.proxies.side_effect = lambda codespace, *_: order.append('proxies:' + codespace) or []
-        connection = self.connection(); connection.python.return_value = b'no\n'
+        connection = self.connection(); connection.python.return_value = b'\n'
         with patch.object(workspace, '_prerequisites'), \
                 patch.object(workspace, '_choose_pairing', return_value=('new-space', self.original)) as choose, \
                 patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=connection), \
@@ -190,7 +190,7 @@ class ExistingCheckoutTests(unittest.TestCase):
         # so Herdr reconnects through it (an older runner's proxy does not leave by itself, #51).
         self.assertEqual(order, ['retarget', 'worker', 'ssh', 'proxies:new-space'])
         # The new Codespace has no Herdr, a fact Herdr setup needs: only it installs Herdr there.
-        self.assertIs(opened.call_args.kwargs['herdr_installed'], False)
+        self.assertEqual(opened.call_args.kwargs['remote_herdr'], '')
         # The old Codespace's checkouts do not exist on the new one, so they are not verified there.
         self.assertEqual(verified, [[self.original]])
         value = read_json(self.state / 'workspace.json')
@@ -199,6 +199,26 @@ class ExistingCheckoutTests(unittest.TestCase):
         self.assertNotIn(self.generated, value['verified_historical_roots'])
         self.assertEqual(value['verified_local_historical_roots'], [str(recovered)])
         self.assertEqual(retarget.call_args.args[2:], ('new-space', self.original))
+
+    def test_remote_herdr_reads_the_codespace_version_and_never_guesses(self):
+        for answer, expected in ((b'herdr 0.9.4\n', 'herdr 0.9.4'), (b'\n', ''), (b'Welcome!\nherdr 0.9.4\n', None),
+                                 (b'zsh: command not found\n', None), (b'\xff\n', None), (None, None)):
+            connection = self.connection(); connection.python.return_value = answer
+            with self.subTest(answer=answer):
+                self.assertEqual(workspace._remote_herdr(connection), expected)
+        connection = self.connection(); connection.python.side_effect = ValueError('Remote Python/SSH timed out')
+        self.assertIsNone(workspace._remote_herdr(connection))
+
+    def test_herdr_probe_reports_the_version_on_path_or_in_local_bin(self):
+        import stat, subprocess, sys
+        home = self.base / 'probe-home'; (home / '.local/bin').mkdir(parents=True)
+        def probe():
+            return subprocess.run([sys.executable, '-I', '-B', '-c', workspace._HERDR_PROBE], capture_output=True, text=True,
+                                  env={'PATH': '/usr/bin:/bin', 'HOME': str(home)}, timeout=60).stdout.strip()
+        self.assertEqual(probe(), '')
+        fake = home / '.local/bin/herdr'
+        fake.write_text('#!/bin/sh\necho herdr 9.9.9-fixture\n'); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+        self.assertEqual(probe(), 'herdr 9.9.9-fixture')
 
     def test_verify_historical_root_uses_remote_canonical_identity(self):
         connection = self.connection()

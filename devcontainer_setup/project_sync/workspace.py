@@ -153,18 +153,23 @@ def _ready(project, state, timeout=120):
     raise ValueError('Waiting for current scratch connection timed out; inspect task work:status and scratch:logs')
 
 
-# Only Herdr setup installs Herdr on a Codespace, so whether it is there is read, not inferred.
-_HERDR_PROBE = ("import os,shutil;print('yes' if shutil.which('herdr',path=os.pathsep.join("
-                "[os.environ.get('PATH',''),os.path.expanduser('~/.local/bin')])) else 'no')")
+# Only Herdr setup installs a matching Herdr on a Codespace, so which one is there is read, not inferred.
+_HERDR_PROBE = ("import os,shutil,subprocess;h=shutil.which('herdr',path=os.pathsep.join("
+                "[os.environ.get('PATH',''),os.path.expanduser('~/.local/bin')]));"
+                "print(subprocess.run([h,'--version'],capture_output=True,text=True,timeout=15).stdout.strip() if h else '')")
 
 
 def _remote_herdr(connection):
-    """Whether the Codespace has Herdr; None when that cannot be read."""
+    """The Codespace's `herdr --version`, '' when it has no Herdr, None when that cannot be read."""
     try:
         answer = connection.python(_HERDR_PROBE, timeout=30)
     except ValueError:
         return None
-    return {b'yes': True, b'no': False}.get(answer.strip()) if isinstance(answer, bytes) else None
+    try:
+        text = answer.decode().strip() if isinstance(answer, bytes) else None
+    except UnicodeDecodeError:
+        return None
+    return text if text is not None and (text == '' or (text.startswith('herdr ') and '\n' not in text)) else None
 
 
 def remote(project, state, armed=None, rebind=None):
@@ -190,7 +195,7 @@ def remote(project, state, armed=None, rebind=None):
         binding = read_json(binding_path) if binding_path.exists() else None
         with CodespaceConnection(name, state=state) as connection:
             _verify_roots(connection, primary, [remote_root])
-            herdr_installed = _remote_herdr(connection)
+            remote_herdr = _remote_herdr(connection)
             old_roots = [value.get(k) for k in ('remote_root', 'remote_active_root')]
             old_roots += value.get('verified_remote_historical_roots', [])
             local_candidates = list(value.get('verified_local_historical_roots', []))
@@ -240,7 +245,7 @@ def remote(project, state, armed=None, rebind=None):
         # Outside workspace-control.lock, which arming takes for its own write,
         # and before Herdr, whose TUI would otherwise hold the step back.
         armed(primary)
-    return open_remote(primary, state, remote_root, herdr_installed=herdr_installed)
+    return open_remote(primary, state, remote_root, remote_herdr=remote_herdr)
 
 
 def status(project, state):

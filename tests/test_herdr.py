@@ -168,10 +168,26 @@ request_path = "request.wav"
                     completed({'result': {'workspaces': []}}),
                     completed({'result': {'workspace': {'workspace_id': 'w'}}}), completed({'result': {}})]), \
                 mock.patch.object(herdr.subprocess, 'call', side_effect=lambda args, **_: calls.append(args) or 0):
-            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote', herdr_installed=False), 0)
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote', remote_herdr=''), 0)
         self.assertEqual(calls, [['herdr', 'machine', 'add', 'alias', '--label', 'repo (Codespace)', '--remote-session', session],
                                  ['herdr', 'machine', 'remove', 'old-id']])
         self.assertEqual(read_json(self.state / 'herdr-machine.json')['machine_id'], 'new-id')
+
+    def test_a_codespace_with_another_herdr_version_gets_a_fresh_machine(self):
+        # Herdr setup installs the version this Mac runs; a mismatched remote cannot serve it.
+        session = 'project-' + 'a' * 24
+        self.bind('space', {'machine_id': 'old-id', 'alias': 'alias', 'session': session, 'codespace': 'space'})
+        old = {'id': 'old-id', 'target': 'alias', 'session': session, 'enabled': True}
+        new = {'id': 'new-id', 'target': 'alias', 'session': session, 'enabled': True}
+        calls = []
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr, '_local_version', return_value='herdr 1.3'), \
+                mock.patch.object(herdr.subprocess, 'run', side_effect=[completed([old]), completed([old, new]),
+                    completed({'result': {'workspaces': []}}),
+                    completed({'result': {'workspace': {'workspace_id': 'w'}}}), completed({'result': {}})]), \
+                mock.patch.object(herdr.subprocess, 'call', side_effect=lambda args, **_: calls.append(args) or 0):
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote', remote_herdr='herdr 1.2'), 0)
+        self.assertEqual([args[:3] for args in calls], [['herdr', 'machine', 'add'], ['herdr', 'machine', 'remove']])
 
     def test_a_codespace_that_has_herdr_keeps_its_profile_even_after_a_move(self):
         session = 'project-' + 'a' * 24
@@ -181,8 +197,9 @@ request_path = "request.wav"
                 mock.patch.object(herdr.subprocess, 'run', side_effect=[completed([machine]),
                     completed({'result': {'workspaces': []}}),
                     completed({'result': {'workspace': {'workspace_id': 'w'}}}), completed({'result': {}})]), \
+                mock.patch.object(herdr, '_local_version', return_value='herdr 1.2'), \
                 mock.patch.object(herdr.subprocess, 'call', return_value=0) as call:
-            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote', herdr_installed=True), 0)
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote', remote_herdr='herdr 1.2'), 0)
         call.assert_not_called()
         receipt = read_json(self.state / 'herdr-machine.json')
         self.assertEqual((receipt['machine_id'], receipt['codespace']), ('kept-id', 'new-space'))

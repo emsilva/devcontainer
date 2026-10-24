@@ -164,7 +164,16 @@ def disconnect_remote(project) -> int:
     return 0
 
 
-def open_remote(project, state: Path, remote_root: str, herdr_installed: bool | None = None) -> int:
+def _local_version():
+    """This Mac's `herdr --version`, or None when it cannot be read."""
+    try:
+        result = subprocess.run(['herdr', '--version'], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def open_remote(project, state: Path, remote_root: str, remote_herdr: str | None = None) -> int:
     """Connect the project's saved machine and open local Herdr when needed."""
     state = Path(state)
     alias, session = configure_ssh(project, state), _session(project)
@@ -176,12 +185,16 @@ def open_remote(project, state: Path, remote_root: str, herdr_installed: bool | 
     binding = state / 'scratch.json'
     codespace = read_json(binding).get('codespace') if binding.exists() else None
     matches = _matching_machines(alias, session)
-    # Only setup installs Herdr on a Codespace (it asks first), saving a fresh
-    # profile. A Codespace without Herdr gets one; when that was not read, a
-    # profile saved for another Codespace counts as lacking it.
+    # Only setup installs the Herdr this Mac runs on a Codespace (it asks first),
+    # saving a fresh profile. A Codespace with none, or another version, gets
+    # one. When that was not read, a profile saved for another Codespace counts
+    # as lacking it.
     previous = receipt.get('codespace')
-    lacking = herdr_installed is False or (
-        herdr_installed is None and None not in (previous, codespace) and previous != codespace)
+    if remote_herdr is None:
+        lacking = None not in (previous, codespace) and previous != codespace
+    else:
+        local = _local_version() if remote_herdr else None
+        lacking = not remote_herdr or (local is not None and remote_herdr != local)
     replaced = {row['id'] for row in matches} if lacking else set()
     if not matches or replaced:
         result = subprocess.call(['herdr', 'machine', 'add', alias, '--label', project.root.name + ' (Codespace)',
