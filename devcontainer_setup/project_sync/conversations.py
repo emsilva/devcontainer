@@ -347,9 +347,14 @@ def _claude_entrypoint(path):
     with _parent(sessions._safe(path)) as (parent, name):
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
         with os.fdopen(fd, 'rb') as source:
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError('Native metadata requires a regular file without hard links')
+            budget = 16 * 1024 * 1024  # Early rows can carry large prompt snapshots.
             for _ in range(64):
-                line = source.readline(1024 * 1024)
-                if not line.endswith(b'\n'):
+                line = source.readline(budget + 1)
+                budget -= len(line)
+                if budget < 0 or not line.endswith(b'\n'):
                     return None
                 try:
                     row = json.loads(line)
@@ -374,7 +379,9 @@ def _finished_workers(home, scopes):
         launches, known = {}, set()
         for row in _rows(_stable_prefix(path)):
             lid, kind = row.get('launch_id'), row.get('type')
-            if not isinstance(lid, str) or kind not in ('launch', 'dispatch', 'reported', 'close'):
+            if kind not in ('launch', 'dispatch', 'close'):
+                continue  # Rows that change no session (reported, or newer tooling's).
+            if not isinstance(lid, str):
                 raise ValueError('Invalid herd record row')
             if kind == 'launch':
                 for other in launches.values():
@@ -451,11 +458,11 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
             meta = row.get('payload', {})
             if not isinstance(meta, dict):
                 raise ValueError('Invalid native session metadata')
+            if meta.get('source') == 'exec':
+                continue  # Headless runs are not conversations; the picker hides them (#49).
             approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, first, store)))
             if meta.get('cwd') not in approved:
                 continue
-            if meta.get('source') == 'exec':
-                continue  # Headless runs are not conversations; the picker hides them (#49).
             retained, entry = _codex_entry(project, store, sid, index, state=state, scopes=scopes)
         except (ValueError, OSError) as exc:
             issue('codex', sid, exc)

@@ -176,11 +176,12 @@ CLAUDE_INLINE_FIELDS = {
     'thinking_drop': (('model', 'querySource'), ('blockHashes',)),
 }
 # Fields only some Claude Code versions write: typed when present. 'strs' is a list
-# of strings, 'dicts' a list of objects (measured 2026-10-24).
+# of strings, 'items' a list of strings or objects (measured 2026-10-24 across the
+# Mac's transcripts: failedMcpServers, surfacedDefinitions and retractedTools hold objects).
 CLAUDE_INLINE_OPTIONAL = {
     'deferred_tools_delta': {'pendingMcpServers': 'strs', 'needsAuthMcpServers': 'strs', 'surfacedNames': 'strs',
-                             'removedByBlock': 'strs', 'failedMcpServers': 'dicts', 'surfacedDefinitions': 'dicts',
-                             'retractedTools': 'dicts'},
+                             'removedByBlock': 'strs', 'failedMcpServers': 'items', 'surfacedDefinitions': 'items',
+                             'retractedTools': 'items'},
     'prompt_snapshot': {'contextRendering': 'str'},
 }
 
@@ -233,7 +234,7 @@ def _validate_claude_inline(attachment):
         if key in attachment:
             value = attachment[key]
             valid = valid and (isinstance(value, str) if shape == 'str' else
-                               isinstance(value, list) and all(isinstance(item, str if shape == 'strs' else dict) for item in value))
+                               isinstance(value, list) and all(isinstance(item, str if shape == 'strs' else (str, dict)) for item in value))
     if kind == 'thinking_drop':
         _validate_claude_thinking_drop(attachment)
     elif kind == 'hook_success':
@@ -304,11 +305,13 @@ def _validate_claude(rows, sid, roots, *, child=False):
         elif kind in ('relocated', 'worktree-state'):
             # These move where the session works, so they stay in scope like cwd.
             state = row.get('worktreeSession') if kind == 'worktree-state' else row
+            if kind == 'worktree-state' and state is None:
+                continue  # The session left its worktree.
             if not isinstance(state, dict):
                 raise ValueError('Invalid Claude working-directory record')
             required = ('relocatedCwd',) if kind == 'relocated' else ('worktreePath',)
             for key in required + ('originalCwd', 'preEnterOriginalCwd'):
-                if key in required or key in state:
+                if key in required or state.get(key) is not None:
                     _scoped_roots(state.get(key), roots, child=True)
         elif kind in ('ai-title', 'permission-mode', 'file-history-delta'):
             # Bookkeeping, like file-history-snapshot: shape only.

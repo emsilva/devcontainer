@@ -69,8 +69,11 @@ class NativeFormatTests(unittest.TestCase):
             for key, value in good.items():
                 if key == 'type': continue
                 missing = copy.deepcopy(good); missing.pop(key)
-                # Snapshot rendering/tool fields are optional, but typed when present.
-                if good['type'] != 'prompt_snapshot' or key in ('systemPrompt', 'contextRendering'):
+                # Fields only some Claude Code versions write are optional, but typed when present
+                # (measured 2026-10-24: real records omit these).
+                optional = {'prompt_snapshot': set(good) - {'type', 'systemPrompt'},
+                            'deferred_tools_delta': {'pendingMcpServers', 'failedMcpServers', 'needsAuthMcpServers', 'toolSearchAbsent'}}
+                if key not in optional.get(good['type'], ()):
                     broken.append(missing)
                 malformed = copy.deepcopy(good)
                 malformed[key] = 1 if isinstance(value, bool) else (False if isinstance(value, (int, float)) else None)

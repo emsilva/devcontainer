@@ -190,9 +190,10 @@ class NativeCheckpointTests(NativeFixture):
         conversation = self.claude()
         for entrypoint in ('sdk-py', 'sdk-cli'):
             run = str(uuid.uuid4())
-            conversation.with_name(run + '.jsonl').write_bytes(lines(
+            big = dict(type='attachment', attachment=dict(type='prompt_snapshot', systemPrompt=['x' * (2 * 1024 * 1024)]), uuid=str(uuid.uuid4()))
+            conversation.with_name(run + '.jsonl').write_bytes(lines([big] + [
                 dict(json.loads(line), entrypoint=entrypoint, sessionId=run)
-                for line in conversation.read_bytes().splitlines()))
+                for line in conversation.read_bytes().splitlines()]))
         self.codex()
         headless = str(uuid.uuid4())
         path = self.codex(headless)
@@ -220,6 +221,7 @@ class NativeCheckpointTests(NativeFixture):
                   dict(launch, launch_id='b', pane_id='p2', session_id=closed),
                   dict(type='close', at='2026-10-24T00:02:00Z', launch_id='b', reason='done'),
                   dict(launch, launch_id='c', pane_id='p3', session_id=reused),
+                  dict(type='renamed', at='2026-10-24T00:03:00Z', launch_id='c', name='later-tooling'),
                   dict(launch, launch_id='d', pane_id='p3', session_id=None))
         result = self.capture()
         self.assertEqual(result['issues'], [])
@@ -267,6 +269,8 @@ class NativeCheckpointTests(NativeFixture):
                 dict(type='worktree-state', worktreeSession=dict(originalCwd=root, worktreePath=worktree, worktreeName='feature',
                                                                  worktreeBranch='feature', sessionId=self.sid)),
                 dict(type='relocated', relocatedCwd=worktree),
+                dict(type='worktree-state', worktreeSession=None),
+                dict(type='worktree-state', worktreeSession=dict(worktreePath=worktree, originalCwd=None)),
                 dict(type='file-history-delta', messageId=str(uuid.uuid4()), snapshotMessageId=str(uuid.uuid4()),
                      trackingPath=inside + '/notes.md', timestamp='2026-10-24T12:00:00Z',
                      backup=dict(backupFileName=None, version=1, backupTime='2026-10-24T12:00:00Z', realParentDir=inside)),
