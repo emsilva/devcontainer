@@ -61,6 +61,47 @@ def stale_proxies(codespace: str, state: Path, before: float, *, run=subprocess.
     return found
 
 
+def proxies_elsewhere(codespace: str, state: Path, *, run=subprocess.run) -> list[int] | None:
+    """Pids of this project's Herdr proxies serving a Codespace other than `codespace`; None when ps cannot be read."""
+    try:
+        listing = run(['ps', '-axo', 'pid=,etime=,command='], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if listing.returncode:
+        return None
+    suffix, found = f' {state}', []
+    for line in listing.stdout.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) < 3 or not fields[0].isdigit():
+            continue
+        command = fields[2].rstrip()
+        if 'herdr_stdio' in command and command.endswith(suffix):
+            served = command[:-len(suffix)].rsplit(' ', 1)[-1]
+            if served != codespace:
+                found.append(int(fields[0]))
+    return found
+
+
+def end_proxies_elsewhere(codespace: str, state: Path, *, run=subprocess.run) -> list[int] | None:
+    """SIGTERM this project's Herdr proxies serving another Codespace; the pids signalled, None when ps cannot be read.
+
+    Transitional (#51): a proxy from 66719dc on leaves by itself once the binding names another
+    Codespace. One an older runner started does not, and keeps Herdr on the Codespace the project left.
+    Remove once no project runs a runner older than 66719dc.
+    """
+    pids = proxies_elsewhere(codespace, state, run=run)
+    if pids is None:
+        return None
+    ended = []
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            continue
+        ended.append(pid)
+    return ended
+
+
 def end_stale_proxies(codespace: str, state: Path, before: float, *, run=subprocess.run) -> list[int]:
     """SIGTERM this project's Herdr proxies that outlived the stop; the pids signalled.
 
