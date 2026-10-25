@@ -308,7 +308,7 @@ def _codex_entry(project, store, sid, index, *, state, scopes):
     return retained, dict(schema=SCHEMA, agent='codex', session_id=sid, project_id=project.project_id, identity=project.identity, source_root=meta['cwd'], scope_roots=sorted({root for item in files for root in item['scope_roots']}), cutoff=dict(turn_id=cutoff, bytes=len(retained[sid])), files=files, title=sessions._catalog_metadata(retained[sid], 'codex', index[sid])['title'], updated_at=index[sid].stat().st_mtime)
 
 
-def _claude_entry(project, store, sid, path, *, state, scopes):
+def _claude_entry(project, store, sid, path, *, state, scopes, root):
     # The transcript resumes on its own. Its side folders (subagents, large tool
     # results) and task list stay on this host for now (#52).
     data = _stable_prefix(path)
@@ -332,10 +332,9 @@ def _claude_entry(project, store, sid, path, *, state, scopes):
         sessions._version('claude', version)
     if _stable_prefix(path, len(kept)) != kept:
         raise ValueError('Claude prefix changed during checkpoint')
-    last = next(row['cwd'] for row in reversed(valid) if 'cwd' in row)
-    # The checkout the session worked in, not its last shell directory, which
-    # may be below it: publication checks this against the scope roots exactly.
-    origin = max((root for root in approved if last == root or Path(last).is_relative_to(root)), key=len)
+    # Rooted at the checkout whose native store holds the transcript, where it
+    # started and its environment snapshot names it, not wherever it ended.
+    origin = root
     digest = hashlib.sha256(kept).hexdigest()
     return {sid: kept}, dict(schema=SCHEMA, agent='claude', session_id=sid, project_id=project.project_id, identity=project.identity, source_root=origin, scope_roots=approved, cutoff=dict(turn_id=cutoff, bytes=len(kept)), files=[dict(session_id=sid, path=path.name, size=len(kept), sha256=digest, blob=digest, scope_roots=approved, origin_root=origin)], title=sessions._catalog_metadata(kept, 'claude', path)['title'], updated_at=path.stat().st_mtime)
 
@@ -481,7 +480,7 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
                 sessions.session_uuid(sid)
                 if (_claude_entrypoint(path) or '').startswith('sdk-'):
                     continue  # Agent SDK and claude -p runs are not conversations.
-                retained, entry = _claude_entry(project, store, sid, path, state=state, scopes=scopes)
+                retained, entry = _claude_entry(project, store, sid, path, state=state, scopes=scopes, root=root)
             except (ValueError, OSError) as exc:
                 issue('claude', sid, exc)
                 continue

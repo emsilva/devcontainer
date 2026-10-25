@@ -718,3 +718,22 @@ class PublicationTests(NativeFixture):
                 result = self.api.publish_conversations(self.project, self.store, 'checkpoint', state=self.root / ('back-' + below.replace('/', '-')), env=self.env)
                 self.assertEqual(result['issues'], [])
                 self.assertEqual(len(result['imported']), 1)
+
+    def test_claude_checkpoint_is_rooted_at_the_checkout_whose_store_holds_it(self):
+        # A worktree may be an approved root too; a session started in the checkout
+        # stays rooted there, where its environment snapshot names it, wherever it ended.
+        from devcontainer_setup.project_sync.sessions import claude_namespace
+        source = str(self.project.root)
+        worktree = source + '/.claude/worktrees/feature'
+        sid = str(uuid.uuid4())
+        def turn(cwd, text):
+            return [dict(type='user', sessionId=sid, cwd=cwd, version='2.1.302', uuid=str(uuid.uuid4()), message=dict(role='user', content=text)),
+                    dict(type='assistant', sessionId=sid, cwd=cwd, version='2.1.302', uuid=str(uuid.uuid4()),
+                         message=dict(role='assistant', content=[dict(type='text', text='Done')], stop_reason='end_turn'))]
+        path = Path(self.env['CLAUDE_CONFIG_DIR']) / 'projects' / claude_namespace(self.project.root) / (sid + '.jsonl')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(lines(turn(source, 'Start') + turn(worktree, 'Work in the worktree')))
+        captured = self.api.capture_conversations(self.project, self.store, env=self.env, historical_roots=[worktree])
+        entry = next(e for e in captured['entries'] if e['session_id'] == sid)
+        self.assertEqual(entry['source_root'], source)
+        self.assertEqual(entry['files'][0]['origin_root'], source)
