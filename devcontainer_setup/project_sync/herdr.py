@@ -189,14 +189,22 @@ def open_remote(project, state: Path, remote_root: str, remote_herdr: str | None
     # saving a fresh profile. A Codespace with none, or another version, gets
     # one. When that was not read, a profile saved for another Codespace counts
     # as lacking it.
-    previous = receipt.get('codespace')
+    previous, versions = receipt.get('codespace'), receipt.get('herdr_versions')
+    pair = None
     if remote_herdr is None:
         lacking = None not in (previous, codespace) and previous != codespace
     else:
         local = _local_version() if remote_herdr else None
+        pair = [local, remote_herdr]
         lacking = not remote_herdr or (local is not None and remote_herdr != local)
+        if lacking and remote_herdr and pair == versions:
+            # Setup already ran for this pair and kept the remote, which Herdr
+            # accepts as compatible; asking again on every connection would loop.
+            print(f'Herdr on this Codespace is {remote_herdr}; this Mac runs {local}. Keeping the profile setup saved.')
+            lacking = False
     replaced = {row['id'] for row in matches} if lacking else set()
     if not matches or replaced:
+        versions = pair
         result = subprocess.call(['herdr', 'machine', 'add', alias, '--label', project.root.name + ' (Codespace)',
                                   '--remote-session', session])
         if result:
@@ -217,8 +225,10 @@ def open_remote(project, state: Path, remote_root: str, remote_herdr: str | None
         result = subprocess.call(['herdr', 'machine', 'enable', machine_id])
         if result:
             return result
-    atomic_write(receipt_path, json.dumps({'machine_id': machine_id, 'alias': alias, 'session': session,
-                                           'codespace': codespace}).encode() + b'\n')
+    saved = {'machine_id': machine_id, 'alias': alias, 'session': session, 'codespace': codespace}
+    if versions:
+        saved['herdr_versions'] = versions
+    atomic_write(receipt_path, json.dumps(saved).encode() + b'\n')
     _workspace(project, remote_root, ['--machine', machine_id])
     print('Codespace connected. Select its Codespace group in Herdr.')
     if os.environ.get('HERDR_ENV') == '1':
