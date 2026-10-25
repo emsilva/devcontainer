@@ -17,8 +17,14 @@ class WizardCliTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name) / 'project'
         self.root.mkdir()
+        # Resolved: the state walk uses O_NOFOLLOW, and /var is a symlink on macOS.
+        state_home = str((Path(self.tmp.name) / 'state').resolve())
         self.env = dict(os.environ, XDG_CONFIG_HOME=str(Path(self.tmp.name) / 'config'),
-                        XDG_CACHE_HOME=str(Path(self.tmp.name) / 'cache'))
+                        XDG_CACHE_HOME=str(Path(self.tmp.name) / 'cache'),
+                        XDG_STATE_HOME=state_home)
+        self._state_home = patch.dict(os.environ, {'XDG_STATE_HOME': state_home})
+        self._state_home.start()
+        self.addCleanup(self._state_home.stop)
         self.git('init', '-b', 'main')
         self.git('config', 'user.name', 'Test User')
         self.git('config', 'user.email', 'test@example.com')
@@ -555,6 +561,179 @@ class WizardCliTests(unittest.TestCase):
                 self.assertIn('Launch unavailable: Move old-space to main first; it is on setup/devcontainer.',
                               error_output.getvalue())
                 self.assertEqual(prompts, ['Continue with commit only?'])
+
+    def _ensure_origin(self):
+        if 'origin' not in self.git('remote'):
+            self.git('remote', 'add', 'origin', 'https://github.com/owner/project.git')
+
+    def _project_state(self):
+        from devcontainer_setup.project_sync.state import discover_project, state_dir
+        self._ensure_origin()
+        project = discover_project(self.root)
+        return project, state_dir(project)
+
+    def _write_binding(self, codespace, *, version=1, identity=None):
+        from devcontainer_setup.project_sync import scratch
+        project, state = self._project_state()
+        scratch._write(state / scratch.CONFIG, {
+            'version': version, 'identity': identity if identity is not None else project.identity,
+            'root': str(project.root), 'codespace': codespace, 'remote_root': '/workspaces/project'})
+        return state
+
+    def _clear_binding(self):
+        from devcontainer_setup.project_sync import scratch
+        _, state = self._project_state()
+        path = state / scratch.CONFIG
+        if path.exists():
+            path.chmod(0o600)
+            path.unlink()
+
+    def _existing_menu(self, spaces, branch='main'):
+        import contextlib
+        import io
+        from devcontainer_setup.__main__ import _launch_options
+        from devcontainer_setup.codespaces import Codespaces
+        self._ensure_origin()
+        calls = []
+
+        class UI:
+            def choose(self, title, options, *selected):
+                calls.append((title, options, selected))
+                if title == 'After setup':
+                    return 'Push and open a Codespace in the browser'
+                if title == 'Existing codespaces for this repository':
+                    return options[1]
+                raise AssertionError(f'Unexpected menu: {title}')
+
+            def confirm(self, title, default=True):
+                return True
+
+        def github(args, **kwargs):
+            route = args[2]
+            if route.endswith('/machines'):
+                payload = {'machines': [{'name': 'standardLinux32gb', 'cpus': 4,
+                                         'memory_in_bytes': 16 * 1024**3, 'storage_in_bytes': 32 * 1024**3}]}
+            elif '?' in route:
+                payload = [{'codespaces': [{'repository': {'full_name': 'owner/project'}, **space}
+                                           for space in spaces]}]
+            else:
+                name = route.rsplit('/', 1)[-1]
+                found = next(space for space in spaces if space['name'] == name)
+                payload = {'machine': {'name': 'standardLinux32gb'}, 'idle_timeout_minutes': 30,
+                           'repository': {'full_name': 'owner/project'}, **found}
+            return subprocess.CompletedProcess(args, 0, json.dumps(payload), '')
+
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            _launch_options(UI(), Codespaces(run=github), self.root, branch, None)
+        menus = [call for call in calls if call[0] == 'Existing codespaces for this repository']
+        if not menus:
+            raise AssertionError(f'Existing-codespace menu was not shown; calls={calls}')
+        return menus[0][1], menus[0][2]
+
+    def test_existing_codespace_menu_defaults_to_the_paired_codespace(self):
+        self._write_binding('second')
+        options, selected = self._existing_menu([
+            {'name': 'first', 'git_status': {'ref': 'main'}},
+            {'name': 'second', 'git_status': {'ref': 'main'}}])
+        self.assertEqual(selected, ('Reuse second (paired)',))
+        self.assertEqual(options, ['Create a new codespace', 'Reuse first', 'Reuse second (paired)'])
+
+    def test_existing_codespace_menu_never_defaults_to_create(self):
+        cases = (
+            ('unpaired on this branch', None,
+             [{'name': 'only', 'git_status': {'ref': 'main'}}],
+             ['Create a new codespace', 'Reuse only'], 'Reuse only'),
+            ('unpaired other branch', None,
+             [{'name': 'first', 'git_status': {'ref': 'feature'}},
+              {'name': 'second', 'git_status': {'ref': 'other'}}],
+             ['Create a new codespace', 'Reuse first (on feature)', 'Reuse second (on other)'],
+             'Reuse first (on feature)'),
+            ('pairing not listed', 'deleted-space',
+             [{'name': 'elsewhere', 'git_status': {'ref': 'feature'}},
+              {'name': 'here', 'git_status': {'ref': 'main'}}],
+             ['Create a new codespace', 'Reuse elsewhere (on feature)', 'Reuse here'], 'Reuse here'),
+        )
+        for name, paired, spaces, expected_options, expected in cases:
+            with self.subTest(name=name):
+                self._write_binding(paired) if paired else self._clear_binding()
+                options, selected = self._existing_menu(spaces)
+                self.assertEqual(options, expected_options)
+                self.assertEqual(selected, (expected,))
+                self.assertIsNotNone(selected[0])
+                self.assertNotEqual(selected[0], 'Create a new codespace')
+
+    def test_pairing_lookup_errors_fall_back_to_the_unpaired_default(self):
+        from devcontainer_setup.project_sync import scratch
+        space = [{'name': 'only', 'git_status': {'ref': 'main'}}]
+        expected = ['Create a new codespace', 'Reuse only']
+        self._write_binding('only', version=9)
+        with self.subTest(error='ValueError'):
+            options, selected = self._existing_menu(space)
+            self.assertEqual(options, expected)
+            self.assertEqual(selected, ('Reuse only',))
+            self.assertNotEqual(selected[0], 'Create a new codespace')
+        state = self._write_binding('only')
+        path = state / scratch.CONFIG
+        path.chmod(0)
+        self.addCleanup(lambda: path.chmod(0o600) if path.exists() else None)
+        with self.subTest(error='OSError'):
+            options, selected = self._existing_menu(space)
+            self.assertEqual(options, expected)
+            self.assertEqual(selected, ('Reuse only',))
+            self.assertNotEqual(selected[0], 'Create a new codespace')
+
+    def test_existing_codespace_menu_skips_a_default_whose_ref_contains_a_comma(self):
+        self._clear_binding()
+        options, selected = self._existing_menu([
+            {'name': 'comma-space', 'git_status': {'ref': 'feat,x'}},
+            {'name': 'clean-space', 'git_status': {'ref': 'other'}}])
+        self.assertEqual(options, ['Create a new codespace', 'Reuse comma-space (on feat,x)',
+                                   'Reuse clean-space (on other)'])
+        self.assertEqual(selected, ('Reuse clean-space (on other)',))
+        self.assertNotIn(',', selected[0])
+        self.assertNotEqual(selected[0], 'Create a new codespace')
+        with self.subTest('every label has a comma'):
+            options, selected = self._existing_menu([
+                {'name': 'comma-space', 'git_status': {'ref': 'feat,x'}}])
+            self.assertEqual(options, ['Create a new codespace', 'Reuse comma-space (on feat,x)'])
+            self.assertEqual(selected, ())
+        with self.subTest('paired ref contains a comma'):
+            self._write_binding('paired-space')
+            options, selected = self._existing_menu([
+                {'name': 'paired-space', 'git_status': {'ref': 'feat,x'}},
+                {'name': 'here', 'git_status': {'ref': 'main'}}])
+            self.assertEqual(options, ['Create a new codespace', 'Reuse paired-space (paired; on feat,x)',
+                                       'Reuse here'])
+            self.assertEqual(selected, ('Reuse here',))
+            self.assertNotIn(',', selected[0])
+
+    def test_paired_codespace_on_another_branch_is_labelled_with_a_semicolon(self):
+        self._write_binding('paired-space')
+        options, selected = self._existing_menu([
+            {'name': 'paired-space', 'git_status': {'ref': 'feature'}},
+            {'name': 'here', 'git_status': {'ref': 'main'}}])
+        self.assertEqual(options, ['Create a new codespace', 'Reuse paired-space (paired; on feature)',
+                                   'Reuse here'])
+        self.assertEqual(selected, ('Reuse paired-space (paired; on feature)',))
+        self.assertNotIn(',', selected[0])
+        self.assertNotEqual(selected[0], 'Create a new codespace')
+
+    def test_paired_codespace_reads_a_hand_written_binding(self):
+        from devcontainer_setup.__main__ import _paired_codespace
+        self._ensure_origin()
+        self._clear_binding()
+        self.assertIsNone(_paired_codespace(self.root))
+        self._write_binding('paired-space')
+        self.assertEqual(_paired_codespace(self.root), 'paired-space')
+        self._write_binding('paired-space', version=9)
+        self.assertIsNone(_paired_codespace(self.root))
+        self._write_binding('paired-space')
+        from devcontainer_setup.project_sync import scratch
+        from devcontainer_setup.project_sync.state import state_dir, discover_project
+        path = state_dir(discover_project(self.root)) / scratch.CONFIG
+        path.chmod(0)
+        self.addCleanup(lambda: path.chmod(0o600) if path.exists() else None)
+        self.assertIsNone(_paired_codespace(self.root))
 
 
 # What the fake owner answers: Ctrl-C, or Enter on the prompt's own default.

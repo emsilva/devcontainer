@@ -567,6 +567,43 @@ LAUNCH_VSCODE = 'Push and open a Codespace in VS Code'
 COMMIT_ONLY = 'Commit only (no Codespace)'
 
 
+def _paired_codespace(project: Path) -> str | None:
+    """The Codespace this Mac's project sync is bound to, or None if unpaired or unreadable."""
+    from .project_sync.codespaces import Codespaces as ProjectCodespaces
+    from .project_sync.state import discover_project, state_dir
+    try:
+        discovered = discover_project(project)
+        binding = ProjectCodespaces(discovered, state_dir(discovered)).binding()
+    except (ValueError, OSError):
+        return None
+    return binding['codespace'] if binding else None
+
+
+def _reuse_label(name: str, ref: str | None, branch: str, paired: str | None) -> str:
+    """Menu label. A paired Codespace on another branch uses a semicolon; Gum splits defaults on commas."""
+    if name == paired and ref == branch:
+        return f'Reuse {name} (paired)'
+    if name == paired:
+        return f'Reuse {name} (paired; on {ref})'
+    if ref == branch:
+        return f'Reuse {name}'
+    return f'Reuse {name} (on {ref})'
+
+
+def _reuse_default(names: list[str], refs: dict[str, str | None], branch: str, paired: str | None) -> str | None:
+    """First comma-free label: paired, then this branch, then list order. None if every label has a comma."""
+    ordered: list[str] = []
+    if paired in refs:
+        ordered.append(paired)
+    ordered.extend(name for name in names if refs[name] == branch and name not in ordered)
+    ordered.extend(name for name in names if name not in ordered)
+    for name in ordered:
+        label = _reuse_label(name, refs[name], branch, paired)
+        if ',' not in label:
+            return label
+    return None
+
+
 def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume: str | None) -> dict | None:
     """Codespace choices for branch (the default branch, with a GitHub origin)."""
     action = ui.choose('After setup', [LAUNCH_BROWSER, LAUNCH_VSCODE, COMMIT_ONLY],
@@ -579,10 +616,15 @@ def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume
             # Every codespace of the repository is shown, so a second one is never created silently.
             spaces = api.existing(repo)
             if spaces:
-                ref = {space['name']: space.get('git_status', {}).get('ref') for space in spaces}
-                choices = ['Create a new codespace', *[f'Reuse {name}' if ref[name] == branch
-                                                       else f'Reuse {name} (on {ref[name]})' for name in ref]]
-                choice = ui.choose('Existing codespaces for this repository', choices)
+                refs = {space['name']: space.get('git_status', {}).get('ref') for space in spaces}
+                paired = _paired_codespace(project)
+                names = list(refs)
+                choices = ['Create a new codespace',
+                           *[_reuse_label(name, refs[name], branch, paired) for name in names]]
+                selected = _reuse_default(names, refs, branch, paired)
+                title = 'Existing codespaces for this repository'
+                # A comma in a branch name cannot be preselected; omit the default rather than crash the menu.
+                choice = ui.choose(title, choices) if selected is None else ui.choose(title, choices, selected)
                 if choice.startswith('Reuse '):
                     resume = choice.removeprefix('Reuse ').split(' ')[0]
         if resume:
