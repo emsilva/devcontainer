@@ -246,8 +246,9 @@ def herdr_stdio(codespace: str, state: str | Path) -> int:
                     return child.wait(timeout=min(BINDING_INTERVAL, LIVENESS_INTERVAL))
                 except subprocess.TimeoutExpired:
                     pass
-                # A rebind retires this Codespace: leaving ends Herdr's SSH master,
-                # so Herdr reconnects through the alias, which rebind repoints first.
+                # A rebind retires this Codespace: leaving ends Herdr's SSH master.
+                # Herdr keeps retrying through the alias, which work:cs repoints once
+                # the new worker is ready; a retry before that exits at the check above.
                 # The binding is re-read only when its file changes, and an
                 # unreadable binding is not a rebind.
                 try:

@@ -160,7 +160,12 @@ _HERDR_PROBE = ("import os,shutil,subprocess;h=shutil.which('herdr',path=os.path
 
 
 def _remote_herdr(connection):
-    """The Codespace's `herdr --version`, '' when it has no Herdr, None when that cannot be read."""
+    """The Codespace's `herdr --version`, None when that cannot be read.
+
+    '' means no Herdr there answers `--version`, installed or not: setup is what
+    installs one that does.
+    """
+    from .herdr import version_line
     try:
         answer = connection.python(_HERDR_PROBE, timeout=30)
     except ValueError:
@@ -169,7 +174,9 @@ def _remote_herdr(connection):
         text = answer.decode().strip() if isinstance(answer, bytes) else None
     except UnicodeDecodeError:
         return None
-    return text if text is not None and (text == '' or (text.startswith('herdr ') and '\n' not in text)) else None
+    if text is None:
+        return None
+    return text if text == '' else version_line(text)
 
 
 def remote(project, state, armed=None, rebind=None):
