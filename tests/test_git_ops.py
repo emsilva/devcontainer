@@ -65,6 +65,19 @@ class GitPlanTests(unittest.TestCase):
         self.assertEqual((self.root / 'app.txt').read_text(), 'owner edit\n')
         self.assertEqual(git(self.root, 'branch', '--show-current'), 'setup/devcontainer')
 
+    def test_reviewed_files_under_a_path_the_project_ignores_are_committed(self):
+        # A project that ignores all of /.scratch/ still gets the reviewed scratch markers.
+        (self.root / '.gitignore').write_text('/.scratch/\n')
+        git(self.root, 'add', '.gitignore')
+        git(self.root, 'commit', '-m', 'Ignore scratch')
+        files = {'.scratch/.gitignore': b'*\n!.gitignore\n!README.md\n', '.scratch/README.md': b'# Project scratch\n'}
+        plan = GitPlan(self.root, files, branch=proposed_branch(self.root))
+        plan.apply()
+        sha = plan.commit()
+        self.assertEqual(git(self.root, 'show', '--format=', '--name-only', sha).splitlines(),
+                         ['.scratch/.gitignore', '.scratch/README.md'])
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+
     def test_unrelated_staged_changes_are_refused_before_writing(self):
         (self.root / 'app.txt').write_text('owner edit\n')
         git(self.root, 'add', 'app.txt')

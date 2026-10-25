@@ -353,7 +353,9 @@ class GitPlan:
                 if os.path.exists(staged):
                     os.unlink(staged)
         self.reviewed_tree = self._build_reviewed_tree()
-        git(self.project, 'add', '--', *self.changed)
+        # The reviewed tree ignores .gitignore, so staging must too: a project may ignore a
+        # directory, such as /.scratch/, that holds reviewed files.
+        git(self.project, 'add', '--force', '--', *self.changed)
         self.applied = True
 
     def _build_reviewed_tree(self) -> str:
@@ -413,7 +415,7 @@ class GitPlan:
             else:
                 self.files[name] = path.read_bytes()
         self.reviewed_tree = self._build_reviewed_tree()
-        git(self.project, 'add', '--', *self.changed)
+        git(self.project, 'add', '--force', '--', *self.changed)
 
     def commit(self) -> str:
         self._check_identity()
