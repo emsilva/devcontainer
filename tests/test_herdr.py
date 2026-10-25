@@ -189,6 +189,51 @@ request_path = "request.wav"
             self.assertEqual(herdr.open_remote(self.project, self.state, '/remote', remote_herdr='herdr 1.2'), 0)
         self.assertEqual([args[:3] for args in calls], [['herdr', 'machine', 'add'], ['herdr', 'machine', 'remove']])
 
+    def test_setup_runs_once_for_a_version_pair_it_left_in_place(self):
+        # Herdr may keep a compatible remote of another version; one prompt per pair, not per connection.
+        session = 'project-' + 'a' * 24
+        self.bind('space', {'machine_id': 'new-id', 'alias': 'alias', 'session': session, 'codespace': 'space',
+                            'herdr_versions': ['herdr 1.3', 'herdr 1.2']})
+        machine = {'id': 'new-id', 'target': 'alias', 'session': session, 'enabled': True}
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr, '_local_version', return_value='herdr 1.3'), \
+                mock.patch.object(herdr.subprocess, 'run', side_effect=[completed([machine]),
+                    completed({'result': {'workspaces': []}}),
+                    completed({'result': {'workspace': {'workspace_id': 'w'}}}), completed({'result': {}})]), \
+                mock.patch.object(herdr.subprocess, 'call', return_value=0) as call, \
+                mock.patch('builtins.print') as shown:
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote', remote_herdr='herdr 1.2'), 0)
+        call.assert_not_called()
+        self.assertIn('herdr 1.2', ' '.join(str(c.args) for c in shown.call_args_list))
+        self.assertEqual(read_json(self.state / 'herdr-machine.json')['herdr_versions'], ['herdr 1.3', 'herdr 1.2'])
+
+    def test_setup_records_the_version_pair_it_ran_for(self):
+        session = 'project-' + 'a' * 24
+        self.bind('space', {'machine_id': 'old-id', 'alias': 'alias', 'session': session, 'codespace': 'space'})
+        old = {'id': 'old-id', 'target': 'alias', 'session': session, 'enabled': True}
+        new = {'id': 'new-id', 'target': 'alias', 'session': session, 'enabled': True}
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr, '_local_version', return_value='herdr 1.3'), \
+                mock.patch.object(herdr.subprocess, 'run', side_effect=[completed([old]), completed([old, new]),
+                    completed({'result': {'workspaces': []}}),
+                    completed({'result': {'workspace': {'workspace_id': 'w'}}}), completed({'result': {}})]), \
+                mock.patch.object(herdr.subprocess, 'call', return_value=0):
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote', remote_herdr='herdr 1.2'), 0)
+        self.assertEqual(read_json(self.state / 'herdr-machine.json')['herdr_versions'], ['herdr 1.3', 'herdr 1.2'])
+
+    def test_an_unreadable_local_version_keeps_a_profile_whose_codespace_has_herdr(self):
+        session = 'project-' + 'a' * 24
+        self.bind('space', {'machine_id': 'kept-id', 'alias': 'alias', 'session': session, 'codespace': 'space'})
+        machine = {'id': 'kept-id', 'target': 'alias', 'session': session, 'enabled': True}
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr, '_local_version', return_value=None), \
+                mock.patch.object(herdr.subprocess, 'run', side_effect=[completed([machine]),
+                    completed({'result': {'workspaces': []}}),
+                    completed({'result': {'workspace': {'workspace_id': 'w'}}}), completed({'result': {}})]), \
+                mock.patch.object(herdr.subprocess, 'call', return_value=0) as call:
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote', remote_herdr='herdr 1.2'), 0)
+        call.assert_not_called()
+
     def test_a_codespace_that_has_herdr_keeps_its_profile_even_after_a_move(self):
         session = 'project-' + 'a' * 24
         self.bind('new-space', {'machine_id': 'kept-id', 'alias': 'alias', 'session': session, 'codespace': 'old-space'})

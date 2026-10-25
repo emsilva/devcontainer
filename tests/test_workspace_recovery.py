@@ -202,7 +202,8 @@ class ExistingCheckoutTests(unittest.TestCase):
 
     def test_remote_herdr_reads_the_codespace_version_and_never_guesses(self):
         for answer, expected in ((b'herdr 0.9.4\n', 'herdr 0.9.4'), (b'\n', ''), (b'Welcome!\nherdr 0.9.4\n', None),
-                                 (b'zsh: command not found\n', None), (b'\xff\n', None), (None, None)):
+                                 (b'zsh: command not found\n', None), (b'herdr 0.9.4\nwarning: stale cache\n', None),
+                                 (b'\xff\n', None), (None, None)):
             connection = self.connection(); connection.python.return_value = answer
             with self.subTest(answer=answer):
                 self.assertEqual(workspace._remote_herdr(connection), expected)
