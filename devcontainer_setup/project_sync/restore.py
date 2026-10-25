@@ -1,6 +1,7 @@
 """Restore after a restart: stale Herdr proxies, the project's Herdr machine, its lead and the resume prompt.
 
-Every Herdr call is bounded and reads a failure as "not yet": False, [] or ''.
+Every Herdr call is bounded and reads a failure as "not yet": False, [] or ''. The process
+listing for a move is the exception: it returns None when ps cannot be read, so work:cs can say so.
 """
 from __future__ import annotations
 
@@ -23,10 +24,18 @@ POLL = 10
 _AGENT = re.compile(r'[a-z][a-z0-9_-]{0,31}')
 
 
+def _served(command, state):
+    """The Codespace a herdr_stdio command line serves for this state dir, or None for any other process."""
+    suffix = f' {state}'
+    if not isinstance(command, str) or 'herdr_stdio' not in command:
+        return None
+    command = command.rstrip()
+    return command[:-len(suffix)].rsplit(' ', 1)[-1] if command.endswith(suffix) else None
+
+
 def is_proxy(command, codespace: str, state) -> bool:
     """True for this project's Herdr SSH proxy: herdr_stdio whose argv ends with this Codespace and state dir."""
-    return (isinstance(command, str) and 'herdr_stdio' in command
-            and command.rstrip().endswith(f' {codespace} {state}'))
+    return _served(command, state) == codespace
 
 
 def _elapsed(text):
@@ -41,57 +50,26 @@ def _elapsed(text):
     return int(days or 0) * 86400 + seconds
 
 
-def stale_proxies(codespace: str, state: Path, before: float, *, run=subprocess.run, now=time.time) -> list[int]:
-    """Pids of this project's Herdr proxies started before `before`; [] when ps cannot be read."""
+def _proxies(state: Path, run):
+    """(pid, seconds running or None, Codespace served) for this project's Herdr proxies; None when ps cannot be read."""
     try:
         # Elapsed time, not lstart: no local-time parse, so a DST fall-back hour cannot misdate one (R35).
         listing = run(['ps', '-axo', 'pid=,etime=,command='], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
-        return []
-    if listing.returncode:
-        return []
-    found, at = [], now()
-    for line in listing.stdout.splitlines():
-        fields = line.split(None, 2)
-        if len(fields) < 3 or not fields[0].isdigit():
-            continue
-        elapsed = _elapsed(fields[1])
-        if elapsed is not None and at - elapsed < before and is_proxy(fields[2], codespace, state):
-            found.append(int(fields[0]))
-    return found
-
-
-def proxies_elsewhere(codespace: str, state: Path, *, run=subprocess.run) -> list[int] | None:
-    """Pids of this project's Herdr proxies serving a Codespace other than `codespace`; None when ps cannot be read."""
-    try:
-        listing = run(['ps', '-axo', 'pid=,etime=,command='], capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
         return None
     if listing.returncode:
         return None
-    suffix, found = f' {state}', []
+    found = []
     for line in listing.stdout.splitlines():
         fields = line.split(None, 2)
-        if len(fields) < 3 or not fields[0].isdigit():
-            continue
-        command = fields[2].rstrip()
-        if 'herdr_stdio' in command and command.endswith(suffix):
-            served = command[:-len(suffix)].rsplit(' ', 1)[-1]
-            if served != codespace:
-                found.append(int(fields[0]))
+        if len(fields) == 3 and fields[0].isdigit():
+            served = _served(fields[2], state)
+            if served is not None:
+                found.append((int(fields[0]), _elapsed(fields[1]), served))
     return found
 
 
-def end_proxies_elsewhere(codespace: str, state: Path, *, run=subprocess.run) -> list[int] | None:
-    """SIGTERM this project's Herdr proxies serving another Codespace; the pids signalled, None when ps cannot be read.
-
-    Transitional (#51): a proxy from 66719dc on leaves by itself once the binding names another
-    Codespace. One an older runner started does not, and keeps Herdr on the Codespace the project left.
-    Remove once no project runs a runner older than 66719dc.
-    """
-    pids = proxies_elsewhere(codespace, state, run=run)
-    if pids is None:
-        return None
+def _terminate(pids):
     ended = []
     for pid in pids:
         try:
@@ -102,6 +80,30 @@ def end_proxies_elsewhere(codespace: str, state: Path, *, run=subprocess.run) ->
     return ended
 
 
+def stale_proxies(codespace: str, state: Path, before: float, *, run=subprocess.run, now=time.time) -> list[int]:
+    """Pids of this project's Herdr proxies started before `before`; [] when ps cannot be read."""
+    at = now()
+    return [pid for pid, elapsed, served in _proxies(state, run) or []
+            if served == codespace and elapsed is not None and at - elapsed < before]
+
+
+def proxies_elsewhere(codespace: str, state: Path, *, run=subprocess.run) -> list[int] | None:
+    """Pids of this project's Herdr proxies serving a Codespace other than `codespace`; None when ps cannot be read."""
+    found = _proxies(state, run)
+    return None if found is None else [pid for pid, _, served in found if served != codespace]
+
+
+def end_proxies_elsewhere(codespace: str, state: Path, *, run=subprocess.run) -> list[int] | None:
+    """SIGTERM this project's Herdr proxies serving another Codespace; the pids signalled, None when ps cannot be read.
+
+    Transitional (#51): a proxy from 66719dc on leaves by itself once the binding names another
+    Codespace. One an older runner started does not, and keeps Herdr on the Codespace the project left.
+    Remove once no project runs a runner older than 66719dc.
+    """
+    pids = proxies_elsewhere(codespace, state, run=run)
+    return None if pids is None else _terminate(pids)
+
+
 def end_stale_proxies(codespace: str, state: Path, before: float, *, run=subprocess.run) -> list[int]:
     """SIGTERM this project's Herdr proxies that outlived the stop; the pids signalled.
 
@@ -109,14 +111,7 @@ def end_stale_proxies(codespace: str, state: Path, before: float, *, run=subproc
     origin fix. This clears one that survived anyway, so Herdr reconnects. Only a process whose argv
     proves it is this package's proxy for this Codespace and state is signalled, never Herdr's own.
     """
-    ended = []
-    for pid in stale_proxies(codespace, state, before, run=run):
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            continue
-        ended.append(pid)
-    return ended
+    return _terminate(stale_proxies(codespace, state, before, run=run))
 
 
 def _named(name):
