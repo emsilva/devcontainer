@@ -96,6 +96,15 @@ class ProxyTests(unittest.TestCase):
                         lambda *a, **k: (_ for _ in ()).throw(subprocess.TimeoutExpired('ps', 10))):
             self.assertEqual(restore.stale_proxies('cs-1', Path(STATE), before, run=failure), [])
 
+    def test_a_proxy_age_is_measured_when_ps_returns(self):
+        # ps reports each age as it runs, so the clock is read after it, not before.
+        clock, before = [1_000_100.0], 1_000_000.0
+        def run(args, **kwargs):
+            clock[0] += 5  # a slow ps on a busy Mac
+            return listed([f'  101 {etime(103)} {PROXY} cs-1 {STATE}'])(args, **kwargs)
+        # Started at 1_000_105 - 103, after `before`: a proxy of the restarted Codespace, not a stale one.
+        self.assertEqual(restore.stale_proxies('cs-1', Path(STATE), before, run=run, now=lambda: clock[0]), [])
+
     def test_proxies_elsewhere_are_this_projects_proxies_serving_another_codespace(self):
         rows = [f'  101 {etime(900)} {PROXY} cs-old {STATE}',
                 f'  102 {etime(5)} {PROXY} cs-older {STATE}',
