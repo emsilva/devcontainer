@@ -221,6 +221,27 @@ request_path = "request.wav"
             self.assertEqual(herdr.open_remote(self.project, self.state, '/remote', remote_herdr='herdr 1.2'), 0)
         self.assertEqual(read_json(self.state / 'herdr-machine.json')['herdr_versions'], ['herdr 1.3', 'herdr 1.2'])
 
+    def test_setup_after_an_unread_probe_keeps_the_settled_version_pair(self):
+        session = 'project-' + 'a' * 24
+        self.bind('new-space', {'machine_id': 'old-id', 'alias': 'alias', 'session': session, 'codespace': 'old-space',
+                                'herdr_versions': ['herdr 1.3', 'herdr 1.2']})
+        old = {'id': 'old-id', 'target': 'alias', 'session': session, 'enabled': True}
+        new = {'id': 'new-id', 'target': 'alias', 'session': session, 'enabled': True}
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr.subprocess, 'run', side_effect=[completed([old]), completed([old, new]),
+                    completed({'result': {'workspaces': []}}),
+                    completed({'result': {'workspace': {'workspace_id': 'w'}}}), completed({'result': {}})]), \
+                mock.patch.object(herdr.subprocess, 'call', return_value=0):
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote', remote_herdr=None), 0)
+        self.assertEqual(read_json(self.state / 'herdr-machine.json')['herdr_versions'], ['herdr 1.3', 'herdr 1.2'])
+
+    def test_the_local_version_is_read_like_the_remote_one(self):
+        for stdout, code, expected in (('herdr 1.3\n', 0, 'herdr 1.3'), ('herdr 1.3\nA new version is available\n', 0, None),
+                                       ('', 0, None), ('1.3\n', 0, None), ('herdr 1.3\n', 1, None)):
+            with self.subTest(stdout=stdout, code=code), \
+                    mock.patch.object(herdr.subprocess, 'run', return_value=subprocess.CompletedProcess([], code, stdout, '')):
+                self.assertEqual(herdr._local_version(), expected)
+
     def test_an_unreadable_local_version_keeps_a_profile_whose_codespace_has_herdr(self):
         session = 'project-' + 'a' * 24
         self.bind('space', {'machine_id': 'kept-id', 'alias': 'alias', 'session': session, 'codespace': 'space'})

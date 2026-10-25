@@ -100,7 +100,8 @@ sync to the new one with `task work:cs -- --rebind <codespace>` (or
 `task work:cs:armed -- --rebind <codespace>`); setup prints the exact command. The
 old binding is paused and kept, not deleted. Herdr moves too: its connection to the
 old Codespace ends, and when the new one lacks the Herdr version your Mac runs, it
-asks once to install it there.
+asks to install it there. If you keep another version that Herdr accepts, it does not
+ask again for that pair.
 
 A Codespace can be deleted at any time, so keep anything you would need again in
 `.scratch/`: working files in `.scratch/tmp/` and shared notes in `.scratch/memory/`.

@@ -164,13 +164,19 @@ def disconnect_remote(project) -> int:
     return 0
 
 
+def version_line(text):
+    """`herdr --version` output when it is one 'herdr …' line, otherwise None."""
+    text = text.strip()
+    return text if text.startswith('herdr ') and '\n' not in text else None
+
+
 def _local_version():
     """This Mac's `herdr --version`, or None when it cannot be read."""
     try:
         result = subprocess.run(['herdr', '--version'], capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return result.stdout.strip() if result.returncode == 0 else None
+    return version_line(result.stdout) if result.returncode == 0 else None
 
 
 def open_remote(project, state: Path, remote_root: str, remote_herdr: str | None = None) -> int:
@@ -204,7 +210,8 @@ def open_remote(project, state: Path, remote_root: str, remote_herdr: str | None
             lacking = False
     replaced = {row['id'] for row in matches} if lacking else set()
     if not matches or replaced:
-        versions = pair
+        if pair is not None:
+            versions = pair  # An unread probe settles nothing, so it erases nothing.
         result = subprocess.call(['herdr', 'machine', 'add', alias, '--label', project.root.name + ' (Codespace)',
                                   '--remote-session', session])
         if result:
