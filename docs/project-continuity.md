@@ -39,7 +39,10 @@ project workspace. The controller verifies checkout identity and does not alter
 its branch or index. Local Python, tested GitHub CLI, selected credentials, SSH
 key and Herdr prerequisites are checked before starting a stopped Codespace.
 Herdr opens once the current verified scratch pairing is synchronized and SSH
-is prepared. Conversation exchange runs in the worker; pending or refused
+is prepared. Before Herdr opens, `work:cs` checks Herdr's resume hooks for
+Claude, Codex and OpenCode on the Codespace, and installs any that are missing
+or outdated, so that a restart can resume the agents. `work:status` shows the
+last check. Conversation exchange runs in the worker; pending or refused
 history is reported without blocking the connection.
 
 Disconnect leaves remote sessions, local Herdr and synchronization running. It

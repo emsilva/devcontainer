@@ -179,8 +179,12 @@ def _local_version():
     return version_line(result.stdout) if result.returncode == 0 else None
 
 
-def open_remote(project, state: Path, remote_root: str, remote_herdr: str | None = None) -> int:
-    """Connect the project's saved machine and open local Herdr when needed."""
+def open_remote(project, state: Path, remote_root: str, remote_herdr: str | None = None, prepared=None) -> int:
+    """Connect the project's saved machine and open local Herdr when needed.
+
+    `prepared`, when given, runs once after the machine receipt is saved and
+    before the workspace opens. It is not called on an early return.
+    """
     state = Path(state)
     alias, session = configure_ssh(project, state), _session(project)
     receipt_path = state / 'herdr-machine.json'
@@ -236,6 +240,10 @@ def open_remote(project, state: Path, remote_root: str, remote_herdr: str | None
     if versions:
         saved['herdr_versions'] = versions
     atomic_write(receipt_path, json.dumps(saved).encode() + b'\n')
+    # After the receipt, before the workspace: the caller can install resume
+    # hooks on the Codespace this machine just saved. Every return above skips it.
+    if prepared is not None:
+        prepared()
     _workspace(project, remote_root, ['--machine', machine_id])
     print('Codespace connected. Select its Codespace group in Herdr.')
     if os.environ.get('HERDR_ENV') == '1':

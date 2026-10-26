@@ -241,6 +241,8 @@ class ExistingCheckoutTests(unittest.TestCase):
         self.assertFalse(result['conversations']['healthy'])
         self.assertEqual(store.load(old)['schema'], 1)
         self.assertNotIn('recoverable', str(result))
+        self.assertIsNone(result['herdr_hooks'])
+        self.assertIn('Herdr hooks: not checked on space', workspace.status_text(result))
 
     def test_ready_requires_schema_two_receipt_not_old_worker_checkpoint(self):
         self.registry()
@@ -369,6 +371,40 @@ class ExistingCheckoutTests(unittest.TestCase):
                 workspace.remote(self.project, self.state)
         retarget.assert_not_called()
         self.assertEqual(read_json(self.state / 'workspace.json'), original)
+
+    def test_remote_prepares_herdr_hooks_for_the_chosen_codespace(self):
+        self.registry()
+        captured = {}
+
+        def open_remote(*args, **kwargs):
+            captured['prepared'] = kwargs['prepared']
+            return 0
+
+        with patch.object(workspace, '_prerequisites'), patch.object(workspace, '_choose_pairing', return_value=('space', self.original)), \
+                patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection()), \
+                patch.object(workspace, '_verify_roots', return_value=[self.generated]), \
+                patch.object(scratch, 'retarget'), patch.object(scratch, 'start'), \
+                patch.object(workspace, '_ready', return_value={}), \
+                patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), \
+                patch('devcontainer_setup.project_sync.herdr.open_remote', side_effect=open_remote), \
+                patch('devcontainer_setup.project_sync.agent_hooks.ensure_on', return_value={}) as ensure_on:
+            self.assertEqual(workspace.remote(self.project, self.state), 0)
+            ensure_on.assert_not_called()
+            captured['prepared']()
+        ensure_on.assert_called_once_with('space', self.state)
+
+    def test_status_returns_herdr_hooks_without_a_remote_call(self):
+        from devcontainer_setup.project_sync.state import atomic_write
+        self.registry()
+        receipt = {'codespace': 'space', 'checked_at': 1700000000.5,
+                   'hooks': {'claude': 'current', 'codex': 'current', 'opencode': 'current'}, 'installed': []}
+        atomic_write(self.state / 'herdr-hooks.json', json.dumps(receipt).encode() + b'\n')
+        with patch.object(scratch, 'status', return_value=dict(running=False, phase='stopped')), \
+                patch('devcontainer_setup.project_sync.codespaces.Codespaces', side_effect=AssertionError('offline')):
+            result = workspace.status(self.project, self.state)
+        self.assertEqual(result['herdr_hooks']['codespace'], 'space')
+        self.assertEqual(result['herdr_hooks']['hooks']['opencode'], 'current')
+        self.assertIn('Herdr hooks: claude, codex, opencode current on space', workspace.status_text(result))
 
     def test_retired_local_recovery_and_agent_launch_apis_absent(self):
         for name in ('local', 'local_project', '_recover'):

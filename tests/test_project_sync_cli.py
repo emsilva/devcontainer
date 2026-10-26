@@ -546,10 +546,13 @@ class ProjectSyncCLITests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('Sync worker: stopped', result.stdout)
         self.assertIn('History:', result.stdout)
+        self.assertNotIn('Herdr hooks:', result.stdout)
         self.assertLess(len(result.stdout.splitlines()), 9)
         detail = self.run_cli('work', '--status', '--json')
         self.assertEqual(detail.returncode, 0, detail.stderr)
-        self.assertIsNone(json.loads(detail.stdout)['last_mac_checkpoint'])
+        body = json.loads(detail.stdout)
+        self.assertIsNone(body['last_mac_checkpoint'])
+        self.assertIsNone(body['herdr_hooks'])
         self.assertFalse(self.state.exists())
 
     def test_disconnect_is_project_scoped_idempotent_and_needs_no_terminal_or_pairing(self):

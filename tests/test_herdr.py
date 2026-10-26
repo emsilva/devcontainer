@@ -413,6 +413,85 @@ request_path = "request.wav"
                                                               'agent': None, 'foreground_process': None}, **busy))
                 self.assertFalse(any('close' in call for call in calls))
 
+    def test_prepared_runs_once_after_the_receipt_and_before_the_workspace(self):
+        session = 'project-' + 'a' * 24
+        machine = {'id': 'created-id', 'target': 'alias', 'session': session, 'enabled': False}
+        order = []
+
+        def call(args, **kwargs):
+            order.append(tuple(args[:3]))
+            return 0
+
+        def prepared():
+            order.append('prepared')
+            self.assertEqual(read_json(self.state / 'herdr-machine.json')['machine_id'], 'created-id')
+
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr.subprocess, 'run', side_effect=[completed([]), completed([machine])]), \
+                mock.patch.object(herdr.subprocess, 'call', side_effect=call), \
+                mock.patch.object(herdr, '_workspace', side_effect=lambda *a, **k: order.append('workspace')):
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote', prepared=prepared), 0)
+        self.assertEqual(order, [('herdr', 'machine', 'add'), ('herdr', 'machine', 'enable'), 'prepared', 'workspace'])
+        self.assertEqual(order.count('prepared'), 1)
+
+    def test_prepared_is_not_called_when_machine_add_fails(self):
+        called = []
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr.subprocess, 'run', return_value=completed([])), \
+                mock.patch.object(herdr.subprocess, 'call', return_value=1), \
+                mock.patch.object(herdr, '_workspace', side_effect=AssertionError('workspace opened')):
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote',
+                                               prepared=lambda: called.append('prepared')), 1)
+        self.assertEqual(called, [])
+        self.assertFalse((self.state / 'herdr-machine.json').exists())
+
+    def test_prepared_runs_when_the_machine_was_already_saved(self):
+        session = 'project-' + 'a' * 24
+        machine = {'id': 'kept-id', 'target': 'alias', 'session': session, 'enabled': True}
+        order = []
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr.subprocess, 'run', return_value=completed([machine])), \
+                mock.patch.object(herdr.subprocess, 'call', side_effect=AssertionError('setup')) as call, \
+                mock.patch.object(herdr, '_workspace', side_effect=lambda *a, **k: order.append('workspace')):
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote',
+                                               prepared=lambda: order.append('prepared')), 0)
+        call.assert_not_called()
+        self.assertEqual(order, ['prepared', 'workspace'])
+
+    def test_prepared_is_not_called_when_machine_enable_fails(self):
+        session = 'project-' + 'a' * 24
+        machine = {'id': 'kept-id', 'target': 'alias', 'session': session, 'enabled': False}
+        called = []
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr.subprocess, 'run', return_value=completed([machine])), \
+                mock.patch.object(herdr.subprocess, 'call', return_value=1), \
+                mock.patch.object(herdr, '_workspace', side_effect=AssertionError('workspace opened')):
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote',
+                                               prepared=lambda: called.append('prepared')), 1)
+        self.assertEqual(called, [])
+
+    def test_prepared_is_not_called_when_machine_remove_fails(self):
+        session = 'project-' + 'a' * 24
+        self.bind('new-space', {'machine_id': 'old-id', 'alias': 'alias', 'session': session, 'codespace': 'old-space'})
+        old = {'id': 'old-id', 'target': 'alias', 'session': session, 'enabled': True}
+        new = {'id': 'new-id', 'target': 'alias', 'session': session, 'enabled': True}
+        calls = []
+
+        def call(args, **kwargs):
+            calls.append(args[:3])
+            return 1 if args[1:3] == ['machine', 'remove'] else 0
+
+        called = []
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr.subprocess, 'run', side_effect=[completed([old]), completed([old, new])]), \
+                mock.patch.object(herdr.subprocess, 'call', side_effect=call), \
+                mock.patch.object(herdr, '_workspace', side_effect=AssertionError('workspace opened')):
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote',
+                                               prepared=lambda: called.append('prepared')), 1)
+        self.assertEqual(called, [])
+        self.assertEqual(calls, [['herdr', 'machine', 'add'], ['herdr', 'machine', 'remove']])
+        self.assertEqual(read_json(self.state / 'herdr-machine.json')['codespace'], 'old-space')
+
     def test_local_home_workspace_is_never_closed(self):
         rows = {'result': {'workspaces': [{'workspace_id': 'w1', 'label': '~', 'worktree': None,
                                            'tab_count': 1, 'pane_count': 1}]}}

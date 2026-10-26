@@ -252,7 +252,14 @@ def remote(project, state, armed=None, rebind=None):
         # Outside workspace-control.lock, which arming takes for its own write,
         # and before Herdr, whose TUI would otherwise hold the step back.
         armed(primary)
-    return open_remote(primary, state, remote_root, remote_herdr=remote_herdr)
+    # The connection above is closed, and on a new Codespace Herdr exists only
+    # after machine add. Check resume hooks on a fresh connection once that is saved.
+    from . import agent_hooks
+
+    def prepared():
+        agent_hooks.ensure_on(name, state)
+
+    return open_remote(primary, state, remote_root, remote_herdr=remote_herdr, prepared=prepared)
 
 
 def status(project, state):
@@ -271,8 +278,10 @@ def status(project, state):
                and (not value.get('remote_root') or cycle.get('remote_root') == value['remote_root']))
     history = sync_cycle.summary(cycle, current=current, local_receipt=latest)
     history['retained_receipts'] = dict(runtime.get('retained_receipts', {}), codespace_to_desktop=latest)
+    from . import agent_hooks
     return dict(workspace=value, worker=runtime, scratch=sync, last_mac_checkpoint=latest,
                 conversations=history, recovery=recovery(state),
+                herdr_hooks=agent_hooks.read(state),
                 synchronization='Scratch and project conversations only; Git is managed manually')
 
 
@@ -409,6 +418,15 @@ def status_text(value):
         lines.append('Previous verified receipts retained; availability reflects the current cycle.')
     if history['issues'] or worker.get('error') or scratch_status.get('issue'):
         lines.append('Details: task work:status -- --json; logs: task scratch:logs')
+    # A property of this Codespace, not of arming, so it is not a recovery line.
+    # Callers in tests omit the new key; a missing Codespace adds no line.
+    workspace_row = value.get('workspace')
+    codespace = workspace_row.get('codespace') if isinstance(workspace_row, dict) else None
+    if codespace:
+        from . import agent_hooks
+        hook_line = agent_hooks.status_line(value.get('herdr_hooks'), codespace)
+        if hook_line:
+            lines.append(hook_line)
     if value.get('recovery'):
         lines += recovery_lines(value['recovery'])
     return '\n'.join(lines)
