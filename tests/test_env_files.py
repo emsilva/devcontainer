@@ -440,6 +440,83 @@ class EnsureOnTests(GitEnv):
         self.assertNotIn('error', receipt)
         self.assertEqual(out.getvalue(), 'Copied .env to space (mode 600).\n')
 
+    def test_ensure_on_does_not_connect_when_no_files_were_found(self):
+        init_repo(self.root)
+        out = io.StringIO()
+        with mock.patch('devcontainer_setup.project_sync.transport.CodespaceConnection',
+                        side_effect=AssertionError('connection')):
+            with contextlib.redirect_stdout(out):
+                receipt = env_files.ensure_on('space', self.state, self.root, '/workspaces/ordinary')
+        self.assertEqual(receipt['files'], {})
+        self.assertNotIn('error', receipt)
+        self.assertEqual(out.getvalue(), '')
+        self.assertEqual(read_json(self.state / env_files.RECEIPT)['files'], {})
+
+    def test_ensure_on_does_not_connect_for_only_a_too_large_file(self):
+        init_repo(self.root)
+        write_file(self.root, 'oversized/.env', b'x' * (70 * 1024))
+        out = io.StringIO()
+        with mock.patch('devcontainer_setup.project_sync.transport.CodespaceConnection',
+                        side_effect=AssertionError('connection')):
+            with contextlib.redirect_stdout(out):
+                receipt = env_files.ensure_on('space', self.state, self.root, '/workspaces/ordinary')
+        self.assertEqual(receipt['files'], {'oversized/.env': 'too large'})
+        self.assertNotIn('error', receipt)
+        self.assertEqual(out.getvalue(),
+                         'Did not copy oversized/.env to space: it is larger than 64 KiB.\n')
+        self.assertEqual(read_json(self.state / env_files.RECEIPT)['files'], receipt['files'])
+
+    def test_ensure_on_connects_once_after_a_single_find(self):
+        init_repo(self.root)
+        write_file(self.root, '.env', b'root\n')
+        events = []
+        real_run = subprocess.run
+
+        def counting_run(*args, **kwargs):
+            command = args[0] if args else kwargs.get('args')
+            if isinstance(command, (list, tuple)) and 'ls-files' in command:
+                events.append('git')
+            return real_run(*args, **kwargs)
+
+        class Opened:
+            def __init__(self, codespace, *, state):
+                events.append('connect')
+                self.codespace, self.state = codespace, state
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                events.append('closed')
+                return None
+
+            def python(self, code, payload=b'', timeout=60):
+                events.append('python')
+                return json.dumps({'files': {'.env': 'copied'}}).encode()
+
+        with mock.patch('devcontainer_setup.project_sync.transport.CodespaceConnection', Opened), \
+                mock.patch('devcontainer_setup.project_sync.env_files.subprocess.run', side_effect=counting_run):
+            with contextlib.redirect_stdout(io.StringIO()):
+                receipt = env_files.ensure_on('space', self.state, self.root, '/workspaces/ordinary')
+        self.assertEqual(events.count('git'), 1)
+        self.assertEqual(events.count('connect'), 1)
+        self.assertLess(events.index('git'), events.index('connect'))
+        self.assertEqual(events[-1], 'closed')
+        self.assertIn('python', events)
+        self.assertEqual(receipt['files'], {'.env': 'copied'})
+        self.assertNotIn('error', receipt)
+
+    def test_ensure_on_records_a_find_failure_without_connecting(self):
+        out = io.StringIO()
+        with mock.patch('devcontainer_setup.project_sync.transport.CodespaceConnection',
+                        side_effect=AssertionError('connection')):
+            with contextlib.redirect_stdout(out):
+                receipt = env_files.ensure_on('space', self.state, self.root, '/workspaces/ordinary')
+        self.assertEqual(receipt['error'], 'git ls-files failed')
+        self.assertEqual(receipt['files'], {})
+        self.assertEqual(out.getvalue(), 'Could not check .env files on space: git ls-files failed. '
+                         'Run task work:cs again.\n')
+
 
 class StatusTests(unittest.TestCase):
     def receipt(self, **updates):

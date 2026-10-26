@@ -440,21 +440,33 @@ def _clock(now) -> float:
     return value
 
 
-def ensure(connection, codespace, state, root, remote_root, *, now=time.time) -> dict:
+def _to_send(found: dict) -> dict:
+    return {path: value for path, value in found.items() if isinstance(value, bytes)}
+
+
+def _finish(connection, codespace, state, remote_root, found, checked_at) -> dict:
+    states = {path: _TOO_LARGE for path, value in found.items() if value == _TOO_LARGE}
+    sending = _to_send(found)
+    if sending:
+        # Nothing to send never reaches here with a missing connection: ensure_on skips it.
+        raw = connection.python(REMOTE, _payload(_safe_root(remote_root), sending), TIMEOUT)
+        states.update(_states(raw, sending))
+    receipt = {'codespace': codespace, 'checked_at': checked_at, 'files': states}
+    _store(state, receipt)
+    return receipt
+
+
+def ensure(connection, codespace, state, root, remote_root, *, now=time.time, found=None) -> dict:
     """Copy missing .env files, write the receipt, and print one line per file that is not current.
 
     ValueError and OSError from Git, the connection, python() or parsing become a receipt error.
+    `found`, when given, is the map from a single earlier `find`; it is not run again.
     """
     try:
         checked_at = _clock(now)
-        found = find(root)
-        states = {path: _TOO_LARGE for path, value in found.items() if value == _TOO_LARGE}
-        to_send = {path: value for path, value in found.items() if isinstance(value, bytes)}
-        if to_send:
-            raw = connection.python(REMOTE, _payload(_safe_root(remote_root), to_send), TIMEOUT)
-            states.update(_states(raw, to_send))
-        receipt = {'codespace': codespace, 'checked_at': checked_at, 'files': states}
-        _store(state, receipt)
+        if found is None:
+            found = find(root)
+        receipt = _finish(connection, codespace, state, remote_root, found, checked_at)
     except (ValueError, OSError) as error:
         return _record_error(codespace, state, error, now)
     _emit(receipt)
@@ -462,7 +474,16 @@ def ensure(connection, codespace, state, root, remote_root, *, now=time.time) ->
 
 
 def ensure_on(codespace, state, root, remote_root) -> dict:
-    """Open a fresh Codespace connection and copy .env files. A connect failure is a receipt error."""
+    """Copy .env files. Open a fresh connection only when a file has bytes to send.
+
+    A find failure is a receipt error, with no connection. A connect failure is too.
+    """
+    try:
+        found = find(root)
+    except (ValueError, OSError) as error:
+        return _record_error(codespace, state, error, time.time)
+    if not _to_send(found):
+        return ensure(None, codespace, state, root, remote_root, found=found)
     from .transport import CodespaceConnection
     try:
         connection = CodespaceConnection(codespace, state=Path(state))
@@ -470,7 +491,7 @@ def ensure_on(codespace, state, root, remote_root) -> dict:
     except (ValueError, OSError) as error:
         return _record_error(codespace, state, error, time.time)
     try:
-        return ensure(entered, codespace, state, root, remote_root)
+        return ensure(entered, codespace, state, root, remote_root, found=found)
     finally:
         # The check already printed its line. Closing must not fail work:cs or print another.
         try:
