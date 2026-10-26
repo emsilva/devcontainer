@@ -14,14 +14,61 @@ RECEIPT = 'herdr-hooks.json'
 # is a little longer so a hung command hits these, not the transport timeout.
 INSTALL_TIMEOUT = 60
 STATUS_TIMEOUT = 30
+SKILL_TIMEOUT = 30
 _CALL_MARGIN = 15
 _STATES = ('not installed', 'outdated', 'current')
+_SKILL_STATES = ('current', 'installed', 'managed elsewhere', 'failed', 'unknown')
 
-# Runs as `python3 -I -B -c` on the Codespace. Stdin is a JSON list of agent
-# names. Herdr is found the same way as workspace._HERDR_PROBE.
+# Runs as `python3 -I -B -c` on the Codespace. Stdin is a JSON object
+# {"install": [...], "skill": true|false}. Herdr is found the same way as
+# workspace._HERDR_PROBE. Skill install uses timeout=30, matching SKILL_TIMEOUT.
 REMOTE = """\
 import json, os, shutil, subprocess, sys
 ALLOWED = ("claude", "codex", "opencode")
+
+def ensure_skill(herdr):
+    skill_dir = os.path.join(os.path.expanduser("~"), ".claude", "skills", "herdr")
+    target = os.path.join(skill_dir, "SKILL.md")
+    if os.path.islink(skill_dir) or os.path.islink(target):
+        return "managed elsewhere"
+    try:
+        result = subprocess.run(
+            [herdr, "--skill"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return "failed"
+    data = result.stdout
+    if result.returncode != 0 or not data or not data.splitlines() or data.splitlines()[0] != b"---":
+        return "failed"
+    temporary = None
+    try:
+        if os.path.islink(skill_dir) or os.path.islink(target):
+            return "managed elsewhere"
+        if os.path.isfile(target) and not os.path.islink(target):
+            with open(target, "rb") as existing:
+                if existing.read() == data:
+                    return "current"
+        os.makedirs(skill_dir, exist_ok=True)
+        if os.path.islink(skill_dir) or os.path.islink(target):
+            return "managed elsewhere"
+        temporary = os.path.join(skill_dir, ".herdr-skill-" + os.urandom(8).hex() + ".tmp")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        try:
+            os.write(descriptor, data)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, target)
+        temporary = None
+    except OSError:
+        return "failed"
+    finally:
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+    return "installed"
 
 def main():
     herdr = shutil.which("herdr", path=os.pathsep.join([os.environ.get("PATH", ""), os.path.expanduser("~/.local/bin")]))
@@ -29,12 +76,19 @@ def main():
         print(json.dumps({"herdr": False}))
         return
     try:
-        names = json.load(sys.stdin)
+        body = json.load(sys.stdin)
     except (ValueError, TypeError):
-        names = None
-    if not isinstance(names, list) or any(not isinstance(name, str) or name not in ALLOWED for name in names):
+        body = None
+    names = body.get("install") if isinstance(body, dict) else None
+    skill = body.get("skill") if isinstance(body, dict) else None
+    if (not isinstance(names, list)
+            or any(not isinstance(name, str) or name not in ALLOWED for name in names)
+            or (skill is not None and skill is not True and skill is not False)):
         sys.stderr.write("refused\\n")
         raise SystemExit(2)
+    answer = {"herdr": True}
+    if skill is True:
+        answer["skill"] = ensure_skill(herdr)
     installed = {}
     for name in names:
         result = subprocess.run(
@@ -44,14 +98,16 @@ def main():
     status = subprocess.run(
         [herdr, "integration", "status"],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
-    print(json.dumps({"herdr": True, "installed": installed, "status": status.stdout.decode("utf-8", "replace")}))
+    answer["installed"] = installed
+    answer["status"] = status.stdout.decode("utf-8", "replace")
+    print(json.dumps(answer))
 
 main()
 """
 
 
-def _python_timeout(count: int) -> int:
-    return STATUS_TIMEOUT + INSTALL_TIMEOUT * count + _CALL_MARGIN
+def _python_timeout(count: int, skill: bool = False) -> int:
+    return STATUS_TIMEOUT + INSTALL_TIMEOUT * count + (SKILL_TIMEOUT if skill else 0) + _CALL_MARGIN
 
 
 def _state(rest: str) -> str:
@@ -102,6 +158,7 @@ def _failed(codespace, checked_at, reason: str) -> dict:
         'checked_at': checked_at,
         'hooks': {agent: 'unknown' for agent in AGENTS},
         'installed': [],
+        'skill': 'unknown',
         'error': reason,
     }
 
@@ -125,9 +182,23 @@ def _message(receipt: dict) -> str:
     return 'Herdr resume hooks are current on ' + codespace + ' (claude, codex, opencode).'
 
 
+def _skill_line(receipt: dict) -> str | None:
+    skill = receipt.get('skill')
+    codespace = receipt.get('codespace', '')
+    if skill == 'installed':
+        return 'Installed the Herdr skill on ' + codespace + ' (the copy bundled with its Herdr).'
+    if skill == 'failed':
+        return ('Could not install the Herdr skill on ' + codespace
+                + '; agents there cannot load it. Run task work:cs again.')
+    return None
+
+
 def _emit(receipt: dict) -> None:
     try:
         print(_message(receipt), flush=True)
+        extra = _skill_line(receipt)
+        if extra:
+            print(extra, flush=True)
     except OSError:
         pass
 
@@ -154,8 +225,18 @@ def _load(raw) -> dict:
     return value
 
 
-def _call(connection, names: list[str]) -> dict:
-    raw = connection.python(REMOTE, json.dumps(names).encode(), _python_timeout(len(names)))
+def _payload(names, skill: bool) -> bytes:
+    return json.dumps({'install': list(names), 'skill': skill}).encode()
+
+
+def _skill_state(value) -> str:
+    if value in _SKILL_STATES:
+        return value
+    return 'failed'
+
+
+def _call(connection, names: list[str], *, skill: bool = False) -> dict:
+    raw = connection.python(REMOTE, _payload(names, skill), _python_timeout(len(names), skill))
     value = _load(raw)
     if value.get('herdr') is False:
         raise ValueError('Herdr is not installed there')
@@ -165,12 +246,14 @@ def _call(connection, names: list[str]) -> dict:
 
 
 def _check(connection, codespace, checked_at) -> dict:
-    first = _call(connection, [])
+    # Skill rides the status call, so a Codespace that is already current still costs one call.
+    first = _call(connection, [], skill=True)
+    skill = _skill_state(first.get('skill'))
     hooks = parse(first['status'])
     missing = [agent for agent in AGENTS if hooks.get(agent) != 'current']
     installed: list[str] = []
     if missing:
-        second = _call(connection, missing)
+        second = _call(connection, missing, skill=False)
         hooks = parse(second['status'])
         installed = list(missing)
     return {
@@ -178,13 +261,15 @@ def _check(connection, codespace, checked_at) -> dict:
         'checked_at': checked_at,
         'hooks': {agent: hooks.get(agent, 'unknown') for agent in AGENTS},
         'installed': installed,
+        'skill': skill,
     }
 
 
 def ensure(connection, codespace, state, *, now=time.time) -> dict:
-    """Check hooks, install any that are not current, write the receipt, and print one line.
+    """Check hooks and the bundled Herdr skill, write the receipt, and print the result.
 
     ValueError and OSError from the connection or the response become a receipt error.
+    The hook line is unchanged. A skill line is added only when it was installed or the install failed.
     """
     try:
         checked_at = now()
@@ -225,30 +310,45 @@ def read(state) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+def _known_skill(receipt) -> str:
+    if isinstance(receipt, dict) and receipt.get('skill') in _SKILL_STATES:
+        return receipt['skill']
+    return 'unknown'
+
+
+def _with_skill(line: str, receipt) -> str:
+    skill = _known_skill(receipt)
+    text = line + '; skill ' + skill
+    # A line that already tells the owner to run work:cs does not grow a second hint.
+    if skill in ('failed', 'unknown') and 'task work:cs' not in line:
+        text += ' (task work:cs installs it)'
+    return text
+
+
 def status_line(receipt, codespace) -> str | None:
     """One offline line for work:status, or None when there is no Codespace to name."""
     if not isinstance(codespace, str) or not codespace:
         return None
     not_checked = 'Herdr hooks: not checked on ' + codespace + '; task work:cs checks them'
     if not isinstance(receipt, dict) or receipt.get('codespace') != codespace:
-        return not_checked
+        return _with_skill(not_checked, None)
     error = receipt.get('error')
     if isinstance(error, str) and error:
-        return ('Herdr hooks: check failed on ' + codespace + ' (' + error
-                + '); task work:cs checks again')
+        return _with_skill('Herdr hooks: check failed on ' + codespace + ' (' + error
+                           + '); task work:cs checks again', receipt)
     hooks = receipt.get('hooks') if isinstance(receipt.get('hooks'), dict) else {}
     pending = [agent + ' ' + str(hooks.get(agent, 'unknown'))
                for agent in AGENTS if hooks.get(agent) != 'current']
     if pending:
-        return ('Herdr hooks: ' + ', '.join(pending) + ' on ' + codespace
-                + '; task work:cs installs them')
+        return _with_skill('Herdr hooks: ' + ', '.join(pending) + ' on ' + codespace
+                           + '; task work:cs installs them', receipt)
     checked_at = receipt.get('checked_at')
     if not isinstance(checked_at, (int, float)):
-        return not_checked
+        return _with_skill(not_checked, None)
     from .arming import format_time
     try:
         checked = format_time(checked_at)
     except (TypeError, ValueError, OSError, OverflowError):
-        return not_checked
-    return ('Herdr hooks: claude, codex, opencode current on ' + codespace
-            + ' (checked ' + checked + ')')
+        return _with_skill(not_checked, None)
+    return _with_skill('Herdr hooks: claude, codex, opencode current on ' + codespace
+                       + ' (checked ' + checked + ')', receipt)

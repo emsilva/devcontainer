@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import stat
@@ -39,10 +40,13 @@ opencode: current (v13) (/home/vscode/.config/opencode/plugins/herdr-agent-state
 WHEN = 1_700_000_000.5
 
 
-def remote_body(status='', installed=None, herdr=True):
+SKILL_FIXTURE = b'---\nname: herdr\ndescription: fixture\n'
+
+
+def remote_body(status='', installed=None, herdr=True, skill='current'):
     if not herdr:
         return json.dumps({'herdr': False}).encode()
-    return json.dumps({'herdr': True, 'installed': installed or {}, 'status': status}).encode()
+    return json.dumps({'herdr': True, 'installed': installed or {}, 'status': status, 'skill': skill}).encode()
 
 
 class Connection:
@@ -107,10 +111,11 @@ class EnsureTests(unittest.TestCase):
             remote_body(CURRENT_STATUS, {'claude': 0, 'codex': 0}),
         ])
         receipt, printed = self.run_ensure(connection)
-        self.assertEqual([call['payload'] for call in connection.calls],
-                         [b'[]', b'["claude", "codex"]'])
+        self.assertEqual(json.loads(connection.calls[0]['payload']), {'install': [], 'skill': True})
+        self.assertEqual(json.loads(connection.calls[1]['payload']),
+                         {'install': ['claude', 'codex'], 'skill': False})
         self.assertEqual(connection.calls[0]['code'], agent_hooks.REMOTE)
-        self.assertGreaterEqual(connection.calls[0]['timeout'], 30)
+        self.assertGreaterEqual(connection.calls[0]['timeout'], 30 + 30)
         self.assertGreaterEqual(connection.calls[1]['timeout'], 30 + 60 * 2)
         self.assertEqual(receipt['codespace'], 'space')
         self.assertEqual(receipt['checked_at'], WHEN)
@@ -130,12 +135,40 @@ class EnsureTests(unittest.TestCase):
         connection = Connection([remote_body(CURRENT_STATUS)])
         receipt, printed = self.run_ensure(connection)
         self.assertEqual(len(connection.calls), 1)
-        self.assertEqual(connection.calls[0]['payload'], b'[]')
+        self.assertEqual(json.loads(connection.calls[0]['payload']), {'install': [], 'skill': True})
+        self.assertEqual(receipt['skill'], 'current')
         self.assertEqual(receipt['installed'], [])
         self.assertEqual(receipt['hooks'], {
             'claude': 'current', 'codex': 'current', 'opencode': 'current'})
         self.assertNotIn('error', receipt)
         self.assertEqual(printed, 'Herdr resume hooks are current on space (claude, codex, opencode).\n')
+        self.assertNotIn('Herdr skill', printed)
+
+    def test_ensure_prints_a_line_when_the_skill_is_installed(self):
+        connection = Connection([remote_body(CURRENT_STATUS, skill='installed')])
+        receipt, printed = self.run_ensure(connection)
+        self.assertEqual(json.loads(connection.calls[0]['payload'])['skill'], True)
+        self.assertEqual(len(connection.calls), 1)
+        self.assertEqual(receipt['skill'], 'installed')
+        self.assertNotIn('error', receipt)
+        self.assertEqual(printed, 'Herdr resume hooks are current on space (claude, codex, opencode).\n'
+                         'Installed the Herdr skill on space (the copy bundled with its Herdr).\n')
+
+    def test_ensure_prints_a_line_when_the_skill_fails(self):
+        connection = Connection([remote_body(CURRENT_STATUS, skill='failed')])
+        receipt, printed = self.run_ensure(connection)
+        self.assertEqual(receipt['skill'], 'failed')
+        self.assertNotIn('error', receipt)
+        self.assertEqual(printed, 'Herdr resume hooks are current on space (claude, codex, opencode).\n'
+                         'Could not install the Herdr skill on space; agents there cannot load it. '
+                         'Run task work:cs again.\n')
+
+    def test_ensure_prints_no_skill_line_when_it_is_already_managed(self):
+        connection = Connection([remote_body(CURRENT_STATUS, skill='managed elsewhere')])
+        receipt, printed = self.run_ensure(connection)
+        self.assertEqual(receipt['skill'], 'managed elsewhere')
+        self.assertEqual(printed.splitlines(),
+                         ['Herdr resume hooks are current on space (claude, codex, opencode).'])
 
     def test_ensure_installs_unknown_and_not_installed_in_agent_order(self):
         # Text order is not agent order; a missing line is unknown, which is not current.
@@ -143,7 +176,8 @@ class EnsureTests(unittest.TestCase):
         connection = Connection([remote_body(before), remote_body(CURRENT_STATUS, {
             'claude': 0, 'codex': 0, 'opencode': 0})])
         receipt, printed = self.run_ensure(connection)
-        self.assertEqual(connection.calls[1]['payload'], b'["claude", "codex", "opencode"]')
+        self.assertEqual(json.loads(connection.calls[1]['payload']),
+                         {'install': ['claude', 'codex', 'opencode'], 'skill': False})
         self.assertEqual(receipt['installed'], ['claude', 'codex', 'opencode'])
         self.assertIn('for claude, codex, opencode;', printed)
 
@@ -152,6 +186,7 @@ class EnsureTests(unittest.TestCase):
             'Remote Python command failed (exit 2); inspect the remote checkout and Python environment.')])
         receipt, printed = self.run_ensure(connection)
         self.assertEqual(receipt['error'], 'Remote Python command failed (exit 2)')
+        self.assertEqual(receipt['skill'], 'unknown')
         self.assertEqual(receipt['installed'], [])
         self.assertEqual(printed, 'Could not check Herdr resume hooks on space '
                          '(Remote Python command failed (exit 2)); its agents may not come back '
@@ -271,6 +306,12 @@ import json, os, sys
 home = os.environ["HOME"]
 with open(home + "/herdr-argv.log", "a") as log:
     log.write(json.dumps(sys.argv[1:]) + "\\n")
+if sys.argv[1:] == ["--skill"]:
+    path = home + "/herdr-skill.txt"
+    if os.path.exists(path):
+        with open(path, "rb") as skill:
+            sys.stdout.buffer.write(skill.read())
+    sys.exit(int(os.environ.get("HERDR_SKILL_CODE", "0")))
 if sys.argv[1:3] == ["integration", "status"]:
     with open(home + "/herdr-status.txt", "rb") as status:
         sys.stdout.buffer.write(status.read())
@@ -278,8 +319,10 @@ if sys.argv[1:3] == ["integration", "status"]:
         script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         return script
 
-    def invoke(self, payload, path=None):
+    def invoke(self, payload, path=None, extra_env=None):
         env = {'HOME': str(self.home), 'PATH': str(self.bindir if path is None else path), 'LANG': 'C'}
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             [self.python, '-I', '-B', '-c', agent_hooks.REMOTE],
             input=payload.encode() if isinstance(payload, str) else payload,
@@ -295,7 +338,7 @@ if sys.argv[1:3] == ["integration", "status"]:
         self.install_herdr(self.bindir)
         self.assertIn('timeout=60', agent_hooks.REMOTE)
         self.assertIn('timeout=30', agent_hooks.REMOTE)
-        result = self.invoke('["codex"]')
+        result = self.invoke('{"install": ["codex"], "skill": false}')
         self.assertEqual(result.returncode, 0, result.stderr)
         body = json.loads(result.stdout)
         self.assertEqual(body, {'herdr': True, 'installed': {'codex': 0}, 'status': CURRENT_STATUS})
@@ -306,7 +349,7 @@ if sys.argv[1:3] == ["integration", "status"]:
 
     def test_remote_code_refuses_a_name_outside_the_three(self):
         self.install_herdr(self.bindir)
-        result = self.invoke('["claude", "pi"]')
+        result = self.invoke('{"install": ["claude", "pi"], "skill": true}')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.argv_log(), [])
         bad = self.invoke('{"agent": "claude"}')
@@ -314,7 +357,7 @@ if sys.argv[1:3] == ["integration", "status"]:
         self.assertEqual(self.argv_log(), [])
 
     def test_remote_code_reports_no_herdr_when_it_is_not_on_path_or_in_local_bin(self):
-        result = self.invoke('[]')
+        result = self.invoke('{"install": [], "skill": true}')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {'herdr': False})
         self.assertFalse((self.home / '.local/bin/herdr').exists())
@@ -323,12 +366,100 @@ if sys.argv[1:3] == ["integration", "status"]:
         local = self.home / '.local/bin'
         local.mkdir(parents=True)
         self.install_herdr(local)
-        result = self.invoke('["opencode"]')
+        result = self.invoke('{"install": ["opencode"], "skill": false}')
         self.assertEqual(result.returncode, 0, result.stderr)
         body = json.loads(result.stdout)
         self.assertTrue(body['herdr'])
         self.assertEqual(body['installed'], {'opencode': 0})
         self.assertEqual(self.argv_log()[0], ['integration', 'install', 'opencode'])
+
+    def skill_path(self):
+        return self.home / '.claude' / 'skills' / 'herdr' / 'SKILL.md'
+
+    def write_skill_fixture(self, data=SKILL_FIXTURE):
+        (self.home / 'herdr-skill.txt').write_bytes(data)
+
+    def test_remote_code_installs_a_missing_skill(self):
+        self.install_herdr(self.bindir)
+        self.write_skill_fixture()
+        result = self.invoke('{"install": [], "skill": true}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = json.loads(result.stdout)
+        self.assertEqual(body['skill'], 'installed')
+        self.assertEqual(self.skill_path().read_bytes(), SKILL_FIXTURE)
+        self.assertEqual(self.argv_log()[0], ['--skill'])
+
+    def test_remote_code_leaves_an_identical_skill_current(self):
+        self.install_herdr(self.bindir)
+        self.write_skill_fixture()
+        target = self.skill_path()
+        target.parent.mkdir(parents=True)
+        target.write_bytes(SKILL_FIXTURE)
+        os.utime(target, (1_700_000_000, 1_700_000_000))
+        result = self.invoke('{"install": [], "skill": true}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['skill'], 'current')
+        self.assertEqual(target.read_bytes(), SKILL_FIXTURE)
+        self.assertEqual(target.stat().st_mtime, 1_700_000_000)
+
+    def test_remote_code_replaces_a_different_skill(self):
+        self.install_herdr(self.bindir)
+        self.write_skill_fixture()
+        target = self.skill_path()
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b'---\nold skill\n')
+        result = self.invoke('{"install": [], "skill": true}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['skill'], 'installed')
+        self.assertEqual(target.read_bytes(), SKILL_FIXTURE)
+
+    def test_remote_code_leaves_a_symlinked_skill_directory_alone(self):
+        self.install_herdr(self.bindir)
+        self.write_skill_fixture()
+        real = self.home / 'elsewhere'
+        real.mkdir()
+        (real / 'SKILL.md').write_bytes(b'hand installed\n')
+        os.utime(real / 'SKILL.md', (1_700_000_000, 1_700_000_000))
+        link_parent = self.home / '.claude' / 'skills'
+        link_parent.mkdir(parents=True)
+        link = link_parent / 'herdr'
+        link.symlink_to(real)
+        result = self.invoke('{"install": [], "skill": true}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['skill'], 'managed elsewhere')
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), str(real))
+        self.assertEqual((real / 'SKILL.md').read_bytes(), b'hand installed\n')
+        self.assertEqual((real / 'SKILL.md').stat().st_mtime, 1_700_000_000)
+
+    def test_remote_code_leaves_a_symlinked_skill_file_alone(self):
+        self.install_herdr(self.bindir)
+        self.write_skill_fixture()
+        real = self.home / 'real-skill.md'
+        real.write_bytes(b'hand installed\n')
+        os.utime(real, (1_700_000_000, 1_700_000_000))
+        target = self.skill_path()
+        target.parent.mkdir(parents=True)
+        target.symlink_to(real)
+        result = self.invoke('{"install": [], "skill": true}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['skill'], 'managed elsewhere')
+        self.assertTrue(target.is_symlink())
+        self.assertEqual(os.readlink(target), str(real))
+        self.assertEqual(real.read_bytes(), b'hand installed\n')
+        self.assertEqual(real.stat().st_mtime, 1_700_000_000)
+
+    def test_remote_code_does_not_write_a_skill_when_herdr_skill_fails(self):
+        self.install_herdr(self.bindir)
+        self.write_skill_fixture()
+        failed = self.invoke('{"install": [], "skill": true}', extra_env={'HERDR_SKILL_CODE': '1'})
+        self.assertEqual(failed.returncode, 0, failed.stderr)
+        self.assertEqual(json.loads(failed.stdout)['skill'], 'failed')
+        self.assertFalse(self.skill_path().exists())
+        self.write_skill_fixture(b'not a skill\n')
+        bad = self.invoke('{"install": [], "skill": true}')
+        self.assertEqual(json.loads(bad.stdout)['skill'], 'failed')
+        self.assertFalse(self.skill_path().exists())
 
 
 def status_value(**extra):
@@ -356,6 +487,7 @@ class StatusTests(unittest.TestCase):
             'checked_at': WHEN,
             'hooks': {'claude': 'current', 'codex': 'current', 'opencode': 'current'},
             'installed': [],
+            'skill': 'current',
         }
         value.update(updates)
         return value
@@ -363,26 +495,26 @@ class StatusTests(unittest.TestCase):
     def test_status_line_current(self):
         line = agent_hooks.status_line(self.receipt(), 'space')
         self.assertEqual(line, 'Herdr hooks: claude, codex, opencode current on space (checked '
-                         + format_time(WHEN) + ')')
+                         + format_time(WHEN) + '); skill current')
 
     def test_status_line_lists_only_agents_that_are_not_current(self):
         hooks = {'claude': 'outdated', 'codex': 'current', 'opencode': 'not installed'}
         line = agent_hooks.status_line(self.receipt(hooks=hooks), 'space')
         self.assertEqual(line, 'Herdr hooks: claude outdated, opencode not installed on space; '
-                         'task work:cs installs them')
+                         'task work:cs installs them; skill current')
 
     def test_status_line_check_failed(self):
-        line = agent_hooks.status_line(self.receipt(error='invalid hooks response'), 'space')
+        line = agent_hooks.status_line(self.receipt(error='invalid hooks response', skill='unknown'), 'space')
         self.assertEqual(line, 'Herdr hooks: check failed on space (invalid hooks response); '
-                         'task work:cs checks again')
+                         'task work:cs checks again; skill unknown')
 
     def test_status_line_not_checked_for_another_codespace(self):
         line = agent_hooks.status_line(self.receipt(codespace='other'), 'space')
-        self.assertEqual(line, 'Herdr hooks: not checked on space; task work:cs checks them')
+        self.assertEqual(line, 'Herdr hooks: not checked on space; task work:cs checks them; skill unknown')
 
     def test_status_line_not_checked_without_a_receipt(self):
         self.assertEqual(agent_hooks.status_line(None, 'space'),
-                         'Herdr hooks: not checked on space; task work:cs checks them')
+                         'Herdr hooks: not checked on space; task work:cs checks them; skill unknown')
         self.assertIsNone(agent_hooks.status_line(self.receipt(), None))
 
     def test_status_text_shows_the_hooks_line_and_tolerates_a_missing_key(self):
@@ -394,6 +526,31 @@ class StatusTests(unittest.TestCase):
         bare = status_value()
         del bare['workspace']
         self.assertNotIn('Herdr hooks:', workspace.status_text(bare))
+
+    def test_status_line_appends_each_skill_state(self):
+        checked = 'Herdr hooks: claude, codex, opencode current on space (checked ' + format_time(WHEN) + ')'
+        self.assertEqual(agent_hooks.status_line(self.receipt(skill='current'), 'space'),
+                         checked + '; skill current')
+        self.assertEqual(agent_hooks.status_line(self.receipt(skill='installed'), 'space'),
+                         checked + '; skill installed')
+        self.assertEqual(agent_hooks.status_line(self.receipt(skill='managed elsewhere'), 'space'),
+                         checked + '; skill managed elsewhere')
+        self.assertEqual(agent_hooks.status_line(self.receipt(skill='failed'), 'space'),
+                         checked + '; skill failed (task work:cs installs it)')
+        self.assertEqual(agent_hooks.status_line(self.receipt(skill='unknown'), 'space'),
+                         checked + '; skill unknown (task work:cs installs it)')
+        # A line that already names the task does not grow a second hint.
+        pending = self.receipt(hooks={'claude': 'outdated', 'codex': 'current', 'opencode': 'current'},
+                               skill='failed')
+        self.assertEqual(agent_hooks.status_line(pending, 'space'),
+                         'Herdr hooks: claude outdated on space; task work:cs installs them; skill failed')
+
+    def test_status_line_old_receipt_reads_skill_as_unknown(self):
+        old = self.receipt()
+        del old['skill']
+        line = agent_hooks.status_line(old, 'space')
+        self.assertEqual(line, 'Herdr hooks: claude, codex, opencode current on space (checked '
+                         + format_time(WHEN) + '); skill unknown (task work:cs installs it)')
 
     def test_read_returns_none_when_the_receipt_is_missing_or_unreadable(self):
         self.assertIsNone(agent_hooks.read(Path(tempfile.mkdtemp()).resolve() / 'absent'))

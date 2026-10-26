@@ -242,7 +242,8 @@ class ExistingCheckoutTests(unittest.TestCase):
         self.assertEqual(store.load(old)['schema'], 1)
         self.assertNotIn('recoverable', str(result))
         self.assertIsNone(result['herdr_hooks'])
-        self.assertIn('Herdr hooks: not checked on space', workspace.status_text(result))
+        self.assertIn('Herdr hooks: not checked on space; task work:cs checks them; skill unknown',
+                      workspace.status_text(result))
 
     def test_ready_requires_schema_two_receipt_not_old_worker_checkpoint(self):
         self.registry()
@@ -405,6 +406,7 @@ class ExistingCheckoutTests(unittest.TestCase):
         self.assertEqual(result['herdr_hooks']['codespace'], 'space')
         self.assertEqual(result['herdr_hooks']['hooks']['opencode'], 'current')
         self.assertIn('Herdr hooks: claude, codex, opencode current on space', workspace.status_text(result))
+        self.assertIn('; skill unknown (task work:cs installs it)', workspace.status_text(result))
 
     def test_retired_local_recovery_and_agent_launch_apis_absent(self):
         for name in ('local', 'local_project', '_recover'):
