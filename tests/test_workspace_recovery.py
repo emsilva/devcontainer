@@ -242,7 +242,10 @@ class ExistingCheckoutTests(unittest.TestCase):
         self.assertEqual(store.load(old)['schema'], 1)
         self.assertNotIn('recoverable', str(result))
         self.assertIsNone(result['herdr_hooks'])
+        self.assertIsNone(result['env_files'])
         self.assertIn('Herdr hooks: not checked on space; task work:cs checks them; skill unknown',
+                      workspace.status_text(result))
+        self.assertIn('Env files: not checked on space; task work:cs copies them',
                       workspace.status_text(result))
 
     def test_ready_requires_schema_two_receipt_not_old_worker_checkpoint(self):
@@ -388,11 +391,44 @@ class ExistingCheckoutTests(unittest.TestCase):
                 patch.object(workspace, '_ready', return_value={}), \
                 patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), \
                 patch('devcontainer_setup.project_sync.herdr.open_remote', side_effect=open_remote), \
-                patch('devcontainer_setup.project_sync.agent_hooks.ensure_on', return_value={}) as ensure_on:
+                patch('devcontainer_setup.project_sync.agent_hooks.ensure_on', return_value={}) as ensure_on, \
+                patch('devcontainer_setup.project_sync.env_files.ensure_on', return_value={}):
             self.assertEqual(workspace.remote(self.project, self.state), 0)
             ensure_on.assert_not_called()
             captured['prepared']()
         ensure_on.assert_called_once_with('space', self.state)
+
+    def test_remote_prepares_env_files_after_herdr_hooks(self):
+        self.registry()
+        captured = {}
+        order = []
+
+        def open_remote(*args, **kwargs):
+            captured['prepared'] = kwargs['prepared']
+            return 0
+
+        def hooks(*args):
+            order.append(('hooks', args))
+
+        def env(*args):
+            order.append(('env', args))
+
+        with patch.object(workspace, '_prerequisites'), \
+                patch.object(workspace, '_choose_pairing', return_value=('space', self.original)), \
+                patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection()), \
+                patch.object(workspace, '_verify_roots', return_value=[self.generated]), \
+                patch.object(scratch, 'retarget'), patch.object(scratch, 'start'), \
+                patch.object(workspace, '_ready', return_value={}), \
+                patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), \
+                patch('devcontainer_setup.project_sync.herdr.open_remote', side_effect=open_remote), \
+                patch('devcontainer_setup.project_sync.agent_hooks.ensure_on', side_effect=hooks), \
+                patch('devcontainer_setup.project_sync.env_files.ensure_on', side_effect=env):
+            self.assertEqual(workspace.remote(self.project, self.state), 0)
+            self.assertEqual(order, [])
+            captured['prepared']()
+        self.assertEqual([item[0] for item in order], ['hooks', 'env'])
+        self.assertEqual(order[0][1], ('space', self.state))
+        self.assertEqual(order[1][1], ('space', self.state, self.root, self.original))
 
     def test_status_returns_herdr_hooks_without_a_remote_call(self):
         from devcontainer_setup.project_sync.state import atomic_write
@@ -407,6 +443,20 @@ class ExistingCheckoutTests(unittest.TestCase):
         self.assertEqual(result['herdr_hooks']['hooks']['opencode'], 'current')
         self.assertIn('Herdr hooks: claude, codex, opencode current on space', workspace.status_text(result))
         self.assertIn('; skill unknown (task work:cs installs it)', workspace.status_text(result))
+
+    def test_status_returns_env_files_without_a_remote_call(self):
+        from devcontainer_setup.project_sync.state import atomic_write
+        self.registry()
+        receipt = {'codespace': 'space', 'checked_at': 1700000000.5,
+                   'files': {'.env': 'copied', 'web/.env': 'current'}}
+        atomic_write(self.state / 'env-files.json', json.dumps(receipt).encode() + b'\n')
+        with patch.object(scratch, 'status', return_value=dict(running=False, phase='stopped')), \
+                patch('devcontainer_setup.project_sync.codespaces.Codespaces', side_effect=AssertionError('offline')):
+            result = workspace.status(self.project, self.state)
+        self.assertEqual(result['env_files']['files'], receipt['files'])
+        text = workspace.status_text(result)
+        self.assertIn('Env files: .env copied; web/.env current', text)
+        self.assertLess(text.index('Herdr hooks:'), text.index('Env files:'))
 
     def test_retired_local_recovery_and_agent_launch_apis_absent(self):
         for name in ('local', 'local_project', '_recover'):

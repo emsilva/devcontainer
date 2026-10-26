@@ -521,11 +521,15 @@ class StatusTests(unittest.TestCase):
         shown = workspace.status_text(status_value(herdr_hooks=self.receipt()))
         self.assertIn('Herdr hooks: claude, codex, opencode current on space (checked '
                       + format_time(WHEN) + ')', shown)
+        self.assertIn('Env files: not checked on space; task work:cs copies them', shown)
+        self.assertLess(shown.index('Herdr hooks:'), shown.index('Env files:'))
         missing = workspace.status_text(status_value())
         self.assertIn('Herdr hooks: not checked on space; task work:cs checks them', missing)
+        self.assertIn('Env files: not checked on space; task work:cs copies them', missing)
         bare = status_value()
         del bare['workspace']
         self.assertNotIn('Herdr hooks:', workspace.status_text(bare))
+        self.assertNotIn('Env files:', workspace.status_text(bare))
 
     def test_status_line_appends_each_skill_state(self):
         checked = 'Herdr hooks: claude, codex, opencode current on space (checked ' + format_time(WHEN) + ')'

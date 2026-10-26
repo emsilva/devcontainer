@@ -253,11 +253,13 @@ def remote(project, state, armed=None, rebind=None):
         # and before Herdr, whose TUI would otherwise hold the step back.
         armed(primary)
     # The connection above is closed, and on a new Codespace Herdr exists only
-    # after machine add. Check resume hooks on a fresh connection once that is saved.
-    from . import agent_hooks
+    # after machine add. Check resume hooks, then copy gitignored .env files,
+    # each on its own fresh connection, once that is saved.
+    from . import agent_hooks, env_files
 
     def prepared():
         agent_hooks.ensure_on(name, state)
+        env_files.ensure_on(name, state, primary.root, remote_root)
 
     return open_remote(primary, state, remote_root, remote_herdr=remote_herdr, prepared=prepared)
 
@@ -278,10 +280,10 @@ def status(project, state):
                and (not value.get('remote_root') or cycle.get('remote_root') == value['remote_root']))
     history = sync_cycle.summary(cycle, current=current, local_receipt=latest)
     history['retained_receipts'] = dict(runtime.get('retained_receipts', {}), codespace_to_desktop=latest)
-    from . import agent_hooks
+    from . import agent_hooks, env_files
     return dict(workspace=value, worker=runtime, scratch=sync, last_mac_checkpoint=latest,
                 conversations=history, recovery=recovery(state),
-                herdr_hooks=agent_hooks.read(state),
+                herdr_hooks=agent_hooks.read(state), env_files=env_files.read(state),
                 synchronization='Scratch and project conversations only; Git is managed manually')
 
 
@@ -423,10 +425,13 @@ def status_text(value):
     workspace_row = value.get('workspace')
     codespace = workspace_row.get('codespace') if isinstance(workspace_row, dict) else None
     if codespace:
-        from . import agent_hooks
+        from . import agent_hooks, env_files
         hook_line = agent_hooks.status_line(value.get('herdr_hooks'), codespace)
         if hook_line:
             lines.append(hook_line)
+        env_line = env_files.status_line(value.get('env_files'), codespace)
+        if env_line:
+            lines.append(env_line)
     if value.get('recovery'):
         lines += recovery_lines(value['recovery'])
     return '\n'.join(lines)
