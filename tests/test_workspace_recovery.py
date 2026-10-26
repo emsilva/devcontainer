@@ -396,7 +396,7 @@ class ExistingCheckoutTests(unittest.TestCase):
             self.assertEqual(workspace.remote(self.project, self.state), 0)
             ensure_on.assert_not_called()
             captured['prepared']()
-        ensure_on.assert_called_once_with('space', self.state)
+        ensure_on.assert_called_once_with('space', self.state, self.original)
 
     def test_remote_prepares_env_files_after_herdr_hooks(self):
         self.registry()
@@ -427,7 +427,7 @@ class ExistingCheckoutTests(unittest.TestCase):
             self.assertEqual(order, [])
             captured['prepared']()
         self.assertEqual([item[0] for item in order], ['hooks', 'env'])
-        self.assertEqual(order[0][1], ('space', self.state))
+        self.assertEqual(order[0][1], ('space', self.state, self.original))
         self.assertEqual(order[1][1], ('space', self.state, self.root, self.original))
 
     def test_status_returns_herdr_hooks_without_a_remote_call(self):

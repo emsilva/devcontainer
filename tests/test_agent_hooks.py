@@ -43,10 +43,13 @@ WHEN = 1_700_000_000.5
 SKILL_FIXTURE = b'---\nname: herdr\ndescription: fixture\n'
 
 
-def remote_body(status='', installed=None, herdr=True, skill='current'):
+def remote_body(status='', installed=None, herdr=True, skill='current', feedback='current'):
     if not herdr:
         return json.dumps({'herdr': False}).encode()
-    return json.dumps({'herdr': True, 'installed': installed or {}, 'status': status, 'skill': skill}).encode()
+    return json.dumps({
+        'herdr': True, 'installed': installed or {}, 'status': status,
+        'skill': skill, 'feedback': feedback,
+    }).encode()
 
 
 class Connection:
@@ -102,7 +105,7 @@ class EnsureTests(unittest.TestCase):
     def run_ensure(self, connection):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            receipt = agent_hooks.ensure(connection, 'space', self.state, now=lambda: WHEN)
+            receipt = agent_hooks.ensure(connection, 'space', self.state, '/workspaces/ordinary', now=lambda: WHEN)
         return receipt, out.getvalue()
 
     def test_ensure_installs_outdated_agents_from_the_mac_fixture(self):
@@ -111,7 +114,8 @@ class EnsureTests(unittest.TestCase):
             remote_body(CURRENT_STATUS, {'claude': 0, 'codex': 0}),
         ])
         receipt, printed = self.run_ensure(connection)
-        self.assertEqual(json.loads(connection.calls[0]['payload']), {'install': [], 'skill': True})
+        self.assertEqual(json.loads(connection.calls[0]['payload']),
+                         {'install': [], 'skill': True, 'root': '/workspaces/ordinary'})
         self.assertEqual(json.loads(connection.calls[1]['payload']),
                          {'install': ['claude', 'codex'], 'skill': False})
         self.assertEqual(connection.calls[0]['code'], agent_hooks.REMOTE)
@@ -135,7 +139,8 @@ class EnsureTests(unittest.TestCase):
         connection = Connection([remote_body(CURRENT_STATUS)])
         receipt, printed = self.run_ensure(connection)
         self.assertEqual(len(connection.calls), 1)
-        self.assertEqual(json.loads(connection.calls[0]['payload']), {'install': [], 'skill': True})
+        self.assertEqual(json.loads(connection.calls[0]['payload']),
+                         {'install': [], 'skill': True, 'root': '/workspaces/ordinary'})
         self.assertEqual(receipt['skill'], 'current')
         self.assertEqual(receipt['installed'], [])
         self.assertEqual(receipt['hooks'], {
@@ -233,6 +238,56 @@ class EnsureTests(unittest.TestCase):
         self.assertIn('(invalid hooks response);', printed)
         self.assertEqual(len(printed.splitlines()), 1)
 
+    def test_ensure_records_feedback_from_the_hooks_call_and_prints_only_two_states(self):
+        root = '/workspaces/ordinary'
+        out = io.StringIO()
+        moved = Connection([remote_body(CURRENT_STATUS, feedback='moved')])
+        with contextlib.redirect_stdout(out):
+            receipt = agent_hooks.ensure(moved, 'space', self.state, root, now=lambda: WHEN)
+        self.assertEqual(json.loads(moved.calls[0]['payload']),
+                         {'install': [], 'skill': True, 'root': root})
+        self.assertEqual(len(moved.calls), 1)
+        self.assertEqual(receipt['feedback'], 'moved')
+        self.assertEqual(out.getvalue(),
+                         'Herdr resume hooks are current on space (claude, codex, opencode).\n'
+                         'Moved handoff feedback on space into .scratch/handoff-feedback so it syncs.\n')
+        self.assertEqual(read_json(self.state / agent_hooks.RECEIPT)['feedback'], 'moved')
+
+        out = io.StringIO()
+        elsewhere = Connection([remote_body(CURRENT_STATUS, feedback='managed elsewhere')])
+        with contextlib.redirect_stdout(out):
+            receipt = agent_hooks.ensure(elsewhere, 'space', self.state, root, now=lambda: WHEN)
+        self.assertEqual(receipt['feedback'], 'managed elsewhere')
+        self.assertEqual(out.getvalue(),
+                         'Herdr resume hooks are current on space (claude, codex, opencode).\n'
+                         'Handoff feedback on space is managed elsewhere; left it unchanged.\n')
+
+        for state in ('current', 'linked', 'no scratch', 'failed'):
+            with self.subTest(state=state):
+                out = io.StringIO()
+                connection = Connection([remote_body(CURRENT_STATUS, feedback=state)])
+                with contextlib.redirect_stdout(out):
+                    receipt = agent_hooks.ensure(connection, 'space', self.state, root, now=lambda: WHEN)
+                self.assertEqual(receipt['feedback'], state)
+                self.assertEqual(out.getvalue().splitlines(),
+                                 ['Herdr resume hooks are current on space (claude, codex, opencode).'])
+
+    def test_ensure_sends_the_checkout_on_the_hooks_call_only(self):
+        connection = Connection([
+            remote_body(MAC_STATUS, feedback='linked'),
+            remote_body(CURRENT_STATUS, {'claude': 0, 'codex': 0}),
+        ])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            receipt = agent_hooks.ensure(connection, 'space', self.state, '/workspaces/ordinary', now=lambda: WHEN)
+        self.assertEqual(len(connection.calls), 2)
+        self.assertEqual(json.loads(connection.calls[0]['payload']),
+                         {'install': [], 'skill': True, 'root': '/workspaces/ordinary'})
+        self.assertNotIn('root', json.loads(connection.calls[1]['payload']))
+        self.assertEqual(receipt['feedback'], 'linked')
+        self.assertNotIn('Moved handoff', out.getvalue())
+        self.assertNotIn('managed elsewhere', out.getvalue())
+
 
 class EnsureOnTests(unittest.TestCase):
     def setUp(self):
@@ -254,7 +309,7 @@ class EnsureOnTests(unittest.TestCase):
         with mock.patch('devcontainer_setup.project_sync.transport.CodespaceConnection', Closed):
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
-                receipt = agent_hooks.ensure_on('space', self.state)
+                receipt = agent_hooks.ensure_on('space', self.state, '/workspaces/ordinary')
         self.assertEqual(receipt['error'], 'Codespace SSH key missing (~/.ssh/codespaces.auto)')
         self.assertIn('Could not check Herdr resume hooks on space', out.getvalue())
         self.assertEqual(read_json(self.state / agent_hooks.RECEIPT)['codespace'], 'space')
@@ -279,7 +334,7 @@ class EnsureOnTests(unittest.TestCase):
 
         with mock.patch('devcontainer_setup.project_sync.transport.CodespaceConnection', Opened):
             with contextlib.redirect_stdout(io.StringIO()):
-                receipt = agent_hooks.ensure_on('space', self.state)
+                receipt = agent_hooks.ensure_on('space', self.state, '/workspaces/ordinary')
         self.assertEqual(opened[0], ('space', self.state))
         self.assertEqual(opened[-1], 'closed')
         self.assertEqual(receipt['hooks']['claude'], 'current')
@@ -461,6 +516,256 @@ if sys.argv[1:3] == ["integration", "status"]:
         self.assertEqual(json.loads(bad.stdout)['skill'], 'failed')
         self.assertFalse(self.skill_path().exists())
 
+    def checkout(self):
+        path = Path(self.temp.name) / 'checkout'
+        path.mkdir(exist_ok=True)
+        return path
+
+    def feedback_link(self):
+        return self.home / '.claude' / 'handoff-feedback'
+
+    def feedback_target(self, checkout):
+        return checkout / '.scratch' / 'handoff-feedback'
+
+    def feedback_payload(self, checkout, **extra):
+        body = {'install': [], 'skill': False, 'root': str(checkout)}
+        body.update(extra)
+        return json.dumps(body)
+
+    def tree_bytes(self, root):
+        found = {}
+        if not root.exists():
+            return found
+        for path in sorted(root.rglob('*')):
+            if path.is_symlink() or not path.is_file():
+                continue
+            found[path.relative_to(root).as_posix()] = path.read_bytes()
+        return found
+
+    def test_remote_code_links_missing_handoff_feedback_on_the_hooks_call(self):
+        self.install_herdr(self.bindir)
+        checkout = self.checkout()
+        (checkout / '.scratch').mkdir()
+        result = self.invoke(self.feedback_payload(checkout))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = json.loads(result.stdout)
+        self.assertEqual(body['feedback'], 'linked')
+        self.assertEqual(body['status'], CURRENT_STATUS)
+        self.assertEqual(self.argv_log(), [['integration', 'status']])
+        link = self.feedback_link()
+        target = self.feedback_target(checkout)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), str(target))
+        self.assertTrue(target.is_dir())
+        self.assertFalse(target.is_symlink())
+        info = link.lstat()
+        again = self.invoke(self.feedback_payload(checkout))
+        self.assertEqual(json.loads(again.stdout)['feedback'], 'current')
+        self.assertEqual(link.lstat().st_ino, info.st_ino)
+        self.assertEqual(os.readlink(link), str(target))
+
+    def test_remote_code_leaves_an_exact_handoff_feedback_link_current(self):
+        self.install_herdr(self.bindir)
+        checkout = self.checkout()
+        target = self.feedback_target(checkout)
+        target.mkdir(parents=True)
+        (target / 'gaps.jsonl').write_bytes(b'mac\n')
+        os.utime(target / 'gaps.jsonl', (1_700_000_000, 1_700_000_000))
+        link = self.feedback_link()
+        link.parent.mkdir(parents=True)
+        link.symlink_to(target)
+        info = link.lstat()
+        result = self.invoke(self.feedback_payload(checkout))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['feedback'], 'current')
+        self.assertEqual(link.lstat().st_ino, info.st_ino)
+        self.assertEqual(os.readlink(link), str(target))
+        self.assertEqual((target / 'gaps.jsonl').read_bytes(), b'mac\n')
+        self.assertEqual((target / 'gaps.jsonl').stat().st_mtime, 1_700_000_000)
+
+    def test_remote_code_moves_handoff_feedback_and_keeps_both_copies(self):
+        self.install_herdr(self.bindir)
+        checkout = self.checkout()
+        target = self.feedback_target(checkout)
+        (target / 'proposals').mkdir(parents=True)
+        (target / 'gaps.jsonl').write_bytes(b'mac-row\n')
+        (target / 'proposals' / 'keep.md').write_bytes(b'same proposal\n')
+        os.utime(target / 'gaps.jsonl', (1_700_000_000, 1_700_000_000))
+        os.utime(target / 'proposals' / 'keep.md', (1_700_000_100, 1_700_000_100))
+        (target / 'gaps.jsonl.codespace-1').write_bytes(b'already parked\n')
+        home = self.feedback_link()
+        (home / 'proposals').mkdir(parents=True)
+        (home / 'gaps.jsonl').write_bytes(b'codespace-row\n')
+        (home / 'proposals' / 'keep.md').write_bytes(b'same proposal\n')
+        (home / 'proposals' / 'new.md').write_bytes(b'codespace proposal\n')
+        (home / 'only-here.txt').write_bytes(b'only on the codespace\n')
+        before = self.tree_bytes(home)
+        before.update(self.tree_bytes(target))
+        result = self.invoke(self.feedback_payload(checkout))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['feedback'], 'moved')
+        self.assertTrue(home.is_symlink())
+        self.assertTrue(stat.S_ISLNK(home.lstat().st_mode))
+        self.assertFalse(stat.S_ISDIR(home.lstat().st_mode))
+        self.assertEqual(os.readlink(home), str(target))
+        self.assertEqual((target / 'gaps.jsonl').read_bytes(), b'mac-row\n')
+        self.assertEqual((target / 'gaps.jsonl').stat().st_mtime, 1_700_000_000)
+        self.assertEqual((target / 'gaps.jsonl.codespace-1').read_bytes(), b'already parked\n')
+        self.assertEqual((target / 'gaps.jsonl.codespace-2').read_bytes(), b'codespace-row\n')
+        self.assertEqual((target / 'proposals' / 'keep.md').read_bytes(), b'same proposal\n')
+        self.assertEqual((target / 'proposals' / 'keep.md').stat().st_mtime, 1_700_000_100)
+        self.assertFalse((target / 'proposals' / 'keep.md.codespace-1').exists())
+        self.assertEqual((target / 'proposals' / 'new.md').read_bytes(), b'codespace proposal\n')
+        self.assertEqual((target / 'only-here.txt').read_bytes(), b'only on the codespace\n')
+        after = self.tree_bytes(target)
+        for name, data in before.items():
+            self.assertIn(data, after.values(), name)
+        from devcontainer_setup.project_sync import scratch_tree
+        list(scratch_tree.entries(checkout / '.scratch'))
+        again = self.invoke(self.feedback_payload(checkout))
+        self.assertEqual(json.loads(again.stdout)['feedback'], 'current')
+        self.assertEqual(os.readlink(home), str(target))
+
+    def test_remote_code_leaves_a_handoff_feedback_link_that_points_elsewhere(self):
+        self.install_herdr(self.bindir)
+        checkout = self.checkout()
+        (checkout / '.scratch').mkdir()
+        elsewhere = self.home / 'elsewhere'
+        elsewhere.mkdir()
+        (elsewhere / 'gaps.jsonl').write_bytes(b'hand\n')
+        os.utime(elsewhere / 'gaps.jsonl', (1_700_000_000, 1_700_000_000))
+        link = self.feedback_link()
+        link.parent.mkdir(parents=True)
+        link.symlink_to(elsewhere)
+        result = self.invoke(self.feedback_payload(checkout))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['feedback'], 'managed elsewhere')
+        self.assertEqual(os.readlink(link), str(elsewhere))
+        self.assertEqual((elsewhere / 'gaps.jsonl').read_bytes(), b'hand\n')
+        self.assertEqual((elsewhere / 'gaps.jsonl').stat().st_mtime, 1_700_000_000)
+        self.assertFalse(self.feedback_target(checkout).exists())
+
+    def test_remote_code_leaves_a_non_directory_handoff_feedback(self):
+        self.install_herdr(self.bindir)
+        checkout = self.checkout()
+        (checkout / '.scratch').mkdir()
+        path = self.feedback_link()
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b'not a directory\n')
+        os.utime(path, (1_700_000_000, 1_700_000_000))
+        result = self.invoke(self.feedback_payload(checkout))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['feedback'], 'managed elsewhere')
+        self.assertFalse(path.is_symlink())
+        self.assertEqual(path.read_bytes(), b'not a directory\n')
+        self.assertEqual(path.stat().st_mtime, 1_700_000_000)
+        self.assertFalse(self.feedback_target(checkout).exists())
+
+    def test_remote_code_reports_no_scratch_and_changes_nothing(self):
+        self.install_herdr(self.bindir)
+        checkout = self.checkout()
+        home = self.feedback_link()
+        home.mkdir(parents=True)
+        (home / 'gaps.jsonl').write_bytes(b'keep\n')
+        result = self.invoke(self.feedback_payload(checkout))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['feedback'], 'no scratch')
+        self.assertFalse((checkout / '.scratch').exists())
+        self.assertTrue(home.is_dir())
+        self.assertFalse(home.is_symlink())
+        self.assertEqual((home / 'gaps.jsonl').read_bytes(), b'keep\n')
+
+    def test_remote_code_does_not_follow_a_symlinked_scratch_or_feedback_dir(self):
+        self.install_herdr(self.bindir)
+        checkout = self.checkout()
+        outside = Path(self.temp.name) / 'outside'
+        outside.mkdir()
+        (outside / 'note').write_bytes(b'stay\n')
+        (checkout / '.scratch').symlink_to(outside, target_is_directory=True)
+        home = self.feedback_link()
+        home.mkdir(parents=True)
+        (home / 'gaps.jsonl').write_bytes(b'keep\n')
+        linked = self.invoke(self.feedback_payload(checkout))
+        self.assertEqual(linked.returncode, 0, linked.stderr)
+        self.assertEqual(json.loads(linked.stdout)['feedback'], 'failed')
+        self.assertEqual((outside / 'note').read_bytes(), b'stay\n')
+        self.assertFalse((outside / 'handoff-feedback').exists())
+        self.assertTrue(home.is_dir())
+        self.assertEqual((home / 'gaps.jsonl').read_bytes(), b'keep\n')
+        (checkout / '.scratch').unlink()
+        (checkout / '.scratch').mkdir()
+        (checkout / '.scratch' / 'handoff-feedback').symlink_to(outside, target_is_directory=True)
+        occupied = self.invoke(self.feedback_payload(checkout))
+        self.assertEqual(json.loads(occupied.stdout)['feedback'], 'failed')
+        self.assertEqual(os.readlink(checkout / '.scratch' / 'handoff-feedback'), str(outside))
+        self.assertEqual((outside / 'note').read_bytes(), b'stay\n')
+        self.assertEqual(set(outside.iterdir()), {outside / 'note'})
+        self.assertTrue(home.is_dir())
+        self.assertEqual((home / 'gaps.jsonl').read_bytes(), b'keep\n')
+
+    def test_remote_code_renames_a_nested_conflicting_file(self):
+        self.install_herdr(self.bindir)
+        checkout = self.checkout()
+        target = self.feedback_target(checkout)
+        (target / 'proposals').mkdir(parents=True)
+        (target / 'proposals' / 'note.md').write_bytes(b'mac\n')
+        os.utime(target / 'proposals' / 'note.md', (1_700_000_000, 1_700_000_000))
+        home = self.feedback_link()
+        (home / 'proposals').mkdir(parents=True)
+        (home / 'proposals' / 'note.md').write_bytes(b'codespace\n')
+        result = self.invoke(self.feedback_payload(checkout))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['feedback'], 'moved')
+        self.assertEqual((target / 'proposals' / 'note.md').read_bytes(), b'mac\n')
+        self.assertEqual((target / 'proposals' / 'note.md').stat().st_mtime, 1_700_000_000)
+        self.assertEqual((target / 'proposals' / 'note.md.codespace-1').read_bytes(), b'codespace\n')
+        self.assertTrue(home.is_symlink())
+        self.assertEqual(os.readlink(home), str(target))
+
+    def test_remote_code_does_not_move_a_symlink_or_replace_an_occupied_target(self):
+        self.install_herdr(self.bindir)
+        checkout = self.checkout()
+        (checkout / '.scratch').mkdir()
+        outside = Path(self.temp.name) / 'secret'
+        outside.write_bytes(b'secret\n')
+        home = self.feedback_link()
+        home.mkdir(parents=True)
+        (home / 'gaps.jsonl').write_bytes(b'keep\n')
+        (home / 'alias').symlink_to(outside)
+        blocked = self.invoke(self.feedback_payload(checkout))
+        self.assertEqual(blocked.returncode, 0, blocked.stderr)
+        self.assertEqual(json.loads(blocked.stdout)['feedback'], 'failed')
+        self.assertFalse(self.feedback_target(checkout).exists())
+        self.assertEqual(list((checkout / '.scratch').iterdir()), [])
+        self.assertTrue(home.is_dir())
+        self.assertFalse(home.is_symlink())
+        self.assertEqual((home / 'gaps.jsonl').read_bytes(), b'keep\n')
+        self.assertTrue((home / 'alias').is_symlink())
+        self.assertEqual(os.readlink(home / 'alias'), str(outside))
+        self.assertEqual(outside.read_bytes(), b'secret\n')
+        (home / 'alias').unlink()
+        target = self.feedback_target(checkout)
+        target.write_bytes(b'owner file\n')
+        os.utime(target, (1_700_000_000, 1_700_000_000))
+        occupied = self.invoke(self.feedback_payload(checkout))
+        self.assertEqual(json.loads(occupied.stdout)['feedback'], 'failed')
+        self.assertEqual(target.read_bytes(), b'owner file\n')
+        self.assertFalse(target.is_symlink())
+        self.assertEqual(target.stat().st_mtime, 1_700_000_000)
+        self.assertTrue(home.is_dir())
+        self.assertEqual((home / 'gaps.jsonl').read_bytes(), b'keep\n')
+
+    def test_remote_code_refuses_an_unsafe_feedback_root_without_writing(self):
+        self.install_herdr(self.bindir)
+        outside = Path(self.temp.name) / 'outside'
+        outside.mkdir()
+        result = self.invoke(json.dumps({
+            'install': [], 'skill': False, 'root': str(outside) + '/../../escape'}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['feedback'], 'failed')
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertFalse(self.feedback_link().exists())
+
 
 def status_value(**extra):
     counts = {'received': 0, 'available': 0, 'pending': 0, 'unsupported': 0}
@@ -488,6 +793,7 @@ class StatusTests(unittest.TestCase):
             'hooks': {'claude': 'current', 'codex': 'current', 'opencode': 'current'},
             'installed': [],
             'skill': 'current',
+            'feedback': 'current',
         }
         value.update(updates)
         return value
@@ -495,26 +801,28 @@ class StatusTests(unittest.TestCase):
     def test_status_line_current(self):
         line = agent_hooks.status_line(self.receipt(), 'space')
         self.assertEqual(line, 'Herdr hooks: claude, codex, opencode current on space (checked '
-                         + format_time(WHEN) + '); skill current')
+                         + format_time(WHEN) + '); skill current; feedback current')
 
     def test_status_line_lists_only_agents_that_are_not_current(self):
         hooks = {'claude': 'outdated', 'codex': 'current', 'opencode': 'not installed'}
         line = agent_hooks.status_line(self.receipt(hooks=hooks), 'space')
         self.assertEqual(line, 'Herdr hooks: claude outdated, opencode not installed on space; '
-                         'task work:cs installs them; skill current')
+                         'task work:cs installs them; skill current; feedback current')
 
     def test_status_line_check_failed(self):
         line = agent_hooks.status_line(self.receipt(error='invalid hooks response', skill='unknown'), 'space')
         self.assertEqual(line, 'Herdr hooks: check failed on space (invalid hooks response); '
-                         'task work:cs checks again; skill unknown')
+                         'task work:cs checks again; skill unknown; feedback current')
 
     def test_status_line_not_checked_for_another_codespace(self):
         line = agent_hooks.status_line(self.receipt(codespace='other'), 'space')
-        self.assertEqual(line, 'Herdr hooks: not checked on space; task work:cs checks them; skill unknown')
+        self.assertEqual(line, 'Herdr hooks: not checked on space; task work:cs checks them; '
+                         'skill unknown; feedback unknown')
 
     def test_status_line_not_checked_without_a_receipt(self):
         self.assertEqual(agent_hooks.status_line(None, 'space'),
-                         'Herdr hooks: not checked on space; task work:cs checks them; skill unknown')
+                         'Herdr hooks: not checked on space; task work:cs checks them; '
+                         'skill unknown; feedback unknown')
         self.assertIsNone(agent_hooks.status_line(self.receipt(), None))
 
     def test_status_text_shows_the_hooks_line_and_tolerates_a_missing_key(self):
@@ -534,27 +842,52 @@ class StatusTests(unittest.TestCase):
     def test_status_line_appends_each_skill_state(self):
         checked = 'Herdr hooks: claude, codex, opencode current on space (checked ' + format_time(WHEN) + ')'
         self.assertEqual(agent_hooks.status_line(self.receipt(skill='current'), 'space'),
-                         checked + '; skill current')
+                         checked + '; skill current; feedback current')
         self.assertEqual(agent_hooks.status_line(self.receipt(skill='installed'), 'space'),
-                         checked + '; skill installed')
+                         checked + '; skill installed; feedback current')
         self.assertEqual(agent_hooks.status_line(self.receipt(skill='managed elsewhere'), 'space'),
-                         checked + '; skill managed elsewhere')
+                         checked + '; skill managed elsewhere; feedback current')
         self.assertEqual(agent_hooks.status_line(self.receipt(skill='failed'), 'space'),
-                         checked + '; skill failed (task work:cs installs it)')
+                         checked + '; skill failed (task work:cs installs it); feedback current')
         self.assertEqual(agent_hooks.status_line(self.receipt(skill='unknown'), 'space'),
-                         checked + '; skill unknown (task work:cs installs it)')
+                         checked + '; skill unknown (task work:cs installs it); feedback current')
         # A line that already names the task does not grow a second hint.
         pending = self.receipt(hooks={'claude': 'outdated', 'codex': 'current', 'opencode': 'current'},
                                skill='failed')
         self.assertEqual(agent_hooks.status_line(pending, 'space'),
-                         'Herdr hooks: claude outdated on space; task work:cs installs them; skill failed')
+                         'Herdr hooks: claude outdated on space; task work:cs installs them; '
+                         'skill failed; feedback current')
 
     def test_status_line_old_receipt_reads_skill_as_unknown(self):
         old = self.receipt()
         del old['skill']
         line = agent_hooks.status_line(old, 'space')
         self.assertEqual(line, 'Herdr hooks: claude, codex, opencode current on space (checked '
-                         + format_time(WHEN) + '); skill unknown (task work:cs installs it)')
+                         + format_time(WHEN) + '); skill unknown (task work:cs installs it); feedback current')
+
+    def test_status_line_appends_each_feedback_state(self):
+        checked = ('Herdr hooks: claude, codex, opencode current on space (checked '
+                   + format_time(WHEN) + '); skill current')
+        for state in ('current', 'linked', 'moved', 'managed elsewhere', 'no scratch'):
+            with self.subTest(state=state):
+                line = agent_hooks.status_line(self.receipt(feedback=state), 'space')
+                self.assertEqual(line, checked + '; feedback ' + state)
+        for state in ('failed', 'unknown'):
+            with self.subTest(state=state):
+                line = agent_hooks.status_line(self.receipt(feedback=state), 'space')
+                self.assertEqual(line, checked + '; feedback ' + state + ' (task work:cs links it)')
+        pending = self.receipt(hooks={'claude': 'outdated', 'codex': 'current', 'opencode': 'current'},
+                               skill='failed', feedback='failed')
+        self.assertEqual(agent_hooks.status_line(pending, 'space'),
+                         'Herdr hooks: claude outdated on space; task work:cs installs them; '
+                         'skill failed; feedback failed')
+
+    def test_status_line_old_receipt_reads_feedback_as_unknown(self):
+        old = self.receipt()
+        del old['feedback']
+        line = agent_hooks.status_line(old, 'space')
+        self.assertEqual(line, 'Herdr hooks: claude, codex, opencode current on space (checked '
+                         + format_time(WHEN) + '); skill current; feedback unknown (task work:cs links it)')
 
     def test_read_returns_none_when_the_receipt_is_missing_or_unreadable(self):
         self.assertIsNone(agent_hooks.read(Path(tempfile.mkdtemp()).resolve() / 'absent'))

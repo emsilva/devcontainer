@@ -42,7 +42,9 @@ Herdr opens once the current verified scratch pairing is synchronized and SSH
 is prepared. Before Herdr opens, `work:cs` checks Herdr's resume hooks for
 Claude, Codex and OpenCode on the Codespace, and installs any that are missing
 or outdated, so that a restart can resume the agents. The same step also
-installs the Herdr skill that matches the Codespace's Herdr. `work:status`
+installs the Herdr skill that matches the Codespace's Herdr. The same step also
+links `~/.claude/handoff-feedback` on the Codespace to the checkout's
+`.scratch/handoff-feedback`, so that feedback syncs to the Mac. `work:status`
 shows the last check. The same step copies the checkout's gitignored `.env`
 files the Codespace lacks and never overwrites an existing file. `work:status`
 shows that check. Conversation exchange runs in the worker; pending or refused

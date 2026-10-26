@@ -89,6 +89,26 @@ class ScratchTests(unittest.TestCase):
             self.module._remote(self._native_remote(), str(self.root))
         self.assertIn(b'symlink', caught.exception.stderr)
 
+    def test_handoff_feedback_link_outside_scratch_does_not_trip_the_link_check(self):
+        from devcontainer_setup.project_sync import scratch_tree
+        target = self.scratch / 'handoff-feedback'
+        target.mkdir()
+        (target / 'gaps.jsonl').write_text('row\n')
+        home = self.root.parent / 'claude-home' / '.claude'
+        home.mkdir(parents=True)
+        link = home / 'handoff-feedback'
+        link.symlink_to(target)
+        self.assertTrue(scratch_tree.eligible(Path('handoff-feedback/gaps.jsonl')))
+        self.assertFalse(scratch_tree.eligible(Path('.handoff/gaps.jsonl')))
+        self.assertEqual(self.module._scratch(self.root), self.scratch)
+        names = [relative.as_posix() for _, relative in scratch_tree.entries(self.scratch)]
+        self.assertIn('handoff-feedback/gaps.jsonl', names)
+        identity = json.loads(self.module._remote(self._native_remote(), str(self.root)))
+        self.assertEqual(identity['root'], str(self.root))
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), str(target))
+        self.assertEqual((target / 'gaps.jsonl').read_text(), 'row\n')
+
     def test_included_special_files_are_refused_locally_and_remotely(self):
         os.mkfifo(self.scratch / 'owner-pipe')
         with self.assertRaisesRegex(ValueError, 'special file'):

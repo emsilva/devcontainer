@@ -253,12 +253,12 @@ def remote(project, state, armed=None, rebind=None):
         # and before Herdr, whose TUI would otherwise hold the step back.
         armed(primary)
     # The connection above is closed, and on a new Codespace Herdr exists only
-    # after machine add. Check resume hooks, then copy gitignored .env files,
-    # each on its own fresh connection, once that is saved.
+    # after machine add. Check resume hooks and link handoff feedback, then copy
+    # gitignored .env files, each on its own fresh connection, once that is saved.
     from . import agent_hooks, env_files
 
     def prepared():
-        agent_hooks.ensure_on(name, state)
+        agent_hooks.ensure_on(name, state, remote_root)
         env_files.ensure_on(name, state, primary.root, remote_root)
 
     return open_remote(primary, state, remote_root, remote_herdr=remote_herdr, prepared=prepared)
