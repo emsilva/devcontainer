@@ -9,9 +9,13 @@ import re
 import subprocess
 import tomllib
 
+from .arming import forward_ports
+from .keepalive import OFFSET
 from .state import _parent, _regular, atomic_write, locked, read_json, state_dir
 
-_NOTES = b'''## Project memory
+_DEVCONTAINER = '.devcontainer/devcontainer.json'
+_PORTS_ERROR = 'Cannot read forwardPorts from .devcontainer/devcontainer.json; review required'
+_GUIDANCE = b'''## Project memory
 
 Read `.scratch/memory/` at the start of a project conversation when it exists.
 Maintain useful project facts, decisions, and handoff notes there as Markdown;
@@ -35,6 +39,44 @@ In a Git worktree, use the main checkout's `.scratch/`; the worktree's own copy
 is not synchronized. The main checkout is the parent of:
 `git rev-parse --path-format=absolute --git-common-dir`
 '''
+
+
+def _ports_section(ports: list[int]) -> bytes:
+    """The ports section of the managed notes. Only the bullet list varies."""
+    if not ports:
+        return (
+            b'## Ports the owner can open\n'
+            b'\n'
+            b'In a Codespace (`CODESPACES=true`), this project forwards no ports, so the\n'
+            b"owner can't open a server you start there. Ask the owner before starting\n"
+            b'one they need to open. Before telling the owner to run a command, check\n'
+            b'that it exists with `task --list`.\n'
+        )
+    bullets = b''.join(
+        f'- {port}: `http://localhost:{port + OFFSET}`\n'.encode() for port in ports)
+    return (
+        b'## Ports the owner can open\n'
+        b'\n'
+        b'In a Codespace (`CODESPACES=true`), the owner reaches a server only through\n'
+        b'the ports this project forwards, and only while the project is armed\n'
+        b'(`task work:cs:armed` on the Mac). On the Mac, each port is at its number\n'
+        + f'plus {OFFSET}:\n'.encode()
+        + b'\n'
+        + bullets
+        + b'\n'
+        + b'Give the owner the Mac URL, never the Codespace port. Put a server the owner\n'
+        + b'must open on one of these ports, and ask before stopping or replacing a\n'
+        + b'server already on one. Before telling the owner to run a command, check\n'
+        + b"that it exists with `task --list`. If the owner can't connect, ask them to\n"
+        + b'run `task work:status` on the Mac.\n'
+    )
+
+
+def _notes_body(ports: list[int]) -> bytes:
+    return _GUIDANCE + b'\n' + _ports_section(ports)
+
+
+_NOTES = _notes_body([])
 _IGNORE = b'*\n!.gitignore\n!README.md\n'
 _README = b'''# Project scratch
 
@@ -157,15 +199,43 @@ def _policy(data: bytes) -> bytes:
     return _table_policy(data, 'features', ('memories',), 'memory-feature')
 
 
+def _devcontainer_text(project: Path, files: dict[str, bytes]) -> str | None:
+    """Candidate bytes win. A missing file is None; text that is not UTF-8 is a review error."""
+    if _DEVCONTAINER in files:
+        raw = files[_DEVCONTAINER]
+        try:
+            return raw.decode()
+        except (AttributeError, UnicodeDecodeError):
+            raise ValueError(_PORTS_ERROR) from None
+    try:
+        return (project / _DEVCONTAINER).read_text()
+    except OSError:
+        return None
+    except UnicodeDecodeError:
+        raise ValueError(_PORTS_ERROR) from None
+
+
+def _forwarded_ports(project: Path, files: dict[str, bytes]) -> list[int]:
+    text = _devcontainer_text(project, files)
+    if text is None:
+        return []
+    try:
+        return forward_ports(text)
+    except (ValueError, AttributeError, TypeError):
+        raise ValueError(_PORTS_ERROR) from None
+
+
 def integrate_notes(project: Path, files: dict[str, bytes], enabled: bool) -> None:
     """Add reviewable candidates only; never write project files or note payloads."""
     if not enabled:
         return
     project = Path(project)
+    # Parse before any candidate is built, so a bad devcontainer.json leaves files untouched.
+    body = _notes_body(_forwarded_ports(project, files))
     additions = {}
     for name in ('AGENTS.md', 'CLAUDE.md'):
         data = _read(project, name, files)
-        additions[name] = _refresh(data, 'project-notes', _NOTES)
+        additions[name] = _refresh(data, 'project-notes', body)
     additions['.codex/config.toml'] = _policy(_read(project, '.codex/config.toml', files))
     for name, desired in (('.scratch/.gitignore', _IGNORE), ('.scratch/README.md', _README)):
         data = _read(project, name, files)

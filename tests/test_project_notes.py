@@ -4,7 +4,7 @@ import tempfile
 import tomllib
 import unittest
 
-from devcontainer_setup.project_sync.notes import _NOTES, _block, integrate_notes
+from devcontainer_setup.project_sync.notes import _NOTES, _block, _owned, integrate_notes
 
 
 class NotesTests(unittest.TestCase):
@@ -188,3 +188,133 @@ class NotesTests(unittest.TestCase):
             self.put('.codex/config.toml', mutation)
             with self.assertRaises(ValueError):
                 self.generate()
+
+    def bullets(self, data):
+        return [line for line in data.splitlines() if line.startswith(b'- ')]
+
+    def test_forward_ports_are_listed_as_mac_urls_and_digest_validates(self):
+        self.put('.devcontainer/devcontainer.json',
+                 b'{ // app\n  "forwardPorts": [8787, 2222, 3570, 3570]\n}\n')
+        files = self.generate()
+        for name in ('AGENTS.md', 'CLAUDE.md'):
+            with self.subTest(name=name):
+                self.assertIn(b'`git rev-parse --path-format=absolute --git-common-dir`\n\n' + _WITH_PORTS, files[name])
+                self.assertEqual(self.bullets(files[name]), [
+                    b'- 3570: `http://localhost:13570`',
+                    b'- 8787: `http://localhost:18787`',
+                ])
+                self.assertNotIn(b'2222', files[name])
+                self.assertTrue(_owned(files[name], 'project-notes'))
+
+    def test_candidate_devcontainer_wins_over_disk(self):
+        self.put('.devcontainer/devcontainer.json', b'{"forwardPorts": [8787]}')
+        candidate = b'{ "forwardPorts": [3570,], }\n'
+        files = {'.devcontainer/devcontainer.json': candidate, 'keep': b'keep'}
+        integrate_notes(self.root, files, True)
+        self.assertEqual(files['.devcontainer/devcontainer.json'], candidate)
+        self.assertEqual(files['keep'], b'keep')
+        self.assertEqual((self.root / '.devcontainer/devcontainer.json').read_bytes(), b'{"forwardPorts": [8787]}')
+        for name in ('AGENTS.md', 'CLAUDE.md'):
+            self.assertIn(b'- 3570: `http://localhost:13570`\n', files[name])
+            self.assertNotIn(b'8787', files[name])
+            self.assertTrue(_owned(files[name], 'project-notes'))
+
+    def test_missing_or_ssh_only_ports_use_the_no_ports_text(self):
+        for label, raw in (('missing', None), ('ssh-only', b'{"forwardPorts": [2222]}')):
+            with self.subTest(label=label):
+                if raw is None:
+                    path = self.root / '.devcontainer/devcontainer.json'
+                    if path.exists():
+                        path.unlink()
+                else:
+                    self.put('.devcontainer/devcontainer.json', raw)
+                files = self.generate()
+                for name in ('AGENTS.md', 'CLAUDE.md'):
+                    self.assertIn(b'`git rev-parse --path-format=absolute --git-common-dir`\n\n' + _NO_PORTS, files[name])
+                    self.assertNotIn(b'http://localhost:', files[name])
+                    self.assertFalse(self.bullets(files[name]))
+                    self.assertTrue(_owned(files[name], 'project-notes'))
+
+    def test_unparsable_devcontainer_raises_and_leaves_files_unchanged(self):
+        self.put('.devcontainer/devcontainer.json', b'{"forwardPorts": [3570]}')
+        on_disk = (self.root / '.devcontainer/devcontainer.json').read_bytes()
+        for label, files in (
+            ('disk', {'keep': b'keep'}),
+            ('candidate', {'keep': b'keep', '.devcontainer/devcontainer.json': b'{"forwardPorts": [1,'}),
+        ):
+            with self.subTest(label=label):
+                if label == 'disk':
+                    self.put('.devcontainer/devcontainer.json', b'{"forwardPorts": [1,')
+                else:
+                    self.put('.devcontainer/devcontainer.json', on_disk)
+                before = dict(files)
+                with self.assertRaisesRegex(ValueError, 'devcontainer.json'):
+                    integrate_notes(self.root, files, True)
+                self.assertEqual(files, before)
+                self.assertEqual((self.root / '.devcontainer/devcontainer.json').read_bytes(),
+                                 b'{"forwardPorts": [1,' if label == 'disk' else on_disk)
+
+    def test_unedited_old_block_is_refreshed_in_agents_and_claude(self):
+        old = _block('project-notes', _OLD_NOTES)
+        self.put('AGENTS.md', b'User prefix\n' + old + b'\nUser suffix\n')
+        self.put('CLAUDE.md', old)
+        self.put('.devcontainer/devcontainer.json', b'{"forwardPorts": [8787, 2222, 3570, 3570]}')
+        files = self.generate()
+        body = _OLD_NOTES + b'\n' + _WITH_PORTS
+        self.assertEqual(files['AGENTS.md'], b'User prefix\n' + _block('project-notes', body) + b'\nUser suffix\n')
+        self.assertEqual(files['CLAUDE.md'], _block('project-notes', body))
+        self.assertTrue(_owned(files['AGENTS.md'], 'project-notes'))
+        self.assertTrue(_owned(files['CLAUDE.md'], 'project-notes'))
+        self.assertNotIn(_OLD_NOTES + b'<!--', files['AGENTS.md'])
+
+
+# The managed block as it stood before the ports section. An unedited copy of this
+# text must refresh in place; the digest is over the whole body, so this fixture
+# has to be the old bytes, not a paraphrase.
+_OLD_NOTES = b'''## Project memory
+
+Read `.scratch/memory/` at the start of a project conversation when it exists.
+Maintain useful project facts, decisions, and handoff notes there as Markdown;
+create the directory when needed. These notes are shared by Codex and Claude.
+Keep notes scoped to this project. Do not copy global memory, credentials,
+tokens, native agent databases, or unrelated project information into scratch.
+The scratch contents are ignored by Git and may synchronize between paired
+checkouts. Preserve existing notes and resolve conflicting facts explicitly.
+
+## Working files
+
+A Codespace can be deleted at any time, and everything in it that is not
+pushed or in `.scratch/` is lost with it. Keep anything you would need again
+in `.scratch/` as you work, not at the end: plans, briefs, reports, results,
+and state. Put working files in `.scratch/tmp/`. Use `tmp/` and `/tmp` only
+for output you can regenerate, such as screenshots, builds, and dependency
+trees; keep those out of `.scratch/`, which copies everything it holds. This
+applies even where other instructions name `./tmp`.
+
+In a Git worktree, use the main checkout's `.scratch/`; the worktree's own copy
+is not synchronized. The main checkout is the parent of:
+`git rev-parse --path-format=absolute --git-common-dir`
+'''
+_WITH_PORTS = b'''## Ports the owner can open
+
+In a Codespace (`CODESPACES=true`), the owner reaches a server only through
+the ports this project forwards, and only while the project is armed
+(`task work:cs:armed` on the Mac). On the Mac, each port is at its number
+plus 10000:
+
+- 3570: `http://localhost:13570`
+- 8787: `http://localhost:18787`
+
+Give the owner the Mac URL, never the Codespace port. Put a server the owner
+must open on one of these ports, and ask before stopping or replacing a
+server already on one. Before telling the owner to run a command, check
+that it exists with `task --list`. If the owner can't connect, ask them to
+run `task work:status` on the Mac.
+'''
+_NO_PORTS = b'''## Ports the owner can open
+
+In a Codespace (`CODESPACES=true`), this project forwards no ports, so the
+owner can't open a server you start there. Ask the owner before starting
+one they need to open. Before telling the owner to run a command, check
+that it exists with `task --list`.
+'''

@@ -170,6 +170,8 @@ tells the lead. Both run on your Mac, use the armed account, or the active gh
 account for an unarmed project, and refuse while `GH_TOKEN` or `GITHUB_TOKEN` is
 set. Run `task work:cs` (or `task work:cs:armed`) again after a Mac reboot.
 Arming refuses while another gh process, such as a project's own `cs:ports` forward or a mirror script, holds this Codespace's link; stop it first.
+The managed notes tell agents in the Codespace which ports reach the owner, and
+the Mac URL for each.
 
 Connections wait up to 45 seconds for a successful SSH handshake and separately
 up to 45 seconds for the saved Herdr machine's remote API after startup. Only

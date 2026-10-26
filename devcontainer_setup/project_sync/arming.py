@@ -54,6 +54,13 @@ def strip_jsonc(text: str) -> str:
     return re.sub(r',(\s*[\]}])', r'\1', ''.join(out))
 
 
+def forward_ports(text: str) -> list[int]:
+    """Return forwardPorts minus 2222, as ints, sorted and deduplicated."""
+    config = json.loads(strip_jsonc(text))
+    ports = config.get('forwardPorts', [])
+    return sorted({p for p in ports if isinstance(p, int) and p != 2222})
+
+
 def default_ports(root: Path) -> list[int]:
     path = Path(root) / '.devcontainer/devcontainer.json'
     try:
@@ -61,9 +68,7 @@ def default_ports(root: Path) -> list[int]:
     except OSError:
         return []
     try:
-        config = json.loads(strip_jsonc(text))
-        ports = config.get('forwardPorts', [])
-        return sorted({p for p in ports if isinstance(p, int) and p != 2222})
+        return forward_ports(text)
     except (ValueError, AttributeError, TypeError):
         raise ValueError('Cannot read forwardPorts from .devcontainer/devcontainer.json; fix the file or pass --port') from None
 
