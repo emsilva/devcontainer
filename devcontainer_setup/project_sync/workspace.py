@@ -44,6 +44,7 @@ def _ordinary(root):
 
 
 def _choose_pairing(project, state, value, rebind=None):
+    from . import evidence
     from .codespaces import Codespaces
     from .terminal import Gum
     from .transport import _name
@@ -62,7 +63,9 @@ def _choose_pairing(project, state, value, rebind=None):
             raise ValueError(('No Codespace ' + name + ' for this repository; existing binding preserved')
                              if new else 'Paired Codespace repository differs')
         if row.get('state') != 'Available':
-            service.start_codespace(name)
+            posted = service.start_codespace(name)
+            if posted is not None:
+                evidence.record_start(state, name, posted, 'started')
         # Verify even a saved original: old registries may point at generated
         # worktrees, or the checkout may have been removed or repurposed. Only an
         # explicit move to a new host, like configure, is trust on first use.
@@ -75,7 +78,9 @@ def _choose_pairing(project, state, value, rebind=None):
         row = spaces[0] if len(spaces) == 1 else spaces[labels.index(Gum().choose('Codespace', labels))]
         name = row['name']
         if row.get('state') != 'Available':
-            service.start_codespace(name)
+            posted = service.start_codespace(name)
+            if posted is not None:
+                evidence.record_start(state, name, posted, 'started')
         roots = service.roots(name)
     roots = [root for root in roots if _ordinary(root)]
     for saved in (value.get('remote_root'), binding.get('remote_root') if binding else None):
@@ -324,7 +329,7 @@ def _token_hint(runtime):
 
 def recovery_lines(value):
     """Spec 6.8's Recovery block; each line that is not fine names the command to run."""
-    from .arming import format_time
+    from .arming import format_time, short_time
     from . import keeper, lifecycle
     config, runtime, now = value['arming'], value['keeper'], value['now']
     if config.get('issue'):
@@ -364,12 +369,14 @@ def recovery_lines(value):
         lines.append('Codespace    unreadable at ' + format_time(reading['at'])
                      + '; check gh auth status --hostname github.com and the network')
     elif reading.get('state') == 'Available':
-        text = 'Codespace    Available'
         if anchor:
-            text += (' since ' + format_time(anchor['at']) + ', anchor ' + str(anchor.get('source'))
-                     + '; 12-hour stop due ~' + format_time(anchor['at'] + lifecycle.LIFETIME))
+            at = anchor['at']
+            also = anchor.get('also') or []
+            text = ('Codespace    Available; 12-hour stop expected ~' + short_time(at + lifecycle.LIFETIME)
+                    + ''.join(' (or ~' + short_time(item + lifecycle.LIFETIME) + ')' for item in also)
+                    + ', counted from its last start at ' + short_time(at))
         else:
-            text += ', no anchor yet'
+            text = 'Codespace    Available, no anchor yet'
         lines.append(text)
     else:
         text = 'Codespace    ' + str(reading.get('state')) + ' since ' + format_time(watch.get('first_at') or reading['at'])

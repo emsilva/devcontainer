@@ -1237,6 +1237,21 @@ class ScratchTests(unittest.TestCase):
             m.supervise(self.root, self.state, 'e' * 48)
         return json.loads((self.state / m.RUNTIME).read_text()), (self.state / 'scratch.log').read_text()
 
+    def test_the_worker_records_stopped_at_when_it_learns_a_down_state(self):
+        # #61: an unarmed project's evidence expires at the next seen stop. Epochs come from time.time.
+        from devcontainer_setup.project_sync import evidence
+        from devcontainer_setup.project_sync.replication import ConnectionVerificationError
+        started = 1_700_000_000.0
+        evidence.record_start(self.state, 'bound-name', started, 'started')
+        notices = self._notices([0.0])
+        with patch('devcontainer_setup.project_sync.scratch.time.time', return_value=started + 3600):
+            notices.explain(ConnectionVerificationError('Codespace is Shutdown', 'Shutdown'), 'symptom')
+        saved = json.loads((self.state / evidence.FILE).read_text())['bound-name']
+        self.assertEqual(saved['stopped_at'], started + 3600)
+        evidence.record_start(self.state, 'bound-name', started + 7200, 'started')
+        notices.explain(ConnectionVerificationError('up', 'Available'), 'symptom')
+        self.assertIsNone(json.loads((self.state / evidence.FILE).read_text())['bound-name']['stopped_at'])
+
     def test_unarmed_stop_notifies_once_until_syncing(self):
         # A stop seen in a cycle, the forward refusing while it lasts, a cycle passing verify(), then a second stop.
         runtime, log = self._work(['ok', self.FORWARD_DOWN, 'ok'], [self._stopped_cycle(), 'ok', self._stopped_cycle()])

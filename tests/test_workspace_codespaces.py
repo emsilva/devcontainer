@@ -188,12 +188,23 @@ class RecoveryStatusTests(unittest.TestCase):
         self.assertIn('restarts 0 of 2 in 24 h', lines[0])
         # The heartbeat is 12 s old at setUp; a loaded machine may add a second or two.
         self.assertRegex(lines[1], r'running \(pid 4121\), heartbeat 1[2-5] s, caffeinate held')
-        due = arming.format_time(anchor + lifecycle.LIFETIME)
-        self.assertRegex(due, r'^\d{4}-\d\d-\d\d \d\d:\d\d \(UTC \d{4}-\d\d-\d\d \d\d:\d\d\)$')
-        self.assertIn('Available since ' + arming.format_time(anchor) + ', anchor observed; 12-hour stop due ~' + due,
-                      lines[2])
+        expected = ('Available; 12-hour stop expected ~' + arming.short_time(anchor + lifecycle.LIFETIME)
+                    + ', counted from its last start at ' + arming.short_time(anchor))
+        self.assertRegex(arming.short_time(anchor), r'^\d\d:\d\d$')
+        self.assertIn(expected, lines[2])
+        self.assertNotIn('anchor', lines[2])
         self.assertIn('13570 18787', lines[3])
         self.assertTrue(lines[4].startswith('Last restart'))
+
+    def test_status_shows_each_kept_start_as_an_alternative(self):
+        # #61: each kept start is an alternative 12-hour stop, earliest first.
+        from devcontainer_setup.project_sync import arming
+        at, also = self.now - 3600, self.now - 1800
+        lines = self.lines(anchor={'at': at, 'source': 'evidence', 'also': [also]})
+        expected = ('Codespace    Available; 12-hour stop expected ~' + arming.short_time(at + lifecycle.LIFETIME)
+                    + ' (or ~' + arming.short_time(also + lifecycle.LIFETIME) + ')'
+                    + ', counted from its last start at ' + arming.short_time(at))
+        self.assertIn(expected, lines[2])
 
     def test_an_active_restart_is_named_and_only_a_restarting_stop_stops_pointing_at_work_cs(self):
         shutdown = {'at': self.now - 180, 'ok': True, 'state': 'Shutdown', 'pending': False}
@@ -211,7 +222,7 @@ class RecoveryStatusTests(unittest.TestCase):
                                   'follow task work:logs', lines[2])
                     self.assertNotIn('work:cs', lines[2])
                 else:
-                    self.assertTrue(lines[2].startswith('Codespace    Available since '), lines[2])
+                    self.assertTrue(lines[2].startswith('Codespace    Available; 12-hour stop expected ~'), lines[2])
 
     def test_keep_alive_line_shows_skipped_ports_and_what_to_run(self):
         holding = self.lines(keepalive={'pid': 5402, 'ports_up': [[13570, 3570]],

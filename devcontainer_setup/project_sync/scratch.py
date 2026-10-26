@@ -358,6 +358,10 @@ class _Notices:
             self.read_at, self.known = now, error.state  # verify() has just read it
         elif self.read_at is None or now - self.read_at >= STATE_READ_GAP:
             self.read_at, self.known = now, read_codespace_state(self.codespace, os.environ)
+        # Epochs come from the wall clock; this object's clock is monotonic (#61).
+        from . import evidence, keeper
+        if self.known in keeper.DOWN:
+            evidence.record_stop(self.state, self.codespace, time.time())
         return message if self.known in (None, 'Available') else stopped_message(self.known)
 
     def notify_stop(self):

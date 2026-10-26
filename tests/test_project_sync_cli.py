@@ -362,6 +362,28 @@ class OwnerPowerTests(unittest.TestCase):
         self.assertIn(arming.format_time(T0), out)
         self.assertNotIn('pending_restore', arming.read(self.state))
 
+    def test_an_owner_restart_records_started_evidence(self):
+        # #61: an accepted owner restart records the start routine's posted_at.
+        from devcontainer_setup.project_sync import evidence
+        from devcontainer_setup.project_sync.lifecycle import Reading
+        api = OwnerAPI(self.state, [Reading(T0, True, 'ShuttingDown', False, None),
+                                    Reading(T0, True, 'Shutdown', False, None),
+                                    Reading(T0, True, 'Available', False, None)])
+        self.power(api, restart=True)
+        saved = json.loads((self.state / evidence.FILE).read_text())['cs-1']
+        self.assertEqual(saved['source'], 'started')
+        self.assertEqual(saved['started_at'], T0)
+        self.assertIsNone(saved['stopped_at'])
+
+    def test_a_refused_owner_restart_records_no_evidence(self):
+        # #61: a refused or failed restart writes nothing.
+        from devcontainer_setup.project_sync import evidence
+        from devcontainer_setup.project_sync.lifecycle import Reading
+        api = OwnerAPI(self.state, [Reading(T0, True, 'Shutdown', False, None)], start=403)
+        with self.assertRaises(ValueError):
+            self.power(api, restart=True)
+        self.assertFalse((self.state / evidence.FILE).exists())
+
     def test_a_failed_planned_start_names_its_outcome(self):
         from devcontainer_setup.project_sync.lifecycle import Reading
         api = OwnerAPI(self.state, [Reading(T0, True, 'Shutdown', False, None)], start=403)

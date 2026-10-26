@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 
-from . import arming, lifecycle, notify, restore
+from . import arming, evidence, lifecycle, notify, restore
 from .keepalive import KeepAlive, end_left_behind, recorded_child
 from .scratch import CONFIG
 from .state import (STARTUP_WAIT, atomic_write, launch_detached, locked, log_formatter, owned_process,
@@ -197,6 +197,17 @@ def _detail(error):
     return str(error).split(';')[0] if isinstance(error, ValueError) else type(error).__name__
 
 
+def _epoch(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _plausible_previous(old, reading):
+    """The anchor before a gap, unless it is the keeper's own POST or a run GitHub has certainly ended."""
+    if not isinstance(old, dict) or old.get('source') == 'keeper' or not _epoch(old.get('at')):
+        return False
+    return reading.at <= old['at'] + lifecycle.LIFETIME + lifecycle.WINDOW
+
+
 def _start_detail(result):
     # What a start routine that did not end Available reports, as fixed text.
     if result['outcome'] == 'failed' and result['last_state'] == 'Shutdown':
@@ -364,6 +375,7 @@ class Keeper:
                 watch['count'] += 1
                 if continuing is not None:
                     watch['kind'] = 'LIFETIME'  # its restart is under way; never a second rid for it
+                    evidence.record_stop(self.state, self.api.name, watch['first_at'])
                 elif watch['count'] >= lifecycle.DOWN_READINGS and not watch.get('kind'):
                     due = self._classify(value, watch)
                 elif watch['count'] >= lifecycle.DOWN_READINGS and watch.get('token_wait'):
@@ -431,8 +443,8 @@ class Keeper:
         gap = seen_at is None or reading.at - seen_at > HEARTBEAT_STALE
         if state is not None and state != 'Available':
             if gap and reading.last_used_at is not None and seen_at < reading.last_used_at <= reading.at:
-                # A start this keeper did not see, inside a gap: its request is the run's start.
-                anchor = {'at': reading.last_used_at, 'source': 'api'}
+                # A start this keeper did not see, inside a gap. Keep every plausible start (#61).
+                anchor = self._candidates(reading, anchor, gap=True)
             else:
                 anchor = {'at': reading.at, 'source': 'observed'}
         elif reading.last_used_at is not None and (
@@ -441,16 +453,39 @@ class Keeper:
             # No anchor yet; one from a run GitHub has certainly stopped since; or a newer start
             # request after a gap long enough to hide a stop and a start (R16). Without such a
             # gap a newer last_used_at is a no-op request, which leaves GitHub's clock alone.
-            # The keeper's own accepted POST stays the anchor of the run it started.
-            anchor = {'at': reading.last_used_at, 'source': 'api'}
+            # The keeper's own accepted POST stays the anchor of the run it started. A gap keeps
+            # the earlier anchor as a candidate; a certainly-ended one is not plausible (#61).
+            anchor = self._candidates(reading, anchor, gap=gap)
         if anchor != self.runtime.get('anchor'):
             _LOG.info('Anchor %s from %s', _utc(anchor['at']), anchor['source'])
         self.runtime.update(anchor=anchor, last_up_at=reading.at, down={'count': 0, 'first_at': None})
 
+    def _candidates(self, reading, old, *, gap):
+        """Earliest plausible start, plus later ones more than WINDOW from it (#61)."""
+        found = [('evidence', evidence.usable_start(self.state, self.api.name, reading.at)),
+                 ('api', reading.last_used_at)]
+        if gap and _plausible_previous(old, reading):
+            found.append(('previous', old['at']))
+        kept = [(source, at) for source, at in found if _epoch(at)]
+        kept.sort(key=lambda item: item[1])
+        earliest = kept[0][1]
+        source, at = kept[0]
+        also = []
+        for _, later in kept[1:]:
+            if later - earliest <= lifecycle.WINDOW or later in also:
+                continue
+            also.append(later)
+        anchor = {'at': at, 'source': source}
+        if also:
+            anchor['also'] = also
+        return anchor
+
     def _classify(self, value, watch):
         anchor = self.runtime.get('anchor') or {}
+        at = anchor.get('at')
+        anchors = [at, *(item for item in anchor.get('also') or [] if _epoch(item))] if _epoch(at) else []
         kind = lifecycle.classify(last_up_at=self.runtime.get('last_up_at'), first_down_at=watch['first_at'],
-                                  anchor_at=anchor.get('at'), owner_stop_at=value.get('owner_stop_at'))
+                                  anchors=anchors, owner_stop_at=value.get('owner_stop_at'))
         _LOG.info('Stop first seen %s classified %s (anchor %s)', _utc(watch['first_at']), kind,
                   anchor.get('source', 'none'))
         key, due = 'stop-' + repr(watch['first_at']), None
@@ -469,6 +504,7 @@ class Keeper:
                 self._wait_for_token(watch, reason)
         # Only now: a raise above leaves the stop unclassified, so the next readings retry it.
         watch['kind'] = kind
+        evidence.record_stop(self.state, self.api.name, watch['first_at'])
         return due
 
     def _unseen_since(self, reading, watch):
@@ -601,6 +637,7 @@ class Keeper:
                               'to resume. See task work:status.')
             return True
         anchor = {'at': result['posted_at'], 'source': 'keeper'}
+        evidence.record_start(self.state, self.api.name, result['posted_at'], 'keeper')
         _LOG.info('Anchor %s from keeper', _utc(anchor['at']))
         # Recorded as a reading, so the next pass sees no transition and keeps the keeper's anchor.
         self.runtime.update(anchor=anchor, last_up_at=back_at, down={'count': 0, 'first_at': None},

@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from devcontainer_setup.project_sync import arming, keeper, lifecycle, restore
+from devcontainer_setup.project_sync import arming, evidence, keeper, lifecycle, restore
 from devcontainer_setup.project_sync.lifecycle import Reading
 from devcontainer_setup.project_sync.state import atomic_write, process_identity, read_json
 
@@ -967,19 +967,22 @@ class KeeperStepTests(unittest.TestCase):
         self.run_steps(k, [T0])
         self.assertEqual(self.runtime()['anchor'], {'at': T0 - 1100, 'source': 'api'})
 
-    def test_a_start_the_keeper_never_saw_is_anchored_from_last_used_at(self):
-        # Reviewer's case: anchor A, the keeper is gone, the Codespace is started
-        # again at S = A + 6 h, then idles out at A + 12 h: not the 12-hour stop.
+    def test_a_start_the_keeper_never_saw_counts_both_its_evidence_and_last_used_at(self):
+        # #61: the owner ruled "accept either" (2026-10-25); missing a real 12-hour stop
+        # costs a night down, a false restart is budgeted.
+        # Anchor A, the keeper is gone, the Codespace is started again at S = A + 6 h
+        # (evidence at that real start), then idles out at A + 12 h.
         a, s = T0, T0 + 6 * 3600
         k = self.keeper([up(a + 60, last_used_at=a)])
         self.run_steps(k, [a + 60])
+        evidence.record_start(self.state, 'cs-1', s, 'started')
         later = self.keeper([up(s + 60, last_used_at=s), up(s + 120, last_used_at=s)]
                             + [down(a + LIFE + 60 * i) for i in range(3)])
         self.run_steps(later, [s + 60, s + 120] + [a + LIFE + 60 * i for i in range(3)])
-        self.assertEqual(self.runtime()['anchor'], {'at': s, 'source': 'api'})
-        self.assertEqual(self.runtime()['down']['kind'], 'OTHER')
-        self.assertEqual(len(self.notes), 1)
-        self.assertIn('other than the 12-hour limit', self.notes[0])
+        anchor = self.runtime()['anchor']
+        self.assertIn(a, [anchor['at'], *anchor.get('also', [])])
+        self.assertIn(s, [anchor['at'], *anchor.get('also', [])])
+        self.assertEqual(self.runtime()['down']['kind'], 'LIFETIME')
 
     def stops_at(self, start):
         return [start + LIFE + 20 + 60 * i for i in range(3)]
@@ -1008,7 +1011,9 @@ class KeeperStepTests(unittest.TestCase):
         self.assertEqual(self.runtime()['anchor'], {'at': a, 'source': 'observed'})
         self.assertEqual(self.runtime()['down']['kind'], 'LIFETIME')
 
-    def test_a_reading_gap_that_could_hide_a_restart_anchors_from_last_used_at(self):
+    def test_a_reading_gap_keeps_the_earlier_anchor_as_a_candidate(self):
+        # #61: the owner ruled "accept either" (2026-10-25); missing a real 12-hour stop
+        # costs a night down, a false restart is budgeted.
         # One keeper whose reads fail for hours while the Codespace stops and is started at S.
         a, s = T0, T0 + 6 * 3600
         readings = ([up(a + 60, last_used_at=a)] + [failed(a + 120 + 60 * i) for i in range(5)]
@@ -1016,7 +1021,91 @@ class KeeperStepTests(unittest.TestCase):
                     + [down(a + LIFE + 60 * i) for i in range(3)])
         k = self.keeper(readings)
         self.run_steps(k, [r.at for r in readings])
-        self.assertEqual(self.runtime()['anchor'], {'at': s, 'source': 'api'})
+        self.assertEqual(self.runtime()['anchor'], {'at': a, 'source': 'previous', 'also': [s]})
+        self.assertEqual(self.runtime()['down']['kind'], 'LIFETIME')
+
+    def test_a_fresh_keeper_counts_from_recorded_start_evidence_not_a_later_last_used_at(self):
+        # #61: evidence at the real start, last_used_at six hours later, stop at start + 12 h is LIFETIME.
+        a = T0
+        evidence.record_start(self.state, 'cs-1', a, 'started')
+        readings = [up(a + 6 * 3600 + 60, last_used_at=a + 6 * 3600)] + [down(a + LIFE + 60 * i) for i in range(3)]
+        k = self.keeper(readings)
+        self.run_steps(k, [reading.at for reading in readings])
+        self.assertEqual(self.runtime()['down']['kind'], 'LIFETIME')
+        self.assertEqual(self.runtime()['anchor'], {'at': a, 'source': 'evidence', 'also': [a + 6 * 3600]})
+
+    def test_evidence_older_than_an_unseen_stop_is_ignored_and_last_used_at_still_counts(self):
+        # #61: evidence stopped before this run is ignored; last_used_at at the real start still counts.
+        a = T0
+        evidence.record_start(self.state, 'cs-1', a - 3 * 3600, 'started')
+        evidence.record_stop(self.state, 'cs-1', a - 3600)
+        readings = [up(a + 60, last_used_at=a)] + [down(a + LIFE + 60 * i) for i in range(3)]
+        k = self.keeper(readings)
+        self.run_steps(k, [reading.at for reading in readings])
+        self.assertEqual(self.runtime()['down']['kind'], 'LIFETIME')
+        self.assertEqual(self.runtime()['anchor'], {'at': a, 'source': 'api'})
+
+    def test_candidates_within_the_window_count_as_one(self):
+        # #61: evidence and last_used_at within WINDOW are one start, so the anchor has no also.
+        a = T0
+        evidence.record_start(self.state, 'cs-1', a, 'started')
+        k = self.keeper([up(a + 600, last_used_at=a + 600)])
+        self.run_steps(k, [a + 600])
+        self.assertEqual(self.runtime()['anchor'], {'at': a, 'source': 'evidence'})
+        self.assertNotIn('also', self.runtime()['anchor'])
+
+    def test_without_a_gap_a_newer_last_used_at_is_still_ignored(self):
+        # #61: without a gap, a newer last_used_at during continuous readings is still a no-op request.
+        a = T0
+        k = self.keeper([up(a, last_used_at=a), up(a + 60, last_used_at=a + 30),
+                         up(a + 120, last_used_at=a + 90)])
+        self.run_steps(k, [a, a + 60, a + 120])
+        self.assertEqual(self.runtime()['anchor'], {'at': a, 'source': 'api'})
+        self.assertNotIn('also', self.runtime()['anchor'])
+
+    def test_a_classified_stop_records_stopped_at(self):
+        # #61: classifying a stop records the stop's first-seen time, including a continued restart.
+        started = T0 - 3600
+        evidence.record_start(self.state, 'cs-1', started, 'started')
+        stops = [T0 + 6 * 3600 + 60 * i for i in range(3)]
+        k = self.keeper([up(T0, last_used_at=started)] + [down(at) for at in stops])
+        self.run_steps(k, [T0] + stops)
+        saved = json.loads((self.state / evidence.FILE).read_text())['cs-1']
+        self.assertEqual(saved['stopped_at'], stops[0])
+        self.assertEqual(self.runtime()['down']['kind'], 'OTHER')
+        # A continued rid is classified LIFETIME without _classify, before any POST.
+        self.setUp()
+        self.clock = T0
+        evidence.record_start(self.state, 'cs-1', T0 - 100, 'keeper')
+        lifecycle.Ledger(self.state / keeper.LEDGER, now=lambda: T0 - 30).append('intent', 'r-000001Z', post=1)
+        k = self.keeper([down(T0)])
+        self.run_steps(k, [T0])
+        saved = json.loads((self.state / evidence.FILE).read_text())['cs-1']
+        self.assertEqual(saved['stopped_at'], T0 - 30)
+        self.assertEqual(self.runtime()['down']['kind'], 'LIFETIME')
+        self.assertEqual(self.api.posts, 0)
+
+    def test_the_keepers_own_restart_records_keeper_evidence(self):
+        # #61: an accepted keeper POST is this run's start, and it replaces the stopped record.
+        stops, readings = self.lifetime([down(T0 + LIFE), up(T0 + LIFE + 60, last_used_at=T0 + LIFE)])
+        k = self.keeper(readings, herdr=FakeHerdr())
+        self.run_steps(k, [T0] + stops)
+        anchor = self.runtime()['anchor']
+        self.assertEqual(anchor['source'], 'keeper')
+        saved = json.loads((self.state / evidence.FILE).read_text())['cs-1']
+        self.assertEqual(saved['source'], 'keeper')
+        self.assertEqual(saved['started_at'], anchor['at'])
+        self.assertIsNone(saved['stopped_at'])
+
+    def test_a_corrupt_evidence_file_never_stops_the_keeper(self):
+        # #61, Review Focus 1: corrupt evidence is no evidence; the keeper anchors from last_used_at.
+        (self.state / evidence.FILE).write_bytes(b'{not json')
+        stops = [T0 + 6 * 3600 + 60 * i for i in range(3)]
+        k = self.keeper([up(T0, last_used_at=T0 - 60)] + [down(at) for at in stops])
+        self.run_steps(k, [T0] + stops)
+        self.assertFalse(k.done)
+        self.assertEqual(self.runtime()['phase'], 'watching')
+        self.assertEqual(self.runtime()['anchor'], {'at': T0 - 60, 'source': 'api'})
         self.assertEqual(self.runtime()['down']['kind'], 'OTHER')
 
     def test_a_fresh_replacement_still_sees_the_transition_it_was_in(self):

@@ -1466,6 +1466,34 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), f'Setup PR #1 (setup/devcontainer-7) is open. {self.RERUN}')
         self.assertEqual(len(self.gh()['prs']), 1)
 
+    def test_setup_records_created_evidence_even_when_not_paired(self):
+        # #61: setup records created evidence even when the Codespace is not paired.
+        import contextlib
+        import io
+        from devcontainer_setup.__main__ import _launch_on_default
+        from devcontainer_setup.project_sync.evidence import FILE
+        from devcontainer_setup.project_sync.state import discover_project, state_dir
+        self.push_to_main({'.devcontainer/devcontainer.json': '{}\n'})
+        created = 1_700_000_000.0
+
+        class API:
+            def launch(self, *args, **kwargs):
+                callback = kwargs.get('on_created')
+                if callback is not None:
+                    callback('new-space', created)
+                return 'new-space'
+
+        sha = self.origin_git('rev-parse', 'main')
+        launch = {'machine': 'standardLinux32gb', 'idle_timeout': '30m', 'client': 'browser'}
+        preferences = {'apply_dotfiles': False, 'dotfiles_repo': ''}
+        with contextlib.redirect_stdout(io.StringIO()):
+            name, _config = _launch_on_default(API(), self.root, 'owner/project', 'main', sha, launch, preferences)
+        self.assertEqual(name, 'new-space')
+        path = state_dir(discover_project(self.root)) / FILE
+        saved = json.loads(path.read_text())['new-space']
+        self.assertEqual((saved['source'], saved['started_at'], saved['stopped_at']), ('created', created, None))
+        self.assertFalse((path.parent / 'scratch.json').exists())
+
     def test_reuse_carries_the_retired_setup_branch_receipt(self):
         from devcontainer_setup.__main__ import _launch_on_default
         from devcontainer_setup.codespaces import Codespaces, receipt_path

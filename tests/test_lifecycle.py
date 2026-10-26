@@ -420,55 +420,71 @@ class ClassifyTests(unittest.TestCase):
                              ((20, '22:08:24'), (21, '10:08:53'))):
             a, d = _utc(*anchor), _utc(*down)
             with self.subTest(anchor=anchor):
-                self.assertEqual(lifecycle.classify(last_up_at=d - 60, first_down_at=d, anchor_at=a,
+                self.assertEqual(lifecycle.classify(last_up_at=d - 60, first_down_at=d, anchors=[a],
                                                     owner_stop_at=None), 'LIFETIME')
 
     def test_stop_at_six_hours_is_other(self):
         a = _utc(21, '01:00:00')
         self.assertEqual(lifecycle.classify(last_up_at=a + 6 * 3600 - 60, first_down_at=a + 6 * 3600,
-                                            anchor_at=a, owner_stop_at=None), 'OTHER')
+                                            anchors=[a], owner_stop_at=None), 'OTHER')
 
     def test_owner_stop_after_anchor_is_owner(self):
         a = 1000.0
         for stop, anchor in ((a + 100, a), (a, a), (a + 100, None)):
             with self.subTest(stop=stop, anchor=anchor):
                 self.assertEqual(lifecycle.classify(last_up_at=a, first_down_at=a + 200,
-                                                    anchor_at=anchor, owner_stop_at=stop), 'OWNER')
+                                                    anchors=[] if anchor is None else [anchor],
+                                                    owner_stop_at=stop), 'OWNER')
         # a stop before the anchor, or after the first down reading, is not this stop
         for stop in (a - 1, a + 201):
             with self.subTest(stop=stop):
                 self.assertEqual(lifecycle.classify(last_up_at=a, first_down_at=a + 200,
-                                                    anchor_at=a, owner_stop_at=stop), 'OTHER')
+                                                    anchors=[a], owner_stop_at=stop), 'OTHER')
 
     def test_owner_wins_over_lifetime(self):
         a = 0.0
         self.assertEqual(lifecycle.classify(last_up_at=a + LIFE - 60, first_down_at=a + LIFE,
-                                            anchor_at=a, owner_stop_at=a + LIFE - 30), 'OWNER')
+                                            anchors=[a], owner_stop_at=a + LIFE - 30), 'OWNER')
 
     def test_late_detection_overlapping_window_is_lifetime(self):
         a = 0.0
         self.assertEqual(lifecycle.classify(last_up_at=a + 11 * 3600 + 50 * 60, first_down_at=a + 14 * 3600 + 55 * 60,
-                                            anchor_at=a, owner_stop_at=None), 'LIFETIME')
+                                            anchors=[a], owner_stop_at=None), 'LIFETIME')
 
     def test_gap_outside_window_is_other(self):
         a = 0.0
         self.assertEqual(lifecycle.classify(last_up_at=a + 12 * 3600 + 20 * 60, first_down_at=a + 15 * 3600,
-                                            anchor_at=a, owner_stop_at=None), 'OTHER')
+                                            anchors=[a], owner_stop_at=None), 'OTHER')
         self.assertEqual(lifecycle.classify(last_up_at=a + 10 * 3600, first_down_at=a + 11 * 3600 + 44 * 60,
-                                            anchor_at=a, owner_stop_at=None), 'OTHER')
+                                            anchors=[a], owner_stop_at=None), 'OTHER')
 
     def test_window_edges_are_inclusive(self):
         a = 0.0
         self.assertEqual(lifecycle.classify(last_up_at=None, first_down_at=a + LIFE - 900,
-                                            anchor_at=a, owner_stop_at=None), 'LIFETIME')
+                                            anchors=[a], owner_stop_at=None), 'LIFETIME')
         self.assertEqual(lifecycle.classify(last_up_at=None, first_down_at=a + LIFE + 900,
-                                            anchor_at=a, owner_stop_at=None), 'LIFETIME')
+                                            anchors=[a], owner_stop_at=None), 'LIFETIME')
         self.assertEqual(lifecycle.classify(last_up_at=None, first_down_at=a + LIFE + 901,
-                                            anchor_at=a, owner_stop_at=None), 'OTHER')
+                                            anchors=[a], owner_stop_at=None), 'OTHER')
 
     def test_no_anchor_is_other(self):
-        self.assertEqual(lifecycle.classify(last_up_at=1.0, first_down_at=LIFE, anchor_at=None,
+        self.assertEqual(lifecycle.classify(last_up_at=1.0, first_down_at=LIFE, anchors=[],
                                             owner_stop_at=None), 'OTHER')
+
+    def test_lifetime_fits_any_candidate_anchor(self):
+        # #61: a stop in any candidate's window is the 12-hour stop.
+        a = 0.0
+        anchors = [a, a + 6 * 3600]
+        self.assertEqual(lifecycle.classify(last_up_at=a + 18 * 3600 - 60, first_down_at=a + 18 * 3600,
+                                            anchors=anchors, owner_stop_at=None), 'LIFETIME')
+        self.assertEqual(lifecycle.classify(last_up_at=a + LIFE - 60, first_down_at=a + LIFE,
+                                            anchors=anchors, owner_stop_at=None), 'LIFETIME')
+
+    def test_owner_is_judged_against_the_earliest_anchor(self):
+        # #61: OWNER uses the earliest candidate, so a stop between two starts is still yours.
+        a = 0.0
+        self.assertEqual(lifecycle.classify(last_up_at=a + 6 * 3600, first_down_at=a + 6 * 3600 + 60,
+                                            anchors=[a, a + 6 * 3600], owner_stop_at=a + 3 * 3600), 'OWNER')
 
 
 LIFE = lifecycle.LIFETIME

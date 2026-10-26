@@ -133,6 +133,7 @@ print(json.dumps(roots))
             say=lambda text: print(text + '…', file=sys.stderr))
         if result['outcome'] != 'available':
             raise start_error(result)
+        return result['posted_at']
 
 
 def start_error(result):

@@ -145,6 +145,30 @@ class CodespacesTests(unittest.TestCase):
                 self.launch()
         sleep.assert_not_called()
 
+    def test_launch_reports_a_new_codespace_and_the_time_before_create(self):
+        # #61: setup records the Mac's time just before gh codespace create.
+        import time
+        seen, created_at = [], []
+        real = self.runner
+
+        def runner(args, **kwargs):
+            if args[1:3] == ['codespace', 'create']:
+                created_at.append(time.time())
+            return real(args, **kwargs)
+
+        self.api.run = runner
+        self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser', None, self.receipt,
+                        on_created=lambda name, at: seen.append((name, at)))
+        self.assertEqual([name for name, _at in seen], ['new-space'])
+        self.assertLessEqual(seen[0][1], created_at[0])
+
+    def test_launch_does_not_report_a_resumed_codespace(self):
+        # #61: a reused Codespace is not a create, so it reports nothing.
+        seen = []
+        self.resume(on_created=lambda name, at: seen.append((name, at)))
+        self.assertEqual(seen, [])
+        self.assertFalse(any(call[1:3] == ['codespace', 'create'] for call in self.runner.calls))
+
     def test_codespace_created_on_default_branch_at_merge_sha(self):
         # Another PR merged after the setup merge: main's head contains the merge commit, not equals it.
         self.runner.remote_sha = 'f' * 40

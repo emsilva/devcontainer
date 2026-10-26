@@ -136,6 +136,11 @@ def format_time(when: float) -> str:
     return f'{local} (UTC {utc})'
 
 
+def short_time(epoch: float) -> str:
+    """A clock time for people: the Mac's local zone, hours and minutes."""
+    return datetime.fromtimestamp(epoch).strftime('%H:%M')
+
+
 def hold_until(value: str, now: float) -> float | None:
     if value.strip().lower() == 'off':
         return None

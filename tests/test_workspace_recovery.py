@@ -107,6 +107,40 @@ class ExistingCheckoutTests(unittest.TestCase):
             service._matches_repository.return_value = True; service.roots.return_value = ['/workspaces/other', self.original]
             self.assertEqual(workspace._choose_pairing(self.project, self.state, value), ('space', self.original))
 
+    def test_work_cs_starting_a_stopped_codespace_records_started_evidence(self):
+        # #61: an accepted owner-present start records posted_at; a start without a POST records nothing.
+        from devcontainer_setup.project_sync import evidence
+        posted = 1_700_000_000.0
+
+        def run(posted_at, *, binding):
+            self.setUp()
+            value = self.registry()
+            if binding:
+                scratch._write(self.state / scratch.CONFIG, dict(version=1, identity=self.project.identity,
+                                 root=str(self.root), codespace='space', remote_root=self.original))
+            result = {'outcome': 'available', 'posted_at': posted_at, 'posts': 1 if posted_at else 0,
+                      'last_state': 'Available', 'status': 200, 'reason': None}
+            with patch('devcontainer_setup.project_sync.codespaces.Codespaces._api',
+                       return_value={'name': 'space', 'state': 'Shutdown'}), \
+                    patch('devcontainer_setup.project_sync.codespaces.Codespaces._matches_repository',
+                          return_value=True), \
+                    patch('devcontainer_setup.project_sync.codespaces.Codespaces.roots',
+                          return_value=[self.original]), \
+                    patch('devcontainer_setup.project_sync.codespaces.Codespaces.spaces',
+                          return_value=[{'name': 'space', 'state': 'Shutdown'}]), \
+                    patch('devcontainer_setup.project_sync.codespaces.lifecycle.start', return_value=result):
+                self.assertEqual(workspace._choose_pairing(self.project, self.state, value), ('space', self.original))
+            return self.state / evidence.FILE
+
+        for label, binding in (('paired', True), ('unpaired', False)):
+            with self.subTest(label=label):
+                path = run(posted, binding=binding)
+                saved = json.loads(path.read_text())['space']
+                self.assertEqual((saved['source'], saved['started_at'], saved['stopped_at']),
+                                 ('started', posted, None))
+        with self.subTest(label='no post'):
+            self.assertFalse(run(None, binding=True).exists())
+
     def test_rebind_moves_to_the_named_codespace_and_starts_it(self):
         value = self.registry(remote_active_root=self.original)
         scratch._write(self.state / scratch.CONFIG, dict(version=1, identity=self.project.identity,
@@ -115,6 +149,7 @@ class ExistingCheckoutTests(unittest.TestCase):
         with patch('devcontainer_setup.project_sync.codespaces.Codespaces') as cls:
             service = cls.return_value; service._api.return_value = dict(name='new-space', state='Shutdown')
             service._matches_repository.return_value = True; service.roots.return_value = [self.original]
+            service.start_codespace.return_value = None  # this mock does not model a posted start
             self.assertEqual(workspace._choose_pairing(self.project, self.state, value, rebind='new-space'),
                              ('new-space', self.original))
             self.assertEqual(service._api.call_args.args[:2], ('GET', 'user/codespaces/new-space'))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import hashlib
 import json
 import os
@@ -322,7 +323,8 @@ class Codespaces:
                client: str, dotfiles_repo: str | None, receipt: Path,
                *, resume: str | None = None, location: str | None = None,
                retention: str | None = None, workspace: str | None = None,
-               machine_profile: dict | None = None, state_root: Path | None = None) -> str:
+               machine_profile: dict | None = None, state_root: Path | None = None,
+               on_created: Callable[[str, float], None] | None = None) -> str:
         """Create (or reuse) a codespace on branch, which must contain sha, the merged setup. A reused
         codespace confirmed on branch takes over its retired setup branch's receipt from state_root."""
         self._repository(repo)
@@ -362,10 +364,13 @@ class Codespaces:
                 if retention:
                     args += ['--retention-period', retention]
                 print('Creating codespace; provisioning may take a few minutes.', flush=True)
+                before = time.time()
                 created = self.command(*args).splitlines()[-1]
                 if not re.fullmatch(r'[A-Za-z0-9-]+', created):
                     raise ValueError('Creation did not return a codespace name. Check gh codespace list before retrying.')
                 name = created
+                if on_created is not None:
+                    on_created(name, before)
                 settings = {'machine': machine, 'idle_timeout_minutes': self._minutes(idle_timeout),
                             'location': location, 'retention_period_minutes': self._minutes(retention)}
             record = {'codespace': name, 'repository': repo, 'branch': branch,

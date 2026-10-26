@@ -756,9 +756,17 @@ def _launch_on_default(api: Codespaces, project: Path, repo: str, default: str, 
     state_home = os.environ.get('XDG_STATE_HOME', '')
     state = Path(state_home) if state_home and Path(state_home).is_absolute() else Path.home() / '.local/state'
     dotfiles = preferences['dotfiles_repo'] if preferences['apply_dotfiles'] else None
+
+    def _record_created(name, before):
+        # Even when setup does not pair the new Codespace. A write error is logged, never raised.
+        from .project_sync.evidence import record_start
+        from .project_sync.state import discover_project, state_dir
+        record_start(state_dir(discover_project(project)), name, before, 'created')
+
     name = api.launch(repo, default, sha, dotfiles_repo=dotfiles, receipt=receipt_path(state, repo, default),
                       workspace=config.get('workspaceFolder'), state_root=state,
-                      machine_profile=_machine_profile(project) if dotfiles else None, **launch)
+                      machine_profile=_machine_profile(project) if dotfiles else None,
+                      on_created=_record_created, **launch)
     return name, config
 
 

@@ -163,7 +163,7 @@ def _owner_power(project, state, *, restart, api=None, now=time.time, sleep=time
     OWNER and never restarts it. A restart then starts the Codespace outside the budget
     (D6) and, for an armed project, hands restore and resume to the keeper.
     """
-    from . import arming, keeper, lifecycle
+    from . import arming, evidence, keeper, lifecycle
     from .codespaces import start_error
     from .state import locked, read_json
     if os.environ.get('CODESPACES') == 'true':
@@ -204,6 +204,8 @@ def _owner_power(project, state, *, restart, api=None, now=time.time, sleep=time
     result = lifecycle.start(api, rid=rid, now=now, sleep=sleep, say=lambda text: print(text + '…', file=sys.stderr))
     if result['outcome'] != 'available':
         raise start_error(result)
+    if result['posted_at'] is not None:
+        evidence.record_start(state, codespace, result['posted_at'], 'started')
     back_at = now()
     if not armed:
         print(f'{codespace} restarted ({rid}): stopped {arming.format_time(stopped_at)}, back '

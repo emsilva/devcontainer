@@ -192,17 +192,21 @@ class LifecycleAPI:
         return self._call('POST', '/stop')[0]
 
 
-def classify(*, last_up_at, first_down_at, anchor_at, owner_stop_at):
+def classify(*, last_up_at, first_down_at, anchors, owner_stop_at):
     """Spec 6.4 step 3: 'OWNER', 'LIFETIME' or 'OTHER' for a stop first seen at first_down_at.
 
     The possible stop interval is [last_up_at, first_down_at], so a stop seen late
     (Mac asleep) still counts when it could have fallen inside the lifetime window.
+    LIFETIME when that interval fits any candidate. OWNER uses the earliest candidate,
+    so an owner stop between two plausible starts is still the owner's. An empty list
+    behaves as no anchor.
     """
-    if (owner_stop_at is not None and (anchor_at is None or owner_stop_at >= anchor_at)
+    earliest = min(anchors) if anchors else None
+    if (owner_stop_at is not None and (earliest is None or owner_stop_at >= earliest)
             and owner_stop_at <= first_down_at):
         return 'OWNER'
-    if anchor_at is not None:
-        start_at = first_down_at if last_up_at is None else last_up_at
+    start_at = first_down_at if last_up_at is None else last_up_at
+    for anchor_at in anchors:
         if start_at <= anchor_at + LIFETIME + WINDOW and first_down_at >= anchor_at + LIFETIME - WINDOW:
             return 'LIFETIME'
     return 'OTHER'
