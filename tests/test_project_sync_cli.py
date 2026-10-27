@@ -72,7 +72,8 @@ class ArmFlowTests(unittest.TestCase):
         _, ask = self.arm(row={'name': 'cs-2', 'billable_owner': {'login': 'octo'}})
         ask.assert_called_once()
 
-    def work_cs(self, *, armed=True, account='octo', row='default', space_error=None, foreign=()):
+    def work_cs(self, *, armed=True, account='octo', row='default', space_error=None, foreign=(),
+                start_error=None, ready_error=None):
         from devcontainer_setup.project_sync import __main__ as cli, arming, keeper, workspace
         from devcontainer_setup.project_sync.state import atomic_write, locked
         mock = self.mock
@@ -96,8 +97,9 @@ class ArmFlowTests(unittest.TestCase):
                 mock.patch.object(cli, 'state_dir', return_value=self.state), \
                 mock.patch.object(workspace, 'remote', side_effect=remote), \
                 mock.patch.object(keeper, 'foreign_processes', return_value=list(foreign)) as scan, \
-                mock.patch.object(keeper, 'start', return_value=started) as start, \
-                mock.patch.object(keeper, 'wait_ready', return_value=dict(started, phase='watching')) as ready, \
+                mock.patch.object(keeper, 'start', return_value=started, side_effect=start_error) as start, \
+                mock.patch.object(keeper, 'wait_ready', return_value=dict(started, phase='watching'),
+                                  side_effect=ready_error) as ready, \
                 mock.patch.object(keeper, 'status', return_value=dict(started, running=True, heartbeat_age=0)), \
                 mock.patch.object(arming, 'account', side_effect=account if isinstance(account, BaseException)
                                   else None, return_value=account) as checked, \
@@ -124,6 +126,23 @@ class ArmFlowTests(unittest.TestCase):
         scan.assert_called_once_with(self.state, 'cs-1')
         self.assertIn('Recovery     armed since', out)
         self.assertIn('Keeper       running', out)
+
+    def test_a_keeper_that_cannot_start_does_not_block_the_connection(self):
+        # #57: keeper startup or readiness trouble must leave plain work:cs connecting to Herdr.
+        for stage, error in (('start', ValueError('The keeper is still shutting down; inspect '
+                                                'task work:status before retrying')),
+                             ('start', OSError('Keeper startup unavailable')),
+                             ('wait_ready', ValueError('Keeper readiness unavailable')),
+                             ('wait_ready', OSError('Keeper readiness unavailable'))):
+            with self.subTest(stage=stage, error=type(error).__name__):
+                start, ready, _, _, out = self.work_cs(start_error=error if stage == 'start' else None,
+                                                      ready_error=error if stage == 'wait_ready' else None)
+                start.assert_called_once_with(self.project.root, self.state)
+                if stage == 'start':
+                    ready.assert_not_called()
+                else:
+                    ready.assert_called_once_with(self.state, 'n' * 48)
+                self.assertEqual(out, str(error) + '\n')
 
     def test_work_cs_with_stale_consent_connects_without_the_keeper_and_says_why(self):
         # #57: changed account, Codespace or consent text requires an explicit armed entrypoint.

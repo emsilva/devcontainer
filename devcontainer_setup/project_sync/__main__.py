@@ -162,8 +162,13 @@ def _resume_recovery(project, state) -> None:
     except (ValueError, OSError) as error:
         print(str(error))
         return
-    started = keeper.start(project.root, state)
-    if keeper.wait_ready(state, started['nonce']).get('phase') == 'starting':
+    try:
+        started = keeper.start(project.root, state)
+        ready = keeper.wait_ready(state, started['nonce'])
+    except (ValueError, OSError) as error:
+        print(str(error))
+        return
+    if ready.get('phase') == 'starting':
         print('The keeper has not reported within 60 seconds; inspect task work:logs.')
     print('\n'.join(workspace.recovery_lines(workspace.recovery(state))))
 
