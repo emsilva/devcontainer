@@ -73,6 +73,49 @@ class ExistingCheckoutTests(unittest.TestCase):
             self.assertEqual(workspace.remote(self.project, self.state, armed=armed), 0)
         self.assertEqual(order, ['worker', 'ssh', 'armed', 'herdr'])
 
+    def test_work_cs_starts_the_keeper_after_the_worker_and_before_herdr(self):
+        # #57: the plain CLI uses the real remote callback outside the lock, after worker readiness.
+        import contextlib
+        import io
+        from devcontainer_setup.project_sync import __main__ as cli, arming, keeper
+        from devcontainer_setup.project_sync.state import locked
+        self.registry()
+        scratch._write(self.state / scratch.CONFIG, {'codespace': 'space'})
+        with locked(self.state / 'workspace-control.lock', blocking=True):
+            arming.arm(self.state, gh_user='octo', codespace='space',
+                       consent=arming.consent_text(self.root.name, 'space', 'octo'),
+                       billable_owner='octo', ports=[], now=1.0)
+        order = []
+
+        def start(root, state):
+            with locked(state / 'workspace-control.lock'):
+                order.append('keeper')
+            return {'nonce': 'n' * 48}
+
+        with patch.object(cli, 'state_dir', return_value=self.state), \
+                patch.object(workspace, '_prerequisites'), \
+                patch.object(workspace, '_choose_pairing', return_value=('space', self.original)), \
+                patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection()), \
+                patch.object(workspace, '_verify_roots', return_value=[self.generated]), \
+                patch.object(scratch, 'retarget'), \
+                patch.object(scratch, 'start', side_effect=lambda *_: order.append('worker')), \
+                patch.object(workspace, '_ready', side_effect=lambda *_: order.append('worker-ready') or {}), \
+                patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh', side_effect=lambda *_: order.append('ssh')), \
+                patch('devcontainer_setup.project_sync.arming.account', return_value='octo'), \
+                patch('devcontainer_setup.project_sync.codespaces.Codespaces') as spaces, \
+                patch.object(keeper, 'foreign_processes', side_effect=lambda *_: order.append('foreign-check') or []), \
+                patch.object(keeper, 'start', side_effect=start), \
+                patch.object(keeper, 'wait_ready', side_effect=lambda *_: order.append('keeper-ready') or {}), \
+                patch('devcontainer_setup.project_sync.herdr.open_remote',
+                      side_effect=lambda *_, **__: order.append('herdr') or 0), \
+                patch('builtins.input', side_effect=AssertionError('plain work:cs must never prompt')), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                patch('sys.stdin.isatty', return_value=True), patch('sys.stdout.isatty', return_value=True):
+            spaces.return_value.space.return_value = {'name': 'space', 'billable_owner': {'login': 'octo'}}
+            args = cli.parser().parse_args(['--project', str(self.root), 'work', '--codespace'])
+            self.assertEqual(cli.run(args), 0)
+        self.assertEqual(order, ['worker', 'worker-ready', 'ssh', 'foreign-check', 'keeper', 'keeper-ready', 'herdr'])
+
     def test_choose_pairing_discovers_original_when_registry_root_was_overwritten(self):
         value = self.registry(remote_root=self.generated)
         scratch._write(self.state / scratch.CONFIG, dict(version=1, identity=self.project.identity,

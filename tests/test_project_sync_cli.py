@@ -72,6 +72,114 @@ class ArmFlowTests(unittest.TestCase):
         _, ask = self.arm(row={'name': 'cs-2', 'billable_owner': {'login': 'octo'}})
         ask.assert_called_once()
 
+    def work_cs(self, *, armed=True, account='octo', row='default', space_error=None, foreign=()):
+        from devcontainer_setup.project_sync import __main__ as cli, arming, keeper, workspace
+        from devcontainer_setup.project_sync.state import atomic_write, locked
+        mock = self.mock
+        with locked(self.state / 'workspace-control.lock', blocking=True):
+            arming.arm(self.state, gh_user='octo', codespace='cs-1',
+                       consent=arming.consent_text(self.project.root.name, 'cs-1', 'octo'),
+                       billable_owner='octo', ports=[3570], now=1.0)
+            arming.write(self.state, dict(arming.read(self.state), armed=armed, hold_until=1234,
+                                          owner_stop_at=1000))
+        atomic_write(self.state / 'scratch.json', json.dumps({'codespace': 'cs-1'}).encode())
+        before = (self.state / arming.ARMING).read_bytes()
+        started = {'pid': 4121, 'nonce': 'n' * 48, 'phase': 'starting'}
+
+        def remote(primary, state, armed=None, rebind=None):
+            if armed is not None:
+                armed(primary)
+            from devcontainer_setup.project_sync.herdr import open_remote
+            return open_remote(primary, state, '/workspaces/proj')
+
+        with mock.patch.object(cli, 'discover_project', return_value=self.project), \
+                mock.patch.object(cli, 'state_dir', return_value=self.state), \
+                mock.patch.object(workspace, 'remote', side_effect=remote), \
+                mock.patch.object(keeper, 'foreign_processes', return_value=list(foreign)) as scan, \
+                mock.patch.object(keeper, 'start', return_value=started) as start, \
+                mock.patch.object(keeper, 'wait_ready', return_value=dict(started, phase='watching')) as ready, \
+                mock.patch.object(keeper, 'status', return_value=dict(started, running=True, heartbeat_age=0)), \
+                mock.patch.object(arming, 'account', side_effect=account if isinstance(account, BaseException)
+                                  else None, return_value=account) as checked, \
+                mock.patch('devcontainer_setup.project_sync.codespaces.Codespaces') as spaces, \
+                mock.patch('devcontainer_setup.project_sync.herdr.open_remote', return_value=0) as opened, \
+                mock.patch('builtins.input', side_effect=AssertionError('plain work:cs must never prompt')) as ask, \
+                contextlib.redirect_stdout(io.StringIO()) as out, \
+                mock.patch('sys.stdin.isatty', return_value=True), \
+                mock.patch('sys.stdout.isatty', return_value=True):
+            spaces.return_value.space.return_value = self.row if row == 'default' else row
+            spaces.return_value.space.side_effect = space_error
+            args = parser().parse_args(['--project', str(self.project.root), 'work', '--codespace'])
+            self.assertEqual(cli.run(args), 0)
+        self.assertEqual((self.state / arming.ARMING).read_bytes(), before)
+        ask.assert_not_called()
+        opened.assert_called_once()
+        return start, ready, scan, checked, out.getvalue()
+
+    def test_work_cs_on_an_armed_project_starts_the_keeper_without_a_prompt(self):
+        # #57: saved consent starts recovery again without changing the arming, hold or owner stop.
+        start, ready, scan, _, out = self.work_cs()
+        start.assert_called_once_with(self.project.root, self.state)
+        ready.assert_called_once_with(self.state, 'n' * 48)
+        scan.assert_called_once_with(self.state, 'cs-1')
+        self.assertIn('Recovery     armed since', out)
+        self.assertIn('Keeper       running', out)
+
+    def test_work_cs_with_stale_consent_connects_without_the_keeper_and_says_why(self):
+        # #57: changed account, Codespace or consent text requires an explicit armed entrypoint.
+        for options, reason in ((dict(account='other'), 'the gh account changed'),
+                                (dict(row={'name': 'cs-2', 'billable_owner': {'login': 'octo'}}),
+                                 'the Codespace changed'),
+                                (dict(row={'name': 'cs-1', 'billable_owner': {'login': 'other'}}),
+                                 'the consent text changed')):
+            with self.subTest(reason=reason):
+                start, ready, _, _, out = self.work_cs(**options)
+                start.assert_not_called()
+                ready.assert_not_called()
+                self.assertEqual(out, 'Recovery is armed but needs your confirmation again (' + reason
+                                 + '); run task work:cs:armed.\n')
+
+    def test_work_cs_when_the_account_check_fails_still_connects_and_says_why(self):
+        # #57: Review Focus 5; unavailable account validation never prompts or blocks Herdr.
+        reasons = ('Unset GH_TOKEN before arming; consent must name a real gh account.',
+                   'GitHub rejected the account check; the token may be expired or the network down. '
+                   'Retry after gh auth status.')
+        for error in (ValueError(reasons[0]), ValueError(reasons[1]), OSError('Account check unavailable')):
+            with self.subTest(error=str(error)):
+                start, ready, _, _, out = self.work_cs(account=error)
+                start.assert_not_called()
+                ready.assert_not_called()
+                self.assertEqual(out, 'Recovery is armed but needs your confirmation again (' + str(error)
+                                 + '); run task work:cs:armed.\n')
+
+    def test_a_foreign_gh_process_blocks_the_keeper_not_the_connection(self):
+        # #57: another gh connection retains the existing refusal copy, while Herdr still opens.
+        start, ready, _, _, out = self.work_cs(foreign=[404])
+        start.assert_not_called()
+        ready.assert_not_called()
+        self.assertEqual(out, 'Another gh process holds cs-1 (pid 404); stop it before arming, '
+                         'because gh can start the Codespace and it holds the ports.\n')
+
+    def test_work_cs_when_the_codespace_check_fails_still_connects_and_says_why(self):
+        # #57: unavailable pairing validation preserves saved consent without starting a keeper.
+        for error in (ValueError('Codespace API request failed; check GitHub authentication and retry'),
+                      OSError('Codespace check unavailable')):
+            with self.subTest(error=str(error)):
+                start, ready, _, _, out = self.work_cs(space_error=error)
+                start.assert_not_called()
+                ready.assert_not_called()
+                self.assertEqual(out, 'Recovery is armed but needs your confirmation again (' + str(error)
+                                 + '); run task work:cs:armed.\n')
+
+    def test_work_cs_on_an_unarmed_project_starts_no_keeper(self):
+        # #57: plain connection checks saved consent only when recovery is armed.
+        start, ready, scan, checked, out = self.work_cs(armed=False)
+        start.assert_not_called()
+        ready.assert_not_called()
+        scan.assert_not_called()
+        self.assertEqual(checked.call_count, 0)
+        self.assertEqual(out, '')
+
     def armed_step(self, foreign=(), port=(), no_port=()):
         from devcontainer_setup.project_sync import __main__ as cli, keeper
         from devcontainer_setup.project_sync.state import atomic_write

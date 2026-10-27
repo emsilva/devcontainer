@@ -257,8 +257,9 @@ class RecoveryStatusTests(unittest.TestCase):
         self.assertEqual(stopped[3], 'Keep-alive   not holding; ports 13570 18787; run task work:cs:armed')
 
     def test_lines_that_are_not_fine_name_the_command(self):
+        # #57: plain work:cs starts recovery again when the saved consent still holds.
         stopped = self.lines(running=False)
-        self.assertIn('not running; run task work:cs:armed', stopped[1])
+        self.assertEqual('Keeper       not running; run task work:cs', stopped[1])
         stale = self.lines(heartbeat_at=self.now - 400)
         self.assertIn('task work:cs:armed', stale[1])
         other = self.lines(reading={'at': self.now, 'ok': True, 'state': 'Shutdown', 'pending': False},

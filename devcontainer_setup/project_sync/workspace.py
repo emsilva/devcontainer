@@ -372,7 +372,7 @@ def recovery_lines(value):
     running, age = runtime.get('running'), runtime.get('heartbeat_age')
     phase, rid = runtime.get('phase'), (runtime.get('last_restart') or {}).get('rid')
     if not running:
-        lines.append('Keeper       not running; run task work:cs:armed')
+        lines.append('Keeper       not running; run task work:cs')
     elif phase == 'refused':
         lines.append('Keeper       refused: ' + str(runtime.get('error')))
     elif age is None or age > keeper.HEARTBEAT_STALE:

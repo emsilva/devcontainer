@@ -1174,7 +1174,8 @@ class ScratchTests(unittest.TestCase):
                               'No start request was allowed.')
     STOPPED = 'Codespace is Shutdown; no start request was allowed.'
     STOP_NOTE = ('Codespace recovery', "repo's Codespace stopped (Shutdown); run task work:cs to bring it back")
-    KEEPER_NOTE = ('Codespace recovery', 'Recovery for repo is not running; run task work:cs:armed')
+    # #57: the dead-keeper notice points to the plain recovery-on-connect command.
+    KEEPER_NOTE = ('Codespace recovery', 'Recovery for repo is not running; run task work:cs')
 
     def _stopped_cycle(self):
         from devcontainer_setup.project_sync.replication import ConnectionVerificationError

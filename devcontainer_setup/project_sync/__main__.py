@@ -58,24 +58,41 @@ def _print(value):
     print(json.dumps(value, indent=2, sort_keys=True))
 
 
+def _consent_on_file(project, state) -> str | None:
+    """None only while the saved consent still names this text, Codespace and account."""
+    from . import arming
+    from .codespaces import Codespaces
+    try:
+        current = arming.read(state)
+        user = arming.account(os.environ)
+        row = Codespaces(project, state).space()
+        if not row:
+            return 'Pair a Codespace first: run task work:cs'
+        owner = (row.get('billable_owner') or {}).get('login')
+        if not owner:
+            return 'The Codespace does not name a billing owner; check it in GitHub'
+        text = arming.consent_text(project.root.name, row['name'], owner)
+        digest = hashlib.sha256(text.encode()).hexdigest()
+    except (ValueError, OSError) as error:
+        return str(error)
+    if current.get('gh_user') != user:
+        return 'the gh account changed'
+    if current.get('codespace') != row['name']:
+        return 'the Codespace changed'
+    if not current.get('armed') or current.get('consent_sha256') != digest:
+        return 'the consent text changed'
+    return None
+
+
 def _arm(project, state, args):
     # Records consent; _armed then starts the keeper. Network calls and the
     # prompt run unlocked; the lock covers only the read and write.
     from . import arming
     from .codespaces import Codespaces
     from .state import locked
-    user = arming.account(os.environ)
-    row = Codespaces(project, state).space()
-    if not row:
-        raise ValueError('Pair a Codespace first: run task work:cs')
-    owner = (row.get('billable_owner') or {}).get('login')
-    if not owner:
-        raise ValueError('The Codespace does not name a billing owner; check it in GitHub')
-    text = arming.consent_text(project.root.name, row['name'], owner)
-    digest = hashlib.sha256(text.encode()).hexdigest()
     current = arming.read(state)
-    if (current.get('armed') and current.get('consent_sha256') == digest
-            and current.get('codespace') == row['name'] and current.get('gh_user') == user):
+    if current.get('armed') and _consent_on_file(project, state) is None:
+        user = current['gh_user']
         if args.port or args.no_port:
             with locked(state / 'workspace-control.lock', blocking=True):
                 latest = arming.read(state)
@@ -85,6 +102,14 @@ def _arm(project, state, args):
         else:
             print('Already armed as ' + user)
         return 0
+    user = arming.account(os.environ)
+    row = Codespaces(project, state).space()
+    if not row:
+        raise ValueError('Pair a Codespace first: run task work:cs')
+    owner = (row.get('billable_owner') or {}).get('login')
+    if not owner:
+        raise ValueError('The Codespace does not name a billing owner; check it in GitHub')
+    text = arming.consent_text(project.root.name, row['name'], owner)
     print(text)
     try:
         answer = input('> ')
@@ -114,6 +139,29 @@ def _armed(project, state, args):
     if before.get('armed') and arming.read(state).get('ports') != before.get('ports'):
         # R20: the running keep-alive child carries the old ports; a new keeper starts one with the new list.
         keeper.stop(state)
+    started = keeper.start(project.root, state)
+    if keeper.wait_ready(state, started['nonce']).get('phase') == 'starting':
+        print('The keeper has not reported within 60 seconds; inspect task work:logs.')
+    print('\n'.join(workspace.recovery_lines(workspace.recovery(state))))
+
+
+def _resume_recovery(project, state) -> None:
+    """Start recovery with consent already on file; plain connection never prompts."""
+    from . import keeper, workspace
+    from .state import read_json
+    reason = _consent_on_file(project, state)
+    if reason is not None:
+        print('Recovery is armed but needs your confirmation again (' + reason + '); run task work:cs:armed.')
+        return
+    try:
+        name = read_json(state / scratch.CONFIG)['codespace']
+        pids = keeper.foreign_processes(state, name)
+        if pids:
+            raise ValueError('Another gh process holds ' + name + ' (pid ' + ', '.join(map(str, pids))
+                             + '); stop it before arming, because gh can start the Codespace and it holds the ports.')
+    except (ValueError, OSError) as error:
+        print(str(error))
+        return
     started = keeper.start(project.root, state)
     if keeper.wait_ready(state, started['nonce']).get('phase') == 'starting':
         print('The keeper has not reported within 60 seconds; inspect task work:logs.')
@@ -304,11 +352,13 @@ def run(args):
             return _owner_power(project, state, restart=args.codespace_restart)
         if args.codespace:
             from . import arming
-            if args.rebind is not None and arming.read(state).get('armed'):
+            armed = arming.read(state).get('armed')
+            if args.rebind is not None and armed:
                 # Moving only the sync would leave automatic restart on the old Codespace.
                 raise ValueError('This project is armed; move it with task work:cs:armed -- --rebind '
                                  + args.rebind + ' so restart moves too')
-            return workspace.remote(project, state, rebind=args.rebind)
+            return workspace.remote(project, state, rebind=args.rebind,
+                                    armed=(lambda primary: _resume_recovery(primary, state)) if armed else None)
     if args.action == 'configure':
         _print(scratch.configure(project.root, state, args.codespace, args.remote_root))
     elif args.action == 'start':

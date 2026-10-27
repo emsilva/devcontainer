@@ -458,7 +458,7 @@ class _Notices:
         elif now - self.unhealthy_at >= KEEPER_DOWN and not self.runtime.get('notified_keeper'):
             self.runtime['notified_keeper'] = True
             self.save()
-            self._send(f'Recovery for {self.project} is not running; run task work:cs:armed')
+            self._send(f'Recovery for {self.project} is not running; run task work:cs')
 
     def _armed(self):
         """True or False from arming.json; None when it cannot be read, which sends no notice."""
