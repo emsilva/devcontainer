@@ -29,6 +29,7 @@
 - `HEARTBEAT_STALE=300` is both the R16 gap and the hung-keeper limit (`keeper.start`, `_Notices.watch_keeper`, `workspace.recovery_lines`). In phase `deleted` the keeper therefore keeps beating every `POLL` (60 s) and reads the API only every 15 minutes. The hung-keeper checks stay as they are.
 - The spec's worker log line says "was deleted", but the spec also rules that only the keeper says "deleted" outright. The worker uses the hedged wording (Task 2).
 - A stop the keeper saw (previous reading not Available) is not an "accept either" candidate: `_up`'s first branch never keeps the old anchor, and drops start evidence at or before that reading when the state is in `keeper.DOWN`. The worker records `stopped_at` only on a fresh state read. Residual, accepted: a first read that still shows Shutdown just after an owner's POST can stamp the new start; its evidence is then lost and the keeper falls back to `last_used_at`.
+- The worker records `last_synchronized_at` on a clean Mutagen sync; the deleted log line drops "(last synchronized HH:MM)" when none is recorded; the Deleted retry delay never stretches the R27 keeper check.
 
 ## Review Focus
 
