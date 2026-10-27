@@ -443,8 +443,9 @@ class Keeper:
         gap = seen_at is None or reading.at - seen_at > HEARTBEAT_STALE
         if state is not None and state != 'Available':
             if gap and reading.last_used_at is not None and seen_at < reading.last_used_at <= reading.at:
-                # A start this keeper did not see, inside a gap. Keep every plausible start (#61).
-                anchor = self._candidates(reading, anchor, gap=True)
+                # A stop this keeper saw ends that run. Accept-either covers only a gap it did not see (#61).
+                floor = seen_at if state in DOWN else None
+                anchor = self._candidates(reading, None, gap=False, drop_at_or_before=floor)
             else:
                 anchor = {'at': reading.at, 'source': 'observed'}
         elif reading.last_used_at is not None and (
@@ -460,13 +461,14 @@ class Keeper:
             _LOG.info('Anchor %s from %s', _utc(anchor['at']), anchor['source'])
         self.runtime.update(anchor=anchor, last_up_at=reading.at, down={'count': 0, 'first_at': None})
 
-    def _candidates(self, reading, old, *, gap):
+    def _candidates(self, reading, old, *, gap, drop_at_or_before=None):
         """Earliest plausible start, plus later ones more than WINDOW from it (#61)."""
         found = [('evidence', evidence.usable_start(self.state, self.api.name, reading.at)),
                  ('api', reading.last_used_at)]
         if gap and _plausible_previous(old, reading):
             found.append(('previous', old['at']))
-        kept = [(source, at) for source, at in found if _epoch(at)]
+        kept = [(source, at) for source, at in found
+                if _epoch(at) and not (drop_at_or_before is not None and at <= drop_at_or_before)]
         kept.sort(key=lambda item: item[1])
         earliest = kept[0][1]
         source, at = kept[0]

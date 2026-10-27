@@ -1494,6 +1494,35 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.assertEqual((saved['source'], saved['started_at'], saved['stopped_at']), ('created', created, None))
         self.assertFalse((path.parent / 'scratch.json').exists())
 
+    def test_setup_continues_when_created_evidence_cannot_find_the_project(self):
+        # #61: a project lookup that fails must not fail setup after the Codespace exists.
+        import contextlib
+        import io
+        import logging
+        from devcontainer_setup.__main__ import _launch_on_default
+        self.push_to_main({'.devcontainer/devcontainer.json': '{}\n'})
+
+        class API:
+            def launch(self, *args, **kwargs):
+                callback = kwargs.get('on_created')
+                if callback is not None:
+                    callback('new-space', 1_700_000_000.0)
+                return 'new-space'
+
+        sha = self.origin_git('rev-parse', 'main')
+        launch = {'machine': 'standardLinux32gb', 'idle_timeout': '30m', 'client': 'browser'}
+        preferences = {'apply_dotfiles': False, 'dotfiles_repo': ''}
+        with patch('devcontainer_setup.project_sync.state.discover_project',
+                   side_effect=ValueError('secret path /Users/owner')), \
+                self.assertLogs('devcontainer_setup.__main__', logging.INFO) as logs, \
+                contextlib.redirect_stdout(io.StringIO()):
+            name, _config = _launch_on_default(API(), self.root, 'owner/project', 'main', sha, launch, preferences)
+        self.assertEqual(name, 'new-space')
+        text = '\n'.join(logs.output)
+        self.assertIn('Start evidence was not written', text)
+        self.assertNotIn('secret path', text)
+        self.assertNotIn('/Users/owner', text)
+
     def test_reuse_carries_the_retired_setup_branch_receipt(self):
         from devcontainer_setup.__main__ import _launch_on_default
         from devcontainer_setup.codespaces import Codespaces, receipt_path

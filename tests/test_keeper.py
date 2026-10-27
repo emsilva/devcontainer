@@ -1024,6 +1024,32 @@ class KeeperStepTests(unittest.TestCase):
         self.assertEqual(self.runtime()['anchor'], {'at': a, 'source': 'previous', 'also': [s]})
         self.assertEqual(self.runtime()['down']['kind'], 'LIFETIME')
 
+    def test_a_stop_the_keeper_saw_ends_its_run_as_a_candidate(self):
+        # #61: a stop the keeper saw is not the ambiguity "accept either" covers.
+        # Up at A, a classified stop at A+3h, a gap, up at A+6h with last_used_at S = A+5h, idle-out at A+12h.
+        a, s = T0, T0 + 5 * 3600
+        readings = ([up(a + 60, last_used_at=a)]
+                    + [down(a + 3 * 3600 + 60 * i) for i in range(3)]
+                    + [up(a + 6 * 3600 + 60 * i, last_used_at=s) for i in range(2)]
+                    + [down(a + LIFE + 60 * i) for i in range(3)])
+        k = self.keeper(readings)
+        self.run_steps(k, [reading.at for reading in readings])
+        self.assertEqual(self.runtime()['anchor'], {'at': s, 'source': 'api'})
+        self.assertEqual(self.runtime()['down']['kind'], 'OTHER')
+
+    def test_start_evidence_from_before_a_seen_stop_is_not_a_candidate(self):
+        # #61: a stop the keeper saw is not the ambiguity "accept either" covers.
+        # Evidence at A, one Shutdown at A+3h (never classified), a gap, up with last_used_at S, idle-out at A+12h.
+        a, s = T0, T0 + 5 * 3600
+        evidence.record_start(self.state, 'cs-1', a, 'started')
+        readings = ([up(a + 60, last_used_at=a), down(a + 3 * 3600)]
+                    + [up(a + 6 * 3600 + 60 * i, last_used_at=s) for i in range(2)]
+                    + [down(a + LIFE + 60 * i) for i in range(3)])
+        k = self.keeper(readings)
+        self.run_steps(k, [reading.at for reading in readings])
+        self.assertEqual(self.runtime()['anchor'], {'at': s, 'source': 'api'})
+        self.assertEqual(self.runtime()['down']['kind'], 'OTHER')
+
     def test_a_fresh_keeper_counts_from_recorded_start_evidence_not_a_later_last_used_at(self):
         # #61: evidence at the real start, last_used_at six hours later, stop at start + 12 h is LIFETIME.
         a = T0

@@ -369,8 +369,6 @@ class Codespaces:
                 if not re.fullmatch(r'[A-Za-z0-9-]+', created):
                     raise ValueError('Creation did not return a codespace name. Check gh codespace list before retrying.')
                 name = created
-                if on_created is not None:
-                    on_created(name, before)
                 settings = {'machine': machine, 'idle_timeout_minutes': self._minutes(idle_timeout),
                             'location': location, 'retention_period_minutes': self._minutes(retention)}
             record = {'codespace': name, 'repository': repo, 'branch': branch,
@@ -390,6 +388,9 @@ class Codespaces:
                         previous.get('validated_commit') == sha
                         and previous.get('rebuild_pending') is False)
             self._save_receipt(receipt, record)
+            # After the receipt: a failing callback must not leave a billed Codespace with nothing to resume (#61).
+            if not resume and on_created is not None:
+                on_created(name, before)
             if resume and data.get('state') in {'Shutdown', 'ShutDown'}:
                 self.command('api', f'user/codespaces/{name}/start', '--method', 'POST')
             self.wait(name)

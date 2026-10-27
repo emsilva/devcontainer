@@ -169,6 +169,17 @@ class CodespacesTests(unittest.TestCase):
         self.assertEqual(seen, [])
         self.assertFalse(any(call[1:3] == ['codespace', 'create'] for call in self.runner.calls))
 
+    def test_a_failing_created_callback_still_leaves_the_launch_receipt(self):
+        # #61: a failing created callback cannot leave a billed Codespace without its receipt.
+        def fail(name, at):
+            raise ValueError('project state cannot be found')
+
+        with self.assertRaises(ValueError):
+            self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser', None, self.receipt,
+                            on_created=fail)
+        self.assertTrue(self.receipt.exists())
+        self.assertEqual(json.loads(self.receipt.read_text())['codespace'], 'new-space')
+
     def test_codespace_created_on_default_branch_at_merge_sha(self):
         # Another PR merged after the setup merge: main's head contains the merge commit, not equals it.
         self.runner.remote_sha = 'f' * 40

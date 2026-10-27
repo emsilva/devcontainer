@@ -1238,18 +1238,36 @@ class ScratchTests(unittest.TestCase):
         return json.loads((self.state / m.RUNTIME).read_text()), (self.state / 'scratch.log').read_text()
 
     def test_the_worker_records_stopped_at_when_it_learns_a_down_state(self):
-        # #61: an unarmed project's evidence expires at the next seen stop. Epochs come from time.time.
+        # #61: an unarmed project's evidence expires at the next seen stop, stamped with that read's time.
         from devcontainer_setup.project_sync import evidence
         from devcontainer_setup.project_sync.replication import ConnectionVerificationError
         started = 1_700_000_000.0
         evidence.record_start(self.state, 'bound-name', started, 'started')
         notices = self._notices([0.0])
-        with patch('devcontainer_setup.project_sync.scratch.time.time', return_value=started + 3600):
+        times = iter([started + 3600, started + 3601])
+        with patch('devcontainer_setup.project_sync.scratch.time.time', side_effect=lambda: next(times)):
             notices.explain(ConnectionVerificationError('Codespace is Shutdown', 'Shutdown'), 'symptom')
         saved = json.loads((self.state / evidence.FILE).read_text())['bound-name']
         self.assertEqual(saved['stopped_at'], started + 3600)
         evidence.record_start(self.state, 'bound-name', started + 7200, 'started')
         notices.explain(ConnectionVerificationError('up', 'Available'), 'symptom')
+        self.assertIsNone(json.loads((self.state / evidence.FILE).read_text())['bound-name']['stopped_at'])
+
+    def test_a_cached_down_state_records_no_stop(self):
+        # #61: a cached down reading must not stamp a stop onto a start recorded since.
+        from devcontainer_setup.project_sync import evidence
+        from devcontainer_setup.project_sync.replication import ConnectionVerificationError
+        started = 1_700_000_000.0
+        evidence.record_start(self.state, 'bound-name', started, 'started')
+        now = [0.0]
+        notices = self._notices(now)
+        with patch('devcontainer_setup.project_sync.scratch.time.time', return_value=started + 100):
+            notices.explain(ConnectionVerificationError('Codespace is Shutdown', 'Shutdown'), 'symptom')
+        evidence.record_start(self.state, 'bound-name', started + 200, 'started')
+        now[0] = 30.0
+        with patch('devcontainer_setup.project_sync.scratch.time.time', return_value=started + 999) as clock:
+            notices.explain(ValueError('forward down'), 'symptom')
+        clock.assert_not_called()
         self.assertIsNone(json.loads((self.state / evidence.FILE).read_text())['bound-name']['stopped_at'])
 
     def test_unarmed_stop_notifies_once_until_syncing(self):

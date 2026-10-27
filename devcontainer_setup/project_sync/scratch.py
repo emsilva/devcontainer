@@ -354,14 +354,17 @@ class _Notices:
         """The worker's error for a failure; a known stop names its state, not the symptom (#48)."""
         from .replication import ConnectionVerificationError, read_codespace_state, stopped_message
         now = self.clock()
+        read_wall = None
         if isinstance(error, ConnectionVerificationError):
             self.read_at, self.known = now, error.state  # verify() has just read it
+            read_wall = time.time()
         elif self.read_at is None or now - self.read_at >= STATE_READ_GAP:
             self.read_at, self.known = now, read_codespace_state(self.codespace, os.environ)
-        # Epochs come from the wall clock; this object's clock is monotonic (#61).
+            read_wall = time.time()
+        # A cached known records nothing: a start in that minute must not inherit the old stop (#61).
         from . import evidence, keeper
-        if self.known in keeper.DOWN:
-            evidence.record_stop(self.state, self.codespace, time.time())
+        if read_wall is not None and self.known in keeper.DOWN:
+            evidence.record_stop(self.state, self.codespace, read_wall)
         return message if self.known in (None, 'Available') else stopped_message(self.known)
 
     def notify_stop(self):

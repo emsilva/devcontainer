@@ -6,6 +6,7 @@ import argparse
 from contextlib import contextmanager
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -27,6 +28,7 @@ from .render import render, validate
 from .ui import Cancelled, Gum, cache_home
 
 SOURCE = Path(__file__).resolve().parents[1]
+_LOG = logging.getLogger(__name__)
 RUNTIME_DEFAULTS = {'python': '3.13', 'node': '24', 'ruby': '3.4', 'go': '1.26', 'rust': '1.99.1'}
 TOOL_LABELS = {'azure': 'Azure CLI', 'aws': 'AWS CLI', 'gcp': 'Google Cloud CLI',
                'docker': 'Docker', 'devtunnel': 'Dev Tunnels', 'precommit': 'pre-commit',
@@ -758,10 +760,13 @@ def _launch_on_default(api: Codespaces, project: Path, repo: str, default: str, 
     dotfiles = preferences['dotfiles_repo'] if preferences['apply_dotfiles'] else None
 
     def _record_created(name, before):
-        # Even when setup does not pair the new Codespace. A write error is logged, never raised.
-        from .project_sync.evidence import record_start
-        from .project_sync.state import discover_project, state_dir
-        record_start(state_dir(discover_project(project)), name, before, 'created')
+        # Even when setup does not pair the new Codespace. A lookup or write error is logged, never raised.
+        try:
+            from .project_sync.evidence import record_start
+            from .project_sync.state import discover_project, state_dir
+            record_start(state_dir(discover_project(project)), name, before, 'created')
+        except (OSError, ValueError):
+            _LOG.info('Start evidence was not written')
 
     name = api.launch(repo, default, sha, dotfiles_repo=dotfiles, receipt=receipt_path(state, repo, default),
                       workspace=config.get('workspaceFolder'), state_root=state,
