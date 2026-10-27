@@ -183,11 +183,25 @@
 
 Run after Tasks 1–3 are on main and pushed. It creates a billed Codespace, so the lead confirms with the owner before Step 2.
 
-- [ ] **Step 1: Isolate.** Use `XDG_STATE_HOME=/Users/mannu/code/devcontainer/tmp/livetest-keeper/state` for every command (`state._state_home` honours it), and a fresh clone of innovate at `/Users/mannu/code/devcontainer/tmp/livetest-keeper/innovate-keeper-test` on a new branch `test/keeper-safety-<date>`. The distinct basename keeps the Herdr machine label apart from the real innovate.
-- [ ] **Step 2: Create** with `gh codespace create --repo kyndryl-agentic-ai/consult-sm-innovate --branch test/keeper-safety-<date>` (billed to kyndryl-agentic-ai, never paired with the real checkout). Then `task work:cs` (records `started` evidence) and `task work:cs:armed`.
-- [ ] **Step 3: Check, recording each command and its output in `tmp/livetest-keeper/REPORT.md`:**
+- [x] **Step 1: Isolate.** Use `XDG_STATE_HOME=/Users/mannu/code/devcontainer/tmp/livetest-keeper/state` for every command (`state._state_home` honours it), and a fresh clone of innovate at `/Users/mannu/code/devcontainer/tmp/livetest-keeper/innovate-keeper-test` on a new branch `test/keeper-safety-<date>`. The distinct basename keeps the Herdr machine label apart from the real innovate.
+- [x] **Step 2: Create** with `gh codespace create --repo kyndryl-agentic-ai/consult-sm-innovate --branch test/keeper-safety-<date>` (billed to kyndryl-agentic-ai, never paired with the real checkout). Then `task work:cs` (records `started` evidence) and `task work:cs:armed`.
+- [x] **Step 3: Check, recording each command and its output in `tmp/livetest-keeper/REPORT.md`:**
   - a fresh keeper anchors on `evidence`;
   - `last_used_at` before and after one browser open;
   - delete the Codespace: the Deleted status line, one notification, caffeinate released, the worker paused;
   - after `task work:stop`, plain `task work:cs` brings the keeper back. Rebind first, or use a second test Codespace for this step.
-- [ ] **Step 4: Clean up.** Delete the test Codespace and branch, then `task work:stop` and `task work:disconnect` under the test `XDG_STATE_HOME`. Comment the results on #61, #60 and #57, and close each one whose live check passed.
+- [x] **Step 4: Clean up.** Delete the test Codespace and branch, then `task work:stop` and `task work:disconnect` under the test `XDG_STATE_HOME`. Comment the results on #61, #60 and #57, and close each one whose live check passed.
+
+#### Live-run corrections (2026-10-27)
+
+Task 4 ran on 2026-10-27 from 03:01Z to 04:20Z, on test Codespace `wretched-specter-699v4r9wv9qwf5p4w`. #61, #60 and #57 passed live; the report is `tmp/livetest-keeper/REPORT.md`. The steps above needed these corrections, and any rerun must apply them:
+
+- **State home.** The private Mutagen socket is `<state home>/devcontainer-setup/projects/<id>/m181/daemon/daemon.sock`, 77 bytes after the home, and `tools.mutagen_env` refuses more than 103 on Darwin. The state home must therefore be at most 26 bytes; the run used `/Users/mannu/.t4state`. The Step 1 path gives 133 bytes and the scratch worker dies (#97). The state home must be a real directory, because `state._parent` walks it with O_NOFOLLOW.
+- **Fresh namespace mode.** In a fresh state home where setup runs first, `devcontainer-setup/` is created 755, and work:cs then refuses "State namespace is not private" (#96).
+- **Distinct basename.** A distinct basename does not isolate the clone. `project_id` hashes the origin, so the ssh alias block and the Herdr profile are real innovate's. `ssh_hosts._configure` refuses the alias without this state's receipt. The run removed real innovate's block by exact bytes for the test and restored `~/.ssh/config` from a backup afterwards (diff empty). It declined Herdr's remote install, so `machine add` saved nothing and the real profile was untouched.
+- **Evidence path.** A freshly created Codespace is Available, so plain `work:cs` records no evidence. Stop it first, then `task work:cs -- --rebind <name>` (`source: started`). Setup's `created` writer is unit-tested only.
+- **Key authorization.** Plain `gh codespace create` leaves `~/.ssh/codespaces.auto` unauthorized ("SSH authentication failed"). One `gh codespace ssh -c <name> -- true` authorizes it, which is what setup's launch does. A first connect right after a boot can also hit #42.
+- **Moving `last_used_at`.** An ssh does not move it. A no-op start request on the Available Codespace (`gh api -X POST user/codespaces/<name>/start`) does, as in the armed-recovery spec. The check needs it more than `WINDOW` after the evidence.
+- **Fresh keeper.** `keeper._load` keeps the old anchor when the new keeper starts within `HEARTBEAT_STALE` of the last heartbeat. Wait more than 300 s between `work:stop` and plain `work:cs` to test a fresh keeper.
+- **One Codespace.** Run the #57 check before the deletion; one billed Codespace then covers all three checks.
+- **Login naming.** The deleted messages name the account only for logins of alphanumerics and `-`. An Enterprise Managed User login (`mannu_kyndryl`) gets the fallback "this Mac's GitHub account" (#98).
