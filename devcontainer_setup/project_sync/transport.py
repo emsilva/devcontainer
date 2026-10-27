@@ -45,10 +45,31 @@ def _upstream(url, token):
         return error.code, b'{}'
 
 
-def codespace_state(name, token, *, upstream=None):
-    """One read of the Codespace state; None on any HTTP, JSON or network failure."""
+def _deleted_from_list(status, body, name):
+    """A complete, valid account inventory can confirm absence; a partial one cannot."""
+    if status != 200:
+        return None
     try:
-        status, body = (upstream or _upstream)('https://api.github.com/user/codespaces/' + _name(name), token)
+        obj = json.loads(body)
+    except ValueError:
+        return None
+    rows = obj.get('codespaces') if isinstance(obj, dict) else None
+    if not isinstance(rows, list) or any(not isinstance(row, dict) or not isinstance(row.get('name'), str)
+                                         for row in rows):
+        return None
+    if any(row['name'] == name for row in rows):
+        return False
+    return True if len(rows) < 100 else None
+
+
+def codespace_state(name, token, *, upstream=None):
+    """Read state, confirming a 404 with one same-token list; None when unreadable."""
+    try:
+        request = upstream or _upstream
+        status, body = request('https://api.github.com/user/codespaces/' + _name(name), token)
+        if status == 404:
+            listed, inventory = request('https://api.github.com/user/codespaces?per_page=100', token)
+            return 'Deleted' if _deleted_from_list(listed, inventory, name) is True else None
         if status != 200:
             return None
         obj = json.loads(body)

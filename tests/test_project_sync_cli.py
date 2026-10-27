@@ -180,6 +180,33 @@ class OwnerHerdr:
 
 
 class OwnerPowerTests(unittest.TestCase):
+    def missing_power(self, restart, confirmed=True):
+        from unittest import mock
+        from devcontainer_setup.project_sync import arming
+        api = OwnerAPI(self.state, [], stop=404)
+        def confirm():
+            self.assertEqual(arming.read(self.state)['owner_stop_at'], self.clock)
+            return confirmed
+        api.confirm_deleted = mock.Mock(side_effect=confirm)
+        with self.assertRaises(ValueError) as caught:
+            self.power(api, restart=restart)
+        self.assertEqual(api.calls, [('stop', self.clock)])
+        api.confirm_deleted.assert_called_once_with()
+        return str(caught.exception)
+
+    def test_work_cs_stop_on_a_confirmed_deletion_says_nothing_to_stop(self):
+        # #60: R33's owner-stop record is durable before the 404 is confirmed.
+        self.assertEqual(self.missing_power(False), 'cs-1 no longer exists on GitHub; there is nothing to stop.')
+
+    def test_work_cs_restart_on_a_confirmed_deletion_says_nothing_to_stop(self):
+        # #60: a deleted Codespace cannot be restarted, and the owner stop still wins.
+        self.assertEqual(self.missing_power(True), 'cs-1 no longer exists on GitHub; there is nothing to stop.')
+
+    def test_an_unconfirmed_stop_404_keeps_the_existing_refusal(self):
+        # #60: failed and incomplete confirmations keep the existing 4xx diagnosis.
+        for confirmed in (False, None):
+            self.assertIn('GitHub refused the stop request (HTTP 404)', self.missing_power(False, confirmed))
+
     """work:cs:stop and work:cs:restart with the owner present."""
 
     def setUp(self):
@@ -392,6 +419,43 @@ class OwnerPowerTests(unittest.TestCase):
 
 
 class ProjectSyncCLITests(unittest.TestCase):
+    def test_work_cs_on_a_missing_pairing_lists_this_repositorys_codespaces(self):
+        # #60: the same active token labels the missing pairing and repository inventory.
+        from unittest import mock
+        from devcontainer_setup.project_sync import arming, scratch, workspace
+        from devcontainer_setup.project_sync.state import atomic_write, discover_project
+        project = discover_project(self.root)
+        atomic_write(self.state / scratch.CONFIG, json.dumps({'identity': project.identity,
+                     'codespace': 'cs-1', 'root': str(self.root), 'remote_root': '/workspaces/project'}).encode())
+        for armed in (False, True):
+            arming.write(self.state, {'schema': 1, 'armed': armed})
+            for names in (['a', 'b'], []):
+                calls = []
+                real_run = subprocess.run
+                def run(args, **kwargs):
+                    if args[0] == 'git':
+                        return real_run(args, **kwargs)
+                    calls.append((args, kwargs['env']['GH_TOKEN']))
+                    route = args[6]
+                    if route == 'user/codespaces/cs-1':
+                        return mock.Mock(returncode=1, stdout='', stderr='gh: Not Found (HTTP 404) fixture-token')
+                    if route == 'user':
+                        return mock.Mock(returncode=0, stdout='{"login":"octo"}', stderr='')
+                    self.assertEqual(route, 'user/codespaces?per_page=100')
+                    rows = [dict(name=name, repository={'full_name': 'example/project'}) for name in names]
+                    return mock.Mock(returncode=0, stdout=json.dumps([{'codespaces': rows}]), stderr='')
+                with mock.patch('devcontainer_setup.project_sync.codespaces.github_token', return_value='fixture-token'), \
+                        mock.patch('devcontainer_setup.project_sync.codespaces.subprocess.run', side_effect=run):
+                    with self.assertRaises(ValueError) as caught:
+                        workspace._choose_pairing(project, self.state, {'local_root': str(self.root)})
+                inventory = ("This repository's Codespaces: a, b." if names else 'This repository has no Codespaces.')
+                move = 'task work:cs:armed' if armed else 'task work:cs'
+                self.assertEqual(str(caught.exception), 'cs-1 is not visible to octo: it was deleted, or it belongs '
+                                 'to another account. ' + inventory + ' Move to one with ' + move +
+                                 ' -- --rebind <name>, or create one with task devcontainer:setup.')
+                self.assertTrue(all(token == 'fixture-token' for _, token in calls))
+                self.assertEqual(len(calls), 3)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

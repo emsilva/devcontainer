@@ -286,12 +286,15 @@ class LifecycleAPITests(unittest.TestCase):
     NAME = 'space-1'
 
     def test_lifecycle_api_reads_and_posts_only_its_routes(self):
+        # #60: the only extra route confirms a missing Codespace with its account's list.
         calls = []
         body = json.dumps({'name': self.NAME, 'state': 'Shutdown', 'pending_operation': False,
                            'last_used_at': '2026-10-21T14:34:47Z'}).encode()
 
         def upstream(method, url, token):
             calls.append((method, url))
+            if url.endswith('?per_page=100'):
+                return 200, b'{"codespaces":[]}'
             return (200, body) if method == 'GET' else (202, b'{}')
         api = lifecycle.LifecycleAPI(self.NAME, upstream=upstream, token_reader=lambda: 't')
         row = api.read()
@@ -299,8 +302,70 @@ class LifecycleAPITests(unittest.TestCase):
         self.assertEqual(row.last_used_at, lifecycle.parse_time('2026-10-21T14:34:47Z'))
         self.assertEqual(api.post_start(), 202)
         self.assertEqual(api.post_stop(), 202)
+        self.assertIs(api.confirm_deleted(), True)
         base = 'https://api.github.com/user/codespaces/' + self.NAME
-        self.assertEqual(calls, [('GET', base), ('POST', base + '/start'), ('POST', base + '/stop')])
+        self.assertEqual(calls, [('GET', base), ('POST', base + '/start'), ('POST', base + '/stop'),
+                                 ('GET', 'https://api.github.com/user/codespaces?per_page=100')])
+
+    def missing_api(self, list_status=200, rows=(), *, first_status=404):
+        calls = []
+        def upstream(method, url, token):
+            calls.append((method, url, token))
+            if url.endswith('?per_page=100'):
+                return list_status, json.dumps({'codespaces': rows}).encode()
+            return first_status, b'{}'
+        return lifecycle.LifecycleAPI(self.NAME, upstream=upstream, token_reader=lambda: 't'), calls
+
+    def test_a_404_confirmed_by_the_list_reads_as_deleted(self):
+        # #60: one confirming list from the same account is required before saying Deleted.
+        api, calls = self.missing_api(rows=[{'name': 'another'}])
+        row = api.read()
+        self.assertEqual((row.ok, row.state, row.pending, row.last_used_at, row.http),
+                         (True, 'Deleted', None, None, 404))
+        self.assertEqual(calls, [('GET', 'https://api.github.com/user/codespaces/space-1', 't'),
+                                 ('GET', 'https://api.github.com/user/codespaces?per_page=100', 't')])
+
+    def test_a_404_whose_list_fails_stays_unreadable(self):
+        # #60: a failed confirmation cannot prove deletion (Review Focus 3).
+        api, calls = self.missing_api(list_status=503)
+        row = api.read()
+        self.assertEqual((row.ok, row.state, row.http), (False, None, 404))
+        self.assertEqual(len(calls), 2)
+
+    def test_a_404_with_a_full_first_page_stays_unreadable(self):
+        # #60: the missing name could be on page two (Review Focus 3).
+        api, calls = self.missing_api(rows=[{'name': 'other-' + str(i)} for i in range(100)])
+        row = api.read()
+        self.assertEqual((row.ok, row.state, row.http), (False, None, 404))
+        self.assertEqual(len(calls), 2)
+
+    def test_a_401_stays_an_auth_reading_without_a_list_call(self):
+        # #60: authorization errors never trigger deletion confirmation.
+        for status in (401, 403):
+            api, calls = self.missing_api(first_status=status)
+            row = api.read()
+            self.assertEqual((row.ok, row.state, row.http), (False, None, status))
+            self.assertEqual(len(calls), 1)
+
+    def test_readings_carry_their_http_status(self):
+        # #60: successful, invalid-body, and network readings preserve their status.
+        for status, body, ok in ((200, b'{"name":"space-1","state":"Available"}', True),
+                                 (200, b'bad json', False), (500, b'{}', False), (0, b'', False)):
+            api = lifecycle.LifecycleAPI(self.NAME, upstream=lambda *a: (status, body), token_reader=lambda: 't')
+            row = api.read()
+            self.assertEqual((row.ok, row.http), (ok, status))
+
+    def test_a_list_that_still_names_the_codespace_does_not_confirm_deletion(self):
+        # #60: even a full page can disprove deletion when it names this Codespace.
+        api, _ = self.missing_api(rows=[{'name': self.NAME}] * 100)
+        self.assertIs(api.confirm_deleted(), False)
+        self.assertFalse(api.read().ok)
+
+    def test_a_malformed_confirming_list_never_proves_deletion(self):
+        # #60: an invalid inventory is an unreadable confirmation, never an empty list.
+        for body in (b'bad json', b'[]', b'{}', b'{"codespaces":[{}]}', b'{"codespaces":null}'):
+            api = lifecycle.LifecycleAPI(self.NAME, upstream=lambda *a: (200, body), token_reader=lambda: 't')
+            self.assertIsNone(api.confirm_deleted())
 
     def test_read_is_not_ok_on_bad_status_body_or_name(self):
         for status, body in ((500, b'{}'), (200, b'<html>'), (200, b'{"name":"other","state":"Available"}'),

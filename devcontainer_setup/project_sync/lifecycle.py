@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener
 
 from .state import _parent
-from .transport import TokenTimeout, _NoRedirect, _name, github_token
+from .transport import TokenTimeout, _NoRedirect, _deleted_from_list, _name, github_token
 
 LIFETIME = 12 * 3600
 WINDOW = 15 * 60
@@ -43,6 +43,7 @@ class Reading:
     state: str | None
     pending: bool | None
     last_used_at: float | None
+    http: int = 0
 
 
 def parse_time(value):
@@ -120,7 +121,7 @@ def _request(method, url, token):
 
 
 class LifecycleAPI:
-    """Direct-HTTPS client for exactly three routes: GET, POST start, POST stop."""
+    """Direct-HTTPS client for four routes: GET state/list, POST start, POST stop."""
 
     def __init__(self, name, gh_user=None, *, upstream=None, token_reader=None):
         self.name, self._gh_user = _name(name), gh_user
@@ -159,10 +160,11 @@ class LifecycleAPI:
                               'and gh auth login --hostname github.com if it is missing.')
         return ValueError(NO_TOKEN + '; set GH_TOKEN or DEVCONTAINER_GH_USER.')
 
-    def _call(self, method, suffix=''):
-        token = self._fetch()
+    def _call(self, method, suffix='', *, inventory=False, token=None):
+        token = token or self._fetch()
         try:
-            return self._upstream(method, _BASE + self.name + suffix, token)
+            url = _BASE.rstrip('/') + '?per_page=100' if inventory else _BASE + self.name + suffix
+            return self._upstream(method, url, token)
         except (URLError, OSError, TimeoutError, http.client.HTTPException):
             return 0, b''
         except ValueError:
@@ -171,8 +173,10 @@ class LifecycleAPI:
 
     def read(self):
         at = time.time()
-        bad = Reading(at, False, None, None, None)
         status, body = self._call('GET')
+        bad = Reading(at, False, None, None, None, status)
+        if status == 404 and self.confirm_deleted() is True:
+            return Reading(at, True, 'Deleted', None, None, 404)
         if status != 200:
             return bad
         try:
@@ -183,7 +187,11 @@ class LifecycleAPI:
             return bad
         pending = obj.get('pending_operation')
         return Reading(at, True, obj['state'], pending if isinstance(pending, bool) else None,
-                       parse_time(obj.get('last_used_at')))
+                       parse_time(obj.get('last_used_at')), status)
+
+    def confirm_deleted(self) -> bool | None:
+        status, body = self._call('GET', inventory=True, token=self._token)
+        return _deleted_from_list(status, body, self.name)
 
     def post_start(self):
         return self._call('POST', '/start')[0]

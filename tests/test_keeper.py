@@ -108,6 +108,19 @@ class FakeKeepAlive:
         self.pid = None
 
 
+class FakeCaffeinate:
+    def __init__(self, runtime):
+        self.runtime, self.holds, self.releases = runtime, 0, 0
+
+    def hold(self):
+        self.holds += 1
+        self.runtime['caffeinate'] = 5403
+
+    def release(self):
+        self.releases += 1
+        self.runtime['caffeinate'] = None
+
+
 class KeeperStepTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -141,6 +154,76 @@ class KeeperStepTests(unittest.TestCase):
 
     def runtime(self):
         return read_json(self.state / keeper.RUNTIME)
+
+    def deleted_keeper(self, readings):
+        child = FakeKeepAlive()
+        k = self.keeper(readings, keepalive=child)
+        power = FakeCaffeinate(k.runtime)
+        power.hold()  # supervise takes the initial hold before its first pass.
+        k.caffeinate = power
+        return k, child, power
+
+    def test_a_deleted_codespace_notifies_once_stops_the_keepalive_and_releases_caffeinate(self):
+        # #60: a confirmed deletion pauses recovery and lets this Mac sleep.
+        k, child, power = self.deleted_keeper([up(T0), down(T0 + 60, 'Deleted')])
+        self.run_steps(k, [T0, T0 + 60, T0 + 120])
+        self.assertEqual(self.notes, ["proj's Codespace cs-1 was deleted. Recovery is paused and this Mac can "
+                                     'sleep. Pair a new one with task work:cs:armed -- --rebind <name>.'])
+        self.assertIn('deleted-cs-1', self.runtime()['notified'])
+        self.assertIsNone(child.pid)
+        self.assertEqual(power.releases, 1)
+        self.assertIsNone(self.runtime()['caffeinate'])
+        self.assertEqual(self.runtime()['phase'], 'deleted')
+        self.assertFalse(k.done)
+        self.assertEqual(self.api.posts, 0)
+
+    def test_in_phase_deleted_the_keeper_beats_every_poll_but_reads_every_fifteen_minutes(self):
+        # #60: the five-minute hung-keeper rule stays valid throughout deletion.
+        k, _, power = self.deleted_keeper([lambda: down(self.clock, 'Deleted')])
+        self.run_steps(k, [T0])
+        initial = self.api.reads
+        for minute in range(1, 31):
+            self.clock = T0 + minute * 60
+            self.assertLessEqual(self.clock - self.runtime()['heartbeat_at'], 60)
+            k.step()
+            self.assertEqual(self.runtime()['phase'], 'deleted')
+            self.assertEqual(k.delay, keeper.POLL)
+        self.assertEqual(self.api.reads - initial, 2)
+        self.assertEqual(power.releases, 1)
+
+    def test_a_codespace_that_answers_again_after_deleted_returns_to_watching(self):
+        # #60: a wrong confirmation must recover on a good 200 (Review Focus 4).
+        k, child, power = self.deleted_keeper([up(T0), down(T0 + 60, 'Deleted'), up(T0 + 960)])
+        self.run_steps(k, [T0, T0 + 60])
+        self.assertEqual(self.runtime()['phase'], 'deleted')
+        self.assertIsNone(child.pid)
+        self.run_steps(k, [T0 + 960])
+        self.assertEqual(self.runtime()['phase'], 'watching')
+        self.assertEqual((power.holds, power.releases), (2, 1))
+        self.assertEqual(child.pid, 5402)
+        self.assertEqual(self.runtime()['caffeinate'], 5403)
+        self.assertEqual(self.api.posts, 0)
+
+    def test_a_deleted_keeper_is_not_replaced_by_keeper_start_for_the_same_codespace(self):
+        # #60: a beating deleted keeper is alive and must be adopted, never duplicated.
+        k, _, _ = self.deleted_keeper([down(T0, 'Deleted')])
+        self.run_steps(k, [T0])
+        self.assertEqual(self.runtime()['phase'], 'deleted')
+        k.runtime.update(runtime_id=keeper.runtime_id(), gh_user='octo', pid=4121)
+        k.beat()
+        with patch.object(keeper, '_owned', return_value=True), patch.object(keeper.time, 'time', return_value=T0), \
+                patch.object(keeper, 'launch_detached') as launch:
+            adopted = keeper.start(Path('/work/proj'), self.state)
+        self.assertEqual(adopted['phase'], 'deleted')
+        launch.assert_not_called()
+
+    def test_a_keeper_that_cannot_initialize_still_finishes_its_cleanup(self):
+        # #60: the sleep-hold callback must not mask a constructor failure or skip log cleanup.
+        handlers = list(keeper._LOG.handlers)
+        with patch.object(keeper, 'Keeper', side_effect=OSError('fixture runtime unavailable')), \
+                patch.object(keeper.signal, 'signal'):
+            keeper.supervise(Path('/work/proj'), self.state, 'fixture-nonce')
+        self.assertEqual(keeper._LOG.handlers, handlers)
 
     def test_step_sets_api_anchor_then_observed_anchor(self):
         k = self.keeper([up(T0, last_used_at=T0 - 3600), down(T0 + 60), up(T0 + 120, last_used_at=T0 + 100)])

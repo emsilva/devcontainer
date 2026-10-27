@@ -7,6 +7,11 @@ from . import lifecycle, scratch
 from .state import read_json
 from .transport import CodespaceConnection, clean_env, github_token, _name
 
+
+class CodespaceNotFound(ValueError):
+    """A 404 is distinct from an authentication failure, but does not prove deletion."""
+
+
 class Codespaces:
     def __init__(self, project, state):
         self.project, self.state = project, Path(state)
@@ -38,6 +43,9 @@ class Codespaces:
                 'Codespace API request timed out; inspect its status in GitHub before retrying'
             ) from None
         if result.returncode:
+            # Inspect stderr only to classify it; arbitrary gh output can contain credentials.
+            if 'HTTP 404' in result.stderr:
+                raise CodespaceNotFound('Codespace is not visible to the selected GitHub account (HTTP 404)')
             raise ValueError('Codespace API request failed; check GitHub authentication and retry')
         if len(result.stdout) > 2 * 1024 * 1024:
             raise ValueError('Codespace inventory exceeds limit')
@@ -47,8 +55,8 @@ class Codespaces:
         repository = row.get('repository', {}).get('full_name', '').lower()
         return repository == self.project.identity.removeprefix('github.com/').lower()
 
-    def spaces(self):
-        pages = self._api('GET', 'user/codespaces?per_page=100', self._api_env(), paginate=True)
+    def spaces(self, *, env=None):
+        pages = self._api('GET', 'user/codespaces?per_page=100', self._api_env() if env is None else env, paginate=True)
         return [
             row for page in pages for row in page.get('codespaces', [])
             if self._matches_repository(row)

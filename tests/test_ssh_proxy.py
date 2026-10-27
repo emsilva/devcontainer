@@ -17,6 +17,19 @@ from devcontainer_setup.project_sync.state import atomic_write
 
 
 class SSHProxyTests(unittest.TestCase):
+    def test_codespace_state_names_a_confirmed_deletion(self):
+        # #60: the read-only transport confirms a 404 once, with the same token.
+        for rows, status, expected in (([], 200, 'Deleted'), ([{'name': 'fixture'}], 200, None),
+                                       ([], 503, None), ([{'name': 'other'}] * 100, 200, None)):
+            calls = []
+            def upstream(url, token):
+                calls.append((url, token))
+                return ((status, json.dumps({'codespaces': rows}).encode())
+                        if url.endswith('?per_page=100') else (404, b'{}'))
+            self.assertEqual(transport.codespace_state('fixture', 't', upstream=upstream), expected)
+            self.assertEqual(calls, [('https://api.github.com/user/codespaces/fixture', 't'),
+                                     ('https://api.github.com/user/codespaces?per_page=100', 't')])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

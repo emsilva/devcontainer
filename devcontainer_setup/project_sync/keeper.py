@@ -29,6 +29,7 @@ RUNTIME = 'keeper-runtime.json'
 LOG = 'keeper.log'
 LEDGER = 'keeper-ledger.jsonl'
 POLL = 60
+DELETED_POLL = 15 * 60
 TEND = 1
 HEARTBEAT_STALE = 300
 ENV = ('HOME', 'PATH', 'LANG', 'TMPDIR', 'USER', 'LOGNAME')
@@ -225,10 +226,11 @@ class Keeper:
     """
 
     def __init__(self, state, *, api, notifier, keepalive=None, herdr=None, now=time.time, sleep=time.sleep,
-                 clock=time.monotonic, end_proxies=restore.end_stale_proxies):
+                 clock=time.monotonic, end_proxies=restore.end_stale_proxies, caffeinate=None):
         self.state, self.api, self.notifier = Path(state), api, notifier
         self.keepalive, self.herdr, self.now, self.sleep, self.clock = keepalive, herdr, now, sleep, clock
         self.end_proxies = end_proxies
+        self.caffeinate, self._deleted_read_at = caffeinate, None
         self.ledger = lifecycle.Ledger(self.state / LEDGER, now=now)
         self.project = api.name
         self.previous = None, None  # (state, time) of the last successful reading
@@ -287,8 +289,9 @@ class Keeper:
             text = str(error) if isinstance(error, ValueError) else 'unexpected error'
             _LOG.info('Keeper pass failed: %s: %s', type(error).__name__, text)
             self.runtime['down']['count'] = 0
-            self.runtime.update(phase='waiting', error=type(error).__name__ + ': ' + text)
-            self.delay, self._backoff = self._backoff, min(self._backoff * 2, POLL)
+            self.runtime.update(phase='deleted' if self._deleted_read_at is not None else 'waiting',
+                                error=type(error).__name__ + ': ' + text)
+            self.delay, self._backoff = (POLL if self._deleted_read_at is not None else self._backoff), min(self._backoff * 2, POLL)
         self._keep(available)
         try:
             self.beat()
@@ -344,16 +347,41 @@ class Keeper:
             self._notify('refused-' + repr(value.get('consented_at')),
                          f'Recovery for {self.project} is refused: {refusal}.')
             return False  # never hold a Codespace the pairing has moved away from
+        if self._deleted_read_at is not None:
+            if self.now() - self._deleted_read_at < DELETED_POLL:
+                return False
+            self._deleted_read_at = self.now()
         reading = self.api.read()
         self.runtime['reading'] = {'at': reading.at, 'ok': reading.ok, 'state': reading.state,
-                                   'pending': reading.pending}
+                                   'pending': reading.pending, 'http': reading.http}
         watch = self.runtime['down']
         if not reading.ok:
             watch['count'] = 0
-            self.runtime.update(phase='waiting', error='Codespace state unreadable; check gh auth status and the network')
+            self.runtime.update(phase='deleted' if self._deleted_read_at is not None else 'waiting',
+                                error='Codespace state unreadable; check gh auth status and the network')
             return None
         if reading.state != self.previous[0]:
             _LOG.info('Codespace %s at %s', reading.state, _utc(reading.at))
+        if reading.state == 'Deleted':
+            if self._deleted_read_at is None:
+                self._keep(False)
+                if self.caffeinate is not None:
+                    self.caffeinate.release()
+                self.runtime['caffeinate'] = None
+            self._deleted_read_at = self.now()
+            self._close_or_continue(reading)
+            watch['count'] = 0
+            self.runtime.update(phase='deleted', error=None,
+                                last_ok={'at': reading.at, 'state': reading.state})
+            self.previous = reading.state, reading.at
+            self._notify('deleted-' + self.api.name,
+                         f"{self.project}'s Codespace {self.api.name} was deleted. Recovery is paused and this Mac "
+                         'can sleep. Pair a new one with task work:cs:armed -- --rebind <name>.')
+            return False
+        if self._deleted_read_at is not None:
+            if self.caffeinate is not None:
+                self.caffeinate.hold()
+            self._deleted_read_at = None
         self.runtime.update(phase='watching', error=None)
         continuing, due = self._close_or_continue(reading), None
         if reading.state == 'Available':
@@ -798,6 +826,23 @@ def _caffeinate():
         return None
 
 
+class _Caffeinate:
+    """Own and reap the sleep hold, publishing its actual pid after every change."""
+
+    def __init__(self, changed):
+        self.child, self.changed = None, changed
+
+    def hold(self):
+        if self.child is None or self.child.poll() is not None:
+            self.child = _caffeinate()
+        self.changed(self.child.pid if self.child else None)
+
+    def release(self):
+        _terminate(self.child)
+        self.child = None
+        self.changed(None)
+
+
 def supervise(root: Path, state: Path, nonce: str) -> None:
     """Entry for `--keep ROOT STATE NONCE`, launched only by start()."""
     root, state = Path(root).resolve(), Path(state).absolute()
@@ -821,12 +866,13 @@ def supervise(root: Path, state: Path, nonce: str) -> None:
             value = arming.read(state)
             api = lifecycle.LifecycleAPI(value.get('codespace'), value.get('gh_user'))
             _end_left_behind(state)  # before this keeper starts its own
-            current = Keeper(state, api=api, notifier=notify.notify,
+            caffeinate = _Caffeinate(lambda pid: current.runtime.update(caffeinate=pid) if current is not None else None)
+            current = Keeper(state, api=api, notifier=notify.notify, caffeinate=caffeinate,
                              keepalive=KeepAlive(api.name, state, value.get('gh_user'), value.get('ports') or []))
-            caffeinate = _caffeinate()
+            caffeinate.hold()
             current.runtime.update(pid=os.getpid(), nonce=nonce, process_identity=process_identity(os.getpid()),
                                    runtime_id=runtime_id(), gh_user=value.get('gh_user'), error=None,
-                                   caffeinate=caffeinate.pid if caffeinate else None)
+                                   caffeinate=current.runtime.get('caffeinate'))
             current.beat('starting')
             _LOG.info('Keeper started for %s as %s', api.name, value.get('gh_user'))
             while not current.done:
@@ -849,7 +895,8 @@ def supervise(root: Path, state: Path, nonce: str) -> None:
                     current.runtime['keepalive'] = current.keepalive.record()
                 except Exception as error:
                     _LOG.info('Keep-alive not stopped: %s', type(error).__name__)
-            _terminate(caffeinate)
+            if caffeinate is not None:
+                caffeinate.release()
             if current is not None:
                 current.runtime.update(process_identity=None, caffeinate=None)
                 try:

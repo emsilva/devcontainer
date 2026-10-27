@@ -45,7 +45,7 @@ def _ordinary(root):
 
 def _choose_pairing(project, state, value, rebind=None):
     from . import evidence
-    from .codespaces import Codespaces
+    from .codespaces import Codespaces, CodespaceNotFound
     from .terminal import Gum
     from .transport import _name
     primary = _project(value['local_root'], project.identity)
@@ -58,7 +58,25 @@ def _choose_pairing(project, state, value, rebind=None):
         # A rebind names the new Codespace; retarget retires the old binding later.
         name = _name(rebind) if rebind is not None else binding['codespace']
         new = not binding or name != binding['codespace']
-        row = service._api('GET', 'user/codespaces/' + name, service._api_env())
+        api_env = service._api_env()
+        try:
+            row = service._api('GET', 'user/codespaces/' + name, api_env)
+        except CodespaceNotFound:
+            from . import arming
+            spaces = service.spaces(env=api_env)
+            login = "this Mac's GitHub account"
+            try:
+                account = service._api('GET', 'user', api_env).get('login')
+                if isinstance(account, str) and account and all(c.isalnum() or c == '-' for c in account):
+                    login = account
+            except (OSError, ValueError):
+                pass
+            inventory = ("This repository's Codespaces: " + ', '.join(row['name'] for row in spaces) + '.'
+                         if spaces else 'This repository has no Codespaces.')
+            move = 'task work:cs:armed' if arming.read(state).get('armed') else 'task work:cs'
+            raise ValueError(f'{name} is not visible to {login}: it was deleted, or it belongs to another account. '
+                             + inventory + ' Move to one with ' + move + ' -- --rebind <name>, or create one with '
+                             'task devcontainer:setup.') from None
         if row.get('name') != name or not service._matches_repository(row):
             raise ValueError(('No Codespace ' + name + ' for this repository; existing binding preserved')
                              if new else 'Paired Codespace repository differs')
@@ -332,12 +350,18 @@ def recovery_lines(value):
     from .arming import format_time, short_time
     from . import keeper, lifecycle
     config, runtime, now = value['arming'], value['keeper'], value['now']
+    def deleted_line():
+        hint = ('task work:cs:armed -- --rebind <name>, or run task work:disarm'
+                if config.get('armed') else 'task work:cs -- --rebind <name>')
+        return ('Codespace    ' + str(runtime.get('codespace')) + ' no longer exists on GitHub (deleted). '
+                'Pair another with ' + hint + '.')
     if config.get('issue'):
         # Unknown, not unarmed: a keeper may still be running, so its lines follow.
         lines = ['Recovery     arming.json cannot be read (' + config['issue'] + '); move '
                  + config['path'] + ' aside, then run task work:cs:armed to arm again']
     elif not config.get('armed'):
-        return ['Recovery     not armed; task work:cs:armed arms it']
+        return ['Recovery     not armed; task work:cs:armed arms it'] + (
+            [deleted_line()] if runtime.get('phase') == 'deleted' else [])
     else:
         hold = config.get('hold_until')
         held = ('on hold until ' + format_time(hold) + ' (task work:hold -- off ends it)'
@@ -363,7 +387,9 @@ def recovery_lines(value):
             text += f'; {phase} {rid}'
         lines.append(text)
     reading, anchor, watch = runtime.get('reading') or {}, runtime.get('anchor'), runtime.get('down') or {}
-    if not running or not reading:
+    if phase == 'deleted':
+        lines.append(deleted_line())
+    elif not running or not reading:
         lines.append('Codespace    not read yet' + ('; run task work:cs:armed' if not running else _token_hint(runtime)))
     elif not reading.get('ok'):
         lines.append('Codespace    unreadable at ' + format_time(reading['at'])

@@ -160,6 +160,22 @@ class CodespaceAPITests(unittest.TestCase):
 
 
 class RecoveryStatusTests(unittest.TestCase):
+    def test_status_names_a_deleted_codespace_for_an_armed_project(self):
+        # #60: a keeper-confirmed deletion names the rebind and disarm choices.
+        lines = self.lines(phase='deleted', caffeinate=None,
+                           reading={'at': self.now, 'ok': True, 'state': 'Deleted', 'http': 404})
+        self.assertIn('Codespace    cs-1 no longer exists on GitHub (deleted). Pair another with '
+                      'task work:cs:armed -- --rebind <name>, or run task work:disarm.', lines)
+
+    def test_status_names_a_deleted_codespace_for_an_unarmed_project(self):
+        # #60: unarming changes the rebind command on the retained keeper reading.
+        from devcontainer_setup.project_sync import arming
+        arming.write(self.state, dict(arming.read(self.state), armed=False))
+        lines = self.lines(phase='deleted', caffeinate=None,
+                           reading={'at': self.now, 'ok': True, 'state': 'Deleted', 'http': 404})
+        self.assertIn('Codespace    cs-1 no longer exists on GitHub (deleted). Pair another with '
+                      'task work:cs -- --rebind <name>.', lines)
+
     def setUp(self):
         import time
         from devcontainer_setup.project_sync import arming
@@ -172,7 +188,7 @@ class RecoveryStatusTests(unittest.TestCase):
     def lines(self, running=True, **runtime):
         from devcontainer_setup.project_sync import keeper, workspace
         from devcontainer_setup.project_sync.state import atomic_write
-        value = dict({'pid': 4121, 'nonce': 'n', 'phase': 'watching', 'heartbeat_at': self.now - 12,
+        value = dict({'pid': 4121, 'nonce': 'n', 'codespace': 'cs-1', 'phase': 'watching', 'heartbeat_at': self.now - 12,
                       'caffeinate': 4122, 'reading': {'at': self.now - 12, 'ok': True, 'state': 'Available',
                                                       'pending': False}}, **runtime)
         atomic_write(self.state / keeper.RUNTIME, json.dumps(value).encode())

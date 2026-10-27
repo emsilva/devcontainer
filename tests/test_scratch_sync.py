@@ -1180,11 +1180,121 @@ class ScratchTests(unittest.TestCase):
         from devcontainer_setup.project_sync.replication import ConnectionVerificationError
         return ConnectionVerificationError(self.STOPPED, 'Shutdown')
 
+    def deleted_replies(self):
+        self.replies.extend([(404, b'{}'), (200, b'{"codespaces":[]}'), (200, b'{"login":"octo"}')])
+
+    def test_the_worker_logs_a_deleted_codespace_once_and_retries_every_fifteen_minutes(self):
+        # #60: preserve scratch, hedge the active account, and pause attempts for fifteen minutes.
+        (self.scratch / 'owner-note').write_text('intact')
+        self.deleted_replies()
+        self.replies.extend([(404, b'{}'), (200, b'{"codespaces":[]}')] * 2)
+        last = 1_700_000_000.0
+        self.module._write(self.state / self.module.RUNTIME, dict(last_synchronized_at=last,
+                           binding=dict(identity='github.com/owner/repo', codespace='bound-name',
+                                        root=str(self.root), remote_root='/workspaces/repo')))
+        now = [0.0]
+        runtime, log = self._work([self.FORWARD_DOWN] * 3, clock=now)
+        expected = ('Scratch paused: bound-name is not visible to octo: it was deleted, or it belongs to another '
+                    'account. Your .scratch/ is intact (last synchronized ' +
+                    time.strftime('%H:%M', time.localtime(last)) + ').')
+        self.assertEqual(log.count(expected), 1)
+        self.assertEqual(self.connection_times, [0, 900, 1800])
+        self.assertTrue(all(wait <= self.module.KEEPER_CHECK for wait in self.waits))
+        self.assertEqual((self.scratch / 'owner-note').read_text(), 'intact')
+        self.assertNotIn('fixture-token', log + json.dumps(runtime))
+        self.assertEqual(self.reads.count('https://api.github.com/user'), 1)
+
+    def test_the_deleted_log_line_omits_the_sync_time_when_none_was_recorded(self):
+        # #60: the lead ruled that absent synchronization evidence is omitted, never a placeholder.
+        self.deleted_replies()
+        _, log = self._work([self.FORWARD_DOWN])
+        expected = ('Scratch paused: bound-name is not visible to octo: it was deleted, or it belongs to another '
+                    'account. Your .scratch/ is intact.')
+        lines = [line for line in log.splitlines() if 'Scratch paused:' in line]
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].endswith(expected), lines[0])
+        self.assertNotIn('last synchronized', lines[0])
+        self.assertNotIn('unknown', lines[0])
+
+    def test_a_deleted_worker_reports_a_killed_keeper_within_the_r27_bound_during_its_retry_wait(self):
+        # #60: R27's six-minute notice bound survives the fifteen-minute Deleted retry delay.
+        self._arm()
+        now, checks, notes, api_reads = [0.0], [], [], []
+        self.deleted_replies()
+        self.replies.extend([(404, b'{}'), (200, b'{"codespaces":[]}')])
+        def status(state):
+            checks.append(now[0])
+            return {'running': now[0] == 0, 'phase': 'deleted', 'heartbeat_age': 0}
+        def notify(title, text):
+            notes.append((now[0], title, text))
+            return True
+        def upstream(url, token):
+            if url.endswith('/bound-name'):
+                api_reads.append(now[0])
+            return self.replies.pop(0)
+        with patch('devcontainer_setup.project_sync.keeper.status', side_effect=status), \
+                patch('devcontainer_setup.project_sync.notify.notify', side_effect=notify), \
+                patch('devcontainer_setup.project_sync.transport._upstream', side_effect=upstream):
+            self._work([self.FORWARD_DOWN] * 2, clock=now)
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0][1:], self.KEEPER_NOTE)
+        self.assertLessEqual(notes[0][0], 6 * 60)
+        self.assertEqual(checks[0], 0)
+        self.assertTrue(all(b - a <= self.module.KEEPER_CHECK for a, b in zip(checks, checks[1:])))
+        self.assertEqual(self.connection_times, [0, 900])
+        self.assertEqual(api_reads, [0, 900])
+
+    def test_an_unarmed_projects_worker_notifies_a_deleted_codespace_with_the_hedged_copy(self):
+        # #60: an unarmed project hears the active-account explanation once from its worker.
+        self.deleted_replies()
+        self._work([self.FORWARD_DOWN, self.FORWARD_DOWN])
+        self.assertEqual(self.notes, [('Codespace recovery', 'bound-name is not visible to octo: it was deleted, '
+                                     'or it belongs to another account.')])
+
+    def test_an_armed_projects_worker_leaves_the_deleted_notice_to_the_keeper(self):
+        # #60: the armed-account keeper owns the definitive deletion notice.
+        self._arm()
+        self.deleted_replies()
+        runtime, log = self._work([self.FORWARD_DOWN])
+        self.assertIn('not visible to octo', runtime['error'])
+        self.assertEqual(self.notes, [])
+
+    def test_the_keeper_watch_accepts_a_beating_keeper_in_phase_deleted(self):
+        # #60: a deleted keeper that beats every minute is healthy, regardless of API cadence.
+        self._arm()
+        now = [0.0]
+        notices = self._notices(now)
+        self.deleted_replies()
+        from devcontainer_setup.project_sync.replication import ConnectionVerificationError
+        notices.explain(ConnectionVerificationError('deleted', 'Deleted'), 'symptom')
+        self.assertIn('not visible', notices.explain(ValueError('forward failed'), 'symptom'))
+        with patch('devcontainer_setup.project_sync.keeper.status',
+                   return_value={'running': True, 'phase': 'deleted', 'heartbeat_age': 60}):
+            for now[0] in range(0, 1801, 60):
+                notices.watch_keeper()
+        self.assertIsNone(notices.unhealthy_at)
+        self.assertEqual(self.notes, [])
+
+    def test_a_deleted_worker_names_the_last_synchronized_time_and_falls_back_when_login_fails(self):
+        # #60: unknown identity uses a fixed fallback and the last successful scratch receipt survives.
+        now = [0.0]
+        notices = self._notices(now)
+        last = 1_700_000_000.0
+        notices.runtime['last_synchronized_at'] = last
+        self.replies.extend([(404, b'{}'), (200, b'{"codespaces":[]}'), (503, b'fixture-token')])
+        text = notices.explain(self.FORWARD_DOWN, str(self.FORWARD_DOWN))
+        expected = ("bound-name is not visible to this Mac's GitHub account: it was deleted, or it belongs to "
+                    'another account.')
+        self.assertEqual(text, expected)
+        self.assertNotIn('fixture-token', text)
+        notices.notify_stop()
+        self.assertEqual(self.notes, [('Codespace recovery', expected)])
+
     def _arm(self, armed=True):
         from devcontainer_setup.project_sync import arming
         arming.write(self.state, {'schema': 1, 'armed': armed, 'codespace': 'bound-name', 'gh_user': 'fixture'})
 
-    def _work(self, attempts, cycles=()):
+    def _work(self, attempts, cycles=(), *, clock=None):
         """Run the worker in this process against scripted connections and sync cycles.
 
         Each attempt is 'ok' or the error opening the connection raises; each cycle is 'ok',
@@ -1195,6 +1305,8 @@ class ScratchTests(unittest.TestCase):
         from types import SimpleNamespace
         from devcontainer_setup.project_sync import sync_cycle
         m, attempts, cycles, self.waits = self.module, list(attempts), list(cycles), []
+        self.connection_times = []
+        connection_times = self.connection_times
         config = dict(identity='github.com/owner/repo', codespace='bound-name', root=str(self.root),
                       remote_root='/workspaces/repo')
         name = 'scratch-' + 'e' * 48
@@ -1205,12 +1317,15 @@ class ScratchTests(unittest.TestCase):
             def set(self): self.stopped = True
             def wait(inner, timeout):
                 self.waits.append(timeout)
+                if clock is not None:
+                    clock[0] += timeout
                 inner.stopped = not (attempts or cycles)
                 return inner.stopped
         class Connection:
             codespace, env = config['codespace'], {}
             def __init__(self, *args, **kwargs): self.child = SimpleNamespace(poll=lambda: None)
             def __enter__(self):
+                connection_times.append(clock[0] if clock is not None else None)
                 outcome = attempts.pop(0)
                 if isinstance(outcome, Exception):
                     raise outcome
@@ -1229,10 +1344,14 @@ class ScratchTests(unittest.TestCase):
         def command(binary, state, *args, **kwargs):
             return json.dumps([dict(name=name, identifier='sync_owned')]) if args[:2] == ('sync', 'list') else ''
         remote = json.dumps(dict(identity=config['identity'], root=config['remote_root'])).encode()
+        notices_type = m._Notices
+        def notices(*args):
+            return notices_type(*args, **({'clock': lambda: clock[0]} if clock is not None else {}))
         with patch.object(m, '_config', return_value=config), patch.object(m, 'CodespaceConnection', Connection), \
                 patch.object(m, 'install_mutagen', return_value=Path('/fake/tool')), \
                 patch.object(m, '_remote', return_value=remote), patch.object(m.threading, 'Event', Event), \
                 patch.object(m.signal, 'signal'), patch.object(m, '_mutagen', side_effect=command), \
+                patch.object(m, '_Notices', side_effect=notices), \
                 patch('devcontainer_setup.project_sync.replication.sync_project_data', side_effect=exchange):
             m.supervise(self.root, self.state, 'e' * 48)
         return json.loads((self.state / m.RUNTIME).read_text()), (self.state / 'scratch.log').read_text()

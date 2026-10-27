@@ -188,6 +188,8 @@ def _owner_power(project, state, *, restart, api=None, now=time.time, sleep=time
     status = api.post_stop()
     # The record stays on every failure (R33): a refused stop during GitHub's own stop would
     # otherwise let the keeper restart a Codespace you asked to keep stopped.
+    if status == 404 and api.confirm_deleted() is True:
+        raise ValueError(f'{codespace} no longer exists on GitHub; there is nothing to stop.')
     if 400 <= status < 500:
         raise ValueError(f'GitHub refused the stop request (HTTP {status}); it is recorded as your stop, so the '
                          'keeper will not restart it. Check task work:status.')

@@ -29,6 +29,7 @@ SESSION = 'scratch-session.json'
 # A failure reads the Codespace state at most once a minute. verify() reads it on its own
 # failures, once per attempt, and those attempts back off from 2 s to 60 s (R23).
 STATE_READ_GAP = 60
+DELETED_RETRY = 15 * 60
 KEEPER_CHECK = 60  # the keeper watch reads local files once a minute while the keeper is healthy
 # Over a re-arm's keeper start without a consent prompt (~208 s: _ready 120 s, account 50 s, Codespace row
 # 30 s, keeper start 8 s); a kill is told within KEEPER_CHECK + 240 s + two ticks, 6 min up to 30 s ticks.
@@ -336,6 +337,7 @@ class _Notices:
         self.codespace, self.project = config['codespace'], Path(config['root']).name
         self.read_at = self.checked_at = self.unhealthy_at = self.known = None
         self.unreadable_logged = False
+        self.deleted_login = None
 
     def save(self):
         _write(self.state / RUNTIME, self.runtime)
@@ -348,23 +350,64 @@ class _Notices:
         # Only a cycle that passes verify() shows the Codespace is back (R23): that ends the
         # stop, so the next one notifies again. A connection alone can still fail verify().
         self.runtime['notified_stop'] = False
+        self.runtime['deleted_logged'] = False
+        self.deleted_login = None
         self.known = None
+
+    def _read_state(self):
+        """Pin the state read and account label to the same token, kept out of runtime."""
+        from .replication import read_codespace_state
+        from .transport import github_token, _upstream
+        try:
+            token = github_token(os.environ)
+            learned = read_codespace_state(self.codespace, dict(os.environ, GH_TOKEN=token))
+            if learned == 'Deleted' and self.deleted_login is None:
+                self.deleted_login = "this Mac's GitHub account"
+                try:
+                    status, body = _upstream('https://api.github.com/user', token)
+                    account = json.loads(body) if status == 200 else {}
+                    login = account.get('login') if isinstance(account, dict) else None
+                    if isinstance(login, str) and login and all(c.isalnum() or c == '-' for c in login):
+                        self.deleted_login = login
+                except Exception:
+                    pass  # only the fixed fallback reaches a message
+            return learned
+        except (OSError, ValueError):
+            return None
+
+    def _deleted_message(self):
+        return (f'{self.codespace} is not visible to ' + (self.deleted_login or "this Mac's GitHub account")
+                + ': it was deleted, or it belongs to another account.')
 
     def explain(self, error, message):
         """The worker's error for a failure; a known stop names its state, not the symptom (#48)."""
-        from .replication import ConnectionVerificationError, read_codespace_state, stopped_message
+        from .replication import ConnectionVerificationError, stopped_message
         now = self.clock()
         read_wall = None
         if isinstance(error, ConnectionVerificationError):
-            self.read_at, self.known = now, error.state  # verify() has just read it
+            # verify() does not carry its credential. Re-read a new Deleted episode with a
+            # pinned token so its /user label describes the account that confirmed absence.
+            learned = self._read_state() if error.state == 'Deleted' and self.deleted_login is None else error.state
+            self.read_at, self.known = now, learned
             read_wall = time.time()
-        elif self.read_at is None or now - self.read_at >= STATE_READ_GAP:
-            self.read_at, self.known = now, read_codespace_state(self.codespace, os.environ)
+        elif self.read_at is None or now - self.read_at >= (DELETED_RETRY if self.known == 'Deleted' else STATE_READ_GAP):
+            learned = self._read_state()
+            self.read_at = now
+            if learned is not None or self.known != 'Deleted':
+                self.known = learned
             read_wall = time.time()
         # A cached known records nothing: a start in that minute must not inherit the old stop (#61).
         from . import evidence, keeper
         if read_wall is not None and self.known in keeper.DOWN:
             evidence.record_stop(self.state, self.codespace, read_wall)
+        if self.known == 'Deleted':
+            if not self.runtime.get('deleted_logged'):
+                self.runtime['deleted_logged'] = True
+                last = self.runtime.get('last_synchronized_at')
+                when = (' (last synchronized ' + time.strftime('%H:%M', time.localtime(last)) + ')'
+                        if isinstance(last, (int, float)) else '')
+                self.logger.info('Scratch paused: %s Your .scratch/ is intact%s.', self._deleted_message(), when)
+            return self._deleted_message()
         return message if self.known in (None, 'Available') else stopped_message(self.known)
 
     def notify_stop(self):
@@ -376,7 +419,8 @@ class _Notices:
             return  # armed projects hear from their keeper
         self.runtime['notified_stop'] = True
         self.save()
-        self._send(f"{self.project}'s Codespace stopped ({self.known}); run task work:cs to bring it back")
+        self._send(self._deleted_message() if self.known == 'Deleted' else
+                   f"{self.project}'s Codespace stopped ({self.known}); run task work:cs to bring it back")
 
     def watch_keeper(self):
         """Notify once an armed project's keeper has read dead or hung for KEEPER_DOWN; local files only."""
@@ -582,7 +626,9 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                    'checkpoint_version': sync_cycle.SCHEMA, 'runtime_id': _runtime_id(),
                    'connection_prepared': False, 'binding': config, 'retained_receipts': retained,
                    'notified_stop': same and previous.get('notified_stop') is True,
-                   'notified_keeper': same and previous.get('notified_keeper') is True}
+                   'notified_keeper': same and previous.get('notified_keeper') is True,
+                   'deleted_logged': same and previous.get('deleted_logged') is True,
+                   'last_synchronized_at': previous.get('last_synchronized_at') if same else None}
         notices = _Notices(state, config, runtime, logger)
         def update(phase, **values):
             runtime.update(phase=phase, heartbeat_at=time.time(), **values)
@@ -624,6 +670,8 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                             _write(state / SESSION, receipt)
                             update('preparing', session=session)
                         info = _session_info(binary, state, receipt)
+                        if info is not None and _reconciliation(info)['phase'] == 'synchronized':
+                            runtime['last_synchronized_at'] = time.time()
                         if info is None:
                             backup(root, state)
                             remote_snapshot = _remote(connection, config['remote_root'], snapshot=True)
@@ -688,6 +736,9 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                             if remote.get('identity') != config['identity'] or remote.get('root') != config['remote_root']:
                                 raise ValueError('Remote repository identity changed; synchronization paused.')
                             summary = _mutagen(binary, state, 'sync', 'list', session)
+                            info = _session_info(binary, state, receipt)
+                            if info is not None and _reconciliation(info)['phase'] == 'synchronized':
+                                runtime['last_synchronized_at'] = time.time()
                             update('syncing', detail=summary)
                             synchronize()
                 except Exception as error:
@@ -707,10 +758,23 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                     if explained != message:
                         message = explained
                         update('waiting', error=message)
-                    logger.info('Scratch waiting: %s', message)
+                    if notices.known != 'Deleted':
+                        logger.info('Scratch waiting: %s', message)
                     notices.notify_stop()
                     notices.watch_keeper()
-                    if exiting.wait(backoff):
+                    if notices.known == 'Deleted':
+                        # A paused connection still watches the keeper locally (R27).
+                        # Only connection/API attempts wait the full fifteen minutes.
+                        remaining = DELETED_RETRY
+                        while remaining > 0 and not exiting.is_set():
+                            interval = min(remaining, KEEPER_CHECK)
+                            if exiting.wait(interval):
+                                break
+                            remaining -= interval
+                            notices.watch_keeper()
+                        if exiting.is_set():
+                            break
+                    elif exiting.wait(backoff):
                         break
                     backoff = min(backoff * 2, 60)
         except _Shutdown:
