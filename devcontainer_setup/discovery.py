@@ -1,6 +1,7 @@
 """Read repository signals without executing project code or following symlinks."""
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 import re
@@ -122,6 +123,84 @@ def _without_printed_help(text: str) -> str:
     return '\n'.join(lines)
 
 
+def _source_runs_az(text: str, language: str) -> bool:
+    """Recognize literal argv forms without matching comments or quoted examples."""
+    if language == 'python':
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            return False
+        return any(isinstance(node, ast.List) and node.elts
+                   and isinstance(node.elts[0], ast.Constant) and node.elts[0].value == 'az'
+                   for node in ast.walk(tree))
+    strings = r'"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`'
+    if language == 'rust':
+        strings = r'r(?P<hashes>#+)"[\s\S]*?"(?P=hashes)|' + strings
+    comments = r'\#[^\n]*' if language in {'python', 'ruby'} else r'//[^\n]*|/\*[\s\S]*?\*/'
+    literals = {'"az"', "'az'", '`az`'}
+    if language in {'go', 'rust'}:
+        literals = {'"az"', '`az`'} if language == 'go' else {'"az"'}
+
+    def shield(match):
+        value = match[0]
+        if value in literals:
+            return '"az"'
+        return '""' if re.match(strings, value) else ' '
+
+    active = re.sub(strings + '|' + comments, shield, text)
+    if language == 'go':
+        for call in re.finditer(r'(?<![\w])exec\s*\.\s*(Command(?:Context)?)\s*\(', active):
+            start = call.end()
+            if call[1] == 'CommandContext':
+                nesting = []
+                separator = None
+                for index in range(start, len(active)):
+                    char = active[index]
+                    if char in '([{':
+                        nesting.append(char)
+                    elif char in ')]}':
+                        if not nesting:
+                            break
+                        nesting.pop()
+                    elif char == ',' and not nesting:
+                        separator = index + 1
+                        break
+                if separator is None:
+                    continue
+                start = separator
+            if re.match(r'\s*"az"\s*(?:,|\))', active[start:]):
+                return True
+        return False
+    patterns = {
+        'node': r'(?<![\w$])(?:spawn|execFile)\s*\(\s*"az"\s*(?:,|\))',
+        'ruby': r'(?<![\w.])(?:Process\s*\.\s*)?(?:system|exec|spawn)\s*\(\s*"az"\s*(?:,|\))',
+        'rust': r'(?<![\w])Command\s*::\s*new\s*\(\s*"az"\s*\)',
+    }
+    return bool(re.search(patterns[language], active))
+
+
+def _agent_docs_run_az_login(text: str) -> bool:
+    """Agent instructions count only when they show an az login command in code."""
+    fence = None
+    command = r'^\s*(?:\$\s+)?az[ \t]+login(?=$|[\s;&|])'
+    for line in re.sub(r'<!--[\s\S]*?-->', '', text).splitlines():
+        marker = re.match(r'^\s{0,3}(`{3,}|~{3,})', line)
+        if marker:
+            if fence is None:
+                fence = marker[1]
+            elif marker[1][0] == fence[0] and len(marker[1]) >= len(fence):
+                fence = None
+            continue
+        if fence:
+            if re.search(command, line):
+                return True
+        else:
+            for code in re.finditer(r'(?<!`)(`+)([^`]+)\1(?!`)', line):
+                if re.search(command, code[2]):
+                    return True
+    return False
+
+
 def scan(project: Path) -> dict:
     project = Path(project).resolve()
     proc = subprocess.run(['git', '-C', str(project), 'ls-files', '-cz', '--others', '--exclude-standard'], capture_output=True)
@@ -185,7 +264,8 @@ def scan(project: Path) -> dict:
             manager(family, package_manager, relative)
             continue
         relevant = (base in {'package.json', 'pyproject.toml', 'Pipfile', 'Gemfile', 'Gemfile.lock', 'go.mod', 'go.work', 'go.sum', 'Cargo.toml', 'Cargo.lock', '.python-version', '.ruby-version', '.node-version', '.nvmrc', '.tool-versions', '.gitignore', '.pre-commit-config.yaml', '.pre-commit-config.yml', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb', 'uv.lock', 'poetry.lock', 'Pipfile.lock'} or base.startswith(('requirements', 'Dockerfile', 'Taskfile')) or container_file or base.endswith('.gemspec') or path.suffix in {'.sh', '.bash'} or relative.startswith('.github/workflows/'))
-        if not relevant:
+        agent_docs = relative in {'CLAUDE.md', 'AGENTS.md'}
+        if not (relevant or suffix_runtime or agent_docs):
             continue
         try:
             with full.open('rb') as stream:
@@ -193,10 +273,17 @@ def scan(project: Path) -> dict:
             if len(raw) > MAX_FILE_BYTES:
                 found['warnings'].append(f'{relative}: skipped file larger than {MAX_FILE_BYTES} bytes')
                 continue
+            if not relevant and b'az' not in raw:
+                continue
             text = raw.decode('utf-8')
         except (OSError, UnicodeError) as error:
             found['warnings'].append(f'{relative}: cannot read text ({error})')
             continue
+        if b'az' in raw:
+            if suffix_runtime and _source_runs_az(text, suffix_runtime):
+                tool('azure', relative, 'runs the az CLI')
+            if agent_docs and _agent_docs_run_az_login(text):
+                tool('azure', relative, 'agent docs run az login')
         try:
             if base == 'package.json':
                 data = json.loads(text)

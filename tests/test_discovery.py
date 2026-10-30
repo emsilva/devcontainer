@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 import unittest
 
-from devcontainer_setup.discovery import scan
+from devcontainer_setup.discovery import MAX_FILE_BYTES, scan
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -19,6 +19,136 @@ class DiscoveryTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
         return path
+
+    def assert_azure_only(self, name, reason='runs the az CLI'):
+        tools = scan(self.root)['tools']
+        self.assertEqual(tools['azure'], {'selected': True, 'evidence': [f'{name}: {reason}']})
+        self.assertFalse(any(row['selected'] for tool, row in tools.items() if tool != 'azure'))
+
+    def test_go_exec_of_az_selects_azure(self):
+        name = 'tools/mvp/azure/token.go'
+        for command in ('exec.CommandContext(ctx, "az", "account", "get-access-token")',
+                        'exec.Command("az", "login")',
+                        'exec.CommandContext(context.Background(),\n "az", "login")',
+                        'exec.CommandContext(context.WithValue(ctx, key, value), "az", "login")',
+                        'exec.CommandContext(context.WithValue(ctx, []string{"tenant", "scope"}, map[string]string{"key": "value"}), "az", "login")'):
+            with self.subTest(command=command):
+                path = self.put(name, 'cmd := ' + command)
+                try:
+                    self.assert_azure_only(name)
+                finally:
+                    path.unlink()
+
+    def test_python_and_node_exec_of_az_select_azure(self):
+        cases = [('client.py', 'subprocess.run(["az", "login"])'),
+                 ('client.py', "subprocess.check_output(['az', 'account', 'show'])"),
+                 ('client.py', 'argv = [\n "az", "account", "show"\n]'),
+                 ('client.py', 'argv = ["az"]'),
+                 ('client.js', 'spawn("az", ["login"])'),
+                 ('client.jsx', "execFile('az', ['login'])"),
+                 ('client.ts', 'child_process.spawn("az", ["account", "show"])'),
+                 ('client.tsx', 'childProcess.execFile(\n "az", ["login"])')]
+        for name, content in cases:
+            with self.subTest(name=name, content=content):
+                path = self.put(name, content)
+                try:
+                    self.assert_azure_only(name)
+                finally:
+                    path.unlink()
+
+    def test_ruby_and_rust_argv_calls_select_azure(self):
+        cases = [('client.rb', 'system("az", "login")'),
+                 ('client.rb', 'Process.spawn("az", "account", "show")'),
+                 ('client.rb', 'exec("az", "login")'),
+                 ('client.rs', 'Command::new("az").arg("login").output()'),
+                 ('client.rs', 'std::process::Command::new("az").args(["account", "show"])')]
+        for name, content in cases:
+            with self.subTest(name=name, content=content):
+                path = self.put(name, content)
+                try:
+                    self.assert_azure_only(name)
+                finally:
+                    path.unlink()
+
+    def test_root_agent_docs_with_az_login_code_select_azure(self):
+        cases = [('CLAUDE.md', 'auth is Entra, `az login`\n'),
+                 ('AGENTS.md', 'Authenticate:\n```bash\naz login --tenant example\n```\n'),
+                 ('CLAUDE.md', '~~~sh\n  az login\n~~~\n')]
+        for name, content in cases:
+            with self.subTest(name=name, content=content):
+                path = self.put(name, content)
+                try:
+                    self.assert_azure_only(name, 'agent docs run az login')
+                finally:
+                    path.unlink()
+
+    def test_az_substrings_and_prose_do_not_select_azure(self):
+        cases = [('client.go', 'exec.Command("azcopy", "login")', 'exec.Command("az", "login")'),
+                 ('client.go', 'exec.Command("echo", "az")', 'exec.Command("az", "login")'),
+                 ('client.go', 'exec.CommandContext(context.WithValue(ctx, "az", "tenant"), "echo", "hello")', 'exec.CommandContext(context.WithValue(ctx, key, value), "az", "login")'),
+                 ('client.go', '// exec.Command("az", "login")', 'exec.Command("az", "login")'),
+                 ('client.go', '/* exec.Command("az", "login") */', 'exec.Command("az", "login")'),
+                 ('client.go', 'example := `exec.Command("az", "login")`', 'exec.Command("az", "login")'),
+                 ('client.py', 'print("run az login")\nlazy = "az"', 'subprocess.run(["az", "login"])'),
+                 ('client.py', '# subprocess.run(["az", "login"])', 'subprocess.run(["az", "login"])'),
+                 ('client.py', "example = '''subprocess.run([\"az\", \"login\"])'''", 'subprocess.run(["az", "login"])'),
+                 ('client.py', 'argv = ["azcopy", "az"]', 'argv = ["az", "login"]'),
+                 ('client.py', 'argv = ["az" + suffix, "login"]', 'argv = ["az", "login"]'),
+                 ('client.py', 'settings["az"]', 'argv = ["az", "login"]'),
+                 ('client.py', 'settings [ "az" ]', 'argv = ["az", "login"]'),
+                 ('client.py', 'settings["services"]["az"]', 'argv = ["az", "login"]'),
+                 ('client.js', '// spawn("az", ["login"])', 'spawn("az", ["login"])'),
+                 ('client.js', '/* execFile("az", ["login"]) */', 'execFile("az", ["login"])'),
+                 ('client.js', 'const example = `spawn("az", ["login"])`', 'spawn("az", ["login"])'),
+                 ('client.js', 'spawn("azcopy", ["login"]); myspawn("az", [])', 'spawn("az", ["login"])'),
+                 ('client.js', 'spawn("az" + suffix, ["login"])', 'spawn("az", ["login"])'),
+                 ('client.rb', '# system("az", "login")', 'system("az", "login")'),
+                 ('client.rb', 'system("az login")', 'system("az", "login")'),
+                 ('client.rs', '// Command::new("az")', 'Command::new("az")'),
+                 ('client.rs', 'Command::new("azcopy")', 'Command::new("az")'),
+                 ('CLAUDE.md', 'We use Azure; run az login to authenticate.\n', '`az login`\n'),
+                 ('AGENTS.md', '`az loginx` and `echo "az login"`\n', '```\naz login\n```\n'),
+                 ('AGENTS.md', '```sh\necho "az login"\n```\n', '```sh\naz login\n```\n')]
+        for name, content, control in cases:
+            with self.subTest(name=name, content=content):
+                path = self.put(name, content)
+                try:
+                    self.assertFalse(scan(self.root)['tools']['azure']['selected'])
+                    path.write_text(control)
+                    self.assert_azure_only(name, 'agent docs run az login' if name.endswith('.md') else 'runs the az CLI')
+                finally:
+                    path.unlink()
+
+    def test_azure_source_and_agent_docs_obey_inventory_limits(self):
+        for name in ('docs/CLAUDE.md', 'nested/AGENTS.md', 'docs/client.py', 'vendor/client.go', 'examples/client.js'):
+            with self.subTest(name=name):
+                path = self.put(name, '`az login`\naz login\nsubprocess.run(["az", "login"])\nexec.Command("az", "login")\nspawn("az", [])')
+                control = self.root / 'client.py'
+                try:
+                    self.assertFalse(scan(self.root)['tools']['azure']['selected'])
+                    self.put('client.py', 'subprocess.run(["az", "login"])')
+                    self.assert_azure_only('client.py')
+                finally:
+                    control.unlink(missing_ok=True)
+                    path.unlink()
+        for name, command in [('client.py', 'subprocess.run(["az", "login"])\n'), ('CLAUDE.md', '`az login`\n')]:
+            with self.subTest(oversized=name):
+                path = self.put(name, command + '#' * MAX_FILE_BYTES)
+                try:
+                    found = scan(self.root)
+                    self.assertFalse(found['tools']['azure']['selected'])
+                    path.write_text(command + '#' * (MAX_FILE_BYTES - len(command)))
+                    self.assert_azure_only(name, 'agent docs run az login' if name.endswith('.md') else 'runs the az CLI')
+                    self.assertIn(f'{name}: skipped file larger than {MAX_FILE_BYTES} bytes', found['warnings'])
+                finally:
+                    path.unlink()
+        target = self.put('docs/real.py', 'subprocess.run(["az", "login"])')
+        (self.root / 'linked.py').symlink_to(target)
+        (self.root / 'linked-dir').symlink_to(target.parent, target_is_directory=True)
+        (self.root / 'CLAUDE.md').symlink_to(target)
+        self.assertFalse(scan(self.root)['tools']['azure']['selected'])
+        self.put('client.py', 'subprocess.run(["az", "login"])')
+        self.assert_azure_only('client.py')
 
     def test_explicit_manager_pin_and_engines_version_are_retained(self):
         self.put('package.json', json.dumps({'packageManager': 'pnpm@9.15.4',
