@@ -32,6 +32,16 @@ class RenderTests(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
 
+    def stub_post_create_installers(self):
+        for name in ('install-agents.sh', 'install-tools.sh'):
+            (self.project / '.devcontainer/scripts' / name).write_text('exit 0\n')
+        tools = self.project / 'post-create-bin'
+        tools.mkdir()
+        sudo = tools / 'sudo'
+        sudo.write_text('#!/bin/sh\nexit 0\n')
+        sudo.chmod(0o755)
+        return str(tools) + os.pathsep + os.environ['PATH']
+
     def config(self, files):
         return json.loads(files['.devcontainer/devcontainer.json'])
 
@@ -90,7 +100,28 @@ class RenderTests(unittest.TestCase):
         self.assertIn('install-agents.sh --update', files['.devcontainer/Taskfile.yml'].decode())
         self.assertNotIn('PATH', config['containerEnv'])
         self.assertTrue(config['remoteEnv']['PATH'].startswith('/home/vscode/.local/bin:/home/vscode/.opencode/bin:'))
-        self.assertIn('export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"', post)
+        self.assertIn('sudo -n bash .devcontainer/scripts/system-path.sh "$PATH"', post)
+
+    def test_system_path_is_rendered_registered_and_ordered(self):
+        from devcontainer_setup.render import validate
+        files = self.render()
+        name = '.devcontainer/scripts/system-path.sh'
+        self.assertIn(name, files)
+        self.assertEqual(files[name], (ROOT / 'templates/scripts/system-path.sh').read_bytes())
+        post = files['.devcontainer/scripts/post-create-selected.sh'].decode()
+        self.assertLess(post.index('system-path.sh'), post.index('install-agents.sh'))
+        self.assertLess(post.index('install-agents.sh'), post.index('validate-selected.sh'))
+        check = files['.devcontainer/scripts/validate-selected.sh'].decode()
+        self.assertNotIn('export PATH=', check)
+        self.assertIn('fresh_shell_lookup', check)
+        self.assertIn('sudo -n bash templates/scripts/system-path.sh "$PATH"',
+                      (ROOT / '.devcontainer/scripts/post-create.sh').read_text())
+        self.install(files)
+        self.assertEqual(validate(self.project), [])
+        config = self.config(files)
+        del config['customizations']['devcontainerSetup']['managedFiles'][name]
+        (self.project / '.devcontainer/devcontainer.json').write_text(json.dumps(config))
+        self.assertIn('Missing managed script registration: ' + name, validate(self.project))
 
     def test_old_managed_agents_migrate_while_custom_features_survive(self):
         from devcontainer_setup.render import validate
@@ -218,20 +249,29 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(files, self.render(package_managers={'node': 'pnpm'},
                                            package_manager_versions={'node': '9.15.4'}))
         helper = self.project / '.devcontainer/scripts/validate-selected.sh'
-        (self.project / '.devcontainer/scripts/install-agents.sh').write_text('exit 0\n')
+        # These probes isolate validation from both installer check phases.
+        for installer in ('install-agents.sh', 'install-tools.sh'):
+            (self.project / '.devcontainer/scripts' / installer).write_text('exit 0\n')
         content = helper.read_text()
+        self.assertIn('fresh_shell_lookup', content)
         commands = content.split('for tool in ', 1)[1].split(';', 1)[0].split()
         bins = self.project / 'bin'
         bins.mkdir()
         for command in commands:
+            if command == 'python3':
+                continue
             path = bins / command
             path.write_text('#!/bin/sh\nexit 0\n')
             path.chmod(0o755)
+        system = self.project / 'system/etc'
+        system.mkdir(parents=True)
+        (system / 'environment').write_text('PATH="' + str(bins) + os.pathsep + os.environ['PATH'] + '"\n')
         manager = bins / 'pnpm'
         for version, expected in [('9.15.4', 0), ('12.11.2', 1)]:
             manager.write_text('#!/bin/sh\necho ' + version + '\n')
             result = subprocess.run(['/bin/bash', str(helper)], cwd=self.project, capture_output=True, text=True,
-                                    env=dict(os.environ, HOME=str(self.project), PATH=str(bins) + os.pathsep + os.environ['PATH']))
+                                    env=dict(os.environ, HOME=str(self.project), PATH=str(bins) + os.pathsep + os.environ['PATH'],
+                                             DEVCONTAINER_SYSTEM_ROOT=str(system.parent)))
             self.assertEqual(result.returncode, expected, result.stderr)
             if expected:
                 self.assertIn('9.15.4', result.stderr)
@@ -440,12 +480,12 @@ class RenderTests(unittest.TestCase):
         self.install(files)
         validator = self.project / '.devcontainer/scripts/validate-selected.sh'
         validator.write_text('exit 0\n')
-        (self.project / '.devcontainer/scripts/install-agents.sh').write_text('exit 0\n')
         apply = self.project / '.devcontainer/scripts/apply-dotfiles.sh'
         apply.write_text('printf "%s\\n" "$1" >> "$TEST_LOG"\n')
         literal = 'https://example.invalid/$(touch owned).git'
         (self.project / '.devcontainer/devcontainer.env').write_text('# Local runtime settings\nPERSONAL_PAT=private-fixture\nDOTFILES_REPO=' + literal + '\nSSH_AUTH_SOCK=/tmp/example\n')
-        base_env = dict(os.environ, TEST_LOG=str(self.project / 'apply.log'))
+        base_env = dict(os.environ, TEST_LOG=str(self.project / 'apply.log'),
+                        PATH=self.stub_post_create_installers())
         base_env.pop('DOTFILES_REPO', None)
         base_env.pop('CODESPACES', None)
         cases = [({}, literal), ({'DOTFILES_REPO': 'existing/local'}, 'existing/local'),
@@ -499,7 +539,7 @@ class RenderTests(unittest.TestCase):
         (self.project / '.devcontainer/scripts/validate-selected.sh').write_text('exit 0\n')
         (self.project / '.devcontainer/scripts/apply-dotfiles.sh').write_text('touch should-not-apply\n')
         (self.project / '.devcontainer/devcontainer.env').write_text('DOTFILES_REPO=one/repo\nOTHER=kept\nDOTFILES_REPO=two/repo\n')
-        env = dict(os.environ)
+        env = dict(os.environ, PATH=self.stub_post_create_installers())
         env.pop('CODESPACES', None)
         env.pop('DOTFILES_REPO', None)
         result = subprocess.run(['bash', '.devcontainer/scripts/post-create-selected.sh'],

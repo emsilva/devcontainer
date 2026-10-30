@@ -345,11 +345,12 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
     if selected['dotfiles']:
         commands.extend(['chezmoi', 'load-dotfiles'])
     replacements = {'__SOURCE_REF__': source_ref, '__TOOLS__': ' '.join(dict.fromkeys(commands)),
+                    '__FRESH_TOOLS__': 'codex claude opencode',
                     '__DOTFILES__': (templates / 'dotfiles-hook.sh').read_text() if selected['dotfiles'] else '',
                     '__MANAGER_VERSIONS__': '\n'.join(
                         f'check_manager_version {selected["package_managers"][family]} {version}'
                         for family, version in sorted(selected['package_manager_versions'].items()))}
-    helper_names = ['setup-wizard.sh', 'validate-selected.sh', 'post-create-selected.sh']
+    helper_names = ['setup-wizard.sh', 'validate-selected.sh', 'post-create-selected.sh', 'system-path.sh']
     if selected['dotfiles']:
         helper_names.append('apply-dotfiles.sh')
     for name in helper_names:
@@ -524,7 +525,9 @@ def validate(project: Path) -> list[str]:
                 errors.append(f'Missing managed helper/file: {relative}')
             elif not _managed_matches(relative, target.read_bytes(), digest):
                 errors.append(f'Modified managed helper/file: {relative}')
-        for required_file in ['.devcontainer/scripts/install-agents.sh', '.devcontainer/scripts/validate-selected.sh', '.devcontainer/scripts/post-create-selected.sh', '.devcontainer/scripts/setup-wizard.sh']:
+        for required_file in ['.devcontainer/scripts/install-agents.sh', '.devcontainer/scripts/validate-selected.sh',
+                              '.devcontainer/scripts/post-create-selected.sh', '.devcontainer/scripts/setup-wizard.sh',
+                              '.devcontainer/scripts/system-path.sh']:
             if required_file not in marker.get('managedFiles', {}):
                 errors.append(f'Missing managed script registration: {required_file}')
         if selected['dotfiles'] and not (project / '.devcontainer/scripts/apply-dotfiles.sh').is_file():

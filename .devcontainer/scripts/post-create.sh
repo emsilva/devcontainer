@@ -146,6 +146,12 @@ ensure_login_shell
 configure_timezone
 
 # Install complete user-owned native coding tools.
+if ! sudo -n bash templates/scripts/system-path.sh "$PATH" 2>/dev/null; then
+  # The recovery command expands PATH when copied into the user's shell.
+  # shellcheck disable=SC2016
+  echo 'Could not configure system PATH; run: sudo bash templates/scripts/system-path.sh "$PATH"' >&2
+  exit 1
+fi
 export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
 bash .devcontainer/scripts/install-agents.sh
 
