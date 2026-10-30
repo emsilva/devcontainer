@@ -115,10 +115,11 @@ class RenderTests(unittest.TestCase):
         post = files['.devcontainer/scripts/post-create-selected.sh'].decode()
         self.assertLess(post.index('system-path.sh'), post.index('install-agents.sh'))
         self.assertLess(post.index('install-agents.sh'), post.index('validate-selected.sh'))
+        self.assertIn('sudo -n bash .devcontainer/scripts/system-path.sh "$PATH" "$(command -v python3)"', post)
         check = files['.devcontainer/scripts/validate-selected.sh'].decode()
         self.assertNotIn('export PATH=', check)
         self.assertIn('fresh_shell_lookup', check)
-        self.assertIn('sudo -n bash templates/scripts/system-path.sh "$PATH"',
+        self.assertIn('sudo -n bash templates/scripts/system-path.sh "$PATH" "$(command -v python3)"',
                       (ROOT / '.devcontainer/scripts/post-create.sh').read_text())
         self.install(files)
         self.assertEqual(validate(self.project), [])

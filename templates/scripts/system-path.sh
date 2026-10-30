@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# An optional caller PATH retains Feature directories that sudo's secure_path drops.
+# The caller PATH retains Feature directories that sudo's secure_path drops.
 # It is data for /etc/environment, never the root process's command lookup path.
-if [ "$#" -gt 1 ]; then
-  echo 'Usage: system-path.sh [caller-path]' >&2
+if [ "$#" -ne 2 ]; then
+  echo 'Usage: system-path.sh <caller-path> <absolute-python-executable>' >&2
   exit 2
 fi
 if [ "$(id -u)" -ne 0 ] && [ -z "${DEVCONTAINER_SYSTEM_ROOT:-}" ]; then
   # Keep PATH literal so the user expands it when running the recovery command.
   # shellcheck disable=SC2016
-  echo 'System PATH setup must run as root; use sudo bash .devcontainer/scripts/system-path.sh "$PATH".' >&2
+  echo 'System PATH setup must run as root; use sudo bash .devcontainer/scripts/system-path.sh "$PATH" "$(command -v python3)".' >&2
   exit 1
 fi
 
-python3 - "${DEVCONTAINER_SYSTEM_ROOT:-}" "${1:-$PATH}" <<'PY'
+case "$2" in
+  /*) ;;
+  *) echo 'The Python executable must be an absolute path.' >&2; exit 2 ;;
+esac
+"$2" - "${DEVCONTAINER_SYSTEM_ROOT:-}" "$1" <<'PY'
 import os
 from pathlib import Path
 import re
@@ -50,9 +54,12 @@ for line in lines:
         fields = shlex.split(line.strip()[5:], comments=True)
         existing_path = fields[0] if fields else ''
         break
-source_path = caller_path if existing_path is None else existing_path
-entries = [entry for entry in source_path.split(':') if entry != local_bin]
-path_value = ':'.join([local_bin, *entries])
+blocked = ('/tmp', '/var/tmp', '/vscode')
+caller_entries = [entry for entry in caller_path.split(':')
+                  if Path(entry).is_absolute() and Path(entry).is_dir()
+                  and not any(entry == p or entry.startswith(p + '/') for p in blocked)]
+existing_entries = existing_path.split(':') if existing_path is not None else []
+path_value = ':'.join(dict.fromkeys([local_bin, *caller_entries, *existing_entries]))
 escaped = path_value.replace('\\', '\\\\').replace('"', '\\"')
 path_line = 'PATH="' + escaped + '"\n'
 path_lines = re.compile(r'^[ \t]*PATH=.*(?:\n|$)', re.M)
