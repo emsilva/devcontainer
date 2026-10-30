@@ -74,11 +74,15 @@ class RenderTests(unittest.TestCase):
         self.install(files)
         self.assertIn('Missing selected feature: ' + NODE, validate(self.project))
 
-    def test_plaud_support_tracks_node_major(self):
+    def test_plaud_support_tracks_locked_node_range(self):
         from devcontainer_setup import render
         self.assertTrue(hasattr(render, 'plaud_supported'))
         for version, expected in [('16', False), ('17.9', False), ('18', True),
-                                  ('22.3', True), ('24', True), ('lts', True)]:
+                                  ('19', False), ('20', True), ('22', True), ('24', True),
+                                  ('18.16.0', False), ('18.17.0', True),
+                                  ('20.4.0', False), ('20.5.0', True),
+                                  ('18.16', False), ('20.4', False), ('20.11', True),
+                                  ('22.3', True), ('lts', True)]:
             with self.subTest(version=version):
                 self.assertEqual(render.plaud_supported(version), expected)
 
@@ -155,8 +159,11 @@ class RenderTests(unittest.TestCase):
             (self.project / '.devcontainer/devcontainer.json').write_text(json.dumps(config))
             self.assertIn('Missing managed script registration: ' + name, validate(self.project))
 
-    def test_plaud_is_omitted_for_old_node(self):
-        for version, expected in [('16', False), ('18', True), ('lts', True)]:
+    def test_plaud_requirement_tracks_locked_node_range(self):
+        for version, expected in [('16', False), ('18', True), ('19', False), ('20', True),
+                                  ('22', True), ('24', True), ('18.16.0', False),
+                                  ('18.17.0', True), ('20.4.0', False), ('20.5.0', True),
+                                  ('20.11', True), ('lts', True)]:
             with self.subTest(version=version):
                 check = self.render(runtimes={'node': version})['.devcontainer/scripts/validate-selected.sh'].decode()
                 commands = check.split('for tool in ', 1)[1].split(';', 1)[0].split()

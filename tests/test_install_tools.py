@@ -146,10 +146,24 @@ chmod +x "$package/dist/index.js"
     def test_old_node_skips_plaud(self):
         result = self.run_helper(TEST_NODE_VERSION='v16.20.2')
         self.assert_ok(result)
-        self.assertEqual(result.stdout.count('Plaud needs Node 18 or newer; this container has Node v16.20.2'), 1)
+        self.assertEqual(result.stdout.count('Plaud needs Node ^18.17.0 or >=20.5.0; this container has Node v16.20.2'), 1)
         self.assertNotIn('npm ci', self.calls())
         self.assertFalse(os.path.lexists(self.home / '.local/bin/plaud'))
         self.assert_ok(self.run_helper('--check', TEST_NODE_VERSION='v16.20.2'))
+
+    def test_installer_matches_locked_node_range(self):
+        for version, supported in [('v18.16.0', False), ('v18.17.0', True),
+                                   ('v20.4.0', False), ('v24.0.0', True)]:
+            with self.subTest(version=version):
+                before = self.calls()
+                result = self.run_helper('--update', TEST_NODE_VERSION=version)
+                self.assert_ok(result)
+                self.assertEqual('npm ci' in self.calls()[len(before):], supported)
+                message = 'Plaud needs Node ^18.17.0 or >=20.5.0; this container has Node ' + version
+                self.assertEqual(result.stdout.count(message), 0 if supported else 1)
+                calls = self.calls()
+                self.assert_ok(self.run_helper('--check', TEST_NODE_VERSION=version))
+                self.assertEqual(self.calls(), calls)
 
     def test_check_requires_tree_link_version_and_help(self):
         self.assert_ok(self.run_helper())

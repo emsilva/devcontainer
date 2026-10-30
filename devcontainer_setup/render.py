@@ -21,6 +21,8 @@ CONFIG = '.devcontainer/devcontainer.json'
 LOCK = '.devcontainer/devcontainer-lock.json'
 NAMESPACE = 'devcontainerSetup'
 TOOL_ASSETS = ('ccswap-constraints.txt', 'plaud-cli/package.json', 'plaud-cli/package-lock.json', 'README.md')
+# Plaud package-lock.json engines.node: mute-stream@2.0.0 and undici@6.29.1.
+PLAUD_NODE_RANGE = '^18.17.0 || >=20.5.0'
 RETIRED_HELPERS = {'.devcontainer/scripts/project_sync/' + name + '.py'
                    for name in ('work', 'workflows', 'handoff', 'ownership', 'project_files')}
 PINNED_OPTIONS = {
@@ -38,9 +40,17 @@ PINNED_OPTIONS = {
 
 
 def plaud_supported(node_version: str) -> bool:
-    """Non-numeric Node aliases follow the project's selected release line."""
-    major = re.match(r'\d+', node_version)
-    return major is None or int(major.group()) >= 18
+    """Release lines use their newest patch/minor; non-numeric aliases remain supported."""
+    if not re.fullmatch(r'\d+(?:\.\d+){0,2}', node_version):
+        return True
+    components = tuple(map(int, node_version.split('.')))
+    # Missing components select the newest version in that release line.
+    version = components + (float('inf'),) * (3 - len(components))
+    for clause in PLAUD_NODE_RANGE.split(' || '):
+        minimum = tuple(map(int, clause.lstrip('^>=').split('.')))
+        if version >= minimum and (not clause.startswith('^') or version[0] == minimum[0]):
+            return True
+    return False
 
 
 def _json(value):

@@ -6,6 +6,8 @@ case "$mode" in install|--update|--check) ;; *) echo "Usage: $0 [--update|--chec
 if [ "$(id -u)" = 0 ]; then echo 'Run install-tools.sh as the remote user, not root.' >&2; exit 1; fi
 CCSWAP_VERSION=0.42.0
 PLAUD_VERSION=0.3.15
+# Plaud package-lock.json engines.node: mute-stream@2.0.0 and undici@6.29.1.
+PLAUD_NODE_RANGE='^18.17.0 || >=20.5.0'
 tools_dir=$(cd "$(dirname "$0")/../tools" && pwd)
 local_bin="$HOME/.local/bin"
 plaud_root="$HOME/.local/share/plaud-cli"
@@ -55,11 +57,22 @@ fi
 check_ccswap
 pending=''
 node_version=$(node --version)
-node_major=${node_version#v}
-node_major=${node_major%%.*}
-case "$node_major" in ''|*[!0-9]*) echo "Cannot determine Node major: $node_version" >&2; exit 1 ;; esac
-if [ "$node_major" -lt 18 ]; then
-  printf 'Plaud needs Node 18 or newer; this container has Node %s\n' "$node_version"
+if ! python3 - "$node_version" "$PLAUD_NODE_RANGE" <<'PY'
+import re
+import sys
+
+match = re.fullmatch(r'v?(\d+)\.(\d+)\.(\d+)', sys.argv[1])
+if not match:
+    sys.exit(1)
+version = tuple(map(int, match.groups()))
+for clause in sys.argv[2].split(' || '):
+    minimum = tuple(map(int, clause.lstrip('^>=').split('.')))
+    if version >= minimum and (not clause.startswith('^') or version[0] == minimum[0]):
+        sys.exit(0)
+sys.exit(1)
+PY
+then
+  printf 'Plaud needs Node %s; this container has Node %s\n' "${PLAUD_NODE_RANGE/ || / or }" "$node_version"
   exit 0
 fi
 if [ "$mode" = --check ]; then check_plaud; exit 0; fi

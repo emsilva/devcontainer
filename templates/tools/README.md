@@ -38,4 +38,6 @@ cp "$lock_root/ccswap-constraints.txt" templates/tools/ccswap-constraints.txt
 completeness probe is `--help`, with `PLAUD_TELEMETRY_DISABLED=1` and
 `PLAUD_NO_UPDATE_NOTIFIER=1`: reading 0.3.15's `dist/index.js` confirms help exits
 without authentication or an update request. Its `version` subcommand checks the
-registry, so it is not used as the probe. Plaud is skipped on Node older than 18.
+registry, so it is not used as the probe. Plaud is skipped outside Node
+`^18.17.0 || >=20.5.0`, the intersection of the locked dependencies' engine ranges.
+Regenerating the lock means re-deriving this range from its `engines.node` fields.
