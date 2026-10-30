@@ -159,8 +159,8 @@ session (#74). Our checks passed through all of it, because they set PATH themse
 
 ### 6. Checks that can fail
 
-- A new PATH step in `install-agents.sh --check` and in `validate-selected.sh`: look each tool up from a fresh
-  non-interactive shell under a clean environment (`env -i` with only `HOME`, `USER` and what the system files
+- A new PATH step in `validate-selected.sh`, which already runs `install-agents.sh --check` first (so the PATH
+  lookup never drives a reinstall): look each tool up from a fresh non-interactive shell under a clean environment (`env -i` with only `HOME`, `USER` and what the system files
   give), in both `zsh -c` and `bash -c`. The tools: the agents, `ccswap`, `plaud` and `node`. The builder picks
   the exact form.
 - `validate-selected.sh` stops prepending PATH, and adds `ccswap`, `plaud` (call 7) and `node` to the commands
