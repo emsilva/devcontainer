@@ -139,7 +139,7 @@ class DiscoveryTests(unittest.TestCase):
                     self.assertFalse(found['tools']['azure']['selected'])
                     path.write_text(command + '#' * (MAX_FILE_BYTES - len(command)))
                     self.assert_azure_only(name, 'agent docs run az login' if name.endswith('.md') else 'runs the az CLI')
-                    self.assertIn(f'{name}: skipped file larger than {MAX_FILE_BYTES} bytes', found['warnings'])
+                    self.assertEqual(found['warnings'], [])
                 finally:
                     path.unlink()
         target = self.put('docs/real.py', 'subprocess.run(["az", "login"])')
@@ -149,6 +149,32 @@ class DiscoveryTests(unittest.TestCase):
         self.assertFalse(scan(self.root)['tools']['azure']['selected'])
         self.put('client.py', 'subprocess.run(["az", "login"])')
         self.assert_azure_only('client.py')
+
+    def test_large_or_binary_source_adds_no_warning(self):
+        cases = [('app.min.js', b'az' + b'x' * (600 * 1024 - 2)),
+                 ('client.py', b'az\xff'),
+                 ('CLAUDE.md', b'`az login`\n' + b'x' * (600 * 1024)),
+                 ('AGENTS.md', b'`az login`\xff')]
+        for name, content in cases:
+            with self.subTest(name=name):
+                path = self.put(name, '')
+                path.write_bytes(content)
+                try:
+                    found = scan(self.root)
+                    self.assertFalse(found['tools']['azure']['selected'])
+                    self.assertEqual(found['warnings'], [])
+                finally:
+                    path.unlink()
+
+        taskfile = self.put('Taskfile.yml', 'az' + 'x' * (600 * 1024))
+        found = scan(self.root)
+        self.assertEqual(found['warnings'], [f'Taskfile.yml: skipped file larger than {MAX_FILE_BYTES} bytes'])
+        self.assertFalse(found['tools']['azure']['selected'])
+        taskfile.write_bytes(b'az\xff')
+        found = scan(self.root)
+        self.assertEqual(len(found['warnings']), 1)
+        self.assertTrue(found['warnings'][0].startswith('Taskfile.yml: cannot read text ('))
+        self.assertFalse(found['tools']['azure']['selected'])
 
     def test_explicit_manager_pin_and_engines_version_are_retained(self):
         self.put('package.json', json.dumps({'packageManager': 'pnpm@9.15.4',

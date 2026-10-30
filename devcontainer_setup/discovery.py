@@ -271,13 +271,15 @@ def scan(project: Path) -> dict:
             with full.open('rb') as stream:
                 raw = stream.read(MAX_FILE_BYTES + 1)
             if len(raw) > MAX_FILE_BYTES:
-                found['warnings'].append(f'{relative}: skipped file larger than {MAX_FILE_BYTES} bytes')
+                if relevant:
+                    found['warnings'].append(f'{relative}: skipped file larger than {MAX_FILE_BYTES} bytes')
                 continue
             if not relevant and b'az' not in raw:
                 continue
             text = raw.decode('utf-8')
         except (OSError, UnicodeError) as error:
-            found['warnings'].append(f'{relative}: cannot read text ({error})')
+            if relevant:
+                found['warnings'].append(f'{relative}: cannot read text ({error})')
             continue
         if b'az' in raw:
             if suffix_runtime and _source_runs_az(text, suffix_runtime):
