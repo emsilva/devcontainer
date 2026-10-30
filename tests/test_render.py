@@ -123,6 +123,59 @@ class RenderTests(unittest.TestCase):
         (self.project / '.devcontainer/devcontainer.json').write_text(json.dumps(config))
         self.assertIn('Missing managed script registration: ' + name, validate(self.project))
 
+    def test_generated_tools_are_locked_registered_and_ordered(self):
+        from devcontainer_setup.render import validate
+        files = self.render()
+        assets = ['scripts/install-tools.sh', 'tools/ccswap-constraints.txt',
+                  'tools/plaud-cli/package.json', 'tools/plaud-cli/package-lock.json', 'tools/README.md']
+        for asset in assets:
+            self.assertIn('.devcontainer/' + asset, files)
+        post = files['.devcontainer/scripts/post-create-selected.sh'].decode()
+        self.assertLess(post.index('install-agents.sh'), post.index('install-tools.sh'))
+        self.assertLess(post.index('install-tools.sh'), post.index('validate-selected.sh'))
+        check = files['.devcontainer/scripts/validate-selected.sh'].decode()
+        self.assertIn('install-tools.sh --check', check)
+        commands = check.split('for tool in ', 1)[1].split(';', 1)[0].split()
+        fresh = check.split('for tool in ', 2)[2].split(';', 1)[0].split()
+        for tool in ('ccswap', 'plaud', 'node'):
+            self.assertIn(tool, commands)
+            self.assertIn(tool, fresh)
+        task = files['.devcontainer/Taskfile.yml'].decode()
+        self.assertLess(task.index('install-agents.sh --update'), task.index('install-tools.sh --update'))
+        self.assertNotIn('install-tools.sh', (ROOT / '.devcontainer/scripts/post-create.sh').read_text())
+        shared = (ROOT / '.devcontainer/scripts/install-agents.sh').read_text()
+        self.assertNotIn('ccswap', shared)
+        self.assertNotIn('plaud', shared)
+        self.install(files)
+        self.assertEqual(validate(self.project), [])
+        for asset in assets:
+            config = self.config(files)
+            name = '.devcontainer/' + asset
+            del config['customizations']['devcontainerSetup']['managedFiles'][name]
+            (self.project / '.devcontainer/devcontainer.json').write_text(json.dumps(config))
+            self.assertIn('Missing managed script registration: ' + name, validate(self.project))
+
+    def test_plaud_is_omitted_for_old_node(self):
+        for version, expected in [('16', False), ('18', True), ('lts', True)]:
+            with self.subTest(version=version):
+                check = self.render(runtimes={'node': version})['.devcontainer/scripts/validate-selected.sh'].decode()
+                commands = check.split('for tool in ', 1)[1].split(';', 1)[0].split()
+                fresh = check.split('for tool in ', 2)[2].split(';', 1)[0].split()
+                self.assertIn('ccswap', commands)
+                self.assertEqual('plaud' in commands, expected)
+                self.assertEqual('plaud' in fresh, expected)
+
+    def test_adopted_node_version_controls_plaud_requirement(self):
+        target = self.project / '.devcontainer/devcontainer.json'
+        target.parent.mkdir()
+        target.write_text(json.dumps({'features': {NODE: {'version': '16'}}}))
+        files = self.render(polyglot=True)
+        self.assertEqual(self.config(files)['features'][NODE]['version'], '16')
+        check = files['.devcontainer/scripts/validate-selected.sh'].decode()
+        self.assertIn('ccswap', check.split('for tool in ', 1)[1].split(';', 1)[0].split())
+        for loop in check.split('for tool in ')[1:]:
+            self.assertNotIn('plaud', loop.split(';', 1)[0].split())
+
     def test_old_managed_agents_migrate_while_custom_features_survive(self):
         from devcontainer_setup.render import validate
         files = self.render()
@@ -296,7 +349,8 @@ class RenderTests(unittest.TestCase):
         joined = b'\n'.join(files.values())
         self.assertNotIn(b'emsilva/dotfiles', joined)
         self.assertNotIn(b'GOMODCACHE', joined)
-        self.assertNotIn(b'.npm', joined)
+        self.assertFalse(any('.npm' in str(mount) for mount in config.get('mounts', [])))
+        self.assertIn('.devcontainer/tools/plaud-cli/package-lock.json', files)
         self.assertNotIn('.devcontainer/Dockerfile', files)
         self.assertNotIn('Taskfile.yml', files)
 

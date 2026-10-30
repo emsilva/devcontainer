@@ -7,5 +7,6 @@ if ! sudo -n bash .devcontainer/scripts/system-path.sh "$PATH" 2>/dev/null; then
   exit 1
 fi
 bash .devcontainer/scripts/install-agents.sh
+bash .devcontainer/scripts/install-tools.sh
 bash .devcontainer/scripts/validate-selected.sh
 __DOTFILES__

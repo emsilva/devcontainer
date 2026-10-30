@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 bash .devcontainer/scripts/install-agents.sh --check
+bash .devcontainer/scripts/install-tools.sh --check
 missing=0
 # Read the system's PATH, without borrowing the caller's additions.
 system_path=$(python3 - "${DEVCONTAINER_SYSTEM_ROOT:-}/etc/environment" <<'PY'

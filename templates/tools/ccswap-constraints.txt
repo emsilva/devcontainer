@@ -1,0 +1,41 @@
+ccswap==0.42.0
+    # via -r ccswap.in
+jaraco-classes==3.4.0 ; sys_platform == 'win32'
+    # via keyring
+jaraco-context==6.1.2 ; sys_platform == 'win32'
+    # via keyring
+jaraco-functools==4.6.0 ; sys_platform == 'win32'
+    # via keyring
+keyring==25.7.0 ; sys_platform == 'win32'
+    # via ccswap
+linkify-it-py==2.2.0
+    # via markdown-it-py
+markdown-it-py==4.2.0
+    # via
+    #   mdit-py-plugins
+    #   rich
+    #   textual
+mdit-py-plugins==0.6.1
+    # via textual
+mdurl==0.1.2
+    # via markdown-it-py
+more-itertools==11.2.1 ; sys_platform == 'win32'
+    # via
+    #   jaraco-classes
+    #   jaraco-functools
+platformdirs==4.14.0
+    # via textual
+pygments==2.21.0
+    # via
+    #   rich
+    #   textual
+pywin32-ctypes==0.2.3 ; sys_platform == 'win32'
+    # via keyring
+rich==15.0.0
+    # via textual
+textual==8.2.8
+    # via ccswap
+truststore==0.10.5
+    # via ccswap
+typing-extensions==4.16.0
+    # via textual
