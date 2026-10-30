@@ -39,12 +39,45 @@ class RenderTests(unittest.TestCase):
         with tarfile.open(ROOT / 'tests/fixtures/legacy-base.tar.gz') as bundle:
             bundle.extractall(self.project, filter='data')
 
-    def test_native_agents_are_mandatory_without_node_dependency(self):
+    def test_node_is_a_baseline_runtime(self):
+        from devcontainer_setup.render import validate
+        files = self.render()
+        catalog = json.loads((ROOT / '.devcontainer/devcontainer.json').read_text())
+        features = self.config(files)['features']
+        self.assertIn(NODE, features)
+        self.assertEqual(features[NODE]['version'], catalog['features'][NODE]['version'])
+        self.install(files)
+        self.assertEqual(validate(self.project), [])
+
+    def test_project_node_version_wins(self):
+        baseline = self.config(self.render())['features']
+        self.assertIn(NODE, baseline)
+        self.assertEqual(self.config(self.render(runtimes={'node': '22'}))['features'][NODE]['version'], '22')
+
+    def test_validate_requires_node_feature(self):
+        from devcontainer_setup.render import validate
+        files = self.render()
+        config = self.config(files)
+        config['features'].pop(NODE, None)
+        config['customizations']['devcontainerSetup']['managedConfig']['features'].pop(NODE, None)
+        files['.devcontainer/devcontainer.json'] = json.dumps(config).encode()
+        self.install(files)
+        self.assertIn('Missing selected feature: ' + NODE, validate(self.project))
+
+    def test_plaud_support_tracks_node_major(self):
+        from devcontainer_setup import render
+        self.assertTrue(hasattr(render, 'plaud_supported'))
+        for version, expected in [('16', False), ('17.9', False), ('18', True),
+                                  ('22.3', True), ('24', True), ('lts', True)]:
+            with self.subTest(version=version):
+                self.assertEqual(render.plaud_supported(version), expected)
+
+    def test_native_agents_are_mandatory_and_record_no_node_dependency(self):
         files = self.render(agents=False)
         config = self.config(files)
         metadata = config['customizations']['devcontainerSetup']
         self.assertIs(metadata['selections']['agents'], True)
-        self.assertNotIn(NODE, config['features'])
+        self.assertIn(NODE, config['features'])
         self.assertNotIn('node', metadata['dependencies'])
         self.assertNotIn('agents', metadata['pinningLimitations'])
         self.assertFalse(any('codex:' in name or 'claude-code:' in name for name in config['features']))
@@ -216,7 +249,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn(PYTHON, config['features'])
         self.assertIn('ghcr.io/va-h/devcontainers-features/uv:1', config['features'])
         self.assertIn('ghcr.io/devcontainers-extra/features/go-task:1', config['features'])
-        for runtime in ('node', 'ruby', 'rust', 'go'):
+        self.assertIn(NODE, config['features'])
+        for runtime in ('ruby', 'rust', 'go'):
             self.assertNotIn(f'ghcr.io/devcontainers/features/{runtime}:1', config['features'])
         self.assertFalse(list(self.project.iterdir()))
         joined = b'\n'.join(files.values())
@@ -235,7 +269,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(set(config['features']), set(lock['features']))
         self.assertTrue(all('@sha256:' not in key for key in config['features']))
         self.assertTrue(all('@sha256:' in value['resolved'] for value in lock['features'].values()))
-        self.assertNotIn(NODE, self.config(self.render(agents=True))['features'])
+        self.assertIn(NODE, self.config(self.render(agents=True))['features'])
 
     def test_repeat_is_identical_and_valid(self):
         from devcontainer_setup.render import validate

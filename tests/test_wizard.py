@@ -39,6 +39,14 @@ class WizardCliTests(unittest.TestCase):
         return subprocess.run([sys.executable, '-m', 'devcontainer_setup', '--project', str(self.root), *args],
                               cwd=SOURCE, env=self.env, capture_output=True, text=True)
 
+    def test_wizard_node_default_matches_catalog(self):
+        from devcontainer_setup.__main__ import RUNTIME_DEFAULTS
+        catalog = json.loads((SOURCE / '.devcontainer/devcontainer.json').read_text())
+        self.assertEqual(RUNTIME_DEFAULTS['node'], catalog['features']['ghcr.io/devcontainers/features/node:1']['version'])
+        # The selection screen must explain why an unselected Node is still installed.
+        self.assertIn('Project runtimes (Python, Node and uv included)',
+                      (SOURCE / 'devcontainer_setup/__main__.py').read_text())
+
     def test_legacy_agent_opt_out_is_ignored_without_an_agent_prompt(self):
         from devcontainer_setup.__main__ import defaults, _select
         from devcontainer_setup.discovery import scan

@@ -10,7 +10,7 @@ import re
 FEATURE = 'ghcr.io/devcontainers/features/'
 BASE_FEATURES = [FEATURE + 'common-utils:2',
                  'ghcr.io/rocker-org/devcontainer-features/apt-packages:1',
-                 FEATURE + 'python:1', 'ghcr.io/va-h/devcontainers-features/uv:1',
+                 FEATURE + 'python:1', FEATURE + 'node:1', 'ghcr.io/va-h/devcontainers-features/uv:1',
                  'ghcr.io/devcontainers-extra/features/go-task:1', FEATURE + 'github-cli:1']
 TOOLS = {'azure': FEATURE + 'azure-cli:1', 'aws': FEATURE + 'aws-cli:1',
          'gcp': 'ghcr.io/dhoeric/features/google-cloud-cli:1',
@@ -34,6 +34,12 @@ PINNED_OPTIONS = {
     'ghcr.io/va-h/devcontainers-features/uv:1': {'version': '0.13.1'},
     'ghcr.io/devcontainers-extra/features/go-task:1': {'version': '3.54.0'},
 }
+
+
+def plaud_supported(node_version: str) -> bool:
+    """Non-numeric Node aliases follow the project's selected release line."""
+    major = re.match(r'\d+', node_version)
+    return major is None or int(major.group()) >= 18
 
 
 def _json(value):
