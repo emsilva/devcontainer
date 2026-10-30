@@ -51,6 +51,18 @@ lockfiles, uv.
 5. **A project selects Node older than 18:** Plaud is skipped with one line, and not required by the checks.
    Tests in Tasks 1 and 4.
 
+
+## Status (2026-10-30)
+
+Done. Tasks 1–5 merged on main in 5da3a62 (stream A 80ca15b…b2edc5e, stream B d4e7b0c, 1d829a8); lead re-gates
+green in the default environment (1,081 tests on the merge). Task 6 passed on a throwaway innovate Codespace, plus a
+restart and a second post-create run; the record is the lead's `tmp/codespace-lifecycle/tools-batch/LIVE.md`.
+Changes from this plan during the build:
+- Plaud's Node check uses the lock's engine range `^18.17.0 || >=20.5.0`, not "major 18 or newer" (Task 4).
+- `system-path.sh` takes the caller's Python by absolute path (the base image has no `python3` on sudo's
+  secure_path) and also writes the Feature directories from the caller's PATH (Task 3).
+- Post-create shows the root step's own error output.
+
 ---
 
 ### Task 1: Node as a baseline runtime
@@ -67,7 +79,7 @@ lockfiles, uv.
   whether `plaud` joins `__TOOLS__`.
 - Produces: every rendered config has `ghcr.io/devcontainers/features/node:1`, version = selected or catalog.
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   - `test_node_is_a_baseline_runtime`: `self.render()` (no runtimes) → `NODE in features`,
     `features[NODE]['version'] == canonical catalog node version`, and `validate()` of the installed render is `[]`.
   - `test_project_node_version_wins`: `runtimes={'node': '22'}` → version `'22'`.
@@ -77,12 +89,12 @@ lockfiles, uv.
   - Change `test_native_agents_are_mandatory_without_node_dependency`: drop `assertNotIn(NODE, config['features'])`
     (Node now comes for Plaud, spec call 1) and keep `assertNotIn('node', metadata['dependencies'])` and the rest.
     Rename it `test_native_agents_are_mandatory_and_record_no_node_dependency`.
-- [ ] **Step 2: Run** `python3 -m unittest tests.test_render tests.test_wizard -v` → the new tests FAIL.
-- [ ] **Step 3: Implement.** Add `FEATURE + 'node:1'` to `BASE_FEATURES` (so `validate()`'s `required` includes it).
+- [x] **Step 2: Run** `python3 -m unittest tests.test_render tests.test_wizard -v` → the new tests FAIL.
+- [x] **Step 3: Implement.** Add `FEATURE + 'node:1'` to `BASE_FEATURES` (so `validate()`'s `required` includes it).
   Keep `test_native_agents_do_not_restrict_project_node_version` (Node 16 still renders). Runtime screen label:
   `Project runtimes (Python, Node and uv included)`; keep Node selectable for its version. Add `plaud_supported`.
-- [ ] **Step 4: Run** `task test` → PASS (all suites).
-- [ ] **Step 5: Commit** `Make Node a baseline runtime for the Plaud CLI`.
+- [x] **Step 4: Run** `task test` → PASS (all suites).
+- [x] **Step 5: Commit** `Make Node a baseline runtime for the Plaud CLI`.
 
 ### Task 2: OpenCode v2, pinned and linked
 
@@ -94,7 +106,7 @@ lockfiles, uv.
 - Produces: `~/.local/bin/opencode` → `~/.opencode/bin/opencode` symlink after install; `check_agent opencode`
   fails unless `opencode --version` (last whitespace field, leading `v` stripped) starts with `2.`.
 
-- [ ] **Step 1: Write the failing tests** (extend the fakes: `curl` serves `https://opencode.ai/v2/install`; the
+- [x] **Step 1: Write the failing tests** (extend the fakes: `curl` serves `https://opencode.ai/v2/install`; the
   opencode fake prints a version from `$TEST_OPENCODE_VERSION`, default `2.1.4`).
   - `test_opencode_v2_installer_is_pinned`: install → calls contain `https://opencode.ai/v2/install` and
     `install opencode --no-modify-path --version 2.1.4`; never `https://opencode.ai/install`.
@@ -105,13 +117,13 @@ lockfiles, uv.
   - `test_check_fails_for_opencode_1x`: a 1.x layout → `--check` exits non-zero.
   - Update `test_install_idempotent_update_and_check` for the new URL and arguments; it must still create no
     `~/.*rc`.
-- [ ] **Step 2: Run** `python3 -m unittest tests.test_agents -v` → new tests FAIL.
-- [ ] **Step 3: Implement** in `install-agents.sh`: URL, arguments, a `OPENCODE_VERSION=2.1.4` constant near the
+- [x] **Step 2: Run** `python3 -m unittest tests.test_agents -v` → new tests FAIL.
+- [x] **Step 3: Implement** in `install-agents.sh`: URL, arguments, a `OPENCODE_VERSION=2.1.4` constant near the
   top, the major-2 test inside `check_agent` (it is part of installation completeness, so it may drive reinstall),
   and `ln -sfn "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode"` after the opencode install; the layout
   check also requires that symlink.
-- [ ] **Step 4: Run** `task check && task test` → PASS.
-- [ ] **Step 5: Commit** `Install OpenCode 2.1.4 and link it beside the other agents (#82)`.
+- [x] **Step 4: Run** `task check && task test` → PASS.
+- [x] **Step 5: Commit** `Install OpenCode 2.1.4 and link it beside the other agents (#82)`.
 
 ### Task 3: `~/.local/bin` on the system PATH, and a check from a fresh shell
 
@@ -136,7 +148,7 @@ lockfiles, uv.
   `validate-selected.sh` → dotfiles hook (Task 4 inserts `install-tools.sh` after `install-agents.sh`). `validate-selected.sh` no longer
   prepends PATH (its existing `command -v` loop runs in the post-create environment as it is).
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   - `tests/test_system_path.py`: with a temp `DEVCONTAINER_SYSTEM_ROOT`:
     `test_prepends_local_bin_once` (existing `PATH="/usr/local/bin:/usr/bin"` → `PATH="/home/vscode/.local/bin:/usr/local/bin:/usr/bin"`;
     second run identical bytes); `test_creates_path_line_when_absent`; `test_zshenv_block_is_replaced_not_appended`.
@@ -149,14 +161,14 @@ lockfiles, uv.
     `Missing managed script registration` without it); post-create order as above; `validate-selected.sh`
     contains no `export PATH=`; `test_native_agents_are_mandatory_…`'s
     `assertIn('export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"', post)` is updated to the new script.
-- [ ] **Step 2: Run** `python3 -m unittest tests.test_system_path tests.test_render -v` → FAIL.
-- [ ] **Step 3: Implement** `system-path.sh` (`#!/usr/bin/env bash`, `set -euo pipefail`, refuse non-root unless
+- [x] **Step 2: Run** `python3 -m unittest tests.test_system_path tests.test_render -v` → FAIL.
+- [x] **Step 3: Implement** `system-path.sh` (`#!/usr/bin/env bash`, `set -euo pipefail`, refuse non-root unless
   `DEVCONTAINER_SYSTEM_ROOT` is set, atomic write via temp file + `mv`), the post-create line with the refusal
   message, `fresh_shell_lookup` in `validate-selected.sh`, and the render wiring. Canonical container: apply the
   same step from `.devcontainer/scripts/post-create.sh` if it fits in a few lines; otherwise leave a one-line
   comment there saying why not.
-- [ ] **Step 4: Run** `task check && task test` → PASS.
-- [ ] **Step 5: Commit** `Put ~/.local/bin on the PATH of every shell and check it from a fresh one (#74, #82)`.
+- [x] **Step 4: Run** `task check && task test` → PASS.
+- [x] **Step 5: Commit** `Put ~/.local/bin on the PATH of every shell and check it from a fresh one (#74, #82)`.
 
 ### Task 4: ccswap and Plaud in generated containers
 
@@ -186,7 +198,7 @@ lockfiles, uv.
   `{"private": true, "dependencies": {"@plaud-ai/cli": "0.3.15"}}`; `uv pip compile --universal
   --python-version 3.12` of `ccswap==0.42.0` with exact `==` pins and no hashes.
 
-- [ ] **Step 1: Write the failing tests** (`tests/test_install_tools.py`, fakes for `uv`, `npm`, `node` like
+- [x] **Step 1: Write the failing tests** (`tests/test_install_tools.py`, fakes for `uv`, `npm`, `node` like
   `tests/test_agents.py`):
   `test_installs_pinned_ccswap_and_plaud` (calls show `ccswap==0.42.0` with the constraints path and
   `npm ci --ignore-scripts`; both links exist); `test_rerun_keeps_both` (second run: no new install calls);
@@ -197,12 +209,12 @@ lockfiles, uv.
   Render tests: the five files are rendered and registered; `__TOOLS__` contains `ccswap`, `plaud`, `node` for
   the default render and omits `plaud` for `runtimes={'node': '16'}`; post-create calls `install-tools.sh` after
   `install-agents.sh` and before `validate-selected.sh`; `validate-selected.sh` calls `install-tools.sh --check`.
-- [ ] **Step 2: Run** `python3 -m unittest tests.test_install_tools tests.test_render -v` → FAIL.
-- [ ] **Step 3: Generate the locks** with the commands above (network is allowed for this step only), then
+- [x] **Step 2: Run** `python3 -m unittest tests.test_install_tools tests.test_render -v` → FAIL.
+- [x] **Step 3: Generate the locks** with the commands above (network is allowed for this step only), then
   implement `install-tools.sh` and the render wiring. Read the lock's resolved versions back and list them in the
   commit message body.
-- [ ] **Step 4: Run** `task check && task test` → PASS.
-- [ ] **Step 5: Commit** `Install ccswap 0.42.0 and the Plaud CLI 0.3.15 on generated Codespaces (#83)`.
+- [x] **Step 4: Run** `task check && task test` → PASS.
+- [x] **Step 5: Commit** `Install ccswap 0.42.0 and the Plaud CLI 0.3.15 on generated Codespaces (#83)`.
 
 ### Task 5: The scan finds `az` in code (stream B)
 
@@ -214,7 +226,7 @@ lockfiles, uv.
 - Produces: `found['tools']['azure']` selected with evidence `"<path>: runs the az CLI"` for source calls and
   `"<path>: agent docs run az login"` for agent docs. No other tool changes.
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   - `test_go_exec_of_az_selects_azure`: `tools/mvp/azure/token.go` containing
     `cmd := exec.CommandContext(ctx, "az", "account", "get-access-token")` → selected, evidence names the file.
     Also `exec.Command("az", "login")`.
@@ -227,41 +239,41 @@ lockfiles, uv.
     `docs/CLAUDE.md` (discounted directory). The existing
     `test_malformed_manifest_is_visible_and_no_prose_cloud_selection` and
     `test_compose_source_files_and_docs_do_not_recommend_tools` must stay green unchanged.
-- [ ] **Step 2: Run** `python3 -m unittest tests.test_discovery -v` → new positives FAIL.
-- [ ] **Step 3: Implement.** Read files whose suffix is in the existing `suffix_runtime` map (same
+- [x] **Step 2: Run** `python3 -m unittest tests.test_discovery -v` → new positives FAIL.
+- [x] **Step 3: Implement.** Read files whose suffix is in the existing `suffix_runtime` map (same
   `MAX_FILE_BYTES`, `DISCOUNTED`, symlink rules) for argv-style calls whose program is exactly `az`; read root
   `CLAUDE.md`/`AGENTS.md` for `az login` inside backticks or a fenced block. Only when the file contains the
   bytes `az` at all (cheap prefilter).
-- [ ] **Step 4: Run** `task test`, then `bash scripts/setup.sh --project ~/code/sm-consult-agent-strata-sap --scan
+- [x] **Step 4: Run** `task test`, then `bash scripts/setup.sh --project ~/code/sm-consult-agent-strata-sap --scan
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["tools"]["azure"])'` → selected with `token.go`
   evidence; `git -C ~/code/sm-consult-agent-strata-sap status --porcelain` unchanged before and after.
-- [ ] **Step 5: Commit** `Recommend the Azure CLI when code runs az (#89)`.
+- [x] **Step 5: Commit** `Recommend the Azure CLI when code runs az (#89)`.
 
 ### Task 6: Live demonstration (lead only)
 
 Run by the lead after Tasks 1–5 are merged into local `main` and re-gated. Spec "Live demonstration" is the
 checklist; record every command and result in `tmp/codespace-lifecycle/tools-batch/LIVE.md`.
 
-- [ ] **Step 1:** `git clone https://github.com/kyndryl-agentic-ai/consult-sm-innovate.git
+- [x] **Step 1:** `git clone https://github.com/kyndryl-agentic-ai/consult-sm-innovate.git
   /Users/mannu/code/devcontainer/tmp/livetest-tools/innovate-tools-test`.
-- [ ] **Step 2:** In a Herdr shell pane, in that clone: `export SETUP_DEVCONTAINER_REPO=/Users/mannu/code/devcontainer
+- [x] **Step 2:** In a Herdr shell pane, in that clone: `export SETUP_DEVCONTAINER_REPO=/Users/mannu/code/devcontainer
   SETUP_DEVCONTAINER_REF=main` (the local `main`; `upgrade_handoff` fetches it, `__main__.py:475-484`) then
   `task devcontainer:upgrade:self`; answer per memory `project-setup-upgrade-recipe` step 2 ("Commit only").
   Check `git diff main setup/devcontainer --stat` shows the new scripts, tool locks and the changed
   `devcontainer.json`, and `sourceRef` equals the main sha.
-- [ ] **Step 3:** `git checkout -b test/tools-batch-20261030 setup/devcontainer && git push origin
+- [x] **Step 3:** `git checkout -b test/tools-batch-20261030 setup/devcontainer && git push origin
   test/tools-batch-20261030 && git branch -D setup/devcontainer`.
-- [ ] **Step 4:** `gh codespace create --repo kyndryl-agentic-ai/consult-sm-innovate --branch
+- [x] **Step 4:** `gh codespace create --repo kyndryl-agentic-ai/consult-sm-innovate --branch
   test/tools-batch-20261030 -m basicLinux32gb --idle-timeout 120m --devcontainer-path
   .devcontainer/devcontainer.json`; record the name in LEAD-STATE at once. Wait for post-create:
   `gh codespace ssh -c <cs> -- 'test -f /workspaces/consult-sm-innovate/.devcontainer/scripts/install-tools.sh && echo ready'`
   and the creation log (`gh codespace logs -c <cs>`) showing post-create finished, exit 0.
-- [ ] **Step 5:** The spec's checks, each recorded with its output: `command -v` in the three shells, versions,
+- [x] **Step 5:** The spec's checks, each recorded with its output: `command -v` in the three shells, versions,
   `validate-selected.sh` and `install-agents.sh --check` exit 0, the Feature tools recorded, the 1.x
   replacement (install 1.x with `curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path`, then
   `bash .devcontainer/scripts/install-agents.sh`, then `opencode --version` and `grep -c opencode ~/.zshrc`).
-- [ ] **Step 6:** Clean up: `gh codespace delete -c <cs> --force`; `git push origin --delete
+- [x] **Step 6:** Clean up: `gh codespace delete -c <cs> --force`; `git push origin --delete
   test/tools-batch-20261030`; remove the clone; `gh codespace list` and `git ls-remote --heads origin
   test/tools-batch-20261030` show nothing.
-- [ ] **Step 7:** Push `main` with the emsilva token (memory `push-generator-fixes-when-green`), then comment on
+- [x] **Step 7:** Push `main` with the emsilva token (memory `push-generator-fixes-when-green`), then comment on
   #82, #74 and #89 with the evidence and close them; comment on #83 that its install half shipped.
