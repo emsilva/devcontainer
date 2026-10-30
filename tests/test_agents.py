@@ -16,7 +16,7 @@ class AgentInstallTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.home = self.root / 'home'
         self.home.mkdir()
         self.bin = self.root / 'bin'
@@ -36,7 +36,7 @@ case "$url" in
  https://chatgpt.com/codex/install.sh|https://releases.openai.com/codex/install.sh) name=codex;;
  https://github.com/openai/codex/releases/latest/download/install.sh) name=codex;;
  https://claude.ai/install.sh) name=claude;;
- https://opencode.ai/install) name=opencode;;
+ https://opencode.ai/install|https://opencode.ai/v2/install) name=opencode;;
  *) exit 90;;
 esac
 cp "$TEST_FIXTURES/$name.sh" "$out"
@@ -62,13 +62,14 @@ ln -sf "$r/bin/codex" "$HOME/.local/bin/codex"
 ''')
         for name, directory in [('claude', '.local/bin'), ('opencode', '.opencode/bin')]:
             native = ('mkdir -p "$HOME/.local/share/claude/versions"\nmv "$HOME/.local/bin/claude" "$HOME/.local/share/claude/versions/test"\nln -sf "$HOME/.local/share/claude/versions/test" "$HOME/.local/bin/claude"' if name == 'claude' else '')
+            version = '${TEST_OPENCODE_VERSION:-2.1.4}' if name == 'opencode' else 'claude-test'
             self.write(self.root / (name + '.sh'), f'''#!/bin/bash
 set -eu
 printf 'install {name} %s\\n' "$*" >> "$TEST_CALLS"
 [ "${{FAIL_INSTALL:-}}" != {name} ] || exit 33
 mkdir -p "$HOME/{directory}"
 rm -f "$HOME/{directory}/{name}"
-printf '#!/bin/sh\\necho {name}-test\\n' > "$HOME/{directory}/{name}"
+printf '#!/bin/sh\\necho {version}\\n' > "$HOME/{directory}/{name}"
 chmod +x "$HOME/{directory}/{name}"
 {native}
 ''')
@@ -84,13 +85,40 @@ chmod +x "$HOME/{directory}/{name}"
     def assert_ok(self, result):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
+    def test_opencode_v2_installer_is_pinned(self):
+        self.assert_ok(self.run_helper())
+        calls = self.log.read_text()
+        self.assertIn('https://opencode.ai/v2/install', calls)
+        self.assertIn('install opencode --no-modify-path --version 2.1.4', calls)
+        self.assertNotIn('https://opencode.ai/install', calls)
+
+    def test_opencode_is_linked_into_local_bin(self):
+        self.assert_ok(self.run_helper())
+        launcher = self.home / '.local/bin/opencode'
+        self.assertTrue(launcher.is_symlink())
+        self.assertEqual(launcher.resolve(), self.home / '.opencode/bin/opencode')
+
+    def test_opencode_1x_is_replaced(self):
+        self.assert_ok(self.run_helper())
+        self.write(self.home / '.opencode/bin/opencode', '#!/bin/sh\necho 1.19.4\n')
+        before = self.log.read_text()
+        self.assert_ok(self.run_helper())
+        self.assertEqual(self.log.read_text()[len(before):].count('install opencode'), 1)
+        self.assert_ok(self.run_helper('--check'))
+        self.assertFalse(any(self.home.glob('.*rc')))
+
+    def test_check_fails_for_opencode_1x(self):
+        self.assert_ok(self.run_helper())
+        self.write(self.home / '.opencode/bin/opencode', '#!/bin/sh\necho 1.19.4\n')
+        self.assertNotEqual(self.run_helper('--check').returncode, 0)
+
     def test_install_idempotent_update_and_check(self):
         self.assert_ok(self.run_helper())
         calls = self.log.read_text()
-        for url in ('https://chatgpt.com/codex/install.sh', 'https://claude.ai/install.sh', 'https://opencode.ai/install'):
+        for url in ('https://chatgpt.com/codex/install.sh', 'https://claude.ai/install.sh', 'https://opencode.ai/v2/install'):
             self.assertIn(url, calls)
         self.assertIn('--fail', calls)
-        self.assertIn('install opencode --no-modify-path', calls)
+        self.assertIn('install opencode --no-modify-path --version 2.1.4', calls)
         self.assertIn('install claude latest', calls)
         self.assert_ok(self.run_helper())
         self.assert_ok(self.run_helper('--check'))

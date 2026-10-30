@@ -2,6 +2,8 @@
 # Shared authority for canonical and generated containers. Vendor releases move.
 set -euo pipefail
 
+OPENCODE_VERSION=2.1.4
+
 mode="${1:-install}"
 if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$mode" != --update ] && [ "$mode" != --check ]; }; then
   echo 'Usage: install-agents.sh [--update|--check]' >&2
@@ -24,7 +26,7 @@ import sys
 
 name = sys.argv[1]
 home = Path.home().resolve()
-launcher = home / ('.opencode/bin/opencode' if name == 'opencode' else '.local/bin/' + name)
+launcher = home / '.local/bin' / name
 try:
     target = launcher.resolve(strict=True)
     target.relative_to(home)
@@ -38,6 +40,9 @@ try:
     if name == 'claude':
         assert launcher.is_symlink()
         target.relative_to(home / '.local/share/claude/versions')
+    if name == 'opencode':
+        assert launcher.is_symlink()
+        assert target.samefile(home / '.opencode/bin/opencode')
     if name == 'codex':
         package = (home / '.codex/packages/standalone/current').resolve(strict=True)
         package.relative_to(home / '.codex/packages/standalone')
@@ -61,10 +66,17 @@ PY
 }
 
 check_agent() {
-  local name="$1" launcher="$HOME/.local/bin/$1"
-  [ "$name" != opencode ] || launcher="$HOME/.opencode/bin/opencode"
+  local name="$1" launcher="$HOME/.local/bin/$1" version
   check_layout "$name" || return 1
-  "$launcher" --version || return 1
+  version=$("$launcher" --version) || return 1
+  printf '%s\n' "$version"
+  if [ "$name" = opencode ]; then
+    version=$(printf '%s\n' "$version" | awk 'END {print $NF}')
+    case "${version#v}" in
+      2.*) ;;
+      *) echo 'Managed OpenCode must report major version 2.' >&2; return 1 ;;
+    esac
+  fi
   if [ "$name" = codex ]; then
     # Read-only package probe: no daemon, authentication, or model request.
     "$launcher" app-server daemon pid-update-loop --check-package-ownership || return 1
@@ -89,7 +101,7 @@ for agent in codex claude opencode; do
     # the same script is published beside the releases and on GitHub Releases.
     codex) urls='https://chatgpt.com/codex/install.sh https://releases.openai.com/codex/install.sh https://github.com/openai/codex/releases/latest/download/install.sh'; shell='sh' ;;
     claude) urls=https://claude.ai/install.sh; shell='bash' ;;
-    opencode) urls=https://opencode.ai/install; shell='bash' ;;
+    opencode) urls=https://opencode.ai/v2/install; shell='bash' ;;
   esac
   installer="$temporary/$agent.sh"
   for url in $urls; do
@@ -106,7 +118,10 @@ for agent in codex claude opencode; do
     # cannot add a PATH block to personal profiles during migration.
     codex) PATH="$HOME/.local/bin:$HOME/.opencode/bin:/usr/bin:/bin" CODEX_NON_INTERACTIVE=1 sh "$installer" ;;
     claude) bash "$installer" latest ;;
-    opencode) bash "$installer" --no-modify-path ;;
+    opencode)
+      bash "$installer" --no-modify-path --version "$OPENCODE_VERSION"
+      ln -sfn "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode"
+      ;;
   esac
   check_agent "$agent"
 done
