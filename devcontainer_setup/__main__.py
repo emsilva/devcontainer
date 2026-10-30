@@ -485,7 +485,7 @@ def upgrade_handoff(project: Path, current_ref: str, resume: str | None) -> int 
 
 
 def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
-    print('\nRecommendations (Python + uv are always included):', flush=True)
+    print('\nRecommendations (Python, Node and uv are always included):', flush=True)
     for name, entry in found['runtimes'].items():
         if entry['selected']:
             print(f'  {name}: {entry["version"] or "choose version"}')
@@ -496,7 +496,7 @@ def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
             print(f'  {TOOL_LABELS.get(name, name)}: ' + '; '.join(entry['evidence'][:2]))
     for warning in found['warnings']:
         print(f'  Note: {warning}')
-    runtime_names = ui.multi('Project runtimes (Python + uv included)', ['node', 'ruby', 'go', 'rust'],
+    runtime_names = ui.multi('Project runtimes (Python, Node and uv included)', ['node', 'ruby', 'go', 'rust'],
                              [name for name in chosen['runtimes'] if name != 'python'])
     runtimes = {'python': chosen['runtimes'].get('python', '3.13')}
     for name in ['python', *runtime_names]:
@@ -854,7 +854,7 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
             origin = f' (from origin/{default})' if default else ''
             marker = json.loads(files['.devcontainer/devcontainer.json'])['customizations']['devcontainerSetup']
             # The PR body: the review without the local path, the dotfiles repository or the launch choices.
-            body = [f'Branch: {plan.branch}{origin}', f'Runtimes: {chosen["runtimes"]}',
+            body = [f'Branch: {plan.branch}{origin}', f'Runtimes: {chosen["runtimes"]} (Python, Node and uv baseline)',
                     f'Tools: {", ".join(chosen["tools"]) or "baseline only"}',
                     'Agents: Codex, Claude Code, OpenCode (baseline)',
                     f'Files: {", ".join(plan.changed) or "already configured"}',

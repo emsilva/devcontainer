@@ -32,6 +32,16 @@ class RenderTests(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
 
+    def stub_post_create_installers(self):
+        for name in ('install-agents.sh', 'install-tools.sh'):
+            (self.project / '.devcontainer/scripts' / name).write_text('exit 0\n')
+        tools = self.project / 'post-create-bin'
+        tools.mkdir()
+        sudo = tools / 'sudo'
+        sudo.write_text('#!/bin/sh\nexit 0\n')
+        sudo.chmod(0o755)
+        return str(tools) + os.pathsep + os.environ['PATH']
+
     def config(self, files):
         return json.loads(files['.devcontainer/devcontainer.json'])
 
@@ -39,12 +49,49 @@ class RenderTests(unittest.TestCase):
         with tarfile.open(ROOT / 'tests/fixtures/legacy-base.tar.gz') as bundle:
             bundle.extractall(self.project, filter='data')
 
-    def test_native_agents_are_mandatory_without_node_dependency(self):
+    def test_node_is_a_baseline_runtime(self):
+        from devcontainer_setup.render import validate
+        files = self.render()
+        catalog = json.loads((ROOT / '.devcontainer/devcontainer.json').read_text())
+        features = self.config(files)['features']
+        self.assertIn(NODE, features)
+        self.assertEqual(features[NODE]['version'], catalog['features'][NODE]['version'])
+        self.install(files)
+        self.assertEqual(validate(self.project), [])
+
+    def test_project_node_version_wins(self):
+        baseline = self.config(self.render())['features']
+        self.assertIn(NODE, baseline)
+        self.assertEqual(self.config(self.render(runtimes={'node': '22'}))['features'][NODE]['version'], '22')
+
+    def test_validate_requires_node_feature(self):
+        from devcontainer_setup.render import validate
+        files = self.render()
+        config = self.config(files)
+        config['features'].pop(NODE, None)
+        config['customizations']['devcontainerSetup']['managedConfig']['features'].pop(NODE, None)
+        files['.devcontainer/devcontainer.json'] = json.dumps(config).encode()
+        self.install(files)
+        self.assertIn('Missing selected feature: ' + NODE, validate(self.project))
+
+    def test_plaud_support_tracks_locked_node_range(self):
+        from devcontainer_setup import render
+        self.assertTrue(hasattr(render, 'plaud_supported'))
+        for version, expected in [('16', False), ('17.9', False), ('18', True),
+                                  ('19', False), ('20', True), ('22', True), ('24', True),
+                                  ('18.16.0', False), ('18.17.0', True),
+                                  ('20.4.0', False), ('20.5.0', True),
+                                  ('18.16', False), ('20.4', False), ('20.11', True),
+                                  ('22.3', True), ('lts', True)]:
+            with self.subTest(version=version):
+                self.assertEqual(render.plaud_supported(version), expected)
+
+    def test_native_agents_are_mandatory_and_record_no_node_dependency(self):
         files = self.render(agents=False)
         config = self.config(files)
         metadata = config['customizations']['devcontainerSetup']
         self.assertIs(metadata['selections']['agents'], True)
-        self.assertNotIn(NODE, config['features'])
+        self.assertIn(NODE, config['features'])
         self.assertNotIn('node', metadata['dependencies'])
         self.assertNotIn('agents', metadata['pinningLimitations'])
         self.assertFalse(any('codex:' in name or 'claude-code:' in name for name in config['features']))
@@ -57,7 +104,85 @@ class RenderTests(unittest.TestCase):
         self.assertIn('install-agents.sh --update', files['.devcontainer/Taskfile.yml'].decode())
         self.assertNotIn('PATH', config['containerEnv'])
         self.assertTrue(config['remoteEnv']['PATH'].startswith('/home/vscode/.local/bin:/home/vscode/.opencode/bin:'))
-        self.assertIn('export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"', post)
+        self.assertIn('sudo -n bash .devcontainer/scripts/system-path.sh "$PATH"', post)
+
+    def test_system_path_is_rendered_registered_and_ordered(self):
+        from devcontainer_setup.render import validate
+        files = self.render()
+        name = '.devcontainer/scripts/system-path.sh'
+        self.assertIn(name, files)
+        self.assertEqual(files[name], (ROOT / 'templates/scripts/system-path.sh').read_bytes())
+        post = files['.devcontainer/scripts/post-create-selected.sh'].decode()
+        self.assertLess(post.index('system-path.sh'), post.index('install-agents.sh'))
+        self.assertLess(post.index('install-agents.sh'), post.index('validate-selected.sh'))
+        self.assertIn('sudo -n bash .devcontainer/scripts/system-path.sh "$PATH" "$(command -v python3)"', post)
+        check = files['.devcontainer/scripts/validate-selected.sh'].decode()
+        self.assertNotIn('export PATH=', check)
+        self.assertIn('fresh_shell_lookup', check)
+        self.assertIn('sudo -n bash templates/scripts/system-path.sh "$PATH" "$(command -v python3)"',
+                      (ROOT / '.devcontainer/scripts/post-create.sh').read_text())
+        self.install(files)
+        self.assertEqual(validate(self.project), [])
+        config = self.config(files)
+        del config['customizations']['devcontainerSetup']['managedFiles'][name]
+        (self.project / '.devcontainer/devcontainer.json').write_text(json.dumps(config))
+        self.assertIn('Missing managed script registration: ' + name, validate(self.project))
+
+    def test_generated_tools_are_locked_registered_and_ordered(self):
+        from devcontainer_setup.render import validate
+        files = self.render()
+        assets = ['scripts/install-tools.sh', 'tools/ccswap-constraints.txt',
+                  'tools/plaud-cli/package.json', 'tools/plaud-cli/package-lock.json', 'tools/README.md']
+        for asset in assets:
+            self.assertIn('.devcontainer/' + asset, files)
+        post = files['.devcontainer/scripts/post-create-selected.sh'].decode()
+        self.assertLess(post.index('install-agents.sh'), post.index('install-tools.sh'))
+        self.assertLess(post.index('install-tools.sh'), post.index('validate-selected.sh'))
+        check = files['.devcontainer/scripts/validate-selected.sh'].decode()
+        self.assertIn('install-tools.sh --check', check)
+        commands = check.split('for tool in ', 1)[1].split(';', 1)[0].split()
+        fresh = check.split('for tool in ', 2)[2].split(';', 1)[0].split()
+        for tool in ('ccswap', 'plaud', 'node'):
+            self.assertIn(tool, commands)
+            self.assertIn(tool, fresh)
+        task = files['.devcontainer/Taskfile.yml'].decode()
+        self.assertLess(task.index('install-agents.sh --update'), task.index('install-tools.sh --update'))
+        self.assertNotIn('install-tools.sh', (ROOT / '.devcontainer/scripts/post-create.sh').read_text())
+        shared = (ROOT / '.devcontainer/scripts/install-agents.sh').read_text()
+        self.assertNotIn('ccswap', shared)
+        self.assertNotIn('plaud', shared)
+        self.install(files)
+        self.assertEqual(validate(self.project), [])
+        for asset in assets:
+            config = self.config(files)
+            name = '.devcontainer/' + asset
+            del config['customizations']['devcontainerSetup']['managedFiles'][name]
+            (self.project / '.devcontainer/devcontainer.json').write_text(json.dumps(config))
+            self.assertIn('Missing managed script registration: ' + name, validate(self.project))
+
+    def test_plaud_requirement_tracks_locked_node_range(self):
+        for version, expected in [('16', False), ('18', True), ('19', False), ('20', True),
+                                  ('22', True), ('24', True), ('18.16.0', False),
+                                  ('18.17.0', True), ('20.4.0', False), ('20.5.0', True),
+                                  ('20.11', True), ('lts', True)]:
+            with self.subTest(version=version):
+                check = self.render(runtimes={'node': version})['.devcontainer/scripts/validate-selected.sh'].decode()
+                commands = check.split('for tool in ', 1)[1].split(';', 1)[0].split()
+                fresh = check.split('for tool in ', 2)[2].split(';', 1)[0].split()
+                self.assertIn('ccswap', commands)
+                self.assertEqual('plaud' in commands, expected)
+                self.assertEqual('plaud' in fresh, expected)
+
+    def test_adopted_node_version_controls_plaud_requirement(self):
+        target = self.project / '.devcontainer/devcontainer.json'
+        target.parent.mkdir()
+        target.write_text(json.dumps({'features': {NODE: {'version': '16'}}}))
+        files = self.render(polyglot=True)
+        self.assertEqual(self.config(files)['features'][NODE]['version'], '16')
+        check = files['.devcontainer/scripts/validate-selected.sh'].decode()
+        self.assertIn('ccswap', check.split('for tool in ', 1)[1].split(';', 1)[0].split())
+        for loop in check.split('for tool in ')[1:]:
+            self.assertNotIn('plaud', loop.split(';', 1)[0].split())
 
     def test_old_managed_agents_migrate_while_custom_features_survive(self):
         from devcontainer_setup.render import validate
@@ -185,20 +310,29 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(files, self.render(package_managers={'node': 'pnpm'},
                                            package_manager_versions={'node': '9.15.4'}))
         helper = self.project / '.devcontainer/scripts/validate-selected.sh'
-        (self.project / '.devcontainer/scripts/install-agents.sh').write_text('exit 0\n')
+        # These probes isolate validation from both installer check phases.
+        for installer in ('install-agents.sh', 'install-tools.sh'):
+            (self.project / '.devcontainer/scripts' / installer).write_text('exit 0\n')
         content = helper.read_text()
+        self.assertIn('fresh_shell_lookup', content)
         commands = content.split('for tool in ', 1)[1].split(';', 1)[0].split()
         bins = self.project / 'bin'
         bins.mkdir()
         for command in commands:
+            if command == 'python3':
+                continue
             path = bins / command
             path.write_text('#!/bin/sh\nexit 0\n')
             path.chmod(0o755)
+        system = self.project / 'system/etc'
+        system.mkdir(parents=True)
+        (system / 'environment').write_text('PATH="' + str(bins) + os.pathsep + os.environ['PATH'] + '"\n')
         manager = bins / 'pnpm'
         for version, expected in [('9.15.4', 0), ('12.11.2', 1)]:
             manager.write_text('#!/bin/sh\necho ' + version + '\n')
             result = subprocess.run(['/bin/bash', str(helper)], cwd=self.project, capture_output=True, text=True,
-                                    env=dict(os.environ, HOME=str(self.project), PATH=str(bins) + os.pathsep + os.environ['PATH']))
+                                    env=dict(os.environ, HOME=str(self.project), PATH=str(bins) + os.pathsep + os.environ['PATH'],
+                                             DEVCONTAINER_SYSTEM_ROOT=str(system.parent)))
             self.assertEqual(result.returncode, expected, result.stderr)
             if expected:
                 self.assertIn('9.15.4', result.stderr)
@@ -216,13 +350,15 @@ class RenderTests(unittest.TestCase):
         self.assertIn(PYTHON, config['features'])
         self.assertIn('ghcr.io/va-h/devcontainers-features/uv:1', config['features'])
         self.assertIn('ghcr.io/devcontainers-extra/features/go-task:1', config['features'])
-        for runtime in ('node', 'ruby', 'rust', 'go'):
+        self.assertIn(NODE, config['features'])
+        for runtime in ('ruby', 'rust', 'go'):
             self.assertNotIn(f'ghcr.io/devcontainers/features/{runtime}:1', config['features'])
         self.assertFalse(list(self.project.iterdir()))
         joined = b'\n'.join(files.values())
         self.assertNotIn(b'emsilva/dotfiles', joined)
         self.assertNotIn(b'GOMODCACHE', joined)
-        self.assertNotIn(b'.npm', joined)
+        self.assertFalse(any('.npm' in str(mount) for mount in config.get('mounts', [])))
+        self.assertIn('.devcontainer/tools/plaud-cli/package-lock.json', files)
         self.assertNotIn('.devcontainer/Dockerfile', files)
         self.assertNotIn('Taskfile.yml', files)
 
@@ -235,7 +371,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(set(config['features']), set(lock['features']))
         self.assertTrue(all('@sha256:' not in key for key in config['features']))
         self.assertTrue(all('@sha256:' in value['resolved'] for value in lock['features'].values()))
-        self.assertNotIn(NODE, self.config(self.render(agents=True))['features'])
+        self.assertIn(NODE, self.config(self.render(agents=True))['features'])
 
     def test_repeat_is_identical_and_valid(self):
         from devcontainer_setup.render import validate
@@ -406,12 +542,12 @@ class RenderTests(unittest.TestCase):
         self.install(files)
         validator = self.project / '.devcontainer/scripts/validate-selected.sh'
         validator.write_text('exit 0\n')
-        (self.project / '.devcontainer/scripts/install-agents.sh').write_text('exit 0\n')
         apply = self.project / '.devcontainer/scripts/apply-dotfiles.sh'
         apply.write_text('printf "%s\\n" "$1" >> "$TEST_LOG"\n')
         literal = 'https://example.invalid/$(touch owned).git'
         (self.project / '.devcontainer/devcontainer.env').write_text('# Local runtime settings\nPERSONAL_PAT=private-fixture\nDOTFILES_REPO=' + literal + '\nSSH_AUTH_SOCK=/tmp/example\n')
-        base_env = dict(os.environ, TEST_LOG=str(self.project / 'apply.log'))
+        base_env = dict(os.environ, TEST_LOG=str(self.project / 'apply.log'),
+                        PATH=self.stub_post_create_installers())
         base_env.pop('DOTFILES_REPO', None)
         base_env.pop('CODESPACES', None)
         cases = [({}, literal), ({'DOTFILES_REPO': 'existing/local'}, 'existing/local'),
@@ -465,7 +601,7 @@ class RenderTests(unittest.TestCase):
         (self.project / '.devcontainer/scripts/validate-selected.sh').write_text('exit 0\n')
         (self.project / '.devcontainer/scripts/apply-dotfiles.sh').write_text('touch should-not-apply\n')
         (self.project / '.devcontainer/devcontainer.env').write_text('DOTFILES_REPO=one/repo\nOTHER=kept\nDOTFILES_REPO=two/repo\n')
-        env = dict(os.environ)
+        env = dict(os.environ, PATH=self.stub_post_create_installers())
         env.pop('CODESPACES', None)
         env.pop('DOTFILES_REPO', None)
         result = subprocess.run(['bash', '.devcontainer/scripts/post-create-selected.sh'],

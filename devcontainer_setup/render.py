@@ -10,7 +10,7 @@ import re
 FEATURE = 'ghcr.io/devcontainers/features/'
 BASE_FEATURES = [FEATURE + 'common-utils:2',
                  'ghcr.io/rocker-org/devcontainer-features/apt-packages:1',
-                 FEATURE + 'python:1', 'ghcr.io/va-h/devcontainers-features/uv:1',
+                 FEATURE + 'python:1', FEATURE + 'node:1', 'ghcr.io/va-h/devcontainers-features/uv:1',
                  'ghcr.io/devcontainers-extra/features/go-task:1', FEATURE + 'github-cli:1']
 TOOLS = {'azure': FEATURE + 'azure-cli:1', 'aws': FEATURE + 'aws-cli:1',
          'gcp': 'ghcr.io/dhoeric/features/google-cloud-cli:1',
@@ -20,6 +20,9 @@ RUNTIMES = {'python', 'node', 'ruby', 'go', 'rust'}
 CONFIG = '.devcontainer/devcontainer.json'
 LOCK = '.devcontainer/devcontainer-lock.json'
 NAMESPACE = 'devcontainerSetup'
+TOOL_ASSETS = ('ccswap-constraints.txt', 'plaud-cli/package.json', 'plaud-cli/package-lock.json', 'README.md')
+# Plaud package-lock.json engines.node: mute-stream@2.0.0 and undici@6.29.1.
+PLAUD_NODE_RANGE = '^18.17.0 || >=20.5.0'
 RETIRED_HELPERS = {'.devcontainer/scripts/project_sync/' + name + '.py'
                    for name in ('work', 'workflows', 'handoff', 'ownership', 'project_files')}
 PINNED_OPTIONS = {
@@ -34,6 +37,20 @@ PINNED_OPTIONS = {
     'ghcr.io/va-h/devcontainers-features/uv:1': {'version': '0.13.1'},
     'ghcr.io/devcontainers-extra/features/go-task:1': {'version': '3.54.0'},
 }
+
+
+def plaud_supported(node_version: str) -> bool:
+    """Release lines use their newest patch/minor; non-numeric aliases remain supported."""
+    if not re.fullmatch(r'\d+(?:\.\d+){0,2}', node_version):
+        return True
+    components = tuple(map(int, node_version.split('.')))
+    # Missing components select the newest version in that release line.
+    version = components + (float('inf'),) * (3 - len(components))
+    for clause in PLAUD_NODE_RANGE.split(' || '):
+        minimum = tuple(map(int, clause.lstrip('^>=').split('.')))
+        if version >= minimum and (not clause.startswith('^') or version[0] == minimum[0]):
+            return True
+    return False
 
 
 def _json(value):
@@ -334,23 +351,10 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
         effective_tools.add('db-clients')
     for tool in sorted(effective_tools):
         commands.extend(tool_commands[tool])
-    commands.extend(['claude', 'codex', 'opencode'])
+    commands.extend(['claude', 'codex', 'opencode', 'ccswap'])
     commands.extend(selected['package_managers'].values())
     if selected['dotfiles']:
         commands.extend(['chezmoi', 'load-dotfiles'])
-    replacements = {'__SOURCE_REF__': source_ref, '__TOOLS__': ' '.join(dict.fromkeys(commands)),
-                    '__DOTFILES__': (templates / 'dotfiles-hook.sh').read_text() if selected['dotfiles'] else '',
-                    '__MANAGER_VERSIONS__': '\n'.join(
-                        f'check_manager_version {selected["package_managers"][family]} {version}'
-                        for family, version in sorted(selected['package_manager_versions'].items()))}
-    helper_names = ['setup-wizard.sh', 'validate-selected.sh', 'post-create-selected.sh']
-    if selected['dotfiles']:
-        helper_names.append('apply-dotfiles.sh')
-    for name in helper_names:
-        content = (templates / 'scripts' / name).read_text()
-        for old, new in replacements.items():
-            content = content.replace(old, new)
-        files['.devcontainer/scripts/' + name] = content.encode()
     files['.devcontainer/scripts/install-agents.sh'] = (source / '.devcontainer/scripts/install-agents.sh').read_bytes()
     taskfile = (templates / 'Taskfile.yml').read_text()
     continuity_tasks = (templates / 'continuity-tasks.yml').read_text() if selected['continuity'] else ''
@@ -423,6 +427,28 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
     _validate_agent_environment(config)
     if ('image' in config) == ('build' in config):
         raise ValueError('Choose exactly one devcontainer image or build configuration')
+    # Adoption may retain a project's older Node version after the desired defaults merge.
+    fresh_commands = ['codex', 'claude', 'opencode', 'ccswap', 'node']
+    if plaud_supported(str(config['features'][FEATURE + 'node:1']['version'])):
+        commands.append('plaud')
+        fresh_commands.append('plaud')
+    replacements = {'__SOURCE_REF__': source_ref, '__TOOLS__': ' '.join(dict.fromkeys(commands)),
+                    '__FRESH_TOOLS__': ' '.join(fresh_commands),
+                    '__DOTFILES__': (templates / 'dotfiles-hook.sh').read_text() if selected['dotfiles'] else '',
+                    '__MANAGER_VERSIONS__': '\n'.join(
+                        f'check_manager_version {selected["package_managers"][family]} {version}'
+                        for family, version in sorted(selected['package_manager_versions'].items()))}
+    helper_names = ['setup-wizard.sh', 'validate-selected.sh', 'post-create-selected.sh',
+                    'system-path.sh', 'install-tools.sh']
+    if selected['dotfiles']:
+        helper_names.append('apply-dotfiles.sh')
+    for name in helper_names:
+        content = (templates / 'scripts' / name).read_text()
+        for old, new in replacements.items():
+            content = content.replace(old, new)
+        files['.devcontainer/scripts/' + name] = content.encode()
+    for name in TOOL_ASSETS:
+        files['.devcontainer/tools/' + name] = (templates / 'tools' / name).read_bytes()
     # Ordinary reruns retain exact locks; an explicit generator revision change
     # refreshes known catalog records while retaining user-only Features.
     existing_lock = _read(_safe_path(project, LOCK)).get('features', {}) if (project / LOCK).exists() else {}
@@ -518,7 +544,10 @@ def validate(project: Path) -> list[str]:
                 errors.append(f'Missing managed helper/file: {relative}')
             elif not _managed_matches(relative, target.read_bytes(), digest):
                 errors.append(f'Modified managed helper/file: {relative}')
-        for required_file in ['.devcontainer/scripts/install-agents.sh', '.devcontainer/scripts/validate-selected.sh', '.devcontainer/scripts/post-create-selected.sh', '.devcontainer/scripts/setup-wizard.sh']:
+        for required_file in ['.devcontainer/scripts/install-agents.sh', '.devcontainer/scripts/validate-selected.sh',
+                              '.devcontainer/scripts/post-create-selected.sh', '.devcontainer/scripts/setup-wizard.sh',
+                              '.devcontainer/scripts/system-path.sh', '.devcontainer/scripts/install-tools.sh',
+                              *('.devcontainer/tools/' + name for name in TOOL_ASSETS)]:
             if required_file not in marker.get('managedFiles', {}):
                 errors.append(f'Missing managed script registration: {required_file}')
         if selected['dotfiles'] and not (project / '.devcontainer/scripts/apply-dotfiles.sh').is_file():
