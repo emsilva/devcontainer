@@ -10,33 +10,49 @@ The owner approved this playback on 2026-11-01 ("thats it"): links always open o
 is at it, busy or away ("well, if I'm doing that its fine"); sign-ins finish by themselves; each link shows a
 notice naming the project; it works only while the project is connected; a busy Mac port is named with the
 way around it. The owner did not answer whether the link may be printed when no Mac is connected; call 1
-below takes that as yes.
+below takes that as yes. A builder check (a fresh reader, 2026-11-01) raised six questions and six
+contradictions with the cited code; each was checked against the source and is settled below (calls 1, 2,
+4, 6, 8, 10, 11 and "How it works").
 
 ## Calls made by the lead (each can be overruled)
 
-1. **When no Mac is listening, the link is printed in the terminal where the command ran.** Only the link the
-   tool asked to open, never a callback. The link carries a client id, a `state` value and a PKCE challenge,
-   all public by design; no password or token. Ruling 10 ("never printed") is read as covering sign-ins
-   themselves, not this link. Codex, Claude and gh already print theirs; this changes Plaud (which never
-   prints) and the OpenCode TUI. Accepted with it: the Mac's browser history keeps the callback URL, whose
-   one-time code is already spent and bound to PKCE.
-2. **No "allow this?" step.** Every `http`/`https` link opens. Each one posts a notice.
+1. **When no Mac is listening, the link is shown in the terminal where the command ran.** The helper then
+   exits 1, so each CLI's own fallback runs: Codex, Claude, OpenCode, gh and az already show their link.
+   The helper writes the link itself only for the rest (Plaud, whose opener ignores the exit code, and CLIs
+   not in the REPORT catalog), never into a full-screen agent's screen. Only the link the tool asked to
+   open, never a callback. The link carries a client id, a `state` value and a PKCE challenge, all public
+   by design; no password or token. Ruling 10 ("never printed") is read as covering sign-ins themselves,
+   not this link. Accepted with it: the Mac's browser history keeps the callback URL, whose one-time code
+   is already spent and bound to PKCE.
+2. **No "allow this?" step.** Every `http`/`https` link opens, to any host. Each one posts a notice.
 3. **Notices:** a macOS notice through `project_sync/notify.py` for every link, plus a Herdr toast
    (`herdr notification show <title> --body …`, present in the Mac's Herdr) when a Herdr server on the Mac
    answers. Ruling 16's Herdr half for the keeper's notices stays out of this batch.
 4. **The callback forward runs over the project SSH,** `ssh -F <state>/ssh-config -o ClearAllForwardings=no`,
    not `gh codespace ports forward`. On 2026-10-26 `gh codespace ssh` broke on mainstage while the project
-   SSH kept working, and Plaud signed in through exactly this forward (PLAN-agents-and-signin.md:140-145).
+   SSH kept working, and Plaud signed in through this kind of forward to `127.0.0.1:8199`
+   (PLAN-agents-and-signin.md:140-146). The Codespace end is `127.0.0.1:P`: every catalogued CLI listens
+   there (Plaud also on `::1`).
 5. **A loopback link with no sign-in in it** (a dev server's `--open`, say `http://localhost:5173/`) also
    opens, through a forward of the same port that lasts while the Codespace still listens on it. Without
    this, ruling 19's "every link" would open pages that cannot load.
-6. **`task work:signin`** handles waiting requests when the worker is not running, with the same code. It is
-   also the harness the first live tests use. It starts nothing on the Codespace (see dead ends).
+6. **`task work:signin`** finishes waiting sign-ins when the worker's link watcher is not live, with the same
+   code. It is also the harness the first live tests use. It starts nothing on the Codespace (see dead ends).
 7. **The Codespace half ships only in generated containers** (`templates/`), like ccswap and Plaud in the
    tools batch. This repo's own container is unchanged.
 8. **The `BROWSER` line joins the existing root step** (`templates/scripts/system-path.sh`), so setup keeps
-   one `sudo -n` step with the same idempotence and the same recovery message.
+   one `sudo -n` step with the same idempotence. This repo's own container runs the same script
+   (`.devcontainer/scripts/post-create.sh:149`) and never installs the helper, so the line is written only
+   when a third argument names the helper's path. Generated post-create passes it, and its recovery message
+   (`templates/scripts/post-create-selected.sh:6`) gains it; this repo's call keeps two arguments.
 9. **The `xdg-open` stand-in ships only if live test 3 shows OpenCode needs it.**
+10. **Lifetimes.** A sign-in request (one with a loopback `redirect_uri`) waits until its deadline (120 s for
+    Plaud, 10 minutes otherwise) or until its requester exits. Any other link opens only if the Mac takes it
+    within 30 seconds; after that it is dropped, so a stale link never opens at the next connect.
+    `task work:signin` handles sign-ins only.
+11. **If live test 1 shows an agent's tool shell does not see `BROWSER`, the lead stops and brings the result
+    to the owner.** The remaining places to set it are the agents' own settings files, which the owner's
+    dotfiles may manage, so the generator does not write them unasked.
 
 ## Intent and why
 
@@ -76,22 +92,25 @@ Mac, for the owner's commands and for agents alike.
 
 **Codespace side.**
 - `~/.local/bin/open-on-mac` (installed by `templates/scripts/install-tools.sh`). `$BROWSER` points at it.
-  Contract, from REPORT Q3: one absolute path, no arguments; takes the URL as `$1`; exits 0 within about
-  100 ms; writes nothing to its own stdout or stderr (npm `open` discards them, Python's `webbrowser`
-  suppresses them); accepts only `http`/`https` (anything else: exit 1 so the opener tries its next method).
+  Contract, from REPORT Q3: one absolute path, no arguments; takes the URL as `$1`; exits within about
+  100 ms (Python's `webbrowser` waits for it, `src/cpython/webbrowser.py:182-191`); writes nothing to its
+  own stdout or stderr; accepts only `http`/`https` (anything else: exit 1 so the opener tries its next
+  method). Exit 0 when a Mac is listening, 1 when not (call 1).
+- **The requester is found by walking up the process tree,** not from the parent: npm `open` starts its
+  bundled `xdg-open` detached with stdio ignored (`src/npm-open/x/package/index.js:227-231`), and that
+  script runs the helper as its own child, so the parent is `sh` with `/dev/null` for fds 0-2. The
+  requester is the first ancestor with a terminal on fd 0, 1 or 2; its program is named from its command
+  line (`node …/@plaud-ai/cli/…` is `plaud`, `python3 … az` is `az`).
 - It writes one request, mode 600, to `~/.local/state/devcontainer-links/requests/<id>.json`: the URL, the
-  time, the requesting process (pid, start time, program name read from `/proc`), and the terminal it
-  inherited if any. Requests older than their deadline (below) are discarded by whoever reads them.
-- When `~/.local/state/devcontainer-links/mac-listening` is older than 15 seconds, it also prints the link
-  where the command ran. How it reaches that terminal is live test 4's result: the requester's terminal from
-  `/proc/<ppid>/fd/{0,1,2}`, else nothing (the CLI's own print, where it has one).
+  time, the requester (pid, start time, program) and its terminal. Requests past their lifetime (call 10)
+  are discarded by whoever reads them.
+- When `~/.local/state/devcontainer-links/mac-listening` is older than 15 seconds, no Mac is listening: the
+  helper writes the link to the requester's terminal under call 1's rule and exits 1.
 - `system-path.sh` writes `BROWSER=/home/vscode/.local/bin/open-on-mac` to `/etc/environment` (read by PAM
   for every SSH session, so the Herdr server, its panes and agent children inherit it) and to the zshenv
   block as `: ${BROWSER:=…}; export BROWSER`, set only when unset, so VS Code terminals keep their own.
-- If live test 1 shows an agent's tool shell does not see `BROWSER` (Claude's binary removes it in one
-  background mode, REPORT spike 1), the value is passed where that agent is launched: the Herdr resume hooks
-  that `project_sync/agent_hooks.py` installs on the Codespace, or the agent's own settings file. That is the
-  one result that moves the design from a system file to per-agent wiring.
+- Live test 1 checks that agent tool shells see it (Claude's binary removes it in one background mode,
+  REPORT spike 1). If one does not, call 11 applies.
 - `validate-selected.sh` checks that `open-on-mac` is installed and executable and that a fresh
   non-interactive SSH session sees `BROWSER` pointing at it.
 
@@ -104,11 +123,13 @@ Mac, for the owner's commands and for agents alike.
   watcher claims new requests (rename, so each is handled once), streams them as JSON lines, and touches
   `mac-listening` every 5 seconds. When the stream ends while the connection lives, the thread restarts it
   with backoff (2 s doubling to 60 s).
-- Each request is untrusted input from any Codespace process. Parse strictly: `https` to any host, `http`
-  only to a loopback host (`localhost`, `127.0.0.1`, `[::1]`); at most 8 KB; port 1024–65535. The
-  sign-in port is the port in a loopback `redirect_uri` query value, if there is one; else, for a loopback
-  link, the link's own port. Reject anything else with a notice. Logs and notices carry the host, the port
-  and the requesting program, never the URL.
+- Each request is untrusted input from any Codespace process. Parse strictly: `http` or `https`, at most
+  8 KB, a port (when present) in 1024–65535. Loopback hosts are `localhost`, `127.0.0.1` and `[::1]`. The
+  port to forward is the port in a loopback `redirect_uri` query value, if there is one; else, for a link
+  to a loopback host, the link's own port; else none. Reject anything else with a notice. Logs and notices
+  carry the host, the port and the requesting program, never the URL.
+- A message for the Codespace terminal (a busy port) goes back through the watcher to the terminal the
+  request recorded, under call 1's rule; the macOS notice always carries it.
 - No port needed: open with `/usr/bin/open <url>` (argument list, no shell) and notify.
 - A port P: preflight first. The Mac port must equal the Codespace port (Codex's are on an identity
   provider's allow-list, `server.rs:79-80`), so the keep-alive's `+10000` offset and `keepalive.free_ports`
@@ -117,13 +138,14 @@ Mac, for the owner's commands and for agents alike.
   `/proc/net/tcp` and `/proc/net/tcp6`. Never send HTTP to a callback server: Codex and OpenCode's legacy
   sign-in treat `/cancel` as a cancel.
 - Then start `ssh -F <state>/ssh-config -o ClearAllForwardings=no -o ExitOnForwardFailure=yes
-  -o ServerAliveInterval=15 -N -L 127.0.0.1:P:localhost:P project-sync` with `start_new_session`, prove it
+  -o ServerAliveInterval=15 -N -L 127.0.0.1:P:127.0.0.1:P project-sync` with `start_new_session`, prove it
   with `lsof -a -p <ssh pid> -nP -iTCP:P -sTCP:LISTEN`, then open the URL and notify.
-- The forward ends when the Codespace stops listening on P (checked every 2 s), at its deadline (120 s when
-  the program is `plaud`, 10 minutes for other sign-ins, none for a plain loopback link), on INT, TERM or
-  HUP, or when the worker stops. End it by process group. Record pid and process identity in the project
-  state dir, so a run after a crash ends a leftover by fact, as `keepalive.end_left_behind` does; never by
-  pid alone.
+- The forward ends when the Codespace stops listening on P (checked every 2 s), at its deadline (call 10;
+  none for a plain loopback link, which only the worker serves), on INT, TERM or HUP, or when its owner
+  stops. End it by process group. Record pid, process identity and the owner (worker or `work:signin`,
+  with its own process identity) in the project state dir. A later run ends a leftover only when its owner
+  is gone, proven by fact as `keepalive.end_left_behind` does, never by pid alone; a live owner's forwards
+  are left alone.
 - One forward per port. A second request for a port already forwarded opens the URL on the existing forward
   if it targets the same Codespace port; two different ports run side by side.
 
@@ -138,9 +160,11 @@ Mac, for the owner's commands and for agents alike.
 | az | random | `az login --use-device-code` |
 | anything else | P | Name the holder; nothing else |
 
-**`task work:signin`.** Opens its own `CodespaceConnection`, handles every unexpired request with the code
-above, keeps forwards until they end, and exits when none is left. Refuses to run while the worker runs
-(the worker already handles them).
+**`task work:signin`.** Opens its own `CodespaceConnection`, handles every unexpired sign-in request with
+the code above, keeps their forwards until they end, and exits when none is left. It refuses while the
+worker's link watcher is live (its heartbeat is fresh), not merely while the worker process is alive: the
+worker can sit in backoff or the Deleted retry outside its connection, with no watcher running
+(`scratch.py:744-779`). Requests are claimed by rename on the Codespace, so the two never handle the same one.
 
 ## Calls left to the builder
 
@@ -162,7 +186,8 @@ On an innovate test branch and an unpaired test Codespace billed to kyndryl-agen
    methods), `codex login`, Claude `/login`, `gh auth login` and `az login` (with and without `CODESPACES`)
    opens. Decides the catalog's open cells, and whether az's switch to a browser sign-in works.
 3. Does OpenCode's bundled `open` reach `$BROWSER`, a PATH `xdg-open` stand-in, or neither? Decides call 9.
-4. Can the helper, started detached by npm `open`, write to the requester's terminal? Decides call 1's path.
+4. Does walking up from the helper find the requester's terminal and program for Plaud (started detached by
+   npm `open`), az (Python `webbrowser`) and an agent's `gh pr view --web`? Decides call 1's path.
 5. Busy port: a dummy listener on Mac 8199, then `plaud login`; on 1455, then `codex login`.
 6. Disconnect mid-sign-in: no forward left (`pgrep -fl 'ssh -F .* -L'` empty), a clean rerun.
 7. Plaud and OpenCode ChatGPT at the same time.
