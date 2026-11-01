@@ -12,7 +12,8 @@ notice naming the project; it works only while the project is connected; a busy 
 way around it. The owner did not answer whether the link may be printed when no Mac is connected; call 1
 below takes that as yes. A builder check (a fresh reader, 2026-11-01) raised six questions and six
 contradictions with the cited code; each was checked against the source and is settled below (calls 1, 2,
-4, 6, 8, 10, 11 and "How it works").
+4, 6, 8, 10, 11 and "How it works"). The owner approved the design on 2026-11-01 (ruling 20: "Only for real
+decisions"; the link helper design counts as approved).
 
 ## Calls made by the lead (each can be overruled)
 
@@ -80,8 +81,8 @@ Mac, for the owner's commands and for agents alike.
 
 ## Non-goals
 
-- Copying sign-ins from the Mac (step 4, #83). With this helper a fresh sign-in on a new Codespace becomes a
-  click; whether ruling 10's automatic copy is still wanted is a question for step 4's design.
+- Signing tools in after a Codespace is created (step 4). The owner ruled on 2026-11-01 (ruling 21,
+  "Everything fresh") that nothing is copied: step 4 opens each tool's sign-in through this helper.
 - The `task work` menu (#87, step 5).
 - VS Code terminals and the VS Code browser tab: VS Code sets its own `BROWSER` and keeps its own flow.
 - Upgrading any project. Innovate runs generator `9ad61ea`; mainstage and strata-sap are older and their
