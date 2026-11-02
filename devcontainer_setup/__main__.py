@@ -22,9 +22,9 @@ from .discovery import scan
 from .git_ops import (GitPlan, ReviewChanged, default_branch, default_contains, fast_forward_checkout, git,
                       is_ancestor, merged_setup_branches, proposed_branch, remove_setup_worktree, remove_worktree,
                       setup_worktree)
-from .preferences import load_open_after_create, load_preferences, save_preferences
+from .preferences import load_open_after_create, load_preferences, save_open_after_create, save_preferences
 from .releases import fetch_release
-from .render import render, validate
+from .render import _scan_decisions, render, validate
 from .ui import Cancelled, Gum, cache_home
 
 SOURCE = Path(__file__).resolve().parents[1]
@@ -56,8 +56,12 @@ def _metadata(project: Path) -> dict:
 
 def defaults(found: dict, preferences: dict, metadata: dict) -> dict:
     previous = metadata.get('selections')
-    if previous:
-        return dict(json.loads(json.dumps(previous)), agents=True,
+    if 'selections' in metadata and not isinstance(previous, dict):
+        raise ValueError('Saved selections must be a JSON object')
+    if isinstance(previous, dict):
+        baseline = {'runtimes': {'python': '3.13'}, 'tools': [], 'ports': [], 'ssh': False,
+                    'dotfiles': True, 'package_managers': {}, 'package_manager_versions': {}, 'polyglot': False}
+        return dict(baseline | json.loads(json.dumps(previous)), agents=True,
                     continuity=previous.get('continuity', True))
     managers = {family: entry['selected'] for family, entry in found['package_managers'].items()
                 if entry.get('selected')}
@@ -440,11 +444,12 @@ def _close_setup_worktree(project: Path, root: Path, worktree: Path, branch: str
         print(f'Setup: {error}', file=sys.stderr)
 
 
-def _preferences_after_commit(project: Path, preferences: dict) -> None:
+def _preferences_after_commit(project: Path, preferences: dict, chosen: dict | None = None) -> None:
     try:
         saved = save_preferences(preferences)
         print(f'Preferences saved: {saved}', flush=True)
-        if preferences['apply_dotfiles']:
+        apply_dotfiles = chosen['dotfiles'] if chosen is not None else preferences['apply_dotfiles']
+        if apply_dotfiles:
             path = project / '.devcontainer/devcontainer.env'
             if not git(project, 'check-ignore', '.devcontainer/devcontainer.env', check=False):
                 # Personal settings may hold tokens: only where Git already ignores them.
@@ -484,6 +489,113 @@ def upgrade_handoff(project: Path, current_ref: str, resume: str | None) -> int 
     return result.returncode
 
 
+def _normalize_saved(found: dict, chosen: dict) -> dict:
+    chosen = json.loads(json.dumps(chosen))
+    runtimes = chosen['runtimes']
+    chosen['package_managers'] = {family: manager for family, manager in chosen.get('package_managers', {}).items()
+                                  if family in runtimes}
+    chosen['package_manager_versions'] = {family: version for family, version in chosen.get('package_manager_versions', {}).items()
+                                         if family in chosen['package_managers']}
+    for family, manager in chosen['package_managers'].items():
+        entry = found['package_managers'].get(family, {})
+        version = entry.get('versions', {}).get(manager, {}).get('version')
+        if version:
+            chosen['package_manager_versions'][family] = version
+    return chosen
+
+
+def _finding_key(finding: dict) -> tuple:
+    return finding['kind'], json.dumps(finding['value'], sort_keys=True)
+
+
+def _new_findings(found: dict, chosen: dict, decisions: list) -> list[dict]:
+    """Identify decisions by their meaning, independent of evidence paths/order."""
+    findings = []
+    def add(kind, value): findings.append({'kind': kind, 'value': value})
+    def declarations(conflicts): return sorted({line.split(': ', 1)[-1] for line in conflicts})
+    for name, entry in found['runtimes'].items():
+        if entry['selected'] and name not in chosen['runtimes']:
+            add('runtime', name)
+        elif name in chosen['runtimes']:
+            conflicts = declarations(entry['conflicts'])
+            if conflicts:
+                add('runtime-conflict', {'runtime': name, 'declarations': conflicts})
+    for name, entry in found['tools'].items():
+        if entry['selected'] and name not in chosen['tools']:
+            add('tool', name)
+    for port in found['ports']:
+        if port not in chosen['ports']:
+            add('port', port)
+    for family, entry in found['package_managers'].items():
+        if family not in chosen['runtimes']:
+            continue
+        manager = chosen.get('package_managers', {}).get(family)
+        if entry['conflicts'] or (entry.get('selected') and entry['selected'] != manager):
+            add('manager', {'family': family, 'choices': sorted(entry.get('versions', {})) or [entry['selected']]})
+        version = entry.get('versions', {}).get(manager, {})
+        if version.get('conflicts'):
+            add('manager-version', {'family': family, 'manager': manager,
+                                    'declarations': declarations(version['conflicts'])})
+    recorded = {_finding_key(record) for record in decisions}
+    return sorted((finding for finding in findings if _finding_key(finding) not in recorded), key=_finding_key)
+
+
+def _answer_findings(ui, found, chosen, decisions):
+    # New runtimes may reveal a manager question; resolve each distinct finding once.
+    while pending := _new_findings(found, chosen, decisions):
+        finding = pending[0]
+        kind, value = finding['kind'], finding['value']
+        if kind == 'runtime':
+            version = found['runtimes'][value]['version'] or RUNTIME_DEFAULTS[value]
+            answer = ui.confirm(f'Add {value} runtime ({version})?', True)
+            if answer:
+                chosen['runtimes'][value] = version
+        elif kind == 'tool':
+            answer = ui.confirm(f'Add {TOOL_LABELS.get(value, value)}?', True)
+            if answer:
+                chosen['tools'].append(value)
+        elif kind == 'port':
+            answer = ui.confirm(f'Forward port {value}?', True)
+            if answer:
+                chosen['ports'].append(value)
+        elif kind == 'runtime-conflict':
+            print('\n'.join(value['declarations']), flush=True)
+            name = value['runtime']
+            answer = ui.input(f'{name} version (resolve declarations above)', chosen['runtimes'][name])
+            chosen['runtimes'][name] = answer
+        elif kind == 'manager':
+            family = value['family']
+            answer = ui.choose(f'{family} package manager', ['Keep saved choice', *value['choices']])
+            if answer == 'Keep saved choice':
+                answer = False
+            else:
+                chosen['package_managers'][family] = answer
+                chosen['package_manager_versions'].pop(family, None)
+        else:
+            print('\n'.join(value['declarations']), flush=True)
+            family, manager = value['family'], value['manager']
+            answer = ui.input(f'{manager} version (resolve declarations above; exact x.y.z)',
+                              chosen['package_manager_versions'].get(family, ''))
+            chosen['package_manager_versions'][family] = answer
+        decisions.append(dict(finding, answer=answer))
+        chosen = _normalize_saved(found, chosen)
+    return chosen
+
+
+def _dotfiles_answer(ui, preferences):
+    while True:
+        try:
+            repo = dotfiles_repository(ui.input('Dotfiles repository', preferences['dotfiles_repo']))
+            if repo != preferences['dotfiles_repo']:
+                print('Checking dotfiles repository access...', flush=True)
+                if not repository_access(repo) and not ui.confirm('Could not verify access. Continue with this repository?', False):
+                    continue
+            preferences['dotfiles_repo'] = repo
+            return
+        except ValueError as error:
+            print(error, file=sys.stderr)
+
+
 def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
     print('\nRecommendations (Python, Node and uv are always included):', flush=True)
     for name, entry in found['runtimes'].items():
@@ -514,10 +626,7 @@ def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
                       [TOOL_LABELS[name] for name in chosen['tools'] if name in TOOL_LABELS])]
     chosen['continuity'] = ui.confirm('Sync scratch files and project notes with your Mac?',
                                       chosen.get('continuity', True))
-    chosen['package_managers'] = {family: manager for family, manager in chosen.get('package_managers', {}).items()
-                                  if family in runtimes}
-    chosen['package_manager_versions'] = {family: version for family, version in chosen.get('package_manager_versions', {}).items()
-                                           if family in chosen['package_managers']}
+    chosen = _normalize_saved(found, chosen)
     for family, entry in found['package_managers'].items():
         if family not in runtimes:
             continue
@@ -537,19 +646,9 @@ def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
             chosen['package_manager_versions'][family] = version_entry['version']
         elif entry['conflicts']:
             chosen['package_manager_versions'].pop(family, None)
-    chosen['dotfiles'] = ui.confirm('Apply dotfiles inside the container?', preferences['apply_dotfiles'])
+    chosen['dotfiles'] = ui.confirm('Apply dotfiles inside the container?', chosen['dotfiles'])
     if chosen['dotfiles']:
-        while True:
-            try:
-                repo = dotfiles_repository(ui.input('Dotfiles repository', preferences['dotfiles_repo']))
-                if repo != preferences['dotfiles_repo']:
-                    print('Checking dotfiles repository access...', flush=True)
-                    if not repository_access(repo) and not ui.confirm('Could not verify access. Continue with this repository?', False):
-                        continue
-                preferences['dotfiles_repo'] = repo
-                break
-            except ValueError as error:
-                print(error, file=sys.stderr)
+        _dotfiles_answer(ui, preferences)
     chosen['agents'] = True
     preferences['apply_dotfiles'], preferences['agentic_tools'] = chosen['dotfiles'], chosen['agents']
     if ui.confirm('Advanced environment options?', False):
@@ -620,6 +719,100 @@ def _launch_unavailable(ui: Gum, error: ValueError) -> dict:
     raise Cancelled()
 
 
+def _state_home() -> Path:
+    configured = os.environ.get('XDG_STATE_HOME', '')
+    return Path(configured) if configured and Path(configured).is_absolute() else Path.home() / '.local/state'
+
+
+def _launch_history(project: Path, branch: str) -> dict:
+    repo = _repository(project)
+    path = receipt_path(_state_home(), repo, branch)
+    try:
+        record = json.loads(path.read_text())
+    except FileNotFoundError:
+        return {}
+    except (ValueError, OSError) as error:
+        return {'warning': f'Cannot read the last launch receipt: {error}. Choose launch resources again.'}
+    if (not isinstance(record, dict) or record.get('repository') != repo or record.get('branch') != branch
+            or not isinstance(record.get('commit'), str) or not re.fullmatch(r'[0-9a-f]{40}', record['commit'])
+            or record.get('validated_commit') != record['commit'] or record.get('rebuild_pending') is not False):
+        return {}
+    if not isinstance(record.get('machine'), str) or not record['machine']:
+        record['warning'] = 'The recorded machine cannot be read. Choose a machine.'
+    return record
+
+
+def _resolve_launch(api: Codespaces, project: Path, branch: str, paired: str | None) -> dict:
+    """Resolve rerun defaults without UI, allocation, or trusting a paired receipt."""
+    repo, warning = _repository(project), None
+    if paired:
+        try:
+            data = api.get(paired)
+            if (data.get('repository', {}).get('full_name', '').lower() == repo.lower()
+                    and data.get('git_status', {}).get('ref') == branch):
+                try:
+                    return _reuse_options(api, paired, branch, 'rebuild', data)
+                except ValueError as error:
+                    return {'action': 'rebuild', 'name': paired, 'machine': None,
+                            'idle_timeout': (f'{data["idle_timeout_minutes"]}m'
+                                             if data.get('idle_timeout_minutes') is not None else None),
+                            'warning': str(error)}
+            warning = f'Paired Codespace {paired} is unavailable for rebuild on {branch}; it is on {data.get("git_status", {}).get("ref")}.'
+        except ValueError as error:
+            warning = f'Paired Codespace {paired} is unavailable: {error}'
+    for space in api.existing(repo):
+        if space['name'] != paired and space.get('git_status', {}).get('ref') == branch:
+            options = _reuse_options(api, space['name'], branch, 'reuse')
+            if warning:
+                options['warning'] = warning
+            return options
+    options = _no_codespace()
+    if warning:
+        options['warning'] = warning
+    return options
+
+
+def _ask_launch_resources(ui, api, project, options):
+    if warning := options.get('warning'):
+        print(f'Launch: {warning}', flush=True)
+    if options['action'] != 'none' and not options.get('machine'):
+        machines = api.machines(_repository(project))
+        labels = {f'{m["cpus"]} cores / {m["memory_in_bytes"] // (1024**3)} GB RAM / '
+                  f'{m["storage_in_bytes"] // (1024**3)} GB disk ({m["name"]})': m['name'] for m in machines}
+        if not labels:
+            raise ValueError('No available Codespaces machines for this repository/account.')
+        options['machine'] = labels[ui.choose('Codespaces machine', list(labels))]
+    if options['action'] != 'none' and not options.get('idle_timeout'):
+        options['idle_timeout'] = ui.choose('Stop when idle for', ['15m', '30m', '1h', '2h'])
+    return options
+
+
+class _LaunchEditor:
+    """Give the existing Codespace menu the last successful create's defaults."""
+    def __init__(self, ui, project, branch):
+        self.ui, self.project, self.branch = ui, project, branch
+        self.history = None
+
+    def __getattr__(self, name):
+        return getattr(self.ui, name)
+
+    def choose(self, title, options, selected=None):
+        if title == 'Codespaces machine':
+            self.history = _launch_history(self.project, self.branch)
+            if warning := self.history.get('warning'):
+                print(f'Launch: {warning}', flush=True)
+                selected = None
+            if self.history.get('machine'):
+                selected = next((label for label in options if label.endswith(f'({self.history["machine"]})')), None)
+                if selected is None:
+                    print(f'Launch: recorded machine {self.history["machine"]} is no longer offered. Choose a machine.', flush=True)
+        elif title == 'Stop when idle for' and self.history and self.history.get('idle_timeout_minutes') is not None:
+            selected = f'{self.history["idle_timeout_minutes"]}m'
+            if selected not in options:
+                options = [*options, selected]
+        return self.ui.choose(title, options, selected)
+
+
 def _codespace_choice(ui: Gum, api: Codespaces, project: Path, branch: str, *, published: bool) -> dict:
     """Show every repository Codespace, reserving create for an unpaired project."""
     if not published:
@@ -688,7 +881,7 @@ def _codespace_choice(ui: Gum, api: Codespaces, project: Path, branch: str, *, p
 def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume: str | None,
                     *, published: bool = True) -> dict:
     if not resume or not published:
-        return _codespace_choice(ui, api, project, branch, published=published)
+        return _codespace_choice(_LaunchEditor(ui, project, branch), api, project, branch, published=published)
     # --resume is an explicit reuse, never a forced rebuild or an invitation to create another.
     choice = ui.choose('Codespace', ['none', f'reuse {resume}'], f'reuse {resume}')
     if choice == 'none':
@@ -812,7 +1005,8 @@ def _launch_on_default(api: Codespaces, project: Path, repo: str, default: str, 
         return None, config
     state_home = os.environ.get('XDG_STATE_HOME', '')
     state = Path(state_home) if state_home and Path(state_home).is_absolute() else Path.home() / '.local/state'
-    dotfiles = preferences['dotfiles_repo'] if preferences['apply_dotfiles'] else None
+    selected = config.get('customizations', {}).get('devcontainerSetup', {}).get('selections', {})
+    dotfiles = preferences['dotfiles_repo'] if selected.get('dotfiles', preferences['apply_dotfiles']) else None
 
     def _record_created(name, before):
         # Even when setup does not pair the new Codespace. A lookup or write error is logged, never raised.
@@ -823,7 +1017,7 @@ def _launch_on_default(api: Codespaces, project: Path, repo: str, default: str, 
         except (OSError, ValueError):
             _LOG.info('Start evidence was not written')
 
-    options = {key: value for key, value in launch.items() if key not in ('action', 'name', 'repo', 'client')}
+    options = {key: value for key, value in launch.items() if key not in ('action', 'name', 'repo', 'client', 'warning')}
     if 'action' in launch:
         options.update(resume=launch['name'], force_rebuild=launch['action'] == 'rebuild')
     name = api.launch(repo, default, sha, dotfiles_repo=dotfiles, receipt=receipt_path(state, repo, default),
@@ -898,10 +1092,32 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
             _check_revision(metadata, ref, upgrade, default)
         chosen = defaults(found, preferences, metadata)
         saved_ssh = bool(chosen.get('ssh'))
+        rerun = isinstance(metadata.get('selections'), dict)
+        decisions = _scan_decisions(metadata.get('scanDecisions', []))
+        saved_decision_keys = {_finding_key(record) for record in decisions}
+        editing, change_answers = not rerun, False
+        editor_preference = None
+        if rerun:
+            chosen = _normalize_saved(found, chosen)
+            chosen = _answer_findings(ui, found, chosen, decisions)
+            if chosen['dotfiles'] and not preferences['dotfiles_repo']:
+                _dotfiles_answer(ui, preferences)
         while True:
-            chosen = _select(ui, found, chosen, preferences)
+            if editing:
+                local_preferences = dict(preferences) if rerun else preferences
+                chosen = _select(ui, found, chosen, local_preferences)
+                preferences['dotfiles_repo'] = local_preferences['dotfiles_repo']
+                # The full editor answers every observed finding, including declines.
+                for finding in _new_findings(found, chosen, []):
+                    kind, value = finding['kind'], finding['value']
+                    answer = (chosen['runtimes'][value['runtime']] if kind == 'runtime-conflict' else
+                              chosen['package_manager_versions'].get(value['family'], '') if kind == 'manager-version' else
+                              chosen['package_managers'].get(value['family'], False) if kind == 'manager' else False)
+                    decisions = [record for record in decisions if _finding_key(record) != _finding_key(finding)]
+                    decisions.append(dict(finding, answer=answer))
             branch = git(source, 'branch', '--show-current') if default else proposed_branch(project)
             chosen['ssh'] = bool(saved_ssh or chosen.get('continuity'))
+            chosen['scanDecisions'] = _scan_decisions(decisions)
 
             def candidate():
                 files = render(source, SOURCE, chosen, ref)
@@ -914,16 +1130,30 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
                 return files, plan
 
             files, plan = candidate()
-            publish = _publish_choice(ui, bool(default), bool(plan.changed), default or 'main')
-            launch = _launch_options(ui, api, project, default or branch, resume,
-                                     published=bool(default) and (publish != 'local' or
-                                                                 (not plan.changed and chosen['ssh'])))
+            if editing:
+                publish = _publish_choice(ui, bool(default), bool(plan.changed), default or 'main')
+                launch = _launch_options(ui, api, project, default or branch, resume,
+                                         published=bool(default) and (publish != 'local' or
+                                                                     (not plan.changed and chosen['ssh'])))
+                if change_answers:
+                    editor_preference = ui.choose('Editor after create', ['none', 'browser', 'vscode'],
+                                                   editor_preference or load_open_after_create())
+            else:
+                publish = ('nothing' if not plan.changed else 'merge') if default else 'local'
+                launch = _no_codespace()
+                if default:
+                    try:
+                        launch = (_reuse_options(api, resume, default, 'reuse') if resume else
+                                  _resolve_launch(api, project, default, _paired_codespace(project)))
+                        launch = _ask_launch_resources(ui, api, project, launch)
+                    except ValueError as error:
+                        launch = _launch_unavailable(ui, error)
             if launch['action'] != 'none' and not chosen['ssh']:
                 chosen['ssh'] = True
                 files, plan = candidate()
                 if publish == 'nothing' and plan.changed:
                     # Enabling SSH is itself a setup change that must be published before launch.
-                    publish = _publish_choice(ui, True, True, default)
+                    publish = _publish_choice(ui, True, True, default) if editing else 'merge'
                     if publish == 'local':
                         print('Codespace: none; the SSH change must reach the default branch first.', flush=True)
                         launch = _no_codespace()
@@ -942,11 +1172,14 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
             publishing = (f'merge into {default}' if publish == 'merge' else 'local commit only' if publish == 'local'
                           else f'nothing to publish (already on {default})')
             print(f'Publish: {publishing}', flush=True)
+            if (default and publish == 'local' and plan.changed
+                    and any(_finding_key(record) not in saved_decision_keys for record in decisions)):
+                print('Scan decisions are local only; they will be asked again until published on the default branch.', flush=True)
             target = f' {launch["name"]}' if launch['name'] else ''
             print(f'Codespace: {launch["action"]}{target}; SSH: {"enabled" if chosen["ssh"] else "disabled"}', flush=True)
             if launch['action'] != 'none':
                 print(f'Launch: {launch["machine"]}, idle {launch["idle_timeout"]}; '
-                      f'editor after create: {load_open_after_create()}', flush=True)
+                      f'editor after create: {editor_preference or load_open_after_create()}', flush=True)
             while True:
                 action = ui.choose('Review setup', ['View diff', 'Change answers', 'Continue', 'Cancel'], 'Continue')
                 if action == 'View diff':
@@ -954,6 +1187,7 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
                 else:
                     break
             if action == 'Change answers':
+                editing, change_answers = True, True
                 continue
             if action == 'Cancel':
                 raise Cancelled()
@@ -973,7 +1207,9 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
                     if not ui.confirm('Commit the hook-updated setup files shown above?', False):
                         raise Cancelled()
             print(f'Setup commit: {sha}', flush=True)
-            _preferences_after_commit(project, preferences)
+            _preferences_after_commit(project, preferences, chosen)
+            if editor_preference is not None:
+                save_open_after_create(editor_preference)
             if publish == 'merge' and plan.changed:
                 # Never a second setup branch or PR while one is open.
                 if open_prs := api.setup_prs(github, default):
