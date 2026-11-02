@@ -546,6 +546,109 @@ class OwnerPowerTests(unittest.TestCase):
 
 
 class ProjectSyncCLITests(unittest.TestCase):
+    def test_work_signin_all_dispatches_to_signins_run(self):
+        from unittest import mock
+        from devcontainer_setup.project_sync import __main__ as cli, signins
+        from devcontainer_setup.project_sync.state import atomic_write
+        atomic_write(self.state / 'scratch.json', json.dumps({'codespace': 'paired'}).encode())
+        project = mock.Mock(root=self.root)
+        with mock.patch.object(cli, 'discover_project', return_value=project), \
+                mock.patch.object(cli, 'state_dir', return_value=self.state), \
+                mock.patch.object(signins, 'run', return_value=0) as signin, \
+                mock.patch.object(cli.sys.stdin, 'isatty', return_value=True), \
+                mock.patch.object(cli.sys.stdout, 'isatty', return_value=True):
+            self.assertEqual(cli.main(['--project', str(self.root), 'work', '--signin-all']), 0)
+        signin.assert_called_once_with(self.root, self.state, 'paired')
+
+    def test_signin_all_without_binding_prints_connect_command(self):
+        from unittest import mock
+        from devcontainer_setup.project_sync import __main__ as cli, signins
+        with mock.patch.object(cli, 'discover_project', return_value=mock.Mock(root=self.root)), \
+                mock.patch.object(cli, 'state_dir', return_value=self.state), \
+                mock.patch.object(signins, 'run') as signin, \
+                contextlib.redirect_stdout(io.StringIO()) as out, \
+                mock.patch.object(cli.sys.stdin, 'isatty', return_value=True), \
+                mock.patch('sys.stdout.isatty', return_value=True):
+            self.assertEqual(cli.main(['work', '--signin-all']), 1)
+        signin.assert_not_called()
+        self.assertEqual(out.getvalue().strip(), signins.NOT_CONNECTED)
+
+    def test_signin_all_requires_a_terminal(self):
+        result = self.run_cli('work', '--signin-all')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('Work entrypoints require a terminal', result.stderr)
+
+    def test_then_signin_all_requires_codespace(self):
+        from devcontainer_setup.project_sync import __main__ as cli
+        for action in ('--stop', '--signin-all', '--armed'):
+            with self.subTest(action=action), contextlib.redirect_stderr(io.StringIO()) as err:
+                with self.assertRaises(SystemExit) as error:
+                    cli.main(['work', action, '--then-signin-all'])
+                self.assertEqual(error.exception.code, 2)
+                self.assertIn('--then-signin-all works only with task work:cs', err.getvalue())
+
+    def test_codespace_then_signin_all_runs_before_herdr(self):
+        from unittest import mock
+        from devcontainer_setup.project_sync import __main__ as cli, arming, scratch, signins, workspace
+        from devcontainer_setup.project_sync.state import discover_project, locked
+        project = discover_project(self.root)
+        value = dict(local_root=str(self.root), remote_root='/workspaces/project',
+                     remote_active_root='/workspaces/project')
+        connection = mock.MagicMock()
+        for armed in (False, True):
+            for result in (0, 1, 130):
+                with self.subTest(armed=armed, result=result), contextlib.ExitStack() as stack:
+                    order = []
+                    def signin(root, state, name):
+                        self.assertEqual((root, state, name), (self.root, self.state, 'paired'))
+                        with locked(state / 'workspace-control.lock'):
+                            order.append('signins')
+                        with locked(state / 'signins.lock'):
+                            pass
+                        return result
+                    patches = [
+                        contextlib.redirect_stdout(io.StringIO()),
+                        mock.patch.dict(os.environ, {'CODESPACES': 'false'}),
+                        mock.patch.object(cli, 'discover_project', return_value=project),
+                        mock.patch.object(cli, 'state_dir', return_value=self.state),
+                        mock.patch.object(arming, 'read', return_value={'armed': armed}),
+                        mock.patch.object(cli, '_resume_recovery', side_effect=lambda *_: order.append('armed')),
+                        mock.patch.object(workspace, 'registry', return_value=value),
+                        mock.patch.object(workspace, '_project', return_value=project),
+                        mock.patch.object(workspace, '_prerequisites'),
+                        mock.patch.object(workspace, '_choose_pairing', return_value=('paired', '/workspaces/project')),
+                        mock.patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=connection),
+                        mock.patch.object(workspace, '_verify_roots', return_value=[]),
+                        mock.patch.object(workspace, '_remote_herdr', return_value=None),
+                        mock.patch.object(workspace, '_write'),
+                        mock.patch.object(scratch, 'retarget'), mock.patch.object(scratch, 'start'),
+                        mock.patch.object(workspace, '_ready', return_value={}),
+                        mock.patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'),
+                        mock.patch('devcontainer_setup.project_sync.restore.end_proxies_elsewhere', return_value=[]),
+                        mock.patch.object(signins, 'run', side_effect=signin),
+                        mock.patch('devcontainer_setup.project_sync.herdr.open_remote',
+                                   side_effect=lambda *_, **__: order.append('herdr') or 0),
+                        mock.patch.object(cli.sys.stdin, 'isatty', return_value=True),
+                        mock.patch('sys.stdout.isatty', return_value=True),
+                    ]
+                    for replacement in patches:
+                        stack.enter_context(replacement)
+                    self.assertEqual(cli.main(['work', '--codespace', '--then-signin-all']), 0)
+                    self.assertEqual(order, (['armed'] if armed else []) + ['signins', 'herdr'])
+
+    def test_connect_refuses_to_rebind_during_signins(self):
+        from unittest import mock
+        from devcontainer_setup.project_sync import workspace
+        from devcontainer_setup.project_sync.state import discover_project, locked
+        with locked(self.state / 'signins.lock'), \
+                mock.patch.dict(os.environ, {'CODESPACES': 'false'}), \
+                mock.patch.object(workspace, '_prerequisites') as prerequisites, \
+                mock.patch.object(workspace, 'registry') as registry:
+            with self.assertRaisesRegex(ValueError, 'Another sign-in is already running for this project'):
+                workspace.remote(discover_project(self.root), self.state, rebind='replacement')
+        prerequisites.assert_not_called()
+        registry.assert_not_called()
+
     def test_work_signin_dispatches_to_signin_main(self):
         from unittest import mock
         from devcontainer_setup.project_sync import __main__ as cli, links

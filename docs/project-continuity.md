@@ -21,6 +21,8 @@ create checkouts. Uncommitted code stays on the host where it was edited.
 | Command | Result |
 | --- | --- |
 | `task work:cs` | Start/connect the paired Codespace, start sync, connect its saved Herdr machine |
+| `task work:signin:all` | Start or retry sign-ins to every tool on the paired Codespace |
+| `task work:signin` | Finish waiting Codespace browser sign-ins on this Mac |
 | `task work:disconnect` | Disconnect only this project's saved Codespace machine from local Herdr |
 | `task work:status` | Show a short offline scratch and conversation summary |
 | `task work:status -- --json` | Show cycle, stage, receipt and publication detail as JSON |
@@ -54,6 +56,29 @@ Disconnect leaves remote sessions, local Herdr and synchronization running. It
 needs no SSH or GitHub connection and is idempotent. Use `work:stop` separately to
 stop synchronization. Setup preserves custom project Taskfile operations and
 retires only verified producer-owned old work/agent launcher tasks.
+
+## Sign-ins
+
+Connect with `task work:cs`, then start or retry with `task work:signin:all`.
+To do both before Herdr opens, run `task work:cs -- --then-signin-all`. The
+sequence waits for the link helper on both machines before starting each login.
+If it cannot reach the Mac, reconnect with `task work:cs` and retry.
+
+Plaud, Codex, Claude, OpenCode and Grok run in that order in your terminal on the
+Codespace, opening their approval pages on this Mac. Choose one Claude account
+in the browser; its email appears in the result. For Grok, enter the code shown
+in the terminal. Credentials stay on the Codespace. The Mac saves only states,
+check times and Claude's email in its private project state.
+
+Existing sign-ins, including other authentication methods, are kept. A tool
+whose status cannot be checked is skipped; only a confirmed signed-out tool
+starts a login. Failed approvals continue to the next tool; the summary names
+what to retry with `task work:signin:all`. Ctrl-C stops the sequence and keeps
+the completed results. Missing tools are listed and skipped.
+
+`task work:signin` finishes waiting sign-ins when the worker is disconnected.
+The connected worker already handles those callbacks. It remains the callback
+recovery command; use `task work:signin:all` to start new sign-ins.
 
 ## Scratch and project memory
 

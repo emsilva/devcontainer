@@ -44,6 +44,8 @@ small helpers, and a Taskfile include. Personal preferences live in
 | `codex` / `claude` / `opencode` / `grok` | Start a native agent in the current checkout |
 | `codex resume` / `claude --resume` | Choose a native conversation |
 | `task work:cs` | Connect Codespace Herdr and sync scratch and project conversations |
+| `task work:signin:all` | Start or retry sign-ins to every tool on the paired Codespace |
+| `task work:signin` | Finish waiting Codespace browser sign-ins on this Mac |
 | `task work:disconnect` | Disconnect this project's Codespace from the local Herdr UI |
 | `task work:status` / `task work:stop` | Read offline sync summary / stop this project’s worker and its keeper |
 | `task work:status -- --json` | Inspect cycle, receipt and publication detail |
@@ -94,6 +96,13 @@ Herdr, and starts scratch and conversation sync. Select its Codespace group, the
 run `codex` or `claude` in the existing project checkout. On your Mac, run the same
 commands in your local checkout. Use `codex resume` or `claude --resume` to choose
 a conversation through the native picker.
+
+After connecting, run `task work:signin:all` to sign in to Plaud, Codex, Claude,
+OpenCode and Grok. Approve each page on this Mac; Claude uses the account you
+choose in the browser. Existing sign-ins are kept, and a retry starts only the
+tools confirmed signed out. To connect and sign in before Herdr opens, run
+`task work:cs -- --then-signin-all`. Use `task work:signin` to finish waiting
+sign-ins when the worker is disconnected. See [sign-ins](docs/project-continuity.md#sign-ins).
 
 `task work:cs` always reconnects the paired Codespace. After setup replaces it, move
 sync to the new one with `task work:cs -- --rebind <codespace>` (or
