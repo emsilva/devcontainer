@@ -28,6 +28,7 @@ def parser():
     work = groups.add_parser('work', help='Manage the Codespace connection; run codex or claude directly')
     action = work.add_mutually_exclusive_group(required=True)
     action.add_argument('--codespace', action='store_true')
+    action.add_argument('--signin', action='store_true', help='Finish queued browser sign-ins on the Mac')
     action.add_argument('--disconnect', action='store_true', help='Disconnect this project’s saved Codespace machine from Herdr')
     action.add_argument('--status', action='store_true')
     action.add_argument('--stop', action='store_true')
@@ -350,6 +351,9 @@ def run(args):
             return _logs(state, args.follow)
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise ValueError('Work entrypoints require a terminal; use task work:status for scripts')
+        if args.signin:
+            from .links import signin_main
+            return signin_main(project.root, state)
         if args.armed:
             return workspace.remote(project, state, armed=lambda primary: _armed(primary, state, args),
                                     rebind=args.rebind)

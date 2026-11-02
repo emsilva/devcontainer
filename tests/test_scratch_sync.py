@@ -12,7 +12,7 @@ import tarfile
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 class ScratchTests(unittest.TestCase):
@@ -190,6 +190,7 @@ class ScratchTests(unittest.TestCase):
         self.assertTrue((scratch / 'included-link').is_symlink())
 
     @unittest.skipUnless(os.environ.get('CI') or os.environ.get('MUTAGEN_TEST_BINARY'), 'set MUTAGEN_TEST_BINARY for older-checkout connection gate')
+    @patch('devcontainer_setup.project_sync.links.Watcher', new=lambda *args: Mock())
     def test_actual_older_checkout_prepares_scratch_and_enters_herdr_despite_publish_refusal(self):
         import threading
         from types import SimpleNamespace
@@ -698,6 +699,7 @@ class ScratchTests(unittest.TestCase):
         with tarfile.open(fileobj=io.BytesIO(data)) as archive:
             self.assertEqual(archive.extractfile('.scratch/remote.bin').read(), b'\x00remote fixture')
 
+    @patch('devcontainer_setup.project_sync.links.Watcher', new=lambda *args: Mock())
     def test_disconnection_pauses_only_owned_session_before_reconnect(self):
         from types import SimpleNamespace
         config = {'identity': 'github.com/owner/repo', 'codespace': 'bound-name', 'root': str(self.root),
@@ -727,6 +729,7 @@ class ScratchTests(unittest.TestCase):
         self.assertLess(calls.index(pause), calls.index(('daemon', 'stop')))
         self.assertFalse(any(call[:2] == ('sync', 'terminate') for call in calls))
 
+    @patch('devcontainer_setup.project_sync.links.Watcher', new=lambda *args: Mock())
     def test_worker_publishes_current_cycle_progress_and_keeps_receipts_separate(self):
         from types import SimpleNamespace
         from devcontainer_setup.project_sync import sync_cycle
@@ -869,6 +872,7 @@ class ScratchTests(unittest.TestCase):
             self.assertEqual(tools._download('https://example.invalid/archive'), b'complete archive')
         self.assertEqual(request.call_count, 1)
 
+    @patch('devcontainer_setup.project_sync.links.Watcher', new=lambda *args: Mock())
     def test_failed_create_without_session_is_retryable_and_never_cleanup_required(self):
         from types import SimpleNamespace
         config = {'identity': 'github.com/owner/repo', 'codespace': 'bound-name', 'root': str(self.root),
@@ -897,6 +901,7 @@ class ScratchTests(unittest.TestCase):
         self.assertEqual(sum(call.args[2:4] == ('sync', 'create') for call in commands.call_args_list), 2)
         self.assertFalse(any(call.args[2:4] == ('sync', 'terminate') for call in commands.call_args_list))
 
+    @patch('devcontainer_setup.project_sync.links.Watcher', new=lambda *args: Mock())
     def test_normal_stop_preserves_owned_session_baseline_and_receipt(self):
         from types import SimpleNamespace
         config = {'identity': 'github.com/owner/repo', 'codespace': 'bound-name', 'root': str(self.root),
@@ -1080,6 +1085,7 @@ class ScratchTests(unittest.TestCase):
                     m._mutagen(binary, state, 'sync', 'terminate', name)
                 m._mutagen(binary, state, 'daemon', 'stop')
 
+    @patch('devcontainer_setup.project_sync.links.Watcher', new=lambda *args: Mock())
     def test_supervisor_reuses_exact_saved_baseline_after_stop_or_create_interruption(self):
         from types import SimpleNamespace
         from devcontainer_setup.project_sync.state import atomic_write
@@ -1118,6 +1124,7 @@ class ScratchTests(unittest.TestCase):
                 self.assertEqual(runtime['session'], name)
                 self.assertEqual(runtime['nonce'], 'f' * 48)
 
+    @patch('devcontainer_setup.project_sync.links.Watcher', new=lambda *args: Mock())
     def test_supervisor_never_recreates_missing_remote_scratch_for_any_saved_receipt(self):
         m = self.module
         (self.scratch / 'note.md').write_text('owner note')
@@ -1295,6 +1302,7 @@ class ScratchTests(unittest.TestCase):
         from devcontainer_setup.project_sync import arming
         arming.write(self.state, {'schema': 1, 'armed': armed, 'codespace': 'bound-name', 'gh_user': 'fixture'})
 
+    @patch('devcontainer_setup.project_sync.links.Watcher', new=lambda *args: Mock())
     def _work(self, attempts, cycles=(), *, clock=None):
         """Run the worker in this process against scripted connections and sync cycles.
 

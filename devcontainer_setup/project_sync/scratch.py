@@ -661,86 +661,93 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                                                     prepare_identity=config['identity'] if receipt is None else None))
                         if remote.get('identity') != config['identity'] or remote.get('root') != config['remote_root']:
                             raise ValueError('Remote repository identity changed; refusing synchronization.')
-                        connection.ssh_config(state / 'ssh-config')
-                        from .ssh_hosts import refresh_ssh
-                        refresh_ssh(state)
-                        if receipt is None:
-                            session = 'scratch-' + nonce
-                            receipt = {'name': session, 'nonce': nonce, 'binding': config, 'established': False}
-                            _write(state / SESSION, receipt)
-                            update('preparing', session=session)
-                        info = _session_info(binary, state, receipt)
-                        if info is not None and _reconciliation(info)['phase'] == 'synchronized':
-                            runtime['last_synchronized_at'] = time.time()
-                        if info is None:
-                            backup(root, state)
-                            remote_snapshot = _remote(connection, config['remote_root'], snapshot=True)
-                            remote_backup = _archive_path(state, 'remote')
-                            atomic_write(remote_backup, remote_snapshot, mode=0o400)
-                            args = ['sync', 'create', str(root / '.scratch'),
-                                    'project-sync:' + config['remote_root'] + '/.scratch',
-                                    '--name=' + session, '--mode=two-way-safe', '--hash=sha256',
-                                    '--symlink-mode=ignore', '--no-global-configuration', '--ignore-vcs', '--paused']
-                            args += ['--ignore=' + item for item in scratch_tree.MUTAGEN_IGNORES]
-                            # Record the owned name before create; partial creation
-                            # can then be cleaned without touching another session.
-                            update('creating', session=session)
-                            _mutagen(binary, state, *args, timeout=120)
-                            info = _session_info(binary, state, receipt)
-                            if info is None:
-                                raise ValueError('Mutagen create returned without a session; retrying safely.')
-                        _mutagen(binary, state, 'sync', 'resume', info['identifier'])
-                        notices.connected()
-                        update('syncing', connection_prepared=True, prepared_binding=config,
-                               prepared_at=time.time(), error=None)
-                        logger.info('Scratch connection established.')
-                        def synchronize():
-                            from .replication import sync_project_data, ConnectionVerificationError
-                            project = discover_project(root)
-                            def progress(result):
-                                if result['stage'] != 'verify':
-                                    verified()  # this cycle has passed verify()
-                                for name, row in result['directions'].items():
-                                    if sync_cycle.receipt_matches(row.get('receipt'), row.get('snapshot_id')):
-                                        runtime['retained_receipts'][name] = row['receipt']
-                                failed = result['outcome'] in ('failed', 'degraded')
-                                phase = 'waiting' if result['outcome'] == 'failed' and result['stage'] == 'verify' else 'syncing'
-                                update(phase, conversations=result,
-                                       conversation_error='Conversation sync incomplete; inspect current cycle' if failed else None)
-                            # Reset evidence before registry reads or verification.
-                            update('syncing', conversations={}, conversation_error=None)
-                            registry_path = state / 'workspace.json'
-                            value = read_json(registry_path) if registry_path.exists() else {}
-                            old_roots = value.get('verified_remote_historical_roots', [])
-                            try:
-                                # The exchange verifies every authorized remote
-                                # scope; changed identities must fail, not vanish.
-                                result = sync_project_data(connection, project, state,
-                                                           config['remote_root'], historical_roots=old_roots,
-                                                           progress=progress)
-                                progress(result)
-                            except ConnectionVerificationError:
-                                raise
-                            except (OSError, ValueError, KeyError, TypeError):
-                                result = runtime['conversations'] or sync_cycle.begin(project, config['remote_root'])
-                                result.update(outcome='failed', completed_at=time.time(),
-                                              issues=[dict(reason='Conversation cycle incomplete; previous receipts preserved')])
-                                progress(result)
-                        synchronize()
-                        while not exiting.wait(5):
-                            notices.watch_keeper()
-                            if connection.child.poll() is not None:
-                                raise ValueError('Codespace forward disconnected; waiting to reconnect.')
-                            _validate_tree(root / '.scratch')
-                            remote = json.loads(_remote(connection, config['remote_root']))
-                            if remote.get('identity') != config['identity'] or remote.get('root') != config['remote_root']:
-                                raise ValueError('Remote repository identity changed; synchronization paused.')
-                            summary = _mutagen(binary, state, 'sync', 'list', session)
+                        with locked(state / 'links-ssh-config.lock', blocking=True):
+                            connection.ssh_config(state / 'ssh-config')
+                            from .ssh_hosts import refresh_ssh
+                            refresh_ssh(state)
+                        from .links import Watcher
+                        watcher = Watcher(connection, state, root.name, logger)
+                        try:
+                            watcher.start()
+                            if receipt is None:
+                                session = 'scratch-' + nonce
+                                receipt = {'name': session, 'nonce': nonce, 'binding': config, 'established': False}
+                                _write(state / SESSION, receipt)
+                                update('preparing', session=session)
                             info = _session_info(binary, state, receipt)
                             if info is not None and _reconciliation(info)['phase'] == 'synchronized':
                                 runtime['last_synchronized_at'] = time.time()
-                            update('syncing', detail=summary)
+                            if info is None:
+                                backup(root, state)
+                                remote_snapshot = _remote(connection, config['remote_root'], snapshot=True)
+                                remote_backup = _archive_path(state, 'remote')
+                                atomic_write(remote_backup, remote_snapshot, mode=0o400)
+                                args = ['sync', 'create', str(root / '.scratch'),
+                                        'project-sync:' + config['remote_root'] + '/.scratch',
+                                        '--name=' + session, '--mode=two-way-safe', '--hash=sha256',
+                                        '--symlink-mode=ignore', '--no-global-configuration', '--ignore-vcs', '--paused']
+                                args += ['--ignore=' + item for item in scratch_tree.MUTAGEN_IGNORES]
+                                # Record the owned name before create; partial creation
+                                # can then be cleaned without touching another session.
+                                update('creating', session=session)
+                                _mutagen(binary, state, *args, timeout=120)
+                                info = _session_info(binary, state, receipt)
+                                if info is None:
+                                    raise ValueError('Mutagen create returned without a session; retrying safely.')
+                            _mutagen(binary, state, 'sync', 'resume', info['identifier'])
+                            notices.connected()
+                            update('syncing', connection_prepared=True, prepared_binding=config,
+                                   prepared_at=time.time(), error=None)
+                            logger.info('Scratch connection established.')
+                            def synchronize():
+                                from .replication import sync_project_data, ConnectionVerificationError
+                                project = discover_project(root)
+                                def progress(result):
+                                    if result['stage'] != 'verify':
+                                        verified()  # this cycle has passed verify()
+                                    for name, row in result['directions'].items():
+                                        if sync_cycle.receipt_matches(row.get('receipt'), row.get('snapshot_id')):
+                                            runtime['retained_receipts'][name] = row['receipt']
+                                    failed = result['outcome'] in ('failed', 'degraded')
+                                    phase = 'waiting' if result['outcome'] == 'failed' and result['stage'] == 'verify' else 'syncing'
+                                    update(phase, conversations=result,
+                                           conversation_error='Conversation sync incomplete; inspect current cycle' if failed else None)
+                                # Reset evidence before registry reads or verification.
+                                update('syncing', conversations={}, conversation_error=None)
+                                registry_path = state / 'workspace.json'
+                                value = read_json(registry_path) if registry_path.exists() else {}
+                                old_roots = value.get('verified_remote_historical_roots', [])
+                                try:
+                                    # The exchange verifies every authorized remote
+                                    # scope; changed identities must fail, not vanish.
+                                    result = sync_project_data(connection, project, state,
+                                                               config['remote_root'], historical_roots=old_roots,
+                                                               progress=progress)
+                                    progress(result)
+                                except ConnectionVerificationError:
+                                    raise
+                                except (OSError, ValueError, KeyError, TypeError):
+                                    result = runtime['conversations'] or sync_cycle.begin(project, config['remote_root'])
+                                    result.update(outcome='failed', completed_at=time.time(),
+                                                  issues=[dict(reason='Conversation cycle incomplete; previous receipts preserved')])
+                                    progress(result)
                             synchronize()
+                            while not exiting.wait(5):
+                                notices.watch_keeper()
+                                if connection.child.poll() is not None:
+                                    raise ValueError('Codespace forward disconnected; waiting to reconnect.')
+                                _validate_tree(root / '.scratch')
+                                remote = json.loads(_remote(connection, config['remote_root']))
+                                if remote.get('identity') != config['identity'] or remote.get('root') != config['remote_root']:
+                                    raise ValueError('Remote repository identity changed; synchronization paused.')
+                                summary = _mutagen(binary, state, 'sync', 'list', session)
+                                info = _session_info(binary, state, receipt)
+                                if info is not None and _reconciliation(info)['phase'] == 'synchronized':
+                                    runtime['last_synchronized_at'] = time.time()
+                                update('syncing', detail=summary)
+                                synchronize()
+                        finally:
+                            watcher.stop()
                 except Exception as error:
                     if receipt:
                         try:
