@@ -6,6 +6,11 @@ tasks:
     interactive: true
     cmds:
       - bash scripts/project-sync.sh work --codespace {{.CLI_ARGS}}
+  work:signin:all:
+    desc: Sign in to every tool on the paired Codespace
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh work --signin-all {{.CLI_ARGS}}
   work:disconnect:
     desc: Disconnect this project's saved Codespace machine from Herdr
     cmds:

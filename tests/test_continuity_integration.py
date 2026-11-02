@@ -72,7 +72,7 @@ class ContinuityIntegrationTests(unittest.TestCase):
         names = {entry['name'] for entry in json.loads(listed.stdout)['tasks']}
         self.assertTrue({'up', 'test', 'scratch:configure', 'scratch:start', 'scratch:stop',
                          'scratch:status', 'scratch:logs', 'scratch:backup',
-                         'work:cs', 'work:disconnect', 'work:status', 'work:stop',
+                         'work:cs', 'work:signin', 'work:signin:all', 'work:disconnect', 'work:status', 'work:stop',
                          'work:cs:armed', 'work:disarm', 'work:hold', 'work:cs:stop',
                          'work:cs:restart', 'work:logs'} <= names,
                         sorted(names))

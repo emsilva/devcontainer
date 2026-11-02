@@ -29,6 +29,7 @@ def parser():
     action = work.add_mutually_exclusive_group(required=True)
     action.add_argument('--codespace', action='store_true')
     action.add_argument('--signin', action='store_true', help='Finish queued browser sign-ins on the Mac')
+    action.add_argument('--signin-all', action='store_true', help='Sign in to every tool on the paired Codespace')
     action.add_argument('--disconnect', action='store_true', help='Disconnect this project’s saved Codespace machine from Herdr')
     action.add_argument('--status', action='store_true')
     action.add_argument('--stop', action='store_true')
@@ -44,6 +45,7 @@ def parser():
     work.add_argument('--json', action='store_true', help='Full offline status detail as JSON')
     work.add_argument('--rebind', metavar='CODESPACE',
                       help='Move scratch and conversation sync to another Codespace of this repository')
+    work.add_argument('--then-signin-all', action='store_true', help='Sign in to every tool before Herdr opens')
     sync = groups.add_parser('scratch', help='Advanced scratch synchronization controls').add_subparsers(dest='action', required=True)
     configure = sync.add_parser('configure')
     configure.add_argument('--codespace', required=True)
@@ -354,20 +356,34 @@ def run(args):
         if args.signin:
             from .links import signin_main
             return signin_main(project.root, state)
+        if args.signin_all:
+            from . import signins
+            from .state import read_json
+            path = state / scratch.CONFIG
+            binding = read_json(path) if path.exists() else {}
+            name = binding.get('codespace')
+            if not isinstance(name, str) or not name:
+                print(signins.NOT_CONNECTED)
+                return 1
+            return signins.run(project.root, state, name)
         if args.armed:
             return workspace.remote(project, state, armed=lambda primary: _armed(primary, state, args),
                                     rebind=args.rebind)
         if args.codespace_stop or args.codespace_restart:
             return _owner_power(project, state, restart=args.codespace_restart)
         if args.codespace:
-            from . import arming
+            from . import arming, signins
             armed = arming.read(state).get('armed')
             if args.rebind is not None and armed:
                 # Moving only the sync would leave automatic restart on the old Codespace.
                 raise ValueError('This project is armed; move it with task work:cs:armed -- --rebind '
                                  + args.rebind + ' so restart moves too')
+            options = {}
+            if args.then_signin_all:
+                options['before_herdr'] = lambda primary, name: signins.run(primary.root, state, name)
             return workspace.remote(project, state, rebind=args.rebind,
-                                    armed=(lambda primary: _resume_recovery(primary, state)) if armed else None)
+                                    armed=(lambda primary: _resume_recovery(primary, state)) if armed else None,
+                                    **options)
     if args.action == 'configure':
         _print(scratch.configure(project.root, state, args.codespace, args.remote_root))
     elif args.action == 'start':
@@ -393,6 +409,8 @@ def main(argv=None):
         args = commands.parse_args(argv)
         if getattr(args, 'rebind', None) is not None and not (args.codespace or args.armed):
             commands.error('--rebind works only with task work:cs or task work:cs:armed')
+        if getattr(args, 'then_signin_all', False) and not args.codespace:
+            commands.error('--then-signin-all works only with task work:cs')
         return run(args)
     except (OSError, ValueError) as error:
         print(str(error), file=sys.stderr)

@@ -1,6 +1,7 @@
 """Connect Herdr to existing checkouts with scratch and native conversation sync."""
 from __future__ import annotations
 
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -202,15 +203,20 @@ def _remote_herdr(connection):
     return text if text == '' else version_line(text)
 
 
-def remote(project, state, armed=None, rebind=None):
-    """Connect the project; `armed(primary)` runs once the worker is ready, before Herdr opens."""
+def remote(project, state, armed=None, rebind=None, before_herdr=None):
+    """Connect; run `armed(primary)` then `before_herdr(primary, name)` before Herdr, unlocked."""
     if os.environ.get('CODESPACES') == 'true':
         raise ValueError('Run task work:cs on your Mac to connect the project')
     from .herdr import open_remote
     from .ssh_hosts import configure_ssh
     from .transport import CodespaceConnection
     state = Path(state)
-    with locked(state / 'workspace-control.lock', blocking=True):
+    with ExitStack() as locks:
+        locks.enter_context(locked(state / 'workspace-control.lock', blocking=True))
+        try:
+            locks.enter_context(locked(state / 'signins.lock'))
+        except BlockingIOError:
+            raise ValueError('Another sign-in is already running for this project.') from None
         value = registry(project, state)
         primary = _project(value['local_root'], project.identity)
         if not _ordinary(str(primary.root)) or primary.root.is_relative_to(state):
@@ -275,6 +281,8 @@ def remote(project, state, armed=None, rebind=None):
         # Outside workspace-control.lock, which arming takes for its own write,
         # and before Herdr, whose TUI would otherwise hold the step back.
         armed(primary)
+    if before_herdr is not None:
+        before_herdr(primary, name)
     # The connection above is closed, and on a new Codespace Herdr exists only
     # after machine add. Check resume hooks and link handoff feedback, then copy
     # gitignored .env files, each on its own fresh connection, once that is saved.
