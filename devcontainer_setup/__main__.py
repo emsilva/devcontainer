@@ -22,7 +22,7 @@ from .discovery import scan
 from .git_ops import (GitPlan, ReviewChanged, default_branch, default_contains, fast_forward_checkout, git,
                       is_ancestor, merged_setup_branches, proposed_branch, remove_setup_worktree, remove_worktree,
                       setup_worktree)
-from .preferences import load_preferences, save_preferences
+from .preferences import load_open_after_create, load_preferences, save_preferences
 from .releases import fetch_release
 from .render import render, validate
 from .ui import Cancelled, Gum, cache_home
@@ -771,7 +771,8 @@ def _launch_on_default(api: Codespaces, project: Path, repo: str, default: str, 
     name = api.launch(repo, default, sha, dotfiles_repo=dotfiles, receipt=receipt_path(state, repo, default),
                       workspace=config.get('workspaceFolder'), state_root=state,
                       machine_profile=_machine_profile(project) if dotfiles else None,
-                      on_created=_record_created, **launch)
+                      on_created=_record_created, open_after_create=load_open_after_create(),
+                      **{key: value for key, value in launch.items() if key != 'client'})
     return name, config
 
 

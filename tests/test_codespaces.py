@@ -106,6 +106,87 @@ class CodespacesTests(unittest.TestCase):
         return self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                                None, self.receipt)
 
+    def test_create_with_none_opens_nothing(self):
+        self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'none', None, self.receipt)
+        self.assertFalse(any(call[1:3] == ['codespace', 'code'] for call in self.runner.calls))
+        self.assertEqual(json.loads(self.receipt.read_text())['validated_commit'], 'a' * 40)
+        self.assertNotIn('client', json.loads(self.receipt.read_text()))
+
+    def test_create_with_browser_opens_once_with_web(self):
+        self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m',
+                        open_after_create='browser', dotfiles_repo=None, receipt=self.receipt)
+        editor = [call for call in self.runner.calls if call[1:3] == ['codespace', 'code']]
+        self.assertEqual(editor, [['gh', 'codespace', 'code', '--codespace', 'new-space', '--web']])
+        validation = next(index for index, call in enumerate(self.runner.calls) if 'validate-selected.sh' in call[-1])
+        self.assertLess(validation, self.runner.calls.index(editor[0]))
+        self.assertNotIn('client', json.loads(self.receipt.read_text()))
+
+    def test_create_with_vscode_opens_once_without_web(self):
+        self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m',
+                        open_after_create='vscode', dotfiles_repo=None, receipt=self.receipt)
+        self.assertEqual([call for call in self.runner.calls if call[1:3] == ['codespace', 'code']],
+                         [['gh', 'codespace', 'code', '--codespace', 'new-space']])
+
+    def test_invalid_editor_preference_refused_before_allocation(self):
+        for value in ('', 'editor', None, True, [], {}):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, 'open_after_create'):
+                    self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', value,
+                                    None, self.receipt)
+                self.assertEqual(self.runner.calls, [])
+                self.assertFalse(self.receipt.exists())
+
+    def test_legacy_client_never_opens_an_editor(self):
+        for action in ('reuse', 'rebuild', 'create'):
+            with self.subTest(action=action):
+                self.runner.calls.clear()
+                self.api._save_receipt(self.receipt, {'codespace': 'new-space', 'repository': 'owner/project',
+                    'branch': 'main', 'commit': 'a' * 40, 'client': 'browser',
+                    'validated_commit': 'a' * 40, 'rebuild_pending': action == 'rebuild'})
+                self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'none', None,
+                                self.receipt, resume=None if action == 'create' else 'new-space')
+                self.assertFalse(any(call[1:3] == ['codespace', 'code'] for call in self.runner.calls))
+                self.assertEqual(sum(call[1:3] == ['codespace', 'rebuild'] for call in self.runner.calls),
+                                 int(action == 'rebuild'))
+                self.assertNotIn('client', json.loads(self.receipt.read_text()))
+
+    def test_reuse_and_rebuild_never_open_even_with_opt_in(self):
+        for value in ('browser', 'vscode'):
+            for pending in (False, True):
+                with self.subTest(value=value, pending=pending):
+                    self.runner.calls.clear()
+                    self.api._save_receipt(self.receipt, {'codespace': 'new-space', 'repository': 'owner/project',
+                        'branch': 'main', 'validated_commit': 'a' * 40, 'rebuild_pending': pending})
+                    self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', value, None,
+                                    self.receipt, resume='new-space')
+                    self.assertFalse(any(call[1:3] == ['codespace', 'code'] for call in self.runner.calls))
+                    self.assertEqual(sum(call[1:3] == ['codespace', 'rebuild'] for call in self.runner.calls), int(pending))
+
+    def test_force_rebuild_rebuilds_a_validated_codespace(self):
+        self.api._save_receipt(self.receipt, {'codespace': 'new-space', 'repository': 'owner/project',
+            'branch': 'main', 'commit': 'a' * 40, 'validated_commit': 'a' * 40, 'rebuild_pending': False})
+        before = dict(self.runner.resource)
+        self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser', None,
+                        self.receipt, resume='new-space', force_rebuild=True)
+        self.assertEqual(sum(call[1:3] == ['codespace', 'rebuild'] for call in self.runner.calls), 1)
+        self.assertFalse(any(call[1:3] in (['codespace', 'create'], ['codespace', 'code']) for call in self.runner.calls))
+        self.assertEqual(self.runner.resource, before)
+        record = json.loads(self.receipt.read_text())
+        self.assertEqual(record['validated_commit'], 'a' * 40)
+        self.assertIs(record['rebuild_pending'], False)
+
+    def test_interrupted_forced_rebuild_stays_pending_for_an_ordinary_retry(self):
+        self.api._save_receipt(self.receipt, {'codespace': 'new-space', 'repository': 'owner/project',
+            'branch': 'main', 'validated_commit': 'a' * 40, 'rebuild_pending': False})
+        self.runner.fail_rebuild_once = True
+        with self.assertRaisesRegex(ValueError, 'temporary rebuild API failure'):
+            self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'none', None,
+                            self.receipt, resume='new-space', force_rebuild=True)
+        self.assertIs(json.loads(self.receipt.read_text())['rebuild_pending'], True)
+        self.resume()
+        self.assertEqual(sum(call[1:3] == ['codespace', 'rebuild'] for call in self.runner.calls), 2)
+        self.assertIs(json.loads(self.receipt.read_text())['rebuild_pending'], False)
+
     def test_available_codespace_retries_transient_ssh_tunnel_failure(self):
         self.runner.ssh_failures = ['kex_exchange_identification: read: Connection reset by peer\n'
                                     'tunnel closed: error forwarding port: unexpected EOF']
@@ -411,7 +492,7 @@ class CodespacesTests(unittest.TestCase):
 
 
     def resume(self, **options):
-        values = dict(machine=MACHINE['name'], idle_timeout='30m', client='browser',
+        values = dict(machine=MACHINE['name'], idle_timeout='30m', open_after_create='browser',
                       dotfiles_repo=None, receipt=self.receipt, resume='new-space')
         values.update(options)
         return self.api.launch('owner/project', 'main', 'a' * 40, **values)

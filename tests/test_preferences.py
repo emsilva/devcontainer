@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -6,6 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from devcontainer_setup import preferences
 from devcontainer_setup.preferences import config_path, load_preferences, save_preferences
 
 
@@ -74,6 +77,76 @@ class PreferencesTests(unittest.TestCase):
         path.write_bytes(b'\xff')
         with self.assertRaisesRegex(ValueError, 'config.json'):
             load_preferences(self.env)
+
+    def test_unknown_preference_keys_survive_load_and_save(self):
+        path = save_preferences({'dotfiles_repo': 'owner/dotfiles'}, self.env)
+        original = json.loads(path.read_text())
+        original['future_setting'] = {'enabled': True, 'values': [1, 'kept']}
+        path.write_text(json.dumps(original))
+        loaded = load_preferences(self.env)
+        self.assertEqual(loaded, {key: value for key, value in original.items() if key != 'future_setting'})
+        save_preferences(dict(loaded, apply_dotfiles=False), self.env)
+        self.assertEqual(json.loads(path.read_text()), dict(original, apply_dotfiles=False))
+        invalid = dict(original, apply_dotfiles='yes')
+        path.write_text(json.dumps(invalid))
+        before = path.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'apply_dotfiles'):
+            load_preferences(self.env)
+        with self.assertRaisesRegex(ValueError, 'apply_dotfiles'):
+            save_preferences({'dotfiles_repo': 'new/repo'}, self.env)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_open_after_create_defaults_to_none_and_validates(self):
+        self.assertTrue(callable(getattr(preferences, 'load_open_after_create', None)), 'editor preference loader is missing')
+        load = preferences.load_open_after_create
+        save = preferences.save_open_after_create
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(load(self.env), 'none')
+        self.assertEqual(stderr.getvalue(), '')
+        self.assertFalse((self.root / 'config').exists())
+        config = save_preferences({'dotfiles_repo': 'owner/dotfiles'}, self.env)
+        before = config.read_bytes()
+        for value in ('none', 'browser', 'vscode'):
+            with self.subTest(valid=value):
+                path = save(value, self.env)
+                self.assertEqual(path, config.with_name('open-after-create.json'))
+                self.assertEqual(json.loads(path.read_text()), {'open_after_create': value})
+                self.assertEqual(load(self.env), value)
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+                self.assertEqual(config.read_bytes(), before)
+        for content in (b'{', b'[]', b'{}', b'{"open_after_create":true}',
+                        b'{"open_after_create":"editor"}', b'\xff'):
+            with self.subTest(invalid=content):
+                path.write_bytes(content)
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    self.assertEqual(load(self.env), 'none')
+                self.assertEqual(len(stderr.getvalue().splitlines()), 1)
+                self.assertIn(str(path), stderr.getvalue())
+                self.assertEqual(path.read_bytes(), content)
+        for value in ('', 'editor', None, True, [], {}):
+            with self.subTest(invalid_save=value):
+                with self.assertRaises(ValueError):
+                    save(value, self.env)
+                self.assertEqual(path.read_bytes(), b'\xff')
+        fallback = {'HOME': str(self.root), 'XDG_CONFIG_HOME': 'relative'}
+        path = save('browser', fallback)
+        self.assertEqual(path, self.root / '.config/devcontainer-setup/open-after-create.json')
+        with patch.dict(os.environ, fallback, clear=True):
+            self.assertEqual(load(), 'browser')
+        self.assertEqual(config.read_bytes(), before)
+
+    def test_open_after_create_replace_failure_preserves_bytes_and_cleans_temp(self):
+        self.assertTrue(callable(getattr(preferences, 'save_open_after_create', None)), 'editor preference saver is missing')
+        path = preferences.save_open_after_create('browser', self.env)
+        before = path.read_bytes()
+        with patch('devcontainer_setup.preferences.os.replace', side_effect=OSError('disk failure')):
+            with self.assertRaises(OSError):
+                preferences.save_open_after_create('vscode', self.env)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(list(path.parent.iterdir()), [path])
 
 
 if __name__ == '__main__':

@@ -5,6 +5,7 @@ from collections.abc import Mapping
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 
 # agentic_tools remains readable for older preference files; agents are now mandatory.
@@ -22,12 +23,12 @@ def config_path(env: Mapping | None = None) -> Path:
     return root / 'devcontainer-setup' / 'config.json'
 
 
-def _validate(values: dict, path: Path) -> None:
+def _validate(values: dict, path: Path, *, allow_unknown: bool = False) -> None:
     def invalid(reason):
         raise ValueError(f'Invalid preferences at {path}: {reason}. Repair this file before saving preferences.')
     if not isinstance(values, dict):
         invalid('expected a JSON object')
-    if set(values) - set(DEFAULTS):
+    if not allow_unknown and set(values) - set(DEFAULTS):
         invalid('unrecognized fields: ' + ', '.join(sorted(set(values) - set(DEFAULTS))))
     if 'version' in values and (type(values['version']) is not int or values['version'] != 1):
         invalid('version must be 1')
@@ -40,8 +41,7 @@ def _validate(values: dict, path: Path) -> None:
             invalid('dotfiles_repo must be a string without control characters')
 
 
-def load_preferences(env: Mapping | None = None) -> dict:
-    path = config_path(env)
+def _read_preferences(path: Path) -> dict:
     try:
         content = path.read_text(encoding='utf-8')
     except FileNotFoundError:
@@ -52,15 +52,45 @@ def load_preferences(env: Mapping | None = None) -> dict:
         values = json.loads(content)
     except (ValueError, UnicodeError) as error:
         raise ValueError(f'Invalid preferences at {path}: {error}. Repair this file before saving preferences.') from error
-    _validate(values, path)
+    _validate(values, path, allow_unknown=True)
     return DEFAULTS | values
+
+
+def load_preferences(env: Mapping | None = None) -> dict:
+    values = _read_preferences(config_path(env))
+    return {key: values[key] for key in DEFAULTS}
 
 
 def save_preferences(values: dict, env: Mapping | None = None) -> Path:
     path = config_path(env)
     _validate(values, path)
-    merged = load_preferences(env) | values
-    _validate(merged, path)
+    merged = _read_preferences(path) | values
+    _validate(merged, path, allow_unknown=True)
+    return _write_private_json(path, merged)
+
+
+def load_open_after_create(env: Mapping | None = None) -> str:
+    path = config_path(env).with_name('open-after-create.json')
+    try:
+        values = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(values, dict) or values.get('open_after_create') not in ('none', 'browser', 'vscode'):
+            raise ValueError('open_after_create must be none, browser or vscode')
+        return values['open_after_create']
+    except FileNotFoundError:
+        return 'none'
+    except (OSError, ValueError, UnicodeError) as error:
+        print(f'Warning: Invalid editor preference at {path}: {error}. Using none.', file=sys.stderr)
+        return 'none'
+
+
+def save_open_after_create(value: str, env: Mapping | None = None) -> Path:
+    if value not in ('none', 'browser', 'vscode'):
+        raise ValueError('open_after_create must be none, browser or vscode')
+    path = config_path(env).with_name('open-after-create.json')
+    return _write_private_json(path, {'open_after_create': value})
+
+
+def _write_private_json(path: Path, values: dict) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.parent.chmod(0o700)
     temporary = None
@@ -69,7 +99,7 @@ def save_preferences(values: dict, env: Mapping | None = None) -> Path:
         temporary = Path(name)
         with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
             os.fchmod(stream.fileno(), 0o600)
-            json.dump(merged, stream, indent=2, sort_keys=True)
+            json.dump(values, stream, indent=2, sort_keys=True)
             stream.write('\n')
             stream.flush()
             os.fsync(stream.fileno())
