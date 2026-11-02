@@ -11,6 +11,7 @@ import uuid
 
 from devcontainer_setup.project_sync import sessions
 from devcontainer_setup.project_sync.agents import _history
+from test_native_checkpoints import NativeFixture, lines
 
 
 def digest(value):
@@ -199,11 +200,27 @@ class NativeFormatTests(unittest.TestCase):
                 sessions._validate_codex_dependencies([dict(type='response_item', payload=dict(type='function_call', name=name))], dict(id=self.sid), self.sid)
 
     def test_version_boundary_and_global_memory_are_explicit(self):
-        for version in ('0.163.0', '0.164.0', '0.164.0-alpha.1'):
-            sessions._version('codex', version)
-        for version in ('9.0.0', '0.164.0-alpha.2', '0.165.0-alpha.1'):
-            with self.subTest(version=version), self.assertRaisesRegex(ValueError, 'version'):
-                sessions._version('codex', version)
+        accepted = {
+            'codex': ('0.163.0', '0.164.0', '0.164.0-alpha.1', '0.165.0', '0.166.0', '0.170.3'),
+            'claude': ('2.1.0', '2.1.316', '2.2.0'),
+        }
+        refused = {
+            'codex': ('0.162.9', '0.99.999', '0.164.0-alpha.2', '0.165.0-alpha.1', '0.166.0-beta',
+                      '0.166.0+build.1', '1.0.0', '9.0.0', '0.166', 'x', None),
+            'claude': ('2.0.9', '3.0.0', '2.2.0-beta', '2.2.0+build.1', 'x'),
+        }
+        for agent, versions in accepted.items():
+            for version in versions:
+                with self.subTest(agent=agent, accepted=version):
+                    try:
+                        sessions._version(agent, version)
+                    except ValueError as error:
+                        self.fail(str(error))
+        for agent, versions in refused.items():
+            for version in versions:
+                with self.subTest(agent=agent, refused=version), self.assertRaises(ValueError) as error:
+                    sessions._version(agent, version)
+                self.assertEqual(str(error.exception), f'Unsupported {agent} native version: {version!r}')
         for marker in sessions.MEMORY_MARKERS:
             row = dict(type='response_item', payload=dict(type='message', role='developer', content=[dict(type='input_text', text=marker.decode())]))
             with self.subTest(marker=marker), self.assertRaisesRegex(ValueError, 'memory'):
@@ -240,3 +257,45 @@ class NativeFormatTests(unittest.TestCase):
                 return checked
             with patch.object(sessions, '_safe', side_effect=swap), self.assertRaises((ValueError, OSError)):
                 sessions._read(native)
+
+
+class NativeVersionCaptureTests(NativeFixture):
+    def codex_release(self, version='0.166.0', *, attached_thread=False, dynamic_tools=False):
+        path = self.codex()
+        rows = [json.loads(line) for line in path.read_bytes().splitlines()]
+        rows[0]['payload'].update(cli_version=version, attached_thread=attached_thread)
+        if dynamic_tools:
+            rows.insert(-1, dict(type='dynamic_tools_updated', payload=dict(thread_id=self.sid, tools=[])))
+        path.write_bytes(lines([dict(row, ordinal=i) for i, row in enumerate(rows)]))
+        return path
+
+    def test_plain_completed_codex_0166_session_is_captured(self):
+        path = self.codex_release()
+        original = path.read_bytes()
+        result = self.capture()
+        self.assertEqual(len(result['entries']), 1, result['issues'])
+        self.assertEqual(result['issues'], [])
+        entry = result['entries'][0]
+        self.assertEqual(entry['session_id'], self.sid)
+        self.assertEqual(self.store.read(entry['files'][0]['blob']), original)
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_codex_0166_dynamic_tools_update_is_refused(self):
+        path = self.codex_release(dynamic_tools=True)
+        original = path.read_bytes()
+        result = self.capture()
+        self.assertEqual(result['entries'], [])
+        self.assertEqual([issue['reason'] for issue in result['issues']], ['Unsupported native record type'])
+        self.assertEqual(self.store.objects, {})
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_codex_attached_thread_is_refused(self):
+        for version in ('0.164.0', '0.166.0'):
+            with self.subTest(version=version):
+                path = self.codex_release(version, attached_thread=True)
+                original = path.read_bytes()
+                result = self.capture()
+                self.assertEqual(len(result['entries']), 0, result['issues'])
+                self.assertTrue(any('attached-thread' in issue['reason'] for issue in result['issues']), result['issues'])
+                self.assertEqual(self.store.objects, {})
+                self.assertEqual(path.read_bytes(), original)
