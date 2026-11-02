@@ -271,7 +271,10 @@ def checkout_update(project: Path, default: str) -> dict:
     if merged.returncode:
         collision = any(message in merged.stderr for message in
                         ('would be overwritten', 'would be removed', 'would lose untracked files'))
-        return result('refused', 'collision' if collision else 'diverged')
+        failure = result('refused', 'collision' if collision else 'merge-failed')
+        if not collision:
+            failure['detail'] = next(iter(merged.stderr.splitlines()), '')[:200]
+        return failure
     behind = 0
     return result('updated')
 

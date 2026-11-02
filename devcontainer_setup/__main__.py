@@ -564,9 +564,7 @@ def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
     return chosen
 
 
-LAUNCH_BROWSER = 'Push and open a Codespace in the browser'
-LAUNCH_VSCODE = 'Push and open a Codespace in VS Code'
-COMMIT_ONLY = 'Commit only (no Codespace)'
+CREATE_CODESPACE = 'create like last time'
 
 
 def _paired_codespace(project: Path) -> str | None:
@@ -581,92 +579,125 @@ def _paired_codespace(project: Path) -> str | None:
     return binding['codespace'] if binding else None
 
 
+def _publish_choice(ui: Gum, has_origin: bool, changed: bool, default: str = 'main') -> str:
+    """Publishing is independent of whether a Codespace is wanted."""
+    if has_origin and not changed:
+        return 'nothing'
+    merge, local = f'merge into {default}', 'local commit only'
+    choice = ui.choose('Publish', [merge, local] if has_origin else [local], merge if has_origin else local)
+    return 'merge' if has_origin and choice == merge else 'local'
+
+
 def _reuse_label(name: str, ref: str | None, branch: str, paired: str | None) -> str:
-    """Menu label. A paired Codespace on another branch uses a semicolon; Gum splits defaults on commas."""
-    if name == paired and ref == branch:
-        return f'Reuse {name} (paired)'
+    # Gum splits defaults at commas; paired branch labels use a semicolon.
     if name == paired:
-        return f'Reuse {name} (paired; on {ref})'
-    if ref == branch:
-        return f'Reuse {name}'
-    return f'Reuse {name} (on {ref})'
+        return f'reuse {name} (paired; on {ref})'
+    return f'reuse {name}' if ref == branch else f'reuse {name} (on {ref})'
 
 
-def _reuse_default(names: list[str], refs: dict[str, str | None], branch: str, paired: str | None) -> str | None:
-    """First comma-free label: paired, then this branch, then list order. None if every label has a comma."""
-    ordered: list[str] = []
-    if paired in refs:
-        ordered.append(paired)
-    ordered.extend(name for name in names if refs[name] == branch and name not in ordered)
-    ordered.extend(name for name in names if name not in ordered)
-    for name in ordered:
-        label = _reuse_label(name, refs[name], branch, paired)
-        if ',' not in label:
-            return label
-    return None
+def _no_codespace() -> dict:
+    return {'action': 'none', 'name': None, 'machine': None, 'idle_timeout': None}
 
 
-def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume: str | None) -> dict | None:
-    """Codespace choices for branch (the default branch, with a GitHub origin)."""
-    action = ui.choose('After setup', [LAUNCH_BROWSER, LAUNCH_VSCODE, COMMIT_ONLY],
-                       LAUNCH_BROWSER if resume or _github_repository(project) else COMMIT_ONLY)
-    if action == COMMIT_ONLY:
-        return None
+def _reuse_options(api: Codespaces, name: str, branch: str, action: str, data: dict | None = None) -> dict:
+    data = api.get(name) if data is None else data
+    if data.get('git_status', {}).get('ref') != branch:
+        raise ValueError(move_first(name, branch, data.get('git_status', {}).get('ref')))
+    settings = api.resource_settings(data)
+    print(f'Existing codespace {name}: {json.dumps(settings, sort_keys=True)}', flush=True)
+    return {'action': action, 'name': name, 'machine': settings['machine'],
+            'idle_timeout': (f"{settings['idle_timeout_minutes']}m"
+                             if settings['idle_timeout_minutes'] is not None else None),
+            'location': settings['location'],
+            'retention': (f"{settings['retention_period_minutes']}m"
+                          if settings['retention_period_minutes'] is not None else None)}
+
+
+def _launch_unavailable(ui: Gum, error: ValueError) -> dict:
+    print(f'Launch unavailable: {error}', file=sys.stderr)
+    if ui.confirm('Continue without a Codespace?'):
+        return _no_codespace()
+    raise Cancelled()
+
+
+def _codespace_choice(ui: Gum, api: Codespaces, project: Path, branch: str, *, published: bool) -> dict:
+    """Show every repository Codespace, reserving create for an unpaired project."""
+    if not published:
+        print('Codespace actions need the setup and SSH on the default branch. '
+              'With unpublished local changes, choose merge to publish them first.', flush=True)
+        ui.choose('Codespace', ['none'], 'none')
+        return _no_codespace()
     try:
         repo = _repository(project)
-        if not resume:
-            # Every codespace of the repository is shown, so a second one is never created silently.
-            spaces = api.existing(repo)
-            if spaces:
-                refs = {space['name']: space.get('git_status', {}).get('ref') for space in spaces}
-                paired = _paired_codespace(project)
-                names = list(refs)
-                choices = ['Create a new codespace',
-                           *[_reuse_label(name, refs[name], branch, paired) for name in names]]
-                selected = _reuse_default(names, refs, branch, paired)
-                title = 'Existing codespaces for this repository'
-                # A comma in a branch name cannot be preselected; omit the default rather than crash the menu.
-                choice = ui.choose(title, choices) if selected is None else ui.choose(title, choices, selected)
-                if choice.startswith('Reuse '):
-                    resume = choice.removeprefix('Reuse ').split(' ')[0]
-        if resume:
-            data = api.get(resume)
-            settings = api.resource_settings(data)
-            if data.get('git_status', {}).get('ref') != branch:
-                raise ValueError(move_first(resume, branch, data.get('git_status', {}).get('ref')))
-            print(f'Existing codespace {resume}: {json.dumps(settings, sort_keys=True)}', flush=True)
-            if not ui.confirm('Reuse this codespace with these existing resource settings?'):
-                raise Cancelled()
-            return {'repo': repo, 'machine': settings['machine'],
-                    'idle_timeout': (f"{settings['idle_timeout_minutes']}m"
-                                     if settings['idle_timeout_minutes'] is not None else None),
-                    'location': settings['location'],
-                    'retention': (f"{settings['retention_period_minutes']}m"
-                                  if settings['retention_period_minutes'] is not None else None),
-                    'client': 'browser' if action.endswith('browser') else 'vscode', 'resume': resume}
-        # Before approval the configuration is not on GitHub yet.
-        # Offer repository machines now; launch rechecks them at the merged SHA.
+        spaces = api.existing(repo)
+        refs = {space['name']: space.get('git_status', {}).get('ref') for space in spaces}
+        paired, paired_data, usable = _paired_codespace(project), None, False
+        if paired:
+            try:
+                paired_data = api.get(paired)
+                usable = (paired_data.get('git_status', {}).get('ref') == branch
+                          and paired_data.get('repository', {}).get('full_name', '').lower() == repo.lower())
+                if not usable:
+                    print(f'Paired Codespace {paired} is unavailable for rebuild on {branch}; '
+                          f'it is on {paired_data.get("git_status", {}).get("ref")}.', flush=True)
+            except ValueError as error:
+                print(f'Paired Codespace {paired} is unavailable: {error}', flush=True)
+        choices = {'none': ('none', None)}
+        if usable:
+            choices[f'rebuild {paired}'] = ('rebuild', paired)
+        for name, ref in refs.items():
+            if not (usable and name == paired):
+                choices[_reuse_label(name, ref, branch, paired)] = ('reuse', name)
+        if not usable:
+            choices[CREATE_CODESPACE] = ('create', None)
+        matching = next((label for label, (action, name) in choices.items()
+                         if action == 'reuse' and name != paired and refs[name] == branch and ',' not in label), None)
+        # The owner's feature branch may have different or malformed setup files.
+        published_config = git(project, 'show', f'refs/remotes/origin/{branch}:.devcontainer/devcontainer.json',
+                               check=False)
+        metadata = (json.loads(published_config).get('customizations', {}).get('devcontainerSetup', {})
+                    if published_config else {})
+        selected = (f'rebuild {paired}' if usable else matching or
+                    ('none' if metadata.get('selections') else CREATE_CODESPACE))
+        choice = ui.choose('Codespace', list(choices), selected)
+        action, name = choices[choice]
+        if action == 'none':
+            return _no_codespace()
+        if name:
+            return _reuse_options(api, name, branch, action, paired_data if name == paired else None)
+        # No allocation before Review; launch rechecks availability at the merged SHA.
         machines = api.machines(repo)
         if not machines:
             raise ValueError('No available Codespaces machines for this repository/account.')
     except ValueError as error:
-        print(f'Launch unavailable: {error}', file=sys.stderr)
-        if ui.confirm('Continue with commit only?'):
-            return None
-        raise Cancelled()
+        return _launch_unavailable(ui, error)
     labels = {f'{m["cpus"]} cores / {m["memory_in_bytes"] // (1024**3)} GB RAM / '
               f'{m["storage_in_bytes"] // (1024**3)} GB disk ({m["name"]})': m for m in machines}
     selected = next((label for label, machine in labels.items() if machine['cpus'] == 4), next(iter(labels)))
     machine = labels[ui.choose('Codespaces machine', list(labels), selected)]
     timeout = ui.choose('Stop when idle for', ['15m', '30m', '1h', '2h'], '30m')
-    options = {'repo': repo, 'machine': machine['name'], 'idle_timeout': timeout,
-               'client': 'browser' if action.endswith('browser') else 'vscode', 'resume': resume}
+    options = {'action': 'create', 'name': None, 'machine': machine['name'], 'idle_timeout': timeout}
     if ui.confirm('Show advanced launch options?', False):
         region = ui.choose('Region', ['Automatic', 'EastUs', 'WestUs2', 'WestEurope', 'SouthEastAsia'])
         if region != 'Automatic':
             options['location'] = region
         options['retention'] = ui.choose('Delete stopped codespace after', ['24h', '72h', '168h', '720h'], '168h')
     return options
+
+
+def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume: str | None,
+                    *, published: bool = True) -> dict:
+    if not resume or not published:
+        return _codespace_choice(ui, api, project, branch, published=published)
+    # --resume is an explicit reuse, never a forced rebuild or an invitation to create another.
+    choice = ui.choose('Codespace', ['none', f'reuse {resume}'], f'reuse {resume}')
+    if choice == 'none':
+        return _no_codespace()
+    try:
+        _repository(project)
+        return _reuse_options(api, resume, branch, 'reuse')
+    except ValueError as error:
+        return _launch_unavailable(ui, error)
 
 
 def setup_continuity(project: Path, ui, codespace: str | None) -> None:
@@ -758,7 +789,8 @@ def _launch_on_default(api: Codespaces, project: Path, repo: str, default: str, 
     if reason:
         explanations = {'fetch': 'fetch failed', 'tracked-changes': 'tracked changes',
                         'other-branch': 'another branch is checked out', 'detached': 'detached HEAD',
-                        'diverged': 'local commits have diverged from origin', 'collision': 'a file is in the way'}
+                        'diverged': 'local commits have diverged from origin', 'collision': 'a file is in the way',
+                        'merge-failed': 'merge failed: ' + update.get('detail', '')}
         line += f'; {explanations[reason]}'
         if is_ancestor(project, sha, 'HEAD'):
             line += '; contains the reviewed setup'
@@ -772,10 +804,11 @@ def _launch_on_default(api: Codespaces, project: Path, repo: str, default: str, 
     elif reason:
         next_step = {'fetch': 'Check access to origin, then',
                      'tracked-changes': 'Preserve the tracked changes, then',
-                     'collision': 'Preserve and move the file in the way, then'}[reason]
+                     'collision': 'Preserve and move the file in the way, then',
+                     'merge-failed': 'Resolve the Git error, then'}[reason]
         print(f'{next_step} run: git -C {here} pull --ff-only', flush=True)
     config = json.loads(git(project, 'show', f'{sha}:.devcontainer/devcontainer.json'))
-    if not launch:
+    if not launch or launch.get('action') == 'none':
         return None, config
     state_home = os.environ.get('XDG_STATE_HOME', '')
     state = Path(state_home) if state_home and Path(state_home).is_absolute() else Path.home() / '.local/state'
@@ -790,22 +823,25 @@ def _launch_on_default(api: Codespaces, project: Path, repo: str, default: str, 
         except (OSError, ValueError):
             _LOG.info('Start evidence was not written')
 
+    options = {key: value for key, value in launch.items() if key not in ('action', 'name', 'repo', 'client')}
+    if 'action' in launch:
+        options.update(resume=launch['name'], force_rebuild=launch['action'] == 'rebuild')
     name = api.launch(repo, default, sha, dotfiles_repo=dotfiles, receipt=receipt_path(state, repo, default),
                       workspace=config.get('workspaceFolder'), state_root=state,
                       machine_profile=_machine_profile(project) if dotfiles else None,
                       on_created=_record_created, open_after_create=load_open_after_create(),
-                      **{key: value for key, value in launch.items() if key != 'client'})
+                      **options)
     return name, config
 
 
 def _merge_and_launch(ui, api: Codespaces, project: Path, repo: str, default: str, number: int, branch: str,
                       head: str, worktree: Path | None, launch: dict | None, preferences: dict):
-    """One confirmation, GitHub's merge of the reviewed head, then the codespace on <default>."""
+    """Confirm the reviewed head's merge, then update the checkout and perform the Codespace choice."""
     user = api.user()
     try:
         # Only an explicit yes merges: Enter and Ctrl-C leave the PR open.
-        merge = ui.confirm(f'Merge PR #{number} into {default} as {user}? '
-                           'Required reviews are bypassed if your account is allowed to.', False)
+        print('Required reviews are bypassed if your account is allowed to.', flush=True)
+        merge = ui.confirm(f'Merge PR #{number} into {default} as {user}? (y/N)', False)
     except Cancelled:
         merge = False
     if not merge:
@@ -823,13 +859,13 @@ def _resume_setup_pr(ui, api: Codespaces, project: Path, repo: str, default: str
     print(f'Setup PR #{pr["number"]} is open: {pr["title"]} ({pr["head"]["ref"]} into {default}, '
           f'at {pr["head"]["sha"][:12]}).', flush=True)
     try:
-        launch = _launch_options(ui, api, project, default, resume)
+        publish = _publish_choice(ui, True, True, default)
+        launch = _launch_options(ui, api, project, default, resume, published=publish == 'merge')
     except Cancelled:
-        launch = None
-    if not launch:
+        publish, launch = 'local', None
+    if publish != 'merge':
         # Commit only means no push and no PR: the open one stays as it is.
         raise ValueError(f'PR #{pr["number"]} is open. {RERUN}')
-    launch.pop('repo')
     name, config = _merge_and_launch(ui, api, project, repo, default, pr['number'], pr['head']['ref'],
                                      pr['head']['sha'], None, launch, preferences)
     if config.get('customizations', {}).get('devcontainerSetup', {}).get('selections', {}).get('continuity'):
@@ -861,19 +897,36 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
             found, metadata = scan(source), _metadata(source)
             _check_revision(metadata, ref, upgrade, default)
         chosen = defaults(found, preferences, metadata)
+        saved_ssh = bool(chosen.get('ssh'))
         while True:
             chosen = _select(ui, found, chosen, preferences)
             branch = git(source, 'branch', '--show-current') if default else proposed_branch(project)
-            launch = _launch_options(ui, api, project, default or branch, resume)
-            chosen['ssh'] = bool(launch)
-            files = render(source, SOURCE, chosen, ref)
-            integrate_taskfile(source, files)
-            integrate_continuity(source, files, chosen.get('continuity', False))
-            check_candidate(files, source)
-            # The worktree is on its setup branch already.
-            plan = GitPlan(source, files, branch=None if default else branch)
-            if not plan.changed:
-                plan.branch = plan.start_branch
+            chosen['ssh'] = bool(saved_ssh or chosen.get('continuity'))
+
+            def candidate():
+                files = render(source, SOURCE, chosen, ref)
+                integrate_taskfile(source, files)
+                integrate_continuity(source, files, chosen.get('continuity', False))
+                check_candidate(files, source)
+                plan = GitPlan(source, files, branch=None if default else branch)
+                if not plan.changed:
+                    plan.branch = plan.start_branch
+                return files, plan
+
+            files, plan = candidate()
+            publish = _publish_choice(ui, bool(default), bool(plan.changed), default or 'main')
+            launch = _launch_options(ui, api, project, default or branch, resume,
+                                     published=bool(default) and (publish != 'local' or
+                                                                 (not plan.changed and chosen['ssh'])))
+            if launch['action'] != 'none' and not chosen['ssh']:
+                chosen['ssh'] = True
+                files, plan = candidate()
+                if publish == 'nothing' and plan.changed:
+                    # Enabling SSH is itself a setup change that must be published before launch.
+                    publish = _publish_choice(ui, True, True, default)
+                    if publish == 'local':
+                        print('Codespace: none; the SSH change must reach the default branch first.', flush=True)
+                        launch = _no_codespace()
             origin = f' (from origin/{default})' if default else ''
             marker = json.loads(files['.devcontainer/devcontainer.json'])['customizations']['devcontainerSetup']
             # The PR body: the review without the local path, the dotfiles repository or the launch choices.
@@ -886,8 +939,14 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
             summary = list(body)
             summary[3] += f'; dotfiles: {preferences["dotfiles_repo"] if chosen["dotfiles"] else "disabled"}'
             print(f'\nProject: {project}\n' + '\n'.join(summary), flush=True)
-            if launch:
-                print(f'Launch: {launch["machine"]}, idle {launch["idle_timeout"]}, {launch["client"]}', flush=True)
+            publishing = (f'merge into {default}' if publish == 'merge' else 'local commit only' if publish == 'local'
+                          else f'nothing to publish (already on {default})')
+            print(f'Publish: {publishing}', flush=True)
+            target = f' {launch["name"]}' if launch['name'] else ''
+            print(f'Codespace: {launch["action"]}{target}; SSH: {"enabled" if chosen["ssh"] else "disabled"}', flush=True)
+            if launch['action'] != 'none':
+                print(f'Launch: {launch["machine"]}, idle {launch["idle_timeout"]}; '
+                      f'editor after create: {load_open_after_create()}', flush=True)
             while True:
                 action = ui.choose('Review setup', ['View diff', 'Change answers', 'Continue', 'Cancel'], 'Continue')
                 if action == 'View diff':
@@ -897,11 +956,6 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
             if action == 'Change answers':
                 continue
             if action == 'Cancel':
-                raise Cancelled()
-            prompt = (f'Commit setup files, push {plan.branch} and open a PR into {default}?' if launch and plan.changed
-                      else f'Create or open the selected codespace on {default}?' if launch
-                      else 'Commit these setup files?' if plan.changed else 'Save these personal preferences?')
-            if not ui.confirm(prompt):
                 raise Cancelled()
             _ensure_runner(ref)
             plan.apply()
@@ -920,17 +974,17 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
                         raise Cancelled()
             print(f'Setup commit: {sha}', flush=True)
             _preferences_after_commit(project, preferences)
-            if launch and plan.changed:
+            if publish == 'merge' and plan.changed:
                 # Never a second setup branch or PR while one is open.
-                if open_prs := api.setup_prs(launch['repo'], default):
+                if open_prs := api.setup_prs(github, default):
                     raise ValueError(_open_setup_prs(open_prs))
                 plan.push()
-                pull = (api.open_pr(launch['repo'], plan.branch, default, SETUP_TITLE, '\n'.join(body)),
+                pull = (api.open_pr(github, plan.branch, default, SETUP_TITLE, '\n'.join(body)),
                         plan.branch, sha, source)
             break
     name = None
-    if launch:
-        repo = launch.pop('repo')
+    if pull or (default and not plan.changed):
+        repo = github
         if pull:
             name, _ = _merge_and_launch(ui, api, project, repo, default, *pull, launch, preferences)
         else:

@@ -828,6 +828,21 @@ class SetupWorktreeTests(unittest.TestCase):
                 self.assertFalse(fast_forward_checkout(project, 'main' if case != 'invalid-default' else '--invalid'))
                 self.assertEqual(self.snapshot(project), before)
 
+    def test_fast_forward_reports_other_merge_failures(self):
+        project = self.project
+        self.push_to_origin(project, 'incoming.txt')
+        lock = project / '.git/index.lock'
+        lock.write_bytes(b'held by another git process\n')
+        before = self.snapshot(project)
+        result = self.checkout_update(project)
+        self.assertEqual((result['state'], result['reason']), ('refused', 'merge-failed'))
+        self.assertIn('index.lock', result['detail'])
+        self.assertEqual(len(result['detail'].splitlines()), 1)
+        self.assertLessEqual(len(result['detail']), 200)
+        self.assertEqual(result['behind'], 1)
+        self.assertEqual(self.snapshot(project), before)
+        self.assertEqual(lock.read_bytes(), b'held by another git process\n')
+
     def test_checkout_reports_current_without_mutating_notes(self):
         project = self.project
         (project / 'notes.txt').write_bytes(b'untracked notes\n')

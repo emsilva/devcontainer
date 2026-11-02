@@ -88,20 +88,142 @@ class WizardCliTests(unittest.TestCase):
         case = self
         class UI:
             def choose(self, title, options, selected=None):
-                return 'Push and open a Codespace in the browser' if title == 'After setup' else selected or options[0]
+                return 'create like last time' if title == 'Codespace' else selected or options[0]
 
             def confirm(self, title, default=True):
-                case.assertNotEqual(title, 'Continue with commit only?',
+                case.assertNotEqual(title, 'Continue without a Codespace?',
                                     'Unpublished branches must still offer Codespaces launch')
                 return default
 
         options = _launch_options(UI(), Codespaces(run=github), self.root, 'docs/local-only', None)
         self.assertEqual(options['machine'], 'standardLinux32gb')
-        self.assertEqual(options['client'], 'browser')
+        self.assertEqual(options['action'], 'create')
         self.assertEqual(options['idle_timeout'], '30m')
         self.assertFalse(any(arg.startswith('ref=') for call in calls for arg in call))
         self.assertEqual(self.git('rev-parse', 'HEAD'), before)
         self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def _split_menu(self, spaces, *, paired=None, choice=None, published=True, unavailable=None):
+        import contextlib
+        import io
+        from devcontainer_setup import __main__ as wizard
+        from devcontainer_setup.codespaces import Codespaces
+        self.assertTrue(callable(getattr(wizard, '_codespace_choice', None)),
+                        'Publish and Codespace must have independent choices')
+        self._ensure_origin()
+        menus, calls = [], []
+
+        class API:
+            resource_settings = staticmethod(Codespaces.resource_settings)
+            def existing(self, repo):
+                calls.append(('existing', repo))
+                return spaces
+            def get(self, name):
+                calls.append(('get', name))
+                if name == unavailable:
+                    raise ValueError('Not visible (HTTP 404)')
+                return next(space for space in spaces if space['name'] == name)
+            def machines(self, *args):
+                raise AssertionError('Rebuild/reuse must keep the actual resources')
+
+        class UI:
+            def choose(self, title, options, selected=None):
+                menus.append((title, options, selected))
+                if title != 'Codespace':
+                    raise AssertionError(f'Unexpected resource question: {title}')
+                return choice or selected
+            def confirm(self, title, default=True):
+                raise AssertionError(f'Review must carry routine confirmation: {title}')
+
+        api, output = API(), io.StringIO()
+        with patch.object(wizard, '_paired_codespace', return_value=paired), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            result = wizard._codespace_choice(UI(), api, self.root, 'main', published=published)
+        return result, menus, calls, output.getvalue(), api
+
+    @staticmethod
+    def _space(name, branch='main'):
+        return {'name': name, 'repository': {'full_name': 'owner/project'},
+                'git_status': {'ref': branch}, 'machine': {'name': 'premiumLinux'},
+                'idle_timeout_minutes': 60, 'retention_period_minutes': 4320, 'location': 'WestEurope'}
+
+    def test_local_only_offers_no_codespace_action(self):
+        from devcontainer_setup import __main__ as wizard
+        self.assertTrue(callable(getattr(wizard, '_publish_choice', None)),
+                        'Publishing must be independent from Codespaces')
+        menus = []
+        class UI:
+            def choose(self, title, options, selected=None):
+                menus.append((title, options, selected))
+                return 'local commit only'
+        self.assertEqual(wizard._publish_choice(UI(), True, True), 'local')
+        self.assertEqual(menus, [('Publish', ['merge into main', 'local commit only'], 'merge into main')])
+        result, menus, calls, output, _ = self._split_menu([], published=False)
+        self.assertEqual(result['action'], 'none')
+        self.assertEqual(menus, [('Codespace', ['none'], 'none')])
+        self.assertEqual(calls, [])
+        self.assertIn('default branch', output)
+
+    def test_paired_defaults_to_rebuild_with_force(self):
+        import contextlib
+        import io
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard
+        result, menus, _, _, api = self._split_menu([self._space('paired')], paired='paired')
+        self.assertEqual((result['action'], result['name']), ('rebuild', 'paired'))
+        self.assertEqual(menus[0][2], 'rebuild paired')
+        self.assertEqual((result['machine'], result['idle_timeout']), ('premiumLinux', '60m'))
+        api.launch = Mock(return_value='paired')
+        update = {'state': 'current', 'reason': None, 'head': 'abc1234', 'behind': 0}
+        with patch.object(wizard, 'default_contains', return_value=True), \
+                patch.object(wizard, 'merged_setup_branches', return_value=[]), \
+                patch('devcontainer_setup.git_ops.checkout_update', return_value=update), \
+                patch.object(wizard, 'git', return_value='{}'), \
+                patch.object(wizard, 'load_open_after_create', return_value='none'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            wizard._launch_on_default(api, self.root, 'owner/project', 'main', 'a' * 40,
+                                      result, {'apply_dotfiles': False})
+        self.assertIs(api.launch.call_args.kwargs['force_rebuild'], True)
+        self.assertEqual(api.launch.call_args.kwargs['resume'], 'paired')
+        self.assertEqual(api.launch.call_args.kwargs['open_after_create'], 'none')
+
+    def test_existing_unpaired_codespace_is_listed_and_default_reused(self):
+        result, menus, _, _, _ = self._split_menu([self._space('first'), self._space('second')])
+        self.assertEqual(menus, [('Codespace', ['none', 'reuse first', 'reuse second', 'create like last time'],
+                                  'reuse first')])
+        self.assertEqual((result['action'], result['name']), ('reuse', 'first'))
+        self.assertEqual(result['machine'], 'premiumLinux')
+
+    def test_no_create_with_a_usable_pairing(self):
+        for branch, unavailable in (('main', None), ('feature', None), ('main', 'paired')):
+            with self.subTest(branch=branch, unavailable=unavailable):
+                _, menus, _, output, _ = self._split_menu(
+                    [self._space('paired', branch), self._space('other')], paired='paired', choice='none',
+                    unavailable=unavailable)
+                options = menus[0][1]
+                if branch == 'main' and not unavailable:
+                    self.assertNotIn('create like last time', options)
+                    self.assertIn('rebuild paired', options)
+                else:
+                    self.assertIn('create like last time', options)
+                    self.assertIn('unavailable', output)
+                    self.assertNotIn('rebuild paired', options)
+                    self.assertEqual(menus[0][2], 'reuse other')
+                self.assertIn('reuse other', options)
+                self.assertFalse(any('replace' in option for option in options))
+
+    def test_codespace_default_uses_published_setup_not_feature_files(self):
+        self._ensure_origin()
+        config = self.root / '.devcontainer/devcontainer.json'
+        config.parent.mkdir()
+        config.write_text(json.dumps({'customizations': {'devcontainerSetup': {'selections': {'ssh': True}}}}))
+        self.git('add', '.')
+        self.git('commit', '-m', 'Published setup')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        self.git('switch', '-c', 'feature/local')
+        config.unlink()
+        _, menus, _, _, _ = self._split_menu([], choice='none')
+        self.assertEqual(menus[0][2], 'none', 'The published setup makes this a rerun')
 
     def test_existing_taskfile_variants_keep_real_task_operations(self):
         import shutil
@@ -310,8 +432,7 @@ class WizardCliTests(unittest.TestCase):
                     return subprocess.CompletedProcess(args, 0, json.dumps(payload), '')
                 class UI:
                     def choose(self, title, options, selected=None):
-                        if title == 'After setup': return 'Push and open a Codespace in the browser'
-                        if title == 'Existing codespaces for this repository': return 'Reuse existing-space'
+                        if title == 'Codespace': return 'reuse existing-space'
                         raise AssertionError(f'Unexpected creation prompt: {title}')
                     def confirm(self, title, default=True): return True
                 output = io.StringIO()
@@ -364,7 +485,7 @@ class WizardCliTests(unittest.TestCase):
                         return subprocess.CompletedProcess(args, 1, '', 'No Codespaces permission (HTTP 403)')
                     class UI:
                         def choose(self, title, options, selected=None):
-                            if title == 'After setup': return 'Push and open a Codespace in the browser'
+                            if title == 'Codespace': return 'create like last time'
                             raise AssertionError(f'Unexpected launch prompt: {title}')
                         def confirm(self, title, default=True):
                             prompts.append(title)
@@ -374,12 +495,12 @@ class WizardCliTests(unittest.TestCase):
                     error_output = io.StringIO()
                     with contextlib.redirect_stderr(error_output):
                         if accept_fallback:
-                            self.assertIsNone(_launch_options(UI(), Codespaces(run=github), self.root,
-                                                              'main', resume))
+                            self.assertEqual(_launch_options(UI(), Codespaces(run=github), self.root,
+                                                                'main', resume)['action'], 'none')
                         else:
                             with self.assertRaises(Cancelled):
                                 _launch_options(UI(), Codespaces(run=github), self.root, 'main', resume)
-                    self.assertEqual(prompts, ['Continue with commit only?'])
+                    self.assertEqual(prompts, ['Continue without a Codespace?'])
                     self.assertIn('Launch unavailable:', error_output.getvalue())
         self.assertEqual(self.git('status', '--porcelain'), '')
 
@@ -391,7 +512,7 @@ class WizardCliTests(unittest.TestCase):
         prompts = []
         class UI:
             def choose(self, title, options, selected=None):
-                return 'Push and open a Codespace in the browser'
+                return 'create like last time'
             def confirm(self, title, default=True):
                 prompts.append(title)
                 return True
@@ -399,35 +520,29 @@ class WizardCliTests(unittest.TestCase):
             raise AssertionError(f'No GitHub call without an origin: {args}')
         error_output = io.StringIO()
         with contextlib.redirect_stderr(error_output):
-            self.assertIsNone(_launch_options(UI(), Codespaces(run=github), self.root, 'main', None))
-        self.assertEqual(prompts, ['Continue with commit only?'])
+            self.assertEqual(_launch_options(UI(), Codespaces(run=github), self.root, 'main', None)['action'], 'none')
+        self.assertEqual(prompts, ['Continue without a Codespace?'])
         self.assertIn('git remote add origin', error_output.getvalue())
 
     def test_after_setup_choice_leads_with_the_codespace_and_defaults_to_it(self):
-        from devcontainer_setup.__main__ import _launch_options
-        from devcontainer_setup.codespaces import Codespaces
+        # The combined choice is now Publish; Codespace is reviewed independently (spec lines 52-60).
+        from devcontainer_setup.__main__ import _publish_choice
         menus = []
         class UI:
             def choose(self, title, options, selected=None):
-                menus.append((options, selected))
-                return next(option for option in options if option.startswith('Commit'))
-        def github(args, **kwargs):
-            raise AssertionError(f'Commit only makes no GitHub call: {args}')
-        self.assertIsNone(_launch_options(UI(), Codespaces(run=github), self.root, 'main', None))
-        self.git('remote', 'add', 'origin', 'https://github.com/owner/project.git')
-        self.assertIsNone(_launch_options(UI(), Codespaces(run=github), self.root, 'main', None))
-        (options, without_origin), (_, with_origin) = menus
-        self.assertEqual([option for option in options if option.startswith('Commit')], ['Commit only (no Codespace)'])
-        self.assertTrue(all('Codespace' in option for option in options))
-        self.assertEqual(without_origin, 'Commit only (no Codespace)')
-        self.assertEqual(with_origin, 'Push and open a Codespace in the browser')
+                menus.append((title, options, selected))
+                return selected
+        self.assertEqual(_publish_choice(UI(), False, True), 'local')
+        self.assertEqual(_publish_choice(UI(), True, True), 'merge')
+        self.assertEqual(menus, [('Publish', ['local commit only'], 'local commit only'),
+                                ('Publish', ['merge into main', 'local commit only'], 'merge into main')])
 
     def test_gum_refuses_a_default_it_would_split_at_commas(self):
         from devcontainer_setup.ui import Gum
         gum = Gum.__new__(Gum)
         gum.binary = '/usr/bin/false'
         with self.assertRaisesRegex(ValueError, 'comma'):
-            gum.choose('After setup', ['Commit only, no Codespace', 'Other'], 'Commit only, no Codespace')
+            gum.choose('Codespace', ['Commit only, no Codespace', 'Other'], 'Commit only, no Codespace')
 
     def test_commit_only_ending_says_how_to_get_a_codespace(self):
         import contextlib
@@ -523,20 +638,19 @@ class WizardCliTests(unittest.TestCase):
         from devcontainer_setup.__main__ import _launch_options
         from devcontainer_setup.codespaces import Codespaces
         from devcontainer_setup.ui import Cancelled
-        self.git('remote', 'add', 'origin', 'https://github.com/owner/project.git')
+        self._ensure_origin()
         prompts = []
         class UI:
             def choose(self, title, options, selected=None):
-                return 'Push and open a Codespace in the browser'
+                raise Cancelled()
             def confirm(self, title, default=True):
                 prompts.append(title)
-                return False
+                raise AssertionError('Cancellation must not offer an error fallback')
         def github(args, **kwargs):
-            return subprocess.CompletedProcess(args, 0,
-                '{"machine":{"name":"actual-machine"},"idle_timeout_minutes":30,"git_status":{"ref":"main"}}', '')
+            raise AssertionError('Cancellation must precede any resource lookup')
         with self.assertRaises(Cancelled):
             _launch_options(UI(), Codespaces(run=github), self.root, 'main', 'existing-space')
-        self.assertEqual(prompts, ['Reuse this codespace with these existing resource settings?'])
+        self.assertEqual(prompts, [])
 
     def test_codespace_on_another_branch_is_listed_and_refused(self):
         import contextlib
@@ -557,19 +671,19 @@ class WizardCliTests(unittest.TestCase):
                 class UI:
                     def choose(self, title, options, selected=None):
                         menus.append((title, options))
-                        return 'Push and open a Codespace in the browser' if title == 'After setup' else options[-1]
+                        return next(option for option in options if option.startswith('reuse '))
                     def confirm(self, title, default=True):
                         prompts.append(title)
                         return True
                 error_output = io.StringIO()
                 with contextlib.redirect_stderr(error_output), contextlib.redirect_stdout(io.StringIO()):
-                    self.assertIsNone(_launch_options(UI(), Codespaces(run=github), self.root, 'main', resume))
+                    self.assertEqual(_launch_options(UI(), Codespaces(run=github), self.root, 'main', resume)['action'], 'none')
                 if not resume:
-                    self.assertEqual(menus[1], ('Existing codespaces for this repository',
-                                                ['Create a new codespace', 'Reuse old-space (on setup/devcontainer)']))
+                    self.assertEqual(menus[0], ('Codespace',
+                                                ['none', 'reuse old-space (on setup/devcontainer)', 'create like last time']))
                 self.assertIn('Launch unavailable: Move old-space to main first; it is on setup/devcontainer.',
                               error_output.getvalue())
-                self.assertEqual(prompts, ['Continue with commit only?'])
+                self.assertEqual(prompts, ['Continue without a Codespace?'])
 
     def _ensure_origin(self):
         if 'origin' not in self.git('remote'):
@@ -608,9 +722,7 @@ class WizardCliTests(unittest.TestCase):
         class UI:
             def choose(self, title, options, *selected):
                 calls.append((title, options, selected))
-                if title == 'After setup':
-                    return 'Push and open a Codespace in the browser'
-                if title == 'Existing codespaces for this repository':
+                if title == 'Codespace':
                     return options[1]
                 raise AssertionError(f'Unexpected menu: {title}')
 
@@ -627,14 +739,16 @@ class WizardCliTests(unittest.TestCase):
                                            for space in spaces]}]
             else:
                 name = route.rsplit('/', 1)[-1]
-                found = next(space for space in spaces if space['name'] == name)
+                found = next((space for space in spaces if space['name'] == name), None)
+                if found is None:
+                    return subprocess.CompletedProcess(args, 1, '', 'Not visible (HTTP 404)')
                 payload = {'machine': {'name': 'standardLinux32gb'}, 'idle_timeout_minutes': 30,
                            'repository': {'full_name': 'owner/project'}, **found}
             return subprocess.CompletedProcess(args, 0, json.dumps(payload), '')
 
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             _launch_options(UI(), Codespaces(run=github), self.root, branch, None)
-        menus = [call for call in calls if call[0] == 'Existing codespaces for this repository']
+        menus = [call for call in calls if call[0] == 'Codespace']
         if not menus:
             raise AssertionError(f'Existing-codespace menu was not shown; calls={calls}')
         return menus[0][1], menus[0][2]
@@ -644,23 +758,23 @@ class WizardCliTests(unittest.TestCase):
         options, selected = self._existing_menu([
             {'name': 'first', 'git_status': {'ref': 'main'}},
             {'name': 'second', 'git_status': {'ref': 'main'}}])
-        self.assertEqual(selected, ('Reuse second (paired)',))
-        self.assertEqual(options, ['Create a new codespace', 'Reuse first', 'Reuse second (paired)'])
+        self.assertEqual(selected, ('rebuild second',))
+        self.assertEqual(options, ['none', 'rebuild second', 'reuse first'])
 
     def test_existing_codespace_menu_never_defaults_to_create(self):
         cases = (
             ('unpaired on this branch', None,
              [{'name': 'only', 'git_status': {'ref': 'main'}}],
-             ['Create a new codespace', 'Reuse only'], 'Reuse only'),
+             ['none', 'reuse only', 'create like last time'], 'reuse only'),
             ('unpaired other branch', None,
              [{'name': 'first', 'git_status': {'ref': 'feature'}},
               {'name': 'second', 'git_status': {'ref': 'other'}}],
-             ['Create a new codespace', 'Reuse first (on feature)', 'Reuse second (on other)'],
-             'Reuse first (on feature)'),
+             ['none', 'reuse first (on feature)', 'reuse second (on other)', 'create like last time'],
+             'create like last time'),
             ('pairing not listed', 'deleted-space',
              [{'name': 'elsewhere', 'git_status': {'ref': 'feature'}},
               {'name': 'here', 'git_status': {'ref': 'main'}}],
-             ['Create a new codespace', 'Reuse elsewhere (on feature)', 'Reuse here'], 'Reuse here'),
+             ['none', 'reuse elsewhere (on feature)', 'reuse here', 'create like last time'], 'reuse here'),
         )
         for name, paired, spaces, expected_options, expected in cases:
             with self.subTest(name=name):
@@ -669,18 +783,19 @@ class WizardCliTests(unittest.TestCase):
                 self.assertEqual(options, expected_options)
                 self.assertEqual(selected, (expected,))
                 self.assertIsNotNone(selected[0])
-                self.assertNotEqual(selected[0], 'Create a new codespace')
+                if any(space['git_status']['ref'] == 'main' for space in spaces):
+                    self.assertNotEqual(selected[0], 'create like last time')
 
     def test_pairing_lookup_errors_fall_back_to_the_unpaired_default(self):
         from devcontainer_setup.project_sync import scratch
         space = [{'name': 'only', 'git_status': {'ref': 'main'}}]
-        expected = ['Create a new codespace', 'Reuse only']
+        expected = ['none', 'reuse only', 'create like last time']
         self._write_binding('only', version=9)
         with self.subTest(error='ValueError'):
             options, selected = self._existing_menu(space)
             self.assertEqual(options, expected)
-            self.assertEqual(selected, ('Reuse only',))
-            self.assertNotEqual(selected[0], 'Create a new codespace')
+            self.assertEqual(selected, ('reuse only',))
+            self.assertNotEqual(selected[0], 'create like last time')
         state = self._write_binding('only')
         path = state / scratch.CONFIG
         path.chmod(0)
@@ -688,32 +803,31 @@ class WizardCliTests(unittest.TestCase):
         with self.subTest(error='OSError'):
             options, selected = self._existing_menu(space)
             self.assertEqual(options, expected)
-            self.assertEqual(selected, ('Reuse only',))
-            self.assertNotEqual(selected[0], 'Create a new codespace')
+            self.assertEqual(selected, ('reuse only',))
+            self.assertNotEqual(selected[0], 'create like last time')
 
     def test_existing_codespace_menu_skips_a_default_whose_ref_contains_a_comma(self):
         self._clear_binding()
         options, selected = self._existing_menu([
             {'name': 'comma-space', 'git_status': {'ref': 'feat,x'}},
             {'name': 'clean-space', 'git_status': {'ref': 'other'}}])
-        self.assertEqual(options, ['Create a new codespace', 'Reuse comma-space (on feat,x)',
-                                   'Reuse clean-space (on other)'])
-        self.assertEqual(selected, ('Reuse clean-space (on other)',))
+        self.assertEqual(options, ['none', 'reuse comma-space (on feat,x)',
+                                   'reuse clean-space (on other)', 'create like last time'])
+        self.assertEqual(selected, ('create like last time',))
         self.assertNotIn(',', selected[0])
-        self.assertNotEqual(selected[0], 'Create a new codespace')
         with self.subTest('every label has a comma'):
             options, selected = self._existing_menu([
                 {'name': 'comma-space', 'git_status': {'ref': 'feat,x'}}])
-            self.assertEqual(options, ['Create a new codespace', 'Reuse comma-space (on feat,x)'])
-            self.assertEqual(selected, ())
+            self.assertEqual(options, ['none', 'reuse comma-space (on feat,x)', 'create like last time'])
+            self.assertEqual(selected, ('create like last time',))
         with self.subTest('paired ref contains a comma'):
             self._write_binding('paired-space')
             options, selected = self._existing_menu([
                 {'name': 'paired-space', 'git_status': {'ref': 'feat,x'}},
                 {'name': 'here', 'git_status': {'ref': 'main'}}])
-            self.assertEqual(options, ['Create a new codespace', 'Reuse paired-space (paired; on feat,x)',
-                                       'Reuse here'])
-            self.assertEqual(selected, ('Reuse here',))
+            self.assertEqual(options, ['none', 'reuse paired-space (paired; on feat,x)',
+                                       'reuse here', 'create like last time'])
+            self.assertEqual(selected, ('reuse here',))
             self.assertNotIn(',', selected[0])
 
     def test_paired_codespace_on_another_branch_is_labelled_with_a_semicolon(self):
@@ -721,11 +835,11 @@ class WizardCliTests(unittest.TestCase):
         options, selected = self._existing_menu([
             {'name': 'paired-space', 'git_status': {'ref': 'feature'}},
             {'name': 'here', 'git_status': {'ref': 'main'}}])
-        self.assertEqual(options, ['Create a new codespace', 'Reuse paired-space (paired; on feature)',
-                                   'Reuse here'])
-        self.assertEqual(selected, ('Reuse paired-space (paired; on feature)',))
+        self.assertEqual(options, ['none', 'reuse paired-space (paired; on feature)',
+                                   'reuse here', 'create like last time'])
+        self.assertEqual(selected, ('reuse here',))
         self.assertNotIn(',', selected[0])
-        self.assertNotEqual(selected[0], 'Create a new codespace')
+        self.assertNotEqual(selected[0], 'create like last time')
 
     def test_paired_codespace_reads_a_hand_written_binding(self):
         from devcontainer_setup.__main__ import _paired_codespace
@@ -977,6 +1091,8 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
                 seen.setdefault('choices', []).append(title)
                 if title == 'Review setup':
                     seen['worktrees'] = case.git('worktree', 'list', '--porcelain')
+                if title == 'Publish' and title not in answers:
+                    return selected
                 if title not in answers:
                     raise AssertionError(f'Unexpected choice: {title}')
                 if answers[title] is CTRL_C:
@@ -1021,13 +1137,13 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
                 seen['output'] = output.getvalue()
         return seen
 
-    COMMIT_ONLY = {'After setup': 'Commit only (no Codespace)', 'Review setup': 'Continue',
+    COMMIT_ONLY = {'Publish': 'local commit only', 'Codespace': 'none', 'Review setup': 'Continue',
                    'Commit these setup files?': True}
-    LAUNCH = {'After setup': 'Push and open a Codespace in the browser',
+    LAUNCH = {'Publish': 'merge into main', 'Codespace': 'create like last time',
               'Codespaces machine': '4 cores / 16 GB RAM / 32 GB disk (standardLinux32gb)',
               'Stop when idle for': '30m', 'Review setup': 'Continue',
               'Commit setup files, push setup/devcontainer and open a PR into main?': True}
-    MERGE = 'Merge PR #1 into main as octo? Required reviews are bypassed if your account is allowed to.'
+    MERGE = 'Merge PR #1 into main as octo? (y/N)'
     RERUN = 'Merge it, then run task devcontainer:setup again to create the Codespace.'
 
     def gh(self, **changes):
@@ -1059,6 +1175,139 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
             self.interact(dict(self.LAUNCH, **{self.MERGE: False}))
         self.assertEqual(str(caught.exception), f'PR #1 is open. {self.RERUN}')
         return len(self.gh()['calls'])
+
+    SPLIT_NONE = {'Publish': 'merge into main', 'Codespace': 'none', 'Review setup': 'Continue',
+                  'Commit these setup files?': True,
+                  'Commit setup files, push setup/devcontainer and open a PR into main?': True}
+    SPLIT_MERGE = 'Merge PR #1 into main as octo? (y/N)'
+
+    def _publish_without_codespace(self, *, saved_ssh=False):
+        from devcontainer_setup import __main__ as wizard
+        original = wizard.defaults
+        def defaults(found, preferences, metadata):
+            return dict(original(found, preferences, metadata), ssh=saved_ssh, continuity=False)
+        with patch.object(wizard, 'defaults', side_effect=defaults):
+            seen = self.interact(dict(self.SPLIT_NONE, **{self.SPLIT_MERGE: True}))
+        self.assertTrue(self.gh()['prs'], 'Publish=merge must publish even with Codespace=none')
+        self.assertIs(self.gh()['prs'][0]['merged'], True)
+        return seen
+
+    def test_publish_merge_with_codespace_none_merges_and_updates_checkout(self):
+        notes = self.root / 'notes.txt'
+        notes.write_bytes(b'owner notes\n\xff')
+        seen = self._publish_without_codespace()
+        self.assertEqual(seen['result'], 0, seen['output'])
+        self.assertEqual(self.git('rev-parse', 'HEAD'), self.origin_git('rev-parse', 'main'))
+        self.assertEqual(notes.read_bytes(), b'owner notes\n\xff')
+        calls = self.gh()['calls']
+        self.assertLess(self.first(calls, 'api', '--method', 'POST'),
+                        self.first(calls, 'api', '--method', 'PUT'))
+        self.assertFalse(any(call['args'][:1] == ['codespace'] for call in calls))
+        self.assertIn('Checkout: updated', seen['output'])
+        self.assertIn('Publish: merge into main', seen['output'])
+        self.assertIn('Codespace: none', seen['output'])
+        self.assert_nothing_left()
+
+    def test_open_pr_path_asks_two_questions(self):
+        start = self.decline_merge()
+        try:
+            seen = self.interact(dict(self.SPLIT_NONE, **{self.SPLIT_MERGE: True}))
+        except ValueError as error:
+            self.fail(f'Publish=merge and Codespace=none must finish the open PR: {error}')
+        self.assertEqual(seen['choices'], ['Publish', 'Codespace'])
+        self.assertEqual(seen['confirms'], [self.SPLIT_MERGE])
+        calls = self.gh()['calls'][start:]
+        self.assertFalse(any(call['args'][:3] == ['api', '--method', 'POST'] for call in calls))
+        self.assertFalse(any(call['args'][:1] == ['codespace'] for call in calls))
+        self.assertEqual(self.git('rev-parse', 'HEAD'), self.origin_git('rev-parse', 'main'))
+        self.assert_nothing_left()
+
+    def test_codespace_none_keeps_saved_ssh(self):
+        self._publish_without_codespace(saved_ssh=True)
+        config_path = self.root / '.devcontainer/devcontainer.json'
+        before, head = config_path.read_bytes(), self.git('rev-parse', 'HEAD')
+        seen = self.interact(self.SPLIT_NONE)
+        self.assertEqual(seen['result'], 0, seen['output'])
+        self.assertIn('Files: already configured', seen['output'])
+        self.assertEqual(config_path.read_bytes(), before)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        config = json.loads(before)
+        selections = config['customizations']['devcontainerSetup']['selections']
+        self.assertIs(selections['ssh'], True)
+        self.assertIs(selections['continuity'], False)
+        self.assertIn('ghcr.io/devcontainers/features/sshd:1', config['features'])
+        self.assertIn(2222, config['forwardPorts'])
+        self.assertFalse(any(call['args'][:1] == ['codespace'] for call in self.gh()['calls']))
+
+    def test_change_answers_discards_ssh_from_an_uncommitted_codespace_choice(self):
+        seen = {}
+        class UI(self.ui(self.LAUNCH, seen)):
+            reviews = 0
+            def choose(self, title, options, selected=None):
+                if title == 'Publish' and self.reviews:
+                    return 'local commit only'
+                if title == 'Codespace' and self.reviews:
+                    return 'none'
+                if title == 'Review setup':
+                    self.reviews += 1
+                    if self.reviews == 1:
+                        return 'Change answers'
+                return super().choose(title, options, selected)
+        self.interact(self.LAUNCH, ui=UI)
+        config = json.loads(self.git('show', 'setup/devcontainer:.devcontainer/devcontainer.json'))
+        self.assertIs(config['customizations']['devcontainerSetup']['selections']['ssh'], False)
+        self.assertNotIn('ghcr.io/devcontainers/features/sshd:1', config['features'])
+        self.assertFalse(any(call['args'][:2] == ['api', '--method'] or call['args'][:1] == ['codespace']
+                             for call in self.gh()['calls']))
+
+    def test_merge_prompt_is_y_n_with_bypass_line(self):
+        import contextlib
+        import io
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard
+        from devcontainer_setup.ui import Cancelled
+        for answer in (ENTER, False, CTRL_C, True):
+            with self.subTest(answer=answer):
+                prompts, output = [], io.StringIO()
+                class UI:
+                    def confirm(self, title, default=True):
+                        prompts.append((title, default))
+                        if answer is CTRL_C:
+                            raise Cancelled()
+                        return default if answer is ENTER else answer
+                api = Mock()
+                api.user.return_value = 'octo'
+                api.merge_pr.return_value = 'a' * 40
+                with patch.object(wizard, '_launch_on_default', return_value=(None, {})), \
+                        contextlib.redirect_stdout(output):
+                    if answer is True:
+                        wizard._merge_and_launch(UI(), api, self.root, 'owner/project', 'main', 1,
+                                                 'setup/devcontainer', 'b' * 40, None, None, {})
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'PR #1 is open'):
+                            wizard._merge_and_launch(UI(), api, self.root, 'owner/project', 'main', 1,
+                                                     'setup/devcontainer', 'b' * 40, None, None, {})
+                self.assertEqual(prompts, [(self.SPLIT_MERGE, False)])
+                self.assertEqual(output.getvalue().splitlines(),
+                                 ['Required reviews are bypassed if your account is allowed to.'])
+                self.assertEqual(api.merge_pr.call_count, int(answer is True))
+
+    def test_nothing_to_publish_still_updates_checkout(self):
+        self._publish_without_codespace()
+        incoming = self.push_to_main({'remote-notes.txt': 'new upstream work\n'})
+        notes = self.root / 'notes.txt'
+        notes.write_bytes(b'owner notes\n')
+        start = len(self.gh()['calls'])
+        seen = self.interact(self.SPLIT_NONE)
+        self.assertIn('Publish: nothing to publish (already on main)', seen['output'])
+        self.assertNotIn('Publish', seen['choices'])
+        self.assertIn('Checkout: updated', seen['output'])
+        self.assertEqual(self.git('rev-parse', 'HEAD'), incoming)
+        self.assertEqual(notes.read_bytes(), b'owner notes\n')
+        self.assertFalse(any(call['args'][:2] == ['api', '--method'] or call['args'][:1] == ['codespace']
+                             for call in self.gh()['calls'][start:]))
+        self.assertEqual(len(self.gh()['prs']), 1)
+        self.assert_nothing_left()
 
     def test_rendered_files_come_from_the_worktree(self):
         from devcontainer_setup.__main__ import integrate_taskfile
@@ -1153,7 +1402,7 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.checkout_feature()
         before = self.snapshot()
         with self.assertRaises(Cancelled):
-            self.interact({'After setup': 'Commit only (no Codespace)', 'Review setup': 'Cancel'})
+            self.interact({'Codespace': 'none', 'Review setup': 'Cancel'})
         self.assertIn('Branch: setup/devcontainer (from origin/main)', self.seen['output'])
         self.assertIn(f'worktree {self.worktree_root() / "setup-devcontainer"}\n', self.seen['worktrees'])
         self.assertEqual(self.snapshot(), before)
@@ -1348,8 +1597,8 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
                 self.assertIs(self.seen['defaults'][self.MERGE], False)
 
     def test_resumed_pr_stays_open_unless_merged(self):
-        stops = (('commit only', {'After setup': 'Commit only (no Codespace)'}),
-                 ('ctrl-c at the codespace questions', {'After setup': CTRL_C}),
+        stops = (('commit only', {'Publish': 'local commit only', 'Codespace': 'none'}),
+                 ('ctrl-c at the codespace questions', {'Codespace': CTRL_C}),
                  ('declined', {self.MERGE: False}), ('enter', {self.MERGE: ENTER}), ('ctrl-c', {self.MERGE: CTRL_C}))
         for label, answers in stops:
             with self.subTest(label):
@@ -1535,6 +1784,29 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
                         command = f'git -C {shlex.quote(str(self.root))} pull --ff-only'
                     self.assertIn(command, text)
                     self.assertLess(text.index(command), text.index('--rebind'))
+
+    def test_ending_names_other_merge_failures(self):
+        import contextlib
+        import io
+        from devcontainer_setup.__main__ import _launch_on_default
+        from devcontainer_setup.git_ops import checkout_update
+        config = '{"customizations": {"devcontainerSetup": {"selections": {}}}}\n'
+        sha = self.push_to_main({'.devcontainer/devcontainer.json': config})
+        lock = self.root / '.git/index.lock'
+        lock.write_bytes(b'held\n')
+        before = self.snapshot()
+        detail = checkout_update(self.root, 'main').get('detail', '')
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _launch_on_default(None, self.root, 'owner/project', 'main', sha, None, {})
+        text = output.getvalue()
+        self.assertIn('merge failed', text)
+        self.assertIn('index.lock', text)
+        self.assertIn(detail, text)
+        self.assertIn(f'git -C {shlex.quote(str(self.root))} pull --ff-only', text)
+        self.assertNotIn('diverged', text)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(lock.read_bytes(), b'held\n')
 
     def test_feature_branch_is_never_told_to_merge(self):
         import contextlib
