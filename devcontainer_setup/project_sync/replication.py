@@ -31,8 +31,20 @@ def references(value):
             yield from references(item)
 
 
-def capture(project, store, *, env=None, historical_roots=()):
+def capture(project, store, *, env=None, historical_roots=(), relay=False):
     conversations = capture_conversations(project, store, state=store.state, env=env, historical_roots=historical_roots)
+    if relay:
+        relayed, issues = store.relay_entries()
+        entries = list(conversations['entries'])
+        def canonical(entry):
+            return json.dumps(entry, sort_keys=True, separators=(',', ':'), ensure_ascii=True, allow_nan=False)
+        seen = {canonical(entry) for entry in entries}
+        for entry in relayed:
+            key = canonical(entry)
+            if key not in seen:
+                entries.append(entry)
+                seen.add(key)
+        conversations = dict(conversations, entries=entries, issues=[*conversations['issues'], *issues])
     return store.save(dict(schema=2,
         project=dict(identity=project.identity, project_id=project.project_id, root=str(project.root)),
         conversations=conversations,
@@ -296,7 +308,7 @@ def sync_project_data(connection, project, state, remote_root, *, env=None, hist
         try:
             row['stage'] = 'capture'
             with sync_cycle.stage(cycle, name + ':capture', progress):
-                snapshot = (capture(project, store, env=env) if outbound else
+                snapshot = (capture(project, store, env=env, relay=True) if outbound else
                             endpoint.call('capture', historical_roots=list(historical_roots))['snapshot_id'])
                 row['snapshot_id'] = snapshot
                 manifest = source.load(snapshot)

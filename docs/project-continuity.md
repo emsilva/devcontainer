@@ -116,6 +116,11 @@ Passing the version check admits a release for validation only. The record,
 scope, ancestry and completed-turn checks decide which histories can sync;
 an unknown Codex record type is refused.
 
+A replacement Codespace receives the conversations its predecessors delivered to
+the Mac, including ones the Mac did not publish locally. A conversation is never
+copied back to the Codespace it started on. Later sync cycles retry delivery
+without creating duplicate imports.
+
 Native Codex can hide automated `exec` sessions and histories containing only
 inherited turns from its default resume picker. Such imports are reported as
 issues; they are not counted as successfully available conversations.
