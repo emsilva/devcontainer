@@ -245,7 +245,7 @@ class KeepAliveTests(Fakes):
             urlopen(env['GITHUB_API_URL'] + 'user/codespaces/cs-1/start', data=b'', timeout=3)
         caught.exception.close()
         self.assertEqual(caught.exception.code, 403)
-        self.assertEqual(record['process_identity'], process_identity(record['pid']))
+        self.assertTrue(keepalive._ours(record['pid'], record['process_identity'], 'cs-1'))
 
     def test_child_respawns_with_backoff_while_available(self):
         self.mode('exit')
