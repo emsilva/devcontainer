@@ -177,6 +177,15 @@ worker can sit in backoff or the Deleted retry outside its connection, with no w
 
 ## Live tests the plan runs first
 
+**Tests 1–4 ran on 2026-11-02** (results and evidence: `tmp/codespace-lifecycle/link-helper/spikes/RESULTS.md`):
+`BROWSER` from `/etc/environment` reaches every SSH session, tmux and the agents' tool shells, so call 11 does not
+apply. OpenCode ignores `BROWSER` and uses an `xdg-open` on the PATH only when one exists, so the stand-in ships
+(call 9). Walking up finds Plaud's terminal two levels above the helper. Writing into Claude's full-screen view
+garbles it, which confirms call 1's rule. az in an SSH session (`CODESPACES=true`) uses its device code and opens
+nothing. The links: Plaud `localhost:8199/auth/callback`; Codex `127.0.0.1:1455/auth/callback`; OpenCode ChatGPT
+`127.0.0.1:<random>/auth/callback`; Claude `localhost:<random>/callback`; az outside Codespaces
+`localhost:<random>` with no path; gh `github.com/login/device`. Tests 5–8 run in the Definition of done.
+
 On an innovate test branch and an unpaired test Codespace billed to kyndryl-agentic-ai, deleted when done
 (ruling 15; recipe in memory `live-test-unpushed-generator`). Each settles a cell REPORT marks unverified:
 
