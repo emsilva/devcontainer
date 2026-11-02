@@ -187,6 +187,73 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.relay_entries(), ([dict(later, relayed=True)], [dict(
             agent='claude', session_id='session', reason='Relayed conversation checkpoint is unreadable')]))
 
+    def test_unreadable_seed_sources_never_block_acknowledge(self):
+        base = self.path
+        cases = [
+            ('missing_manifest', json.dumps(dict(snapshot_id='e' * 64)).encode(), b'{'),
+            ('corrupt_receipt', b'{', b'[]'),
+            ('missing_receipt_id', b'{}', b'null'),
+            ('invalid_receipt_id', b'{"snapshot_id": []}', b'{'),
+            ('corrupt_marker', json.dumps(dict(snapshot_id='e' * 64)).encode(), b'{'),
+        ]
+        for name, receipt, journal in cases:
+            with self.subTest(source=name):
+                self.path = base / name
+                self.store = checkpoint_store.Store(self.path)
+                atomic_write(self.path / 'checkpoints/receipts/codespace.json', receipt)
+                if name == 'corrupt_marker':
+                    atomic_write(self.path / 'checkpoints/relay/seeded', b'{')
+                atomic_write(self.path / 'conversation-imports' / ('b' * 64) / 'receipt.json', journal)
+                seeded = self.conversation(b'valid journal', sid='seeded')
+                atomic_write(self.path / 'conversation-imports' / ('c' * 64) / 'receipt.json',
+                             json.dumps(dict(status='complete', source_checkpoint=seeded)).encode())
+                new = self.conversation(b'new receipt', sid='new')
+                snapshot = self.receive(new)
+                self.assertEqual(self.store.latest('codespace')['snapshot_id'], snapshot)
+                self.assertEqual(self.store.relay_entries(),
+                                 ([dict(seeded, relayed=True), dict(new, relayed=True)], []))
+                self.assertEqual(stat.S_IMODE((self.path / 'checkpoints/relay/seeded').stat().st_mode), 0o600)
+
+    def test_corrupt_record_file_is_an_issue_and_acknowledge_still_works(self):
+        base = self.path
+        for index, corrupt in enumerate((b'{', b'{}', b'{"schema": 1, "entry": [], "received_at": null}',
+                                         b'{"schema": 1, "entry": {}, "received_at": 0}',
+                                         b'{"schema": 1, "entry": {}, "received_at": "2026-11-02T00:00:00+00:00"}')):
+            with self.subTest(record=corrupt):
+                self.path = base / str(index)
+                self.store = checkpoint_store.Store(self.path)
+                healthy = self.conversation(b'healthy', sid='healthy')
+                self.receive(healthy)
+                digest = hashlib.sha256(b'{}').hexdigest() if index == 3 else 'b' * 64
+                path = self.path / 'checkpoints/relay' / (digest + '.json')
+                atomic_write(path, corrupt)
+                issue = dict(agent=None, session_id=None,
+                             reason='Relayed conversation checkpoint is unreadable')
+                self.assertEqual(self.store.relay_entries(), ([dict(healthy, relayed=True)], [issue]))
+                new = self.conversation(b'new', sid='new')
+                snapshot = self.receive(new)
+                self.assertEqual(self.store.latest('codespace')['snapshot_id'], snapshot)
+                self.assertEqual(self.store.relay_entries(),
+                                 ([dict(healthy, relayed=True), dict(new, relayed=True)], [issue]))
+                self.assertEqual(path.read_bytes(), corrupt)
+                # Collection cannot safely remove objects when a root is unreadable.
+                loose = self.store.put(b'loose')
+                self.age('objects', loose, checkpoint_store.KEEP_DAYS + 2)
+                with self.assertRaises((OSError, ValueError, KeyError, TypeError)):
+                    self.store.collect(apply=True)
+                self.assertEqual(self.store.read(loose), b'loose')
+
+    def test_identical_record_retry_does_not_read_heads_again(self):
+        entry = self.conversation(b'head of an unchanged conversation')
+        snapshot = self.receive(entry)
+        record = self.relay_records()[0]
+        original = record.read_bytes()
+        with mock.patch.object(self.store, 'read', wraps=self.store.read) as read:
+            self.store.acknowledge(snapshot, source='codespace')
+        # Acknowledgement still verifies each unique manifest blob once.
+        self.assertEqual(read.call_count, len({item['blob'] for item in entry['files']}))
+        self.assertEqual(record.read_bytes(), original)
+
     def test_collect_keeps_named_and_recent_manifests_and_what_they_reference(self):
         old, recent, named, loose, fresh = (self.store.put(name.encode()) for name in ('old', 'recent', 'named', 'loose', 'fresh'))
         stale = self.store.save({'files': [{'blob': old}]})

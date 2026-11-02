@@ -174,8 +174,24 @@ class Store:
         self.load(receipt['snapshot_id'])
         return receipt
 
-    def _relay_records(self):
-        return [(path, read_json(path)) for path in sorted((self.root / 'relay').glob('*.json'))]
+    def _relay_records(self, *, issues=None):
+        records = []
+        for path in sorted((self.root / 'relay').glob('*.json')):
+            try:
+                record = read_json(path)
+                if (record['schema'] != 1 or not isinstance(record['entry'], dict)
+                        or not isinstance(record['received_at'], str)):
+                    raise ValueError('Invalid relay record')
+                if hashlib.sha256(_canonical(record['entry'])).hexdigest() != path.stem:
+                    raise ValueError('Relay record entry digest differs')
+            except (OSError, ValueError, KeyError, TypeError):
+                if issues is None:
+                    raise  # Collection must not delete objects with an unreadable root.
+                issues.append(dict(agent=None, session_id=None,
+                                   reason='Relayed conversation checkpoint is unreadable'))
+            else:
+                records.append((path, record))
+        return records
 
     def _head(self, entry: dict) -> bytes | None:
         try:
@@ -186,15 +202,25 @@ class Store:
 
     def _record_received(self, manifest: dict) -> None:
         """Register received entries while the caller holds store.lock."""
-        for entry in manifest.get('conversations', {}).get('entries', []):
-            digest = hashlib.sha256(_canonical(entry)).hexdigest()
+        try:
+            entries = manifest['conversations']['entries']
+        except (OSError, ValueError, KeyError, TypeError):
+            return
+        if not isinstance(entries, list):
+            return
+        for entry in entries:
+            try:
+                digest = hashlib.sha256(_canonical(entry)).hexdigest()
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
             path = self.root / 'relay' / (digest + '.json')
+            records = self._relay_records(issues=[])
+            if any(old_path == path for old_path, _ in records):
+                continue  # An identical retry needs no head-blob reads.
             head = self._head(entry)
             retired = []
-            for old_path, record in self._relay_records():
+            for old_path, record in records:
                 old = record['entry']
-                if old_path == path:
-                    break  # A retry preserves the original receipt time.
                 if (old.get('agent'), old.get('session_id')) != (entry.get('agent'), entry.get('session_id')):
                     continue
                 old_head = self._head(old)
@@ -217,23 +243,27 @@ class Store:
         marker = self.root / 'relay' / 'seeded'
         try:
             read_json(marker)
-        except FileNotFoundError:
+        except (OSError, ValueError, KeyError, TypeError):
             pass
         else:
             return
         try:
             receipt = read_json(self._receipt('codespace'))
-        except FileNotFoundError:
-            pass
-        else:
             # Read verified manifest text without requiring all its blobs: a lost
             # blob becomes a per-entry relay issue, not a failed migration.
-            self._record_received(self._manifest(receipt['snapshot_id']))
+            manifest = self._manifest(receipt['snapshot_id'])
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        else:
+            self._record_received(manifest)
         for path in sorted((self.state / 'conversation-imports').glob('*/receipt.json')):
-            receipt = read_json(path)
-            if receipt.get('status') != 'complete' or path.with_name('superseded.json').exists():
+            try:
+                receipt = read_json(path)
+                if receipt.get('status') != 'complete' or path.with_name('superseded.json').exists():
+                    continue
+                entry = receipt.get('source_checkpoint')
+            except (OSError, ValueError, KeyError, TypeError):
                 continue
-            entry = receipt.get('source_checkpoint')
             if isinstance(entry, dict):
                 self._record_received(dict(conversations=dict(entries=[entry])))
         atomic_write(marker, _canonical(dict(schema=1)), mode=0o600)
@@ -243,7 +273,7 @@ class Store:
         entries, issues = [], []
         with locked(self.root / 'store.lock', blocking=True):
             self._seed_relay()
-            for _, record in sorted(self._relay_records(), key=lambda item: item[1]['received_at']):
+            for _, record in sorted(self._relay_records(issues=issues), key=lambda item: item[1]['received_at']):
                 entry = record['entry']
                 try:
                     self._verify(entry)
