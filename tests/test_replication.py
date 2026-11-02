@@ -148,6 +148,205 @@ class ReplicationTests(unittest.TestCase):
         self.assertFalse(any(c['request']['operation'] == 'restore' for c in self.connection.calls))
         self.assertTrue(all('project_files' not in c['modules'] for c in self.connection.calls))
 
+    def cycle(self):
+        return replication.sync_project_data(self.connection, self.project, self.store.state,
+                                             str(self.root), env=self.local_env)
+
+    def replace_codespace(self, name):
+        self.connection = IsolatedPythonConnection(self.base / name)
+        self.endpoint = rpc.RemoteEndpoint(self.connection, self.root, self.project.identity)
+        self.remote_store = Store(state_dir(self.project, self.connection.env))
+
+    def native_files(self, env):
+        from devcontainer_setup.project_sync.sessions import claude_namespace
+        return sorted((Path(env['CLAUDE_CONFIG_DIR']) / 'projects' / claude_namespace(self.root)).glob('*.jsonl'))
+
+    def test_published_predecessor_conversation_reaches_replacement(self):
+        sid, source = self.conversation(self.connection.env)
+        original = source.read_bytes()
+        first = self.cycle()
+        self.assertEqual([row['source_session_id'] for row in first['local_publication']['imported']], [sid])
+        self.replace_codespace('replacement-b')
+        result = self.cycle()
+        imported = result['remote_publication']['imported']
+        self.assertEqual([row['source_session_id'] for row in imported], [sid])
+        self.assertNotEqual(imported[0]['session_id'], sid)
+        self.assertEqual(result['outcome'], 'complete')
+        self.assertEqual([path.stem for path in self.native_files(self.connection.env)], [imported[0]['session_id']])
+        self.assertIn(b'ORCHID', self.native_files(self.connection.env)[0].read_bytes())
+        self.assertEqual(source.read_bytes(), original)
+
+    def test_refused_predecessor_conversation_reaches_replacement(self):
+        sid, _ = self.conversation(self.connection.env)
+        with patch('devcontainer_setup.project_sync.conversations.publish_conversations',
+                   return_value=dict(imported=[], unchanged=[], issues=[
+                       dict(agent='claude', session_id=sid, reason='fixture publication refused')])):
+            first = self.cycle()
+        inbound = first['directions']['codespace_to_desktop']
+        self.assertEqual(inbound['counts']['received'], 1)
+        self.assertEqual(inbound['counts']['available'], 0)
+        self.assertEqual(inbound['receipt'], self.store.latest('codespace'))
+        self.assertEqual(self.native_files(self.local_env), [])
+        self.replace_codespace('replacement-b')
+        result = self.cycle()
+        self.assertEqual([row['source_session_id'] for row in result['remote_publication']['imported']], [sid])
+        self.assertNotEqual(result['remote_publication']['imported'][0]['session_id'], sid)
+        self.assertEqual(result['outcome'], 'complete')
+
+    def test_never_attempted_conversation_reaches_replacement(self):
+        sid, _ = self.conversation(self.connection.env)
+        with patch('devcontainer_setup.project_sync.conversations.publish_conversations',
+                   side_effect=TimeoutError('fixture timeout before publication')):
+            first = self.cycle()
+        inbound = first['directions']['codespace_to_desktop']
+        self.assertEqual(inbound['stage'], 'publication')
+        self.assertEqual(inbound['outcome'], 'failed')
+        self.assertEqual(inbound['counts']['received'], 1)
+        self.assertEqual(inbound['receipt'], self.store.latest('codespace'))
+        self.assertFalse((self.store.state / 'conversation-imports').exists())
+        self.replace_codespace('replacement-b')
+        result = self.cycle()
+        self.assertEqual([row['source_session_id'] for row in result['remote_publication']['imported']], [sid])
+        self.assertNotEqual(result['remote_publication']['imported'][0]['session_id'], sid)
+        self.assertEqual(result['outcome'], 'complete')
+
+    def test_relay_to_the_origin_writes_nothing(self):
+        sid, source = self.conversation(self.connection.env)
+        original = source.read_bytes()
+        self.assertEqual(self.cycle()['remote_publication']['imported'], [])
+        for _ in range(2):
+            result = self.cycle()
+            self.assertEqual(result['remote_publication']['imported'], [])
+            self.assertEqual(result['remote_publication']['unchanged'], [
+                dict(agent='claude', source_session_id=sid, session_id=sid)])
+            self.assertEqual(result['outcome'], 'complete')
+            self.assertEqual(self.native_files(self.connection.env), [source])
+            self.assertEqual(source.read_bytes(), original)
+            self.assertFalse((self.remote_store.state / 'conversation-imports').exists())
+
+    def test_replacement_relay_is_idempotent(self):
+        sid, _ = self.conversation(self.connection.env)
+        self.cycle()
+        self.replace_codespace('replacement-b')
+        first = self.cycle()
+        self.assertEqual([row['source_session_id'] for row in first['remote_publication']['imported']], [sid])
+        files = {path: path.read_bytes() for path in self.native_files(self.connection.env)}
+        journals = set((self.remote_store.state / 'conversation-imports').iterdir())
+        self.assertEqual(len(files), 1)
+        self.assertEqual(len(journals), 1)
+        for _ in range(2):
+            result = self.cycle()
+            self.assertEqual(result['remote_publication']['imported'], [])
+            self.assertEqual([row['source_session_id'] for row in result['remote_publication']['unchanged']], [sid])
+            self.assertEqual(result['outcome'], 'complete')
+            self.assertEqual({path: path.read_bytes() for path in self.native_files(self.connection.env)}, files)
+            self.assertEqual(set((self.remote_store.state / 'conversation-imports').iterdir()), journals)
+
+    def test_chain_delivers_to_the_third_codespace(self):
+        sid, _ = self.conversation(self.connection.env)
+        self.cycle()
+        retired = self.connection
+        self.replace_codespace('replacement-b')
+        second = self.cycle()
+        self.assertEqual([row['source_session_id'] for row in second['remote_publication']['imported']], [sid])
+        self.assertEqual(self.store.load(second['receipt']['snapshot_id'])['conversations']['entries'], [])
+        self.replace_codespace('replacement-c')
+        with patch.object(retired, 'python', side_effect=AssertionError('retired Codespace contacted')):
+            third = self.cycle()
+        self.assertEqual([row['source_session_id'] for row in third['remote_publication']['imported']], [sid])
+        self.assertNotEqual(third['remote_publication']['imported'][0]['session_id'], sid)
+        self.assertEqual(third['outcome'], 'complete')
+
+    def test_interrupted_first_relay_finishes_next_cycle(self):
+        sids = {self.conversation(self.connection.env, text=text)[0] for text in ('FIRST', 'SECOND')}
+        self.cycle()
+        self.replace_codespace('replacement-b')
+        actual, replies = self.connection.python, []
+        def lose_publish_reply(code, payload=b'', timeout=60):
+            reply = actual(code, payload, timeout)
+            if payload and json.loads(payload)['request']['operation'] == 'publish':
+                replies.append(json.loads(reply))
+                return b'{"ok":false,"error":"fixture reply lost after publication"}'
+            return reply
+        with patch.object(self.connection, 'python', side_effect=lose_publish_reply):
+            first = self.cycle()
+        self.assertEqual(len(replies), 1)
+        self.assertEqual({row['source_session_id'] for row in replies[0]['result']['imported']}, sids)
+        outbound = first['directions']['desktop_to_codespace']
+        self.assertEqual(outbound['outcome'], 'failed')
+        self.assertEqual(outbound['stage'], 'publication')
+        self.assertEqual(outbound['counts']['received'], 2)
+        self.assertEqual(outbound['receipt'], self.remote_store.latest('desktop'))
+        self.assertEqual(first['directions']['codespace_to_desktop']['outcome'], 'complete')
+        files = {path: path.read_bytes() for path in self.native_files(self.connection.env)}
+        journals = set((self.remote_store.state / 'conversation-imports').iterdir())
+        self.assertEqual(len(files), 2)
+        self.assertEqual(len(journals), 2)
+        again = self.cycle()
+        self.assertEqual(again['remote_publication']['imported'], [])
+        self.assertEqual({row['source_session_id'] for row in again['remote_publication']['unchanged']}, sids)
+        self.assertEqual(again['outcome'], 'complete')
+        self.assertEqual({path: path.read_bytes() for path in self.native_files(self.connection.env)}, files)
+        self.assertEqual(set((self.remote_store.state / 'conversation-imports').iterdir()), journals)
+
+    def test_unreadable_record_does_not_stop_the_cycle(self):
+        bad_sid, _ = self.conversation(self.connection.env, text='LOST')
+        good_sid, _ = self.conversation(self.connection.env, text='RETAINED')
+        # Retain custody without native import journals that also need the lost blob.
+        with patch('devcontainer_setup.project_sync.conversations.publish_conversations',
+                   return_value=dict(imported=[], unchanged=[], issues=[dict(reason='fixture publication refused')])):
+            self.cycle()
+        entries, issues = self.store.relay_entries()
+        self.assertEqual(issues, [])
+        bad = next(entry for entry in entries if entry['session_id'] == bad_sid)
+        head = next(item for item in bad['files'] if item['session_id'] == bad_sid)
+        (self.store.root / 'objects' / head['blob']).unlink()
+        local_sid, _ = self.conversation(self.local_env, text='LOCAL')
+        self.replace_codespace('replacement-b')
+        result = self.cycle()
+        outbound = result['directions']['desktop_to_codespace']
+        self.assertEqual(outbound['capture_issues'], [dict(
+            agent='claude', session_id=bad_sid, reason='Relayed conversation checkpoint is unreadable')])
+        self.assertEqual({row['source_session_id'] for row in result['remote_publication']['imported']},
+                         {good_sid, local_sid})
+        self.assertEqual(outbound['receipt'], self.remote_store.latest('desktop'))
+        self.assertEqual(result['directions']['codespace_to_desktop']['outcome'], 'complete')
+        self.assertEqual(result['outcome'], 'degraded')
+        self.assertEqual(len(result['issues']), 1)
+
+    def test_codespace_capture_never_relays(self):
+        local_sid, _ = self.conversation(self.local_env, text='DESKTOP')
+        remote_sid, _ = self.conversation(self.connection.env, text='CODESPACE')
+        for _ in range(2):
+            result = self.cycle()
+            inbound = self.store.load(result['receipt']['snapshot_id'])
+            self.assertFalse(any(entry.get('relayed') for entry in inbound['conversations']['entries']))
+            self.assertFalse((self.remote_store.root / 'relay').exists())
+        outbound = self.store.load(result['directions']['desktop_to_codespace']['snapshot_id'])
+        self.assertEqual([entry['session_id'] for entry in outbound['conversations']['entries']
+                          if entry.get('relayed')], [remote_sid])
+        self.assertIn(local_sid, [entry['session_id'] for entry in outbound['conversations']['entries']])
+        snapshot = self.endpoint.call('capture')['snapshot_id']
+        self.assertFalse(any(entry.get('relayed') for entry in self.remote_store.load(snapshot)['conversations']['entries']))
+        self.assertFalse((self.remote_store.root / 'relay').exists())
+
+    def test_capture_merges_canonically_distinct_entries_and_both_issue_lists(self):
+        self.conversation(self.local_env, text='FIRST')
+        self.conversation(self.local_env, text='SECOND')
+        captured = self.store.load(replication.capture(self.project, self.store, env=self.local_env))
+        first, second = [dict(entry, relayed=True) for entry in captured['conversations']['entries']]
+        native_issue, relay_issue = dict(reason='native fixture issue'), dict(reason='relay fixture issue')
+        # Equal JSON with different key order must be sent once; retain the native order.
+        duplicate = dict(reversed(list(first.items())))
+        native = dict(schema=1, entries=[first], issues=[native_issue])
+        with patch.object(replication, 'capture_conversations', return_value=native), \
+                patch.object(Store, 'relay_entries', return_value=([duplicate, second, second], [relay_issue])):
+            result = self.cycle()
+        outbound = self.store.load(result['directions']['desktop_to_codespace']['snapshot_id'])
+        self.assertEqual(outbound['conversations']['entries'], [first, second])
+        self.assertEqual(outbound['conversations']['issues'], [native_issue, relay_issue])
+        self.assertEqual(outbound['schema'], 2)
+
     def test_a_cycle_that_received_both_ways_collects_both_stores_once_a_day(self):
         self.conversation(self.local_env, text='LOCAL'); self.conversation(self.connection.env, text='REMOTE')
         loose = []
