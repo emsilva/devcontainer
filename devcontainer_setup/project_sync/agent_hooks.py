@@ -12,7 +12,7 @@ import time
 from .state import atomic_write, read_json
 
 
-AGENTS = ('claude', 'codex', 'opencode')
+AGENTS = ('claude', 'codex', 'grok', 'opencode')
 RECEIPT = 'herdr-hooks.json'
 # Remote `integration install` and `integration status` bounds. The SSH call
 # is a little longer so a hung command hits these, not the transport timeout.
@@ -31,7 +31,7 @@ _FEEDBACK_STATES = ('current', 'linked', 'moved', 'managed elsewhere', 'no scrat
 # timeout=30, matching SKILL_TIMEOUT.
 REMOTE = """\
 import errno, json, os, shutil, stat, subprocess, sys
-ALLOWED = ("claude", "codex", "opencode")
+ALLOWED = ("claude", "codex", "grok", "opencode")
 FEEDBACK_DIR = "handoff-feedback"
 
 def ensure_skill(herdr):
@@ -390,7 +390,7 @@ def _state(rest: str) -> str:
 
 
 def parse(text: str) -> dict[str, str]:
-    """Map claude, codex and opencode to current, outdated, not installed, or unknown."""
+    """Map claude, codex, grok and opencode to current, outdated, not installed, or unknown."""
     found = {}
     for line in text.splitlines():
         for agent in AGENTS:
@@ -451,7 +451,7 @@ def _message(receipt: dict) -> str:
     if installed:
         return ('Installed Herdr resume hooks on ' + codespace + ' for ' + ', '.join(installed)
                 + '; its agents can now come back after a restart.')
-    return 'Herdr resume hooks are current on ' + codespace + ' (claude, codex, opencode).'
+    return 'Herdr resume hooks are current on ' + codespace + ' (claude, codex, grok, opencode).'
 
 
 def _skill_line(receipt: dict) -> str | None:
@@ -675,5 +675,5 @@ def status_line(receipt, codespace) -> str | None:
         checked = format_time(checked_at)
     except (TypeError, ValueError, OSError, OverflowError):
         return _with_skill(not_checked, None)
-    return _with_skill('Herdr hooks: claude, codex, opencode current on ' + codespace
+    return _with_skill('Herdr hooks: claude, codex, grok, opencode current on ' + codespace
                        + ' (checked ' + checked + ')', receipt)

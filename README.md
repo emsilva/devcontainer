@@ -29,7 +29,7 @@ The wizard asks you to:
    existing Codespace's actual settings.
 5. Review the file diff and approve the commit, plus the push and launch if selected.
 
-Every environment includes Python, uv, Codex, Claude Code, and OpenCode. The three
+Every environment includes Python, uv, Codex, Claude Code, OpenCode, and Grok. The four
 coding tools use their official native installers as `vscode`; Node is selected
 when the project needs it. Dotfiles apply inside the container.
 
@@ -41,7 +41,7 @@ small helpers, and a Taskfile include. Personal preferences live in
 
 | Command | Action |
 |---|---|
-| `codex` / `claude` | Start a native agent in the current checkout |
+| `codex` / `claude` / `opencode` / `grok` | Start a native agent in the current checkout |
 | `codex resume` / `claude --resume` | Choose a native conversation |
 | `task work:cs` | Connect Codespace Herdr and sync scratch and project conversations |
 | `task work:disconnect` | Disconnect this project's Codespace from the local Herdr UI |
@@ -68,7 +68,7 @@ runners need network access to validate their pinned source cache. Setup preserv
 existing project tasks, ports, and editor settings. Edits to managed helpers stop
 an overwrite and need manual migration.
 
-Inside the container, update all three coding tools without rebuilding:
+Inside the container, update all four coding tools without rebuilding:
 
 ```sh
 task devcontainer:upgrade:agents

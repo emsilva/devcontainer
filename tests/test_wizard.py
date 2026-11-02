@@ -1868,6 +1868,16 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
         self.assertIn('Update the main checkout', seen['output'])
 
+    def test_review_and_pr_body_list_grok_as_baseline(self):
+        seen = self.interact(dict(self.LAUNCH, **{self.MERGE: True}))
+        self.assertEqual(seen['result'], 0, seen['output'])
+        baseline = 'Agents: Codex, Claude Code, OpenCode, Grok (baseline)'
+        self.assertIn(baseline, seen['output'])
+        calls = self.gh()['calls']
+        body = json.loads(calls[self.first(calls, 'api', '--method', 'POST',
+                                         'repos/owner/project/pulls')]['stdin'])['body']
+        self.assertIn(baseline, body)
+
     def test_pr_body_leaves_out_the_dotfiles_repository(self):
         seen = self.interact(dict(self.LAUNCH, **{self.MERGE: True, 'Apply dotfiles inside the container?': True,
                                                    'Dotfiles repository': 'owner/dotfiles'}))
@@ -1875,7 +1885,7 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.assertIn('dotfiles: owner/dotfiles', seen['output'])  # The review still shows it.
         calls = self.gh()['calls']
         body = json.loads(calls[self.first(calls, 'api', '--method', 'POST', 'repos/owner/project/pulls')]['stdin'])['body']
-        self.assertIn('Agents: Codex, Claude Code, OpenCode (baseline)\n', body)
+        self.assertIn('Agents: Codex, Claude Code, OpenCode, Grok (baseline)\n', body)
         self.assertNotIn('owner/dotfiles', body)
         self.assertNotIn('dotfiles:', body)
 

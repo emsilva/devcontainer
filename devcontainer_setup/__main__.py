@@ -1162,7 +1162,7 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
             # The PR body: the review without the local path, the dotfiles repository or the launch choices.
             body = [f'Branch: {plan.branch}{origin}', f'Runtimes: {chosen["runtimes"]} (Python, Node and uv baseline)',
                     f'Tools: {", ".join(chosen["tools"]) or "baseline only"}',
-                    'Agents: Codex, Claude Code, OpenCode (baseline)',
+                    'Agents: Codex, Claude Code, OpenCode, Grok (baseline)',
                     f'Files: {", ".join(plan.changed) or "already configured"}',
                     *[f'Dependency: {detail}' for detail in marker.get('dependencies', {}).values()],
                     *[f'Version note: {detail}' for detail in marker.get('pinningLimitations', {}).values()]]

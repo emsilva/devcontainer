@@ -26,6 +26,14 @@ class RenderTests(unittest.TestCase):
         from devcontainer_setup.render import render
         return render(self.project, ROOT, dict(self.selection, **changes), REF)
 
+    def test_grok_is_checked_in_baseline_and_fresh_shell_commands(self):
+        files = self.render()
+        check = files['.devcontainer/scripts/validate-selected.sh'].decode()
+        commands = check.split('for tool in ', 1)[1].split(';', 1)[0].split()
+        fresh = check.split('for tool in ', 2)[2].split(';', 1)[0].split()
+        self.assertIn('grok', commands)
+        self.assertIn('grok', fresh)
+
     def test_scan_decisions_are_sorted_separate_and_preserved(self):
         decisions = [{'kind': 'tool', 'value': 'aws', 'answer': False},
                      {'kind': 'port', 'value': 8080, 'answer': True}]
