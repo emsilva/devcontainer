@@ -8,7 +8,8 @@ Read-only analysis with file:line evidence and five red tests against 936db93:
 `tmp/codespace-lifecycle/task-work/analysis/REPORT.md` (REPORT). Builder check:
 `tmp/codespace-lifecycle/task-work/builder-check/CHECK.md` (CHECK), settled below.
 
-**Status: draft, two owner inputs pending** (section "Owner inputs"). Everything else is decided below.
+**Status: owner inputs answered 2026-11-02 (rulings 29-32, section "Owner answers"). The plan waits until the sign-ins
+step ships (ruling 20 order).**
 
 ## The owner's words
 
@@ -117,8 +118,8 @@ carries it.
 - The menu offers 3-6 actions, the likely one first: Available → connect; running, not armed → connect, arm; stopped by
   you → start and connect; unexpected stop → the reason, then connect; failed creation → logs or resume; confirmed
   deleted → rebind or create; setup PR open → resume setup; checkout behind → `git -C <checkout> merge --ff-only
-  origin/<default>` (Git refuses an unsafe case itself); newer generator → upgrade. Each prints its exact command before
-  running it. Details prints `work:status`. Without a TTY: the state, then `Next:` lines, exit 0.
+  origin/<default>` (Git refuses an unsafe case itself); newer generator → upgrade; a conversation the paired
+  Codespace refused → forget it (ruling 30, #100 call 5). Each prints its exact command before running it. Details prints `work:status`. Without a TTY: the state, then `Next:` lines, exit 0.
 
 ### C. Checked delete (ruling 8, #62)
 
@@ -138,8 +139,8 @@ carries it.
   - **Scratch:** the current pairing synchronized with no conflicts; for a retired OLD, its files compared with the
     final flush that replace recorded (stage D step 3).
   - **History:** for the current pairing, a completed cycle with nothing pending, incomplete or unsupported; for a
-    retired OLD, no conversation turn newer than the final capture replace recorded (owner input 2 sets what "kept on
-    the Mac" allows).
+    retired OLD, no conversation turn newer than the final capture replace recorded. A conversation NEW refused that
+    the Mac keeps does not block; the verdict names each one on a `Kept on this Mac only` line (ruling 30).
   - **Agents:** a process inventory on the target over the same connection (herdr, claude, codex, grok, opencode),
     not the project's Herdr machine, which points at NEW after a move (CHECK Q10). A failed read is `unknown`.
 - Each category reads SAFE, UNSAFE (with the outstanding paths, counts or commit ids) or UNKNOWN; deletion is offered
@@ -189,7 +190,7 @@ left to the checked delete), or when either Codespace is deleted (CHECK Q11).
 4. **Move** sync, recovery and Herdr to NEW, without entering Herdr's TUI. For an armed project, stage A's consent
    rules run first, now that NEW's name and billing owner are readable: the consent move, or a typed `arm` for NEW; a
    decline keeps OLD paired and NEW listed (call 8; CHECK Q7). A nonzero Herdr result is not "connected".
-5. **Sign in fresh** with the step-3 sequence (every selected tool, Grok and each Claude account). A failed or skipped
+5. **Sign in fresh** with the step-3 sequence (every selected tool, Grok and one Claude account, ruling 25). A failed or skipped
    tool joins a retry list and does not block steps 6-7 (call 3).
 6. **Check NEW:** validation, a completed sync cycle, NEW's keeper if armed, Herdr reachable, and every OLD
    conversation revision present on NEW through #100's relay (by revision and content, not by count).
@@ -207,17 +208,17 @@ subprocesses of the project's own `project-sync.sh`, so the worker and keeper th
 (`runtime_id` hashes the package's path, `state.py:310-322`, and a worker started from the release cache would read as
 not current, `workspace.py:143-146`). In this repo the coordinator runs from `scripts/setup.sh`.
 
-## Owner inputs (pending; each changes the build)
+## Owner answers (2026-11-02 20:31Z, rulings 29-32)
 
-1. **What the delete check must cover.** Git, scratch, Claude and Codex conversations, and live agents are checked.
-   Files Git ignores, home-folder data outside sync (the 10-25 hand check looked at both), and Grok and OpenCode
-   conversations (not captured today, `conversations.py:462`, `596`) are named under "Not checked" and do not block.
-   Is that enough, or must delete inventory and export them before it offers `delete`? Exporting them is a new feature
-   with its own size and secret-handling rules.
-2. **Conversations a replacement cannot open.** When a conversation is kept on the Mac but NEW refused to publish it,
-   may OLD still be deleted (the verdict names each one), or must it block? And should `task work` offer "forget this
-   conversation" (stop relaying it and clear the degraded sync it causes today; #100's call 5 left that to this
-   step), keeping the Mac copy?
+1. **What the delete check must cover:** "List them, allow delete" (ruling 29). Files Git ignores, home-folder data
+   outside sync, and Grok and OpenCode conversations (not captured today, `conversations.py:462`, `596`) are named
+   under "Not checked" and do not block. Nothing is exported.
+2. **Conversations a replacement cannot open:** "Allow delete, add forget" (ruling 30). A conversation NEW refused
+   that the Mac keeps is named in the verdict and does not block. **Forget** is a scriptable command and a `task work`
+   action: it stops relaying that conversation and clears the degraded sync it causes (#100 call 5), keeping the Mac
+   copy. Nothing is deleted on either side.
+3. **An agent inside the Codespace may stop it** (ruling 31, confirms call 9).
+4. **The live test uses innovate with backup** (ruling 32, confirms call 10).
 
 ## Constraints
 
@@ -245,7 +246,9 @@ interactive). Plus REPORT §7's acceptance list, at least:
 - **C:** a clean main plus a dirty second worktree, or a stash → UNSAFE and zero DELETE calls; an unpushed commit the
   Mac cannot find → UNSAFE; late OLD scratch, a turn newer than the final capture, a failed process read → UNSAFE or
   UNKNOWN; only the exact word proceeds; EOF, headless or a changed target → zero destructive calls; deleting a retired
-  OLD leaves NEW's `arming.json` byte-identical and NEW's next lifetime stop is still restarted (CHECK C1).
+  OLD leaves NEW's `arming.json` byte-identical and NEW's next lifetime stop is still restarted (CHECK C1); a refused
+  conversation the Mac keeps is named and does not block; forget stops its relay and clears degraded sync, and the
+  Mac copy is byte-identical afterwards.
 - **D:** premium/120 m beats a stale four-core receipt; unreadable resources fail closed; a failure at each phase
   resumes on rerun; a lost create reply never creates twice; a dotfiles retry never rebuilds; the worker and keeper
   after a replace are current for the vendored runtime; OLD → Mac → NEW conversations arrive with exact revisions.
@@ -258,7 +261,8 @@ interactive). Plus REPORT §7's acceptance list, at least:
 ## Left to the builder
 
 Module names (REPORT suggests `project_sync/work.py` and `project_sync/deletion.py`), the journal encoding, the Gum
-layout, the bounded probe's structure, the Codespace-to-Mac stop request's format, the test-only branch override's name.
+layout, the bounded probe's structure, the Codespace-to-Mac stop request's format, the test-only branch override's name,
+the forget command's name and where its record lives.
 
 ## Calls made by the lead (each can be overruled)
 
@@ -290,9 +294,9 @@ connection can no longer reach it (C2); it dropped the final flush of OLD before
 the release cache would leave a worker the project's runtime does not count as current (Q1). The calls:
 
 9. **Ruling 7 covers an agent inside the Codespace**, as its source says ("a lead can't stop its own Codespace"): the
-   request goes through the Mac, which records the owner stop (C3). If a Mac-side agent is enough, this shrinks.
+   request goes through the Mac, which records the owner stop (C3). Confirmed by the owner (ruling 31).
 10. **The live test follows the 2026-10-27 ruling "innovate, with backup"**, as today's live session did, with a
-    test-only branch override that the menu never shows (C4). No new owner input.
+    test-only branch override that the menu never shows (C4). Confirmed by the owner (ruling 32).
 11. **The consent decision comes before the retarget, its prompt outside the lock, with a move intent for a crash
     between them** (C6, Q8).
 12. **The Git check's containment test runs on the Mac** (Q3); **agents on OLD are read as processes** (Q10).
