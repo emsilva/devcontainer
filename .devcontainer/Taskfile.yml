@@ -40,7 +40,7 @@ tasks:
     silent: false
 
   upgrade:agents:
-    desc: Update native Codex, Claude Code and OpenCode with official user installers
+    desc: Update native Codex, Claude Code, OpenCode and Grok with official user installers
     cmds:
       - bash .devcontainer/scripts/install-agents.sh --update
   upgrade:lock:

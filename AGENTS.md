@@ -11,7 +11,7 @@
 - `task devcontainer:rebuild` — recreate the container locally with the Dev Containers CLI (requires `@devcontainers/cli`).
 - `task devcontainer:upgrade:self` — pull the latest canonical `.devcontainer` assets.
 - `task devcontainer:upgrade:lock` — bump feature versions in `devcontainer-lock.json` (review the diff, then commit).
-- `task devcontainer:upgrade:agents` — refresh the native Codex, Claude Code, and OpenCode installations in-place.
+- `task devcontainer:upgrade:agents` — refresh the native Codex, Claude Code, OpenCode, and Grok installations in-place.
 - `task devcontainer:setup:dotfiles -- <repo>` (or `load-dotfiles <repo>`) — apply chezmoi dotfiles.
 - `bash .devcontainer/scripts/validate-devcontainer.sh` — verify required tools, PATH wiring, and Docker connectivity (run inside the container; outside requires Docker access).
 

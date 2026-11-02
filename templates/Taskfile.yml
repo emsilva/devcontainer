@@ -16,7 +16,7 @@ tasks:
     cmds:
       - bash .devcontainer/scripts/setup-wizard.sh --upgrade {{.CLI_ARGS}}
   upgrade:agents:
-    desc: Update native agents and the pinned ccswap and Plaud tools
+    desc: Update native Codex, Claude Code, OpenCode and Grok and the pinned ccswap and Plaud tools
     cmds:
       - bash .devcontainer/scripts/install-agents.sh --update
       - bash .devcontainer/scripts/install-tools.sh --update

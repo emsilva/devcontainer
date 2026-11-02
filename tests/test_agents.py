@@ -35,6 +35,7 @@ case " ${FAIL_DOWNLOAD:-} " in *" $url "*) echo 'exit 0' > "$out"; exit 22;; esa
 case "$url" in
  https://chatgpt.com/codex/install.sh|https://releases.openai.com/codex/install.sh) name=codex;;
  https://github.com/openai/codex/releases/latest/download/install.sh) name=codex;;
+ https://x.ai/cli/install.sh) name=grok;;
  https://claude.ai/install.sh) name=claude;;
  https://opencode.ai/install|https://opencode.ai/v2/install) name=opencode;;
  *) exit 90;;
@@ -74,6 +75,23 @@ chmod +x "$HOME/{directory}/{name}"
 {native}
 ''')
 
+        self.write(self.root / 'grok.sh', '''#!/bin/bash
+set -eu
+executing_shell=${BASH:-}
+[ "${executing_shell##*/}" = bash ]
+printf 'install grok %s\\n' "$*" >> "$TEST_CALLS"
+[ "${FAIL_INSTALL:-}" != grok ] || exit 33
+[ "${GROK_BIN_DIR:-$HOME/.grok/bin}" = "$HOME/.grok/bin" ]
+[ "${GROK_CHANNEL:-stable}" = stable ]
+[ "${GROK_DEPLOYMENT_KEY+x}" != x ]
+[ "${GROK_PROXY_URL+x}" != x ]
+case "${SHELL##*/}" in bash|zsh|fish) echo rewritten >> "$HOME/.bashrc";; esac
+mkdir -p "$HOME/.grok/downloads" "$HOME/.grok/bin"
+printf '#!/bin/sh\\n[ "${FAIL_CHECK:-}" != grok ] || exit 44\\necho "${TEST_GROK_VERSION:-grok 1.0.70 (test) [stable]}"\\n' > "$HOME/.grok/downloads/grok-linux-x86_64"
+chmod +x "$HOME/.grok/downloads/grok-linux-x86_64"
+ln -sfn ../downloads/grok-linux-x86_64 "$HOME/.grok/bin/grok"
+''')
+
     def write(self, path, content):
         path.write_text(content)
         path.chmod(0o755)
@@ -84,6 +102,71 @@ chmod +x "$HOME/{directory}/{name}"
 
     def assert_ok(self, result):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+    def test_grok_install_idempotence_update_and_check(self):
+        self.assert_ok(self.run_helper())
+        calls = self.log.read_text()
+        self.assertIn('https://x.ai/cli/install.sh', calls)
+        self.assertIn('install grok ', calls)
+        launcher = self.home / '.local/bin/grok'
+        self.assertEqual(Path(os.readlink(launcher)), self.home / '.grok/bin/grok')
+        self.assertEqual(launcher.resolve(), self.home / '.grok/downloads/grok-linux-x86_64')
+        self.assert_ok(self.run_helper())
+        check = self.run_helper('--check')
+        self.assert_ok(check)
+        self.assertIn('grok 1.0.70', check.stdout)
+        self.assertEqual(calls, self.log.read_text())
+        self.assert_ok(self.run_helper('--update'))
+        self.assertEqual(self.log.read_text().count('install grok '), 2)
+
+    def test_grok_rejects_wrong_chain_and_external_downloads(self):
+        self.assert_ok(self.run_helper())
+        launcher = self.home / '.local/bin/grok'
+        native = self.home / '.grok/bin/grok'
+        binary = self.home / '.grok/downloads/grok-linux-x86_64'
+        for target in (binary, self.bin / 'external-grok'):
+            with self.subTest(target=target):
+                self.write(self.bin / 'external-grok', '#!/bin/sh\necho grok external\n')
+                launcher.unlink(missing_ok=True)
+                launcher.symlink_to(target)
+                self.assertNotEqual(self.run_helper('--check').returncode, 0)
+        launcher.unlink()
+        launcher.symlink_to(native)
+        native.parent.mkdir(parents=True, exist_ok=True)
+        native.unlink(missing_ok=True)
+        native.symlink_to(self.bin / 'external-grok')
+        self.assertNotEqual(self.run_helper('--check').returncode, 0)
+
+    def test_grok_requires_version_prefix(self):
+        self.assertNotEqual(self.run_helper(TEST_GROK_VERSION='1.0.70').returncode, 0)
+
+    def test_grok_neutralizes_vendor_environment_and_preserves_profiles(self):
+        profile = self.home / '.bashrc'
+        profile.write_text('# personal profile\n')
+        self.assert_ok(self.run_helper(SHELL='/bin/bash', GROK_BIN_DIR=str(self.root / 'redirected'),
+                                       GROK_CHANNEL='enterprise', GROK_DEPLOYMENT_KEY='fixture-only',
+                                       GROK_PROXY_URL='https://fixture.invalid'))
+        self.assertIn('install grok ', self.log.read_text())
+        self.assertEqual(profile.read_text(), '# personal profile\n')
+        self.assertFalse((self.root / 'redirected').exists())
+
+    def test_grok_download_failure_propagates(self):
+        result = self.run_helper(FAIL_DOWNLOAD='https://x.ai/cli/install.sh')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Could not download the grok installer', result.stderr)
+        self.assertNotIn('install grok ', self.log.read_text())
+
+    def test_grok_syntax_failure_prevents_execution(self):
+        self.write(self.root / 'grok.sh', 'echo executed >> "$TEST_CALLS"\nif then\n')
+        result = self.run_helper()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('executed', self.log.read_text())
+
+    def test_grok_install_failure_propagates(self):
+        self.assertEqual(self.run_helper(FAIL_INSTALL='grok').returncode, 33)
+
+    def test_grok_version_failure_propagates(self):
+        self.assertNotEqual(self.run_helper(FAIL_CHECK='grok').returncode, 0)
 
     def test_opencode_v2_installer_is_pinned(self):
         self.assert_ok(self.run_helper())

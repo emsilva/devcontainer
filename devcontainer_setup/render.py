@@ -391,7 +391,7 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
         effective_tools.add('db-clients')
     for tool in sorted(effective_tools):
         commands.extend(tool_commands[tool])
-    commands.extend(['claude', 'codex', 'opencode', 'ccswap'])
+    commands.extend(['claude', 'codex', 'opencode', 'grok', 'ccswap'])
     commands.extend(selected['package_managers'].values())
     if selected['dotfiles']:
         commands.extend(['chezmoi', 'load-dotfiles'])
@@ -468,7 +468,7 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
     if ('image' in config) == ('build' in config):
         raise ValueError('Choose exactly one devcontainer image or build configuration')
     # Adoption may retain a project's older Node version after the desired defaults merge.
-    fresh_commands = ['codex', 'claude', 'opencode', 'ccswap', 'node']
+    fresh_commands = ['codex', 'claude', 'opencode', 'grok', 'ccswap', 'node']
     if plaud_supported(str(config['features'][FEATURE + 'node:1']['version'])):
         commands.append('plaud')
         fresh_commands.append('plaud')

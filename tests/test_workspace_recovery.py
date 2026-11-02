@@ -512,14 +512,14 @@ class ExistingCheckoutTests(unittest.TestCase):
         from devcontainer_setup.project_sync.state import atomic_write
         self.registry()
         receipt = {'codespace': 'space', 'checked_at': 1700000000.5,
-                   'hooks': {'claude': 'current', 'codex': 'current', 'opencode': 'current'}, 'installed': []}
+                   'hooks': {'claude': 'current', 'codex': 'current', 'grok': 'current', 'opencode': 'current'}, 'installed': []}
         atomic_write(self.state / 'herdr-hooks.json', json.dumps(receipt).encode() + b'\n')
         with patch.object(scratch, 'status', return_value=dict(running=False, phase='stopped')), \
                 patch('devcontainer_setup.project_sync.codespaces.Codespaces', side_effect=AssertionError('offline')):
             result = workspace.status(self.project, self.state)
         self.assertEqual(result['herdr_hooks']['codespace'], 'space')
         self.assertEqual(result['herdr_hooks']['hooks']['opencode'], 'current')
-        self.assertIn('Herdr hooks: claude, codex, opencode current on space', workspace.status_text(result))
+        self.assertIn('Herdr hooks: claude, codex, grok, opencode current on space', workspace.status_text(result))
         self.assertIn('; skill unknown (task work:cs installs it)', workspace.status_text(result))
 
     def test_status_returns_env_files_without_a_remote_call(self):

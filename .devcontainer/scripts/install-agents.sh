@@ -40,6 +40,17 @@ try:
     if name == 'claude':
         assert launcher.is_symlink()
         target.relative_to(home / '.local/share/claude/versions')
+    if name == 'grok':
+        native = home / '.grok/bin/grok'
+        assert launcher.is_symlink() and native.is_symlink()
+        assert native.lstat().st_uid == os.getuid()
+        assert Path(os.path.abspath(launcher.parent / os.readlink(launcher))) == native
+        target.relative_to(home / '.grok/downloads')
+        assert target.samefile(native)
+        for parent in native.parents:
+            assert parent.stat().st_uid == os.getuid()
+            if parent == home:
+                break
     if name == 'opencode':
         assert launcher.is_symlink()
         assert target.samefile(home / '.opencode/bin/opencode')
@@ -77,6 +88,12 @@ check_agent() {
       *) echo 'Managed OpenCode must report major version 2.' >&2; return 1 ;;
     esac
   fi
+  if [ "$name" = grok ]; then
+    case "$version" in
+      'grok '*) ;;
+      *) echo 'Managed Grok must report a version starting with grok .' >&2; return 1 ;;
+    esac
+  fi
   if [ "$name" = codex ]; then
     # Read-only package probe: no daemon, authentication, or model request.
     "$launcher" app-server daemon pid-update-loop --check-package-ownership || return 1
@@ -84,14 +101,14 @@ check_agent() {
 }
 
 if [ "$mode" = --check ]; then
-  for agent in codex claude opencode; do check_agent "$agent"; done
+  for agent in codex claude opencode grok; do check_agent "$agent"; done
   exit 0
 fi
 
 umask 077
 temporary=$(mktemp -d)
 trap 'rm -rf "$temporary"' EXIT
-for agent in codex claude opencode; do
+for agent in codex claude opencode grok; do
   if [ "$mode" != --update ] && check_agent "$agent" >/dev/null 2>&1; then
     printf 'Managed %s is complete; keeping installed release.\n' "$agent"
     continue
@@ -101,6 +118,7 @@ for agent in codex claude opencode; do
     # the same script is published beside the releases and on GitHub Releases.
     codex) urls='https://chatgpt.com/codex/install.sh https://releases.openai.com/codex/install.sh https://github.com/openai/codex/releases/latest/download/install.sh'; shell='sh' ;;
     claude) urls=https://claude.ai/install.sh; shell='bash' ;;
+    grok) urls=https://x.ai/cli/install.sh; shell='bash' ;;
     opencode) urls=https://opencode.ai/v2/install; shell='bash' ;;
   esac
   installer="$temporary/$agent.sh"
@@ -118,6 +136,15 @@ for agent in codex claude opencode; do
     # cannot add a PATH block to personal profiles during migration.
     codex) PATH="$HOME/.local/bin:$HOME/.opencode/bin:/usr/bin:/bin" CODEX_NON_INTERACTIVE=1 sh "$installer" ;;
     claude) bash "$installer" latest ;;
+    grok)
+      # The vendor selects profiles by SHELL basename; an unknown shell avoids edits.
+      # Deployment settings must never turn this installation into a deployment.
+      (
+        unset GROK_DEPLOYMENT_KEY GROK_PROXY_URL
+        GROK_BIN_DIR="$HOME/.grok/bin" GROK_CHANNEL=stable SHELL=/bin/false bash "$installer"
+      )
+      ln -sfn "$HOME/.grok/bin/grok" "$HOME/.local/bin/grok"
+      ;;
     opencode)
       bash "$installer" --no-modify-path --version "$OPENCODE_VERSION"
       ln -sfn "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode"
