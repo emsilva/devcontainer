@@ -52,21 +52,28 @@ analysis with file:line evidence and three red tests: `tmp/codespace-lifecycle/w
 `After setup` is replaced by two choices, both on Review:
 - **Publish:** `merge into <default>` (default with a GitHub origin) or `local commit only` (default otherwise).
   Push, PR and merge depend on Publish only, on the normal path and on the resumed-open-PR path alike.
-- **Codespace:** `none`, `create like last time`, `rebuild <paired name>` (only when one is paired; then it is the
-  default). Without a pairing the default is `none` on a rerun and `create like last time` on first setup.
-  Create and rebuild need a published setup: with `local commit only` they are not offered, and Review says why.
+- **Codespace:** `none`; `rebuild <paired name>` (when the pairing is usable; then it is the default); `reuse <name>`
+  for every other Codespace of the repository, as today, so a second one is never created silently (ruling 14.1,
+  `test_existing_codespace_menu_never_defaults_to_create`); `create like last time` only when no usable pairing exists.
+  Default without a pairing: reuse an existing Codespace on this branch if there is one, else `none` on a rerun and
+  `create like last time` on first setup. Create, rebuild and reuse need the setup on the default branch: with
+  `local commit only` and unpublished changes they are not offered, and Review says why.
 - The editor opens only when the user preference `open_after_create` is `browser` or `vscode` (default `none`),
   and only after a create. Rebuild never opens anything. New receipts drop the `client` field; a legacy receipt's
   `client` never counts as the opt-in.
-- `rebuild` forces `gh codespace rebuild` even when the commit has not changed (an explicit request), then runs
-  today's validation; today's idempotent retry after an interrupted rebuild is kept.
-- SSH stays on whenever continuity is on, whatever the choices (`render.py` invariant).
+- `rebuild` (menu) passes a new force flag to `launch()`: it rebuilds even when the receipt shows this commit
+  already validated. `reuse` and `--resume NAME` keep today's exact behaviour (the receipt decides: a pending rebuild
+  is redone, a completed one is skipped), for any Codespace of the repository, paired or not.
+- SSH: `selections.ssh` or continuity or any Codespace action other than `none`. A rerun with `none` keeps the saved
+  value (never drops sshd/2222 silently). When the Codespace choice turns SSH on, Review re-renders and shows it.
 
 ### Rerun at Review (#81, ruling 3)
 
 - A project whose `devcontainer.json` already has `customizations.devcontainerSetup.selections` opens at Review,
   built from those selections, the remembered dotfiles repository, and the resolved launch values below. First setup
   still walks every screen.
+- Before Review, apply `_select`'s non-interactive normalization exactly as today (adopt a declared exact package
+  manager version, drop managers of unselected runtimes): those show as changes on Review, not questions.
 - Before Review, ask only about new scan findings: a runtime, tool, port or manager recommendation, or a
   conflicting declaration, that is neither in the saved selections nor in the recorded scan decisions. A changed
   evidence path alone is not new. Each answer, including a decline, is recorded so it is never asked again.
@@ -75,7 +82,10 @@ analysis with file:line evidence and three red tests: `tmp/codespace-lifecycle/w
 - Review's Change answers opens the full editor (every screen today's flow has, both advanced gates). View diff and
   Cancel stay. The routine reuse and commit/push/PR confirms are folded into Review's Continue; the merge prompt stays
   separate.
-- The project's saved `selections.dotfiles` decides whether dotfiles apply on a rerun, not the user-wide default.
+- The project's saved `selections.dotfiles` decides whether dotfiles apply on a rerun, everywhere a gate reads it
+  today (including `_preferences_after_commit` and the launch path), not the user-wide default; a rerun never writes
+  it back to the user preferences. If it is on and this machine has no remembered repository, ask for the repository
+  before Review (a missing answer, not a new finding).
 
 ### Machine and idle timeout (ruling 22)
 
@@ -104,8 +114,11 @@ No. Enter, No and Ctrl-C leave the PR open; only an explicit yes merges.
 
 ## Constraints
 
-- Generated projects and this repo's own `.devcontainer` keep working; existing receipts and preference files stay
-  readable (unknown preference keys are rejected today, so `open_after_create` is added to the schema).
+- Generated projects and this repo's own `.devcontainer` keep working; existing receipts stay readable.
+- Preferences: every older generator pin rejects unknown keys in `~/.config/devcontainer-setup/config.json`
+  (`preferences.py:30-31`), and all three projects run older pins until rolled out. So `open_after_create` lives in
+  its own file, `~/.config/devcontainer-setup/open-after-create.json`, which old pins never read. And, at the origin,
+  the new loader keeps unknown keys on save and ignores them on read, so the next new key does not repeat this.
 - Every existing safety check stays: reviewed-head and default-branch containment before launch, dirty/branch/divergence
   refusals on reuse, receipt-before-validation ordering.
 - Commit messages plain imperative, no AI attribution. Gates: `task check`, `task test`.
@@ -133,3 +146,25 @@ Review lays the two choices out; how the full editor is reused under Change answ
    default branch; Review says so.
 5. **Scan decisions live in the project's metadata**, so every machine that reruns setup sees the same answers.
 6. **Untracked files no longer block the checkout update**; tracked changes still do (REPORT #63 controls).
+
+## Builder check (2026-11-02) and the calls it settled
+
+A fresh reader checked this design against the code and found ten questions and five contradictions; the lead
+verified the key ones in source (`preferences.py:30-31` rejects unknown keys; `__main__.py:615-631` lists every
+Codespace of the repository). The sections above now carry the answers. The calls:
+
+7. **`open_after_create` gets its own file**, and the preferences loader stops rejecting unknown keys (C1).
+8. **`--resume NAME` and `reuse` keep today's meaning; only the menu's `rebuild` forces a rebuild** (Q2, C3).
+9. **Every Codespace of the repository stays listed** as `reuse <name>`; `create` is offered only without a usable
+   pairing (a second Codespace for a paired project is a replacement, the `task work` step) (Q3, Q10).
+10. **SSH = saved value, or continuity, or a Codespace action**; never dropped by choosing `none` (Q4, C2).
+11. **The open-PR path asks the two choices as two plain questions** (it has no render to review) (Q5, C4).
+12. **A rerun with nothing to publish** shows Publish as "nothing to publish (already on <default>)"; the checkout
+    update runs whenever the run ends with the setup on the default branch, merged now or already there (Q6).
+13. **A decline is recorded in the project metadata and published like any change** (one line on Review's diff);
+    with `local commit only` it is asked again next run, and Review says so (Q7).
+14. **The project's dotfiles choice governs every gate; a missing repository on this machine is asked** (Q8).
+15. **Today's silent package-manager normalization still runs before Review** and shows as a change (Q9, C5).
+16. **With an unusable pairing** (404, other branch), Review says why and offers `none`, `reuse` of others and
+    `create like last time` using the last receipt's machine (Q10).
+17. **REPORT's red tests are analysis scaffolding**: the builder writes its own red tests in the suite (Q11).
