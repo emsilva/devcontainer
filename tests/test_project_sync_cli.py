@@ -546,6 +546,18 @@ class OwnerPowerTests(unittest.TestCase):
 
 
 class ProjectSyncCLITests(unittest.TestCase):
+    def test_work_signin_dispatches_to_signin_main(self):
+        from unittest import mock
+        from devcontainer_setup.project_sync import __main__ as cli, links
+        project = mock.Mock(root=self.root)
+        with mock.patch.object(cli, 'discover_project', return_value=project), \
+                mock.patch.object(cli, 'state_dir', return_value=self.state), \
+                mock.patch.object(links, 'signin_main', return_value=0) as signin, \
+                mock.patch.object(cli.sys.stdin, 'isatty', return_value=True), \
+                mock.patch.object(cli.sys.stdout, 'isatty', return_value=True):
+            self.assertEqual(cli.main(['--project', str(self.root), 'work', '--signin']), 0)
+        signin.assert_called_once_with(self.root, self.state)
+
     def test_work_cs_on_a_missing_pairing_lists_this_repositorys_codespaces(self):
         # #60: the same active token labels the missing pairing and repository inventory.
         from unittest import mock

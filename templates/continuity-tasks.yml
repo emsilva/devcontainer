@@ -3,6 +3,11 @@
     interactive: true
     cmds:
       - bash .devcontainer/scripts/project-sync.sh work --codespace {{.CLI_ARGS}}
+  work:signin:
+    desc: Finish waiting Codespace browser sign-ins on this Mac
+    interactive: true
+    cmds:
+      - bash .devcontainer/scripts/project-sync.sh work --signin {{.CLI_ARGS}}
   work:status:
     desc: Show scratch and project conversation synchronization status
     cmds:

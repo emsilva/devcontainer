@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
 import errno
 import json
 import logging
@@ -9,9 +10,13 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
+import selectors
+import shlex
 import signal
 import socket
 import subprocess
+import threading
 import time
 from urllib.parse import parse_qs, urlsplit
 
@@ -224,10 +229,15 @@ class Forwards:
 
     def tend(self, connection, *, now=None):
         now = time.time() if now is None else now
-        for port in self.active():
+        ports = self.active()
+        # Local deadlines remain enforceable even while a remote probe fails.
+        for port in ports:
             request, _, _ = self.requests[port]
             limit = deadline(request)
-            if (limit is not None and now >= limit) or not remote_listening(connection, port):
+            if limit is not None and now >= limit:
+                self.stop(port)
+        for port in ports:
+            if port in self.children and not remote_listening(connection, port):
                 self.stop(port)
 
     def end_left_behind(self) -> list[int]:
@@ -350,3 +360,354 @@ def handle(request: Request, connection, forwards: Forwards, *, project: str, no
     notifier(project, request.program, request.host, f'Port {request.port}' if request.port else '')
     _LOG.info('Opened: %s %s port %s', request.program, request.host, request.port or 'none')
     return 'forwarded' if request.port is not None else 'opened'
+
+
+# stdin stays open for the worker's stream. At EOF the same source is a one-shot
+# snapshot; SIGNINS_ONLY leaves ordinary links queued for the connected worker.
+REMOTE_WATCHER = r'''import json,math,os,select,stat,sys,time
+from pathlib import Path
+from urllib.parse import parse_qs,urlsplit
+
+base=Path.home()/'.local/state/devcontainer-links'
+requests=base/'requests'
+claimed=base/'claimed'
+for directory in (base,requests,claimed):
+ directory.mkdir(mode=0o700,parents=True,exist_ok=True)
+ if directory.is_symlink() or not directory.is_dir(): raise ValueError('Unsafe link state')
+ directory.chmod(0o700)
+
+def read(path):
+ fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+ try:
+  info=os.fstat(fd)
+  if not stat.S_ISREG(info.st_mode) or info.st_size>65536: raise ValueError('Invalid file')
+  raw=os.read(fd,65537)
+  if len(raw)>65536: raise ValueError('Invalid file')
+  value=json.loads(raw)
+  if (not isinstance(value,dict) or type(value.get('schema')) is not int or value['schema']!=1
+      or not {'id','url','created_at','program','pid','start','tty'}<=value.keys()
+      or type(value['created_at']) not in (int,float) or not math.isfinite(value['created_at'])):
+   raise ValueError('Invalid request')
+  return value
+ finally: os.close(fd)
+
+def signin(value):
+ try:
+  redirect=parse_qs(urlsplit(value['url']).query,max_num_fields=256).get('redirect_uri',[''])[0]
+  parsed=urlsplit(redirect)
+  return (parsed.scheme in ('http','https') and parsed.hostname in ('localhost','127.0.0.1','::1')
+          and parsed.port is not None and 1024<=parsed.port<=65535)
+ except (ValueError,TypeError,KeyError): return False
+
+def discard(path):
+ try:
+  if stat.S_ISDIR(path.lstat().st_mode): path.rmdir()
+  else: path.unlink()
+ except OSError: pass
+
+due=0
+while True:
+ if time.monotonic()>=due:
+  fd=os.open(base/'mac-listening',os.O_CREAT|os.O_WRONLY|os.O_NOFOLLOW|os.O_NONBLOCK,0o600)
+  try:
+   if not stat.S_ISREG(os.fstat(fd).st_mode): raise ValueError('Invalid heartbeat')
+   os.utime(fd,None)
+  finally: os.close(fd)
+  due=time.monotonic()+5
+ for source in requests.glob('*.json'):
+  if globals().get('SIGNINS_ONLY',False):
+   try:
+    value=read(source)
+    if time.time()-value['created_at']<=600 and not signin(value): continue
+   except Exception: pass
+  target=claimed/(str(time.time_ns())+'-'+str(os.getpid())+'-'+os.urandom(4).hex()+'.json')
+  try: source.rename(target)
+  except FileNotFoundError: continue
+  try:
+   value=read(target)
+   if time.time()-value['created_at']<=600:
+    print(json.dumps(value,separators=(',',':')),flush=True)
+  except Exception:
+   print('Skipped invalid link request',file=sys.stderr,flush=True)
+  finally: discard(target)
+ if select.select([sys.stdin],[],[],.2)[0] and not os.read(sys.stdin.fileno(),4096): break
+'''
+
+
+def watcher_live(state: Path) -> bool:
+    try:
+        value = read_json(Path(state) / 'links-watcher.json')
+        age = time.time() - value['heartbeat_at']
+        return bool(0 <= age <= 15 and value.get('process_identity')
+                    and process_identity(value.get('pid')) == value['process_identity'])
+    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+        return False
+
+
+def _stop_owned(forwards):
+    failure = None
+    for port in list(forwards.children):
+        try:
+            forwards.stop(port)
+        except Exception as error:
+            failure = error
+    if failure is not None:
+        raise ValueError('An owned callback forward could not be stopped') from None
+
+
+@contextmanager
+def _defer_signals():
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    caught = []
+    previous = {sig: signal.signal(sig, lambda number, _: caught.append(number))
+                for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        if caught:
+            signal.raise_signal(caught[0])
+
+
+class Watcher(threading.Thread):
+    def __init__(self, connection, state: Path, project: str, logger, *, now=time.time):
+        super().__init__(name='project-links', daemon=True)
+        self.connection, self.state, self.project, self.logger = connection, Path(state), project, logger
+        self.now = now
+        self.owner = 'watcher-' + secrets.token_hex(16)
+        self.identity = process_identity(os.getpid())
+        self.forwards = Forwards(self.state, self.owner)
+        self._halt = threading.Event()
+        self._stream_lock = threading.Lock()
+        self._stream = None
+
+    def _heartbeat(self):
+        value = dict(pid=os.getpid(), process_identity=self.identity,
+                     owner=self.owner, heartbeat_at=self.now())
+        atomic_write(self.state / 'links-watcher.json', json.dumps(value).encode())
+
+    def _clear(self):
+        try:
+            if read_json(self.state / 'links-watcher.json').get('owner') == self.owner:
+                (self.state / 'links-watcher.json').unlink()
+        except FileNotFoundError:
+            pass
+
+    def _close_stream(self):
+        with self._stream_lock:
+            child, self._stream = self._stream, None
+        if child is None:
+            return
+        try:
+            child.stdin.close()
+        except (OSError, ValueError):
+            pass
+        if child.poll() is None:
+            _signal_group(child.pid, signal.SIGTERM)
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _signal_group(child.pid, signal.SIGKILL)
+            child.wait(timeout=5)
+        finally:
+            child.stdout.close()
+            child.stderr.close()
+
+    def _serve(self):
+        command = 'python3 -I -B -c ' + shlex.quote(REMOTE_WATCHER)
+        child = subprocess.Popen(['ssh', '-F', str(self.state / 'ssh-config'), '-T', 'project-sync', command],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 start_new_session=True)
+        with self._stream_lock:
+            self._stream = child
+        buffers, dropping = {child.stdout: b'', child.stderr: b''}, set()
+        beat = check = 0
+        try:
+            with selectors.DefaultSelector() as ready:
+                ready.register(child.stdout, selectors.EVENT_READ)
+                ready.register(child.stderr, selectors.EVENT_READ)
+                while not self._halt.is_set():
+                    if self.now() >= beat:
+                        self._heartbeat()
+                        beat = self.now() + 5
+                    if self.now() >= check:
+                        self.forwards.tend(self.connection, now=self.now())
+                        check = self.now() + 2
+                    for key, _ in ready.select(.2):
+                        stream = key.fileobj
+                        chunk = os.read(stream.fileno(), 65536)
+                        if not chunk:
+                            if stream is child.stdout:
+                                return
+                            ready.unregister(stream)
+                            continue
+                        for part in chunk.splitlines(keepends=True):
+                            if self._halt.is_set():
+                                return
+                            if stream not in dropping:
+                                buffers[stream] += part
+                            if len(buffers[stream]) > 65536:
+                                buffers[stream] = b''
+                                dropping.add(stream)
+                                self.logger.info('Skipped oversized link request')
+                            if not part.endswith(b'\n'):
+                                continue
+                            raw, buffers[stream] = buffers[stream], b''
+                            if stream in dropping:
+                                dropping.remove(stream)
+                                continue
+                            if stream is child.stderr:
+                                self.logger.info('Link watcher reported a skipped request or stream error')
+                                continue
+                            try:
+                                request = parse_request(raw)
+                            except ValueError:
+                                self.logger.info('Skipped invalid link request')
+                                continue
+                            handle(request, self.connection, self.forwards, project=self.project)
+        finally:
+            self._close_stream()
+
+    def _pause(self, delay):
+        if not self.forwards.active():
+            return self._halt.wait(delay)
+        until = self.now() + delay
+        while self.now() < until:
+            if self._halt.wait(min(2, until - self.now())):
+                return True
+            try:
+                self.forwards.tend(self.connection, now=self.now())
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                self.logger.info('Callback listener check unavailable; waiting to retry')
+        return False
+
+    def run(self):
+        try:
+            with locked(self.state / 'links-watcher.lock'):
+                self.forwards.end_left_behind()
+                backoff = 2
+                while not self._halt.is_set() and self.connection.child.poll() is None:
+                    try:
+                        self._serve()
+                    except (OSError, ValueError, subprocess.TimeoutExpired):
+                        self.logger.info('Link watcher stream ended; waiting to reconnect')
+                    finally:
+                        self._clear()
+                    if self._pause(backoff):
+                        break
+                    backoff = min(backoff * 2, 60)
+        finally:
+            self._close_stream()
+            _stop_owned(self.forwards)
+            self._clear()
+
+    def stop(self) -> None:
+        with _defer_signals():
+            self._halt.set()
+            with self._stream_lock:
+                if self._stream is not None and self._stream.poll() is None:
+                    _signal_group(self._stream.pid, signal.SIGTERM)
+            if self.is_alive() and threading.current_thread() is not self:
+                self.join(timeout=60)
+                if self.is_alive():
+                    raise ValueError('Link watcher has not stopped')
+            _stop_owned(self.forwards)
+            self._clear()
+
+
+class _SigninStop(BaseException):
+    def __init__(self, number):
+        self.number = number
+
+
+@contextmanager
+def _signin_config(connection, state):
+    """Borrow the shared config and restore it only while we still own its bytes.
+
+    The worker uses this same lock for its config publication and alias refresh.
+    A reconnect published during sign-in always wins over our saved version.
+    """
+    from .ssh_hosts import _read
+    path = state / 'ssh-config'
+    def current():
+        try:
+            return _read(path, private=True)
+        except FileNotFoundError:
+            return None
+    published = False
+    try:
+        with _defer_signals(), locked(state / 'links-ssh-config.lock', blocking=True):
+            allowed = not watcher_live(state)
+            if allowed:
+                before = current()
+                try:
+                    connection.ssh_config(path)
+                finally:
+                    # Establish custody even if publication is interrupted after replacement.
+                    ours = current()
+                    published = True
+        yield allowed
+    finally:
+        if published:
+            with _defer_signals(), locked(state / 'links-ssh-config.lock', blocking=True):
+                if current() == ours:
+                    if before is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        atomic_write(path, before)
+
+
+def signin_main(root: Path, state: Path) -> int:
+    from .scratch import _config
+    from .transport import CodespaceConnection
+    root, state = Path(root), Path(state)
+    if watcher_live(state):
+        print('The connected worker is already handling links.')
+        return 1
+    config = _config(root, state)
+    forwards, previous = None, {}
+    def interrupted(number, _):
+        raise _SigninStop(number)
+    try:
+        with locked(state / 'links-signin.lock'):
+            for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+                previous[number] = signal.signal(number, interrupted)
+            with CodespaceConnection(config['codespace'], state=state) as connection:
+                with _signin_config(connection, state) as allowed:
+                    if not allowed:
+                        print('The connected worker is already handling links.')
+                        return 1
+                    try:
+                        forwards = Forwards(state, 'signin-' + secrets.token_hex(16))
+                        forwards.end_left_behind()
+                        while True:
+                            batch = connection.python('SIGNINS_ONLY=True\n' + REMOTE_WATCHER, timeout=30)
+                            for raw in batch.splitlines():
+                                try:
+                                    request = parse_request(raw)
+                                except ValueError:
+                                    _LOG.info('Skipped invalid sign-in request')
+                                    continue
+                                if request.kind == 'signin':
+                                    handle(request, connection, forwards, project=root.name)
+                            if not forwards.active():
+                                return 0
+                            time.sleep(2)
+                            forwards.tend(connection)
+                    finally:
+                        with _defer_signals():
+                            if forwards is not None:
+                                _stop_owned(forwards)
+    except _SigninStop as stopped:
+        return 128 + stopped.number
+    finally:
+        try:
+            with _defer_signals():
+                if forwards is not None:
+                    _stop_owned(forwards)
+        finally:
+            for number, handler in previous.items():
+                signal.signal(number, handler)

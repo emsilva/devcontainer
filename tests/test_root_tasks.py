@@ -4,6 +4,23 @@ from devcontainer_setup.root_tasks import integrate
 
 
 class RootTasksTests(unittest.TestCase):
+    def test_work_signin_renders_description_interactive_and_root_alias(self):
+        import tempfile
+        from pathlib import Path
+        from devcontainer_setup.render import render
+        source = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            files = render(Path(directory), source, {'continuity': True, 'ssh': True}, 'a' * 40)
+        included = files['.devcontainer/Taskfile.yml'].decode()
+        stanza = included.split('  work:signin:\n', 1)[1].split('\n  work:', 1)[0]
+        self.assertIn('    desc:', stanza)
+        self.assertIn('    interactive: true', stanza)
+        self.assertIn('work --signin {{.CLI_ARGS}}', stanza)
+        root = integrate("version: '3'\ntasks:\n")
+        self.assertIn('  work:signin:\n    interactive: true\n', root)
+        self.assertIn('task: devcontainer:work:signin\n', root)
+        self.assertEqual(integrate(root), root)
+
     def test_exact_legacy_delegates_retired_custom_preserved_idempotent(self):
         custom = '  work:codex:cs:\n    cmds: [echo custom]\n'
         text = ("version: '3'\ntasks:\n" + custom + '  agent:handoff:\n    cmds:\n'
