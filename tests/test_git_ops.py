@@ -748,16 +748,93 @@ class SetupWorktreeTests(unittest.TestCase):
                     (project / 'local.env').write_text('PERSONAL_PAT=owner secret\n')
                 before = self.snapshot(project)
                 local_main = git(project, 'rev-parse', 'refs/heads/main')
-                if case == 'clean':
+                if case in ('clean', 'untracked'):
                     self.assertTrue(fast_forward_checkout(project, 'main'))
                     self.assertEqual(git(project, 'rev-parse', 'HEAD'), incoming)
-                    self.assertEqual(git(project, 'status', '--porcelain', '--untracked-files=all'), '')
+                    if case == 'untracked':
+                        self.assertEqual((project / 'notes.txt').read_text(), 'owner notes\n')
+                        self.assertEqual(git(project, 'status', '--porcelain', '--untracked-files=all'), '?? notes.txt')
+                    else:
+                        self.assertEqual(git(project, 'status', '--porcelain', '--untracked-files=all'), '')
                     continue
                 self.assertFalse(fast_forward_checkout(project, 'main'))
                 self.assertEqual(self.snapshot(project), before)
                 self.assertEqual(git(project, 'rev-parse', 'refs/heads/main'), local_main)
                 if case == 'ignored':
                     self.assertEqual((project / 'local.env').read_text(), 'PERSONAL_PAT=owner secret\n')
+
+    def checkout_update(self, project, default='main'):
+        self.assertTrue(callable(getattr(operations, 'checkout_update', None)),
+                        'checkout_update must return the checkout state and refusal reason')
+        return operations.checkout_update(project, default)
+
+    def test_untracked_notes_do_not_block_the_update(self):
+        project = self.project
+        incoming = self.push_to_origin(project, 'remote.txt')
+        notes = project / 'notes.txt'
+        notes.write_bytes(b'owner notes\n\x00keep these bytes\xff')
+        before = notes.read_bytes()
+        result = self.checkout_update(project)
+        self.assertEqual(result, {'state': 'updated', 'reason': None,
+                                  'head': git(project, 'rev-parse', '--short', incoming), 'behind': 0})
+        self.assertEqual(git(project, 'rev-parse', 'HEAD'), incoming)
+        self.assertEqual(notes.read_bytes(), before)
+        self.assertTrue(fast_forward_checkout(project, 'main'))
+
+    def test_fast_forward_reports_each_refusal_reason(self):
+        cases = {'unstaged': 'tracked-changes', 'staged': 'tracked-changes',
+                 'deletion': 'tracked-changes', 'rename': 'tracked-changes',
+                 'untracked': 'collision', 'directory': 'collision', 'ignored': 'collision',
+                 'feature': 'other-branch', 'detached': 'detached', 'diverged': 'diverged',
+                 'ahead': 'diverged', 'fetch': 'fetch', 'invalid-default': 'fetch'}
+        for case, reason in cases.items():
+            with self.subTest(case=case):
+                project = self.make_project(f'refusal-{case}')
+                if case == 'ignored':
+                    (project / '.gitignore').write_text('incoming.txt\n')
+                    git(project, 'add', '.gitignore')
+                    git(project, 'commit', '--quiet', '-m', 'Ignore local file')
+                    git(project, 'push', '--quiet', 'origin', 'main')
+                if case != 'ahead':
+                    self.push_to_origin(project, 'incoming.txt')
+                if case in ('unstaged', 'staged', 'diverged', 'ahead'):
+                    (project / 'app.txt').write_bytes(b'owner edit\n')
+                    if case == 'staged':
+                        git(project, 'add', 'app.txt')
+                    elif case in ('diverged', 'ahead'):
+                        git(project, 'commit', '--quiet', '-am', 'Local work')
+                elif case == 'deletion':
+                    (project / 'app.txt').unlink()
+                elif case == 'rename':
+                    git(project, 'mv', 'app.txt', 'renamed.txt')
+                elif case in ('untracked', 'ignored'):
+                    (project / 'incoming.txt').write_bytes(b'owner bytes\n\xff')
+                elif case == 'directory':
+                    (project / 'incoming.txt').mkdir()
+                    (project / 'incoming.txt/notes').write_bytes(b'owner bytes\n')
+                elif case == 'feature':
+                    git(project, 'switch', '--quiet', '-c', 'feature/local')
+                elif case == 'detached':
+                    git(project, 'switch', '--quiet', '--detach')
+                elif case == 'fetch':
+                    git(project, 'remote', 'set-url', 'origin', str(self.base / 'unreachable.git'))
+                before = self.snapshot(project)
+                result = self.checkout_update(project, '--invalid' if case == 'invalid-default' else 'main')
+                self.assertEqual((result['state'], result['reason']), ('refused', reason))
+                self.assertEqual(result['head'], git(project, 'rev-parse', '--short', 'HEAD'))
+                expected_behind = 0 if case == 'ahead' else 1 if reason in ('collision', 'diverged') else None
+                self.assertEqual(result['behind'], expected_behind)
+                self.assertEqual(self.snapshot(project), before)
+                self.assertFalse(fast_forward_checkout(project, 'main' if case != 'invalid-default' else '--invalid'))
+                self.assertEqual(self.snapshot(project), before)
+
+    def test_checkout_reports_current_without_mutating_notes(self):
+        project = self.project
+        (project / 'notes.txt').write_bytes(b'untracked notes\n')
+        before = self.snapshot(project)
+        self.assertEqual(self.checkout_update(project), {'state': 'current', 'reason': None,
+                         'head': git(project, 'rev-parse', '--short', 'HEAD'), 'behind': 0})
+        self.assertEqual(self.snapshot(project), before)
 
 
 if __name__ == '__main__':

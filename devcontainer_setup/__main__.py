@@ -692,9 +692,9 @@ def setup_continuity(project: Path, ui, codespace: str | None) -> None:
             # Moving a pairing is the owner's explicit step; work:cs retires the old binding.
             from .project_sync import arming
             command = 'task work:cs:armed' if arming.read(state).get('armed') else 'task work:cs'
-            print(f'Setup is preserved. Scratch sync needs attention: it is still paired with '
+            print(f'Setup is preserved. Scratch sync is still paired with '
                   f'{binding["codespace"]}.\nTo move it to {codespace}, run on your Mac: '
-                  f'{command} -- --rebind {codespace}', file=sys.stderr)
+                  f'{command} -- --rebind {codespace}', flush=True)
             return
         if binding:
             root = binding['remote_root']
@@ -749,9 +749,31 @@ def _launch_on_default(api: Codespaces, project: Path, repo: str, default: str, 
         except (subprocess.CalledProcessError, OSError) as error:
             print(f'Setup: could not remove {branch}: {error}. Check it, then run by hand: git -C {here} branch -D '
                   f'{branch} && git -C {here} push origin --delete {branch}', file=sys.stderr, flush=True)
-    if not fast_forward_checkout(project, default) and not is_ancestor(project, sha, 'HEAD'):
-        # Never a branch switch, a merge into a feature branch or a rebase.
-        print(f'Your checkout lacks the new setup files until you merge or pull {default}.', flush=True)
+    from .git_ops import checkout_update
+    update = checkout_update(project, default)
+    behind = (f'{update["behind"]} commits behind origin/{default}' if update['behind'] is not None
+              else f'commits behind origin/{default}: unknown')
+    line = f'Checkout: {update["state"]}; HEAD {update["head"]}; {behind}'
+    reason = update['reason']
+    if reason:
+        explanations = {'fetch': 'fetch failed', 'tracked-changes': 'tracked changes',
+                        'other-branch': 'another branch is checked out', 'detached': 'detached HEAD',
+                        'diverged': 'local commits have diverged from origin', 'collision': 'a file is in the way'}
+        line += f'; {explanations[reason]}'
+        if is_ancestor(project, sha, 'HEAD'):
+            line += '; contains the reviewed setup'
+    print(line + '.', flush=True)
+    if reason in ('other-branch', 'detached'):
+        print(f'Update the {default} checkout before connecting. In that checkout, run: git pull --ff-only',
+              flush=True)
+    elif reason == 'diverged':
+        print(f'Review the local commits before updating {default}: '
+              f'git -C {here} log --left-right --graph --oneline HEAD...origin/{default}', flush=True)
+    elif reason:
+        next_step = {'fetch': 'Check access to origin, then',
+                     'tracked-changes': 'Preserve the tracked changes, then',
+                     'collision': 'Preserve and move the file in the way, then'}[reason]
+        print(f'{next_step} run: git -C {here} pull --ff-only', flush=True)
     config = json.loads(git(project, 'show', f'{sha}:.devcontainer/devcontainer.json'))
     if not launch:
         return None, config
