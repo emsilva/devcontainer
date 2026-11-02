@@ -30,7 +30,7 @@ class ReviewRerunTests(unittest.TestCase):
         self.prompts = []
         self.rendered = []
 
-    def run_wizard(self, *, saved=True, decisions=None, answers=None, github=False, api=None, changes=None):
+    def run_wizard(self, *, saved=True, decisions=None, answers=None, github=False, api=None, changes=None, paired=None):
         import contextlib
         import io
         from unittest.mock import Mock
@@ -81,7 +81,7 @@ class ReviewRerunTests(unittest.TestCase):
                     'git': lambda p, *a, **k: 'setup/devcontainer' if a[0] == 'branch' else '{}', 'render': render,
                     'integrate_taskfile': lambda *a: None, 'integrate_continuity': lambda *a: None,
                     'check_candidate': lambda *a: None, 'GitPlan': git_plan,
-                    '_paired_codespace': lambda p: None, '_ensure_runner': lambda *a: None,
+                    '_paired_codespace': lambda p: paired, '_ensure_runner': lambda *a: None,
                     'repository_access': lambda *a: True, '_merge_and_launch': Mock(return_value=(None, {}))}.items():
                 stack.enter_context(patch.object(wizard, name, value))
             stack.enter_context(contextlib.redirect_stdout(output))
@@ -285,22 +285,37 @@ class ReviewRerunTests(unittest.TestCase):
         from unittest.mock import Mock
         from devcontainer_setup import __main__ as wizard
         from devcontainer_setup.codespaces import Codespaces
-        self.assertTrue(callable(getattr(wizard, '_resolve_launch', None)), 'Missing live machine must require an answer')
         api = Mock()
         api.resource_settings = Codespaces.resource_settings
         api.get.return_value = dict(WizardCliTests._space('paired'), machine=None)
         api.existing.return_value = [api.get.return_value]
         api.machines.return_value = [{'name': 'premiumLinux', 'cpus': 8,
             'memory_in_bytes': 32 * 1024**3, 'storage_in_bytes': 64 * 1024**3}]
+        with patch.object(wizard, '_launch_history', side_effect=AssertionError('Rebuild must not use a receipt')) as history:
+            self.run_wizard(github=True, api=api, paired='paired',
+                            answers={'Review setup': ['Change answers', 'Cancel'], 'Codespace': 'rebuild paired'})
+        self.assertEqual(self.prompts[0], 'Review setup')
+        self.assertIn('Codespaces machine', self.prompts)
+        self.assertLess(self.prompts.index('Codespace'), self.prompts.index('Codespaces machine'))
+        self.assertNotIn('Stop when idle for', self.prompts)
+        self.assertIn('premiumLinux', self.output)
+        api.machines.assert_called_once_with('owner/project')
+        history.assert_not_called()
+
+    def test_rerun_with_unreadable_paired_machine_defaults_to_none(self):
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard
+        api = Mock()
+        api.get.return_value = dict(WizardCliTests._space('paired'), machine=None)
+        api.resource_settings.side_effect = ValueError('Existing codespace machine metadata is unavailable')
         with patch.object(wizard, '_repository', return_value='owner/project'):
             launch = wizard._resolve_launch(api, self.root, 'main', 'paired')
-        self.assertIsNone(launch['machine'])
-        self.assertIn('machine', launch['warning'].lower())
-        # Exercise the pending resource question through interactive, before Review.
-        with patch.object(wizard, '_resolve_launch', return_value=launch):
-            self.run_wizard(github=True, api=api)
-        self.assertEqual(self.prompts, ['Codespaces machine', 'Review setup'])
-        self.assertIn('premiumLinux', self.output)
+        self.assertEqual(launch['action'], 'none')
+        self.run_wizard(github=True, api=api, paired='paired')
+        self.assertEqual(self.prompts, ['Review setup'])
+        api.resource_settings.assert_not_called()
+        api.machines.assert_not_called()
+        api.existing.assert_not_called()
 
     def test_change_answers_opens_full_editor(self):
         self.run_wizard(github=True, answers={'Review setup': ['Change answers', 'Cancel'],

@@ -96,8 +96,9 @@ analysis with file:line evidence and three red tests: `tmp/codespace-lifecycle/w
   receipt. A usable paired Codespace stays as it is on a rerun unless a rebuild is chosen (ruling 28).
 - Create like last time without a pairing: the last successful launch receipt for this repository's default branch.
 - No history: ask once (today's machine and idle screens), then remember through the receipt.
-- A recorded machine that is no longer offered, or a paired Codespace whose machine cannot be read: say so on Review
-  and ask; never fall back to four cores silently. Review and the launch line show the resolved values.
+- A recorded machine that is no longer offered, or an explicitly selected paired rebuild whose live machine cannot
+  be read: say why and ask; never substitute a receipt or silently use four cores for the rebuild. Review and the
+  launch line show the resolved values. Leaving a paired Codespace as it is needs no machine metadata.
 
 ### Merge prompt (ruling 4)
 
