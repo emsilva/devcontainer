@@ -1536,6 +1536,29 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
                     self.assertIn(command, text)
                     self.assertLess(text.index(command), text.index('--rebind'))
 
+    def test_ending_names_other_merge_failures(self):
+        import contextlib
+        import io
+        from devcontainer_setup.__main__ import _launch_on_default
+        from devcontainer_setup.git_ops import checkout_update
+        config = '{"customizations": {"devcontainerSetup": {"selections": {}}}}\n'
+        sha = self.push_to_main({'.devcontainer/devcontainer.json': config})
+        lock = self.root / '.git/index.lock'
+        lock.write_bytes(b'held\n')
+        before = self.snapshot()
+        detail = checkout_update(self.root, 'main').get('detail', '')
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _launch_on_default(None, self.root, 'owner/project', 'main', sha, None, {})
+        text = output.getvalue()
+        self.assertIn('merge failed', text)
+        self.assertIn('index.lock', text)
+        self.assertIn(detail, text)
+        self.assertIn(f'git -C {shlex.quote(str(self.root))} pull --ff-only', text)
+        self.assertNotIn('diverged', text)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(lock.read_bytes(), b'held\n')
+
     def test_feature_branch_is_never_told_to_merge(self):
         import contextlib
         import io

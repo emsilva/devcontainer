@@ -758,7 +758,8 @@ def _launch_on_default(api: Codespaces, project: Path, repo: str, default: str, 
     if reason:
         explanations = {'fetch': 'fetch failed', 'tracked-changes': 'tracked changes',
                         'other-branch': 'another branch is checked out', 'detached': 'detached HEAD',
-                        'diverged': 'local commits have diverged from origin', 'collision': 'a file is in the way'}
+                        'diverged': 'local commits have diverged from origin', 'collision': 'a file is in the way',
+                        'merge-failed': 'merge failed: ' + update.get('detail', '')}
         line += f'; {explanations[reason]}'
         if is_ancestor(project, sha, 'HEAD'):
             line += '; contains the reviewed setup'
@@ -772,7 +773,8 @@ def _launch_on_default(api: Codespaces, project: Path, repo: str, default: str, 
     elif reason:
         next_step = {'fetch': 'Check access to origin, then',
                      'tracked-changes': 'Preserve the tracked changes, then',
-                     'collision': 'Preserve and move the file in the way, then'}[reason]
+                     'collision': 'Preserve and move the file in the way, then',
+                     'merge-failed': 'Resolve the Git error, then'}[reason]
         print(f'{next_step} run: git -C {here} pull --ff-only', flush=True)
     config = json.loads(git(project, 'show', f'{sha}:.devcontainer/devcontainer.json'))
     if not launch:
