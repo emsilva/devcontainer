@@ -1050,7 +1050,7 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         from devcontainer_setup.codespaces import receipt_path
         receipt = json.loads(receipt_path(self.state, 'owner/project', 'main').read_text())
         self.assertEqual((receipt['codespace'], receipt['branch'], receipt['commit']), ('new-space', 'main', sha))
-        self.assertEqual(calls[-1]['args'], ['codespace', 'code', '--codespace', 'new-space', '--web'])
+        self.assertFalse(any(call['args'][:2] == ['codespace', 'code'] for call in calls))
 
     def decline_merge(self):
         """A first launch run whose merge the owner declines: PR #1 stays open."""

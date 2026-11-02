@@ -276,9 +276,9 @@ class Codespaces:
                          ' || cat > ~/.config/chezmoi/machine.json; }', input=json.dumps(profile, indent=2) + '\n')
         self.command('codespace', 'ssh', '--codespace', name, '--', _with_github(shlex.join(['load-dotfiles', repo])))
 
-    def open(self, name: str, client: str) -> None:
+    def open(self, name: str, open_after_create: str) -> None:
         args = ['codespace', 'code', '--codespace', name]
-        if client == 'browser':
+        if open_after_create == 'browser':
             args += ['--web']
         try:
             self.command(*args)
@@ -320,14 +320,16 @@ class Codespaces:
             raise ValueError(f'Cannot store launch receipt at {path}: {error}') from error
 
     def launch(self, repo: str, branch: str, sha: str, machine: str | None, idle_timeout: str | None,
-               client: str, dotfiles_repo: str | None, receipt: Path,
+               open_after_create: str, dotfiles_repo: str | None, receipt: Path,
                *, resume: str | None = None, location: str | None = None,
                retention: str | None = None, workspace: str | None = None,
                machine_profile: dict | None = None, state_root: Path | None = None,
-               on_created: Callable[[str, float], None] | None = None) -> str:
+               on_created: Callable[[str, float], None] | None = None, force_rebuild: bool = False) -> str:
         """Create (or reuse) a codespace on branch, which must contain sha, the merged setup. A reused
         codespace confirmed on branch takes over its retired setup branch's receipt from state_root."""
         self._repository(repo)
+        if open_after_create not in ('none', 'browser', 'vscode'):
+            raise ValueError('open_after_create must be none, browser or vscode')
         self._preflight_receipt(receipt)
         folder = workspace or f'/workspaces/{repo.split("/")[1]}'
         if not folder.startswith('/') or '${' in folder:
@@ -372,7 +374,7 @@ class Codespaces:
                 settings = {'machine': machine, 'idle_timeout_minutes': self._minutes(idle_timeout),
                             'location': location, 'retention_period_minutes': self._minutes(retention)}
             record = {'codespace': name, 'repository': repo, 'branch': branch,
-                      'commit': sha, **settings, 'client': client,
+                      'commit': sha, **settings,
                       'validated_commit': None, 'rebuild_pending': bool(resume)}
             if resume and receipt.exists():
                 try:
@@ -384,7 +386,7 @@ class Codespaces:
                 if (previous.get('codespace') == name and previous.get('repository') == repo
                         and previous.get('branch') == branch):
                     record['validated_commit'] = previous.get('validated_commit')
-                    record['rebuild_pending'] = not (
+                    record['rebuild_pending'] = force_rebuild or not (
                         previous.get('validated_commit') == sha
                         and previous.get('rebuild_pending') is False)
             self._save_receipt(receipt, record)
@@ -430,7 +432,8 @@ class Codespaces:
             self._save_receipt(receipt, record)
             if dotfiles_repo:
                 self.personalize(name, dotfiles_repo, machine_profile)
-            self.open(name, client)
+            if not resume and open_after_create != 'none':
+                self.open(name, open_after_create)
         except (ValueError, OSError, subprocess.TimeoutExpired) as error:
             if not name:
                 raise ValueError(str(error)) from error
