@@ -231,18 +231,54 @@ def merged_setup_branches(project: Path, default: str) -> list[str]:
             and is_ancestor(project, name, f'refs/remotes/origin/{default}')]
 
 
-def fast_forward_checkout(project: Path, default: str) -> bool:
-    """Fast-forward the owner's checkout only when it is on <default> and clean; otherwise change
-    nothing in it. Either way it may update refs/remotes/origin/<default>."""
-    status = _read(project, 'status', '--porcelain', '--untracked-files=all')
-    if (status is None or status or not _succeeds(project, 'check-ref-format', '--branch', default)
-            or git(project, 'branch', '--show-current', check=False) != default):
-        return False
+def checkout_update(project: Path, default: str) -> dict:
+    """Fast-forward the default checkout, reporting why a safe update was refused.
+
+    Untracked files are Git's to check for collisions. A behind count is available only
+    after a fresh fetch; refusals never change checkout bytes, the index or local branches.
+    """
+    behind = None
+
+    def result(state, reason=None):
+        return {'state': state, 'reason': reason,
+                'head': git(project, 'rev-parse', '--short', 'HEAD', check=False), 'behind': behind}
+
+    status = _read(project, 'status', '--porcelain', '--untracked-files=no')
+    if not _succeeds(project, 'check-ref-format', '--branch', default):
+        return result('refused', 'fetch')
+    branch = git(project, 'branch', '--show-current', check=False)
+    if not branch:
+        return result('refused', 'detached')
+    if branch != default:
+        return result('refused', 'other-branch')
+    if status is None or status:
+        return result('refused', 'tracked-changes')
     if not _fetch_default(project, default):
-        return False
+        return result('refused', 'fetch')
+    remote = f'refs/remotes/origin/{default}'
+    count = _read(project, 'rev-list', '--count', f'HEAD..{remote}')
+    if count is None:
+        return result('refused', 'fetch')
+    behind = int(count)
+    if not is_ancestor(project, 'HEAD', remote):
+        return result('refused', 'diverged')
+    if behind == 0:
+        return result('current')
     # --no-overwrite-ignore: an ignored local file (devcontainer.env, say) is never replaced.
-    return _succeeds(project, 'merge', '--ff-only', '--quiet', '--no-autostash', '--no-overwrite-ignore',
-                     f'refs/remotes/origin/{default}')
+    merged = subprocess.run(['git', '-C', str(project), 'merge', '--ff-only', '--quiet', '--no-autostash',
+                             '--no-overwrite-ignore', remote], capture_output=True, text=True,
+                            env=dict(os.environ, LC_ALL='C'))
+    if merged.returncode:
+        collision = any(message in merged.stderr for message in
+                        ('would be overwritten', 'would be removed', 'would lose untracked files'))
+        return result('refused', 'collision' if collision else 'diverged')
+    behind = 0
+    return result('updated')
+
+
+def fast_forward_checkout(project: Path, default: str) -> bool:
+    """Compatibility wrapper for callers that only need to know whether the checkout is current."""
+    return checkout_update(project, default)['state'] in ('updated', 'current')
 
 
 def _digest(data: bytes) -> str:

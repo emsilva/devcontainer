@@ -446,26 +446,27 @@ class WizardCliTests(unittest.TestCase):
         import contextlib
         import io
         from devcontainer_setup.__main__ import setup_continuity
-        from devcontainer_setup.project_sync import arming
+        from devcontainer_setup.project_sync import arming, codespaces as project_codespaces
         state = Path(self.tmp.name).resolve() / 'sync-state'
         state.mkdir()
         for armed, command in ((False, 'task work:cs -- --rebind new-space'),
                                (True, 'task work:cs:armed -- --rebind new-space')):
             with self.subTest(armed=armed):
                 arming.write(state, {'schema': 1, 'armed': armed})
+                output = io.StringIO()
                 errors = io.StringIO()
                 with patch.dict(os.environ, CODESPACES=''), patch('devcontainer_setup.project_sync.state.discover_project'), \
                         patch('devcontainer_setup.project_sync.state.state_dir', return_value=state), \
-                        patch('devcontainer_setup.project_sync.codespaces.Codespaces') as cls, \
-                        contextlib.redirect_stderr(errors):
+                        patch.object(project_codespaces, 'Codespaces') as cls, \
+                        contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
                     cls.return_value.binding.return_value = {'codespace': 'old-space', 'remote_root': '/workspaces/project'}
                     setup_continuity(self.root, None, 'new-space')
                 # The wizard never moves a pairing itself; work:cs retires the old binding.
                 cls.return_value.roots.assert_not_called()
                 cls.return_value.pair.assert_not_called()
-                self.assertIn('Scratch sync needs attention', errors.getvalue())
-                self.assertIn('old-space', errors.getvalue())
-                self.assertIn(command, errors.getvalue())
+                self.assertEqual(errors.getvalue(), '')
+                self.assertIn('Scratch sync is still paired with old-space', output.getvalue())
+                self.assertIn(command, output.getvalue())
 
     def test_machine_profile_is_the_macs_minus_mac_only_parts(self):
         from devcontainer_setup.__main__ import _machine_profile
@@ -1271,7 +1272,7 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.assert_nothing_left()
         # A feature-branch checkout is never switched, merged into or rebased.
         self.assertEqual(self.snapshot(), before)
-        self.assertIn('Your checkout lacks the new setup files until you merge or pull main.', seen['output'])
+        self.assertIn('Update the main checkout', seen['output'])
 
     def test_pr_body_leaves_out_the_dotfiles_repository(self):
         seen = self.interact(dict(self.LAUNCH, **{self.MERGE: True, 'Apply dotfiles inside the container?': True,
@@ -1473,6 +1474,104 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.assertIn('Note: cannot check GitHub for an open setup PR', self.seen['output'])
         self.assertEqual(str(caught.exception), f'Setup PR #1 (setup/devcontainer-7) is open. {self.RERUN}')
         self.assertEqual(len(self.gh()['prs']), 1)
+
+    def test_ending_prints_checkout_result_before_rebind(self):
+        import contextlib
+        import io
+        from devcontainer_setup.__main__ import _launch_on_default, setup_continuity
+        from devcontainer_setup.project_sync import arming
+        from devcontainer_setup.project_sync.state import discover_project, state_dir
+
+        cases = (('updated', False), ('current', True), ('tracked changes', False),
+                 ('a file is in the way', True), ('diverged', False))
+        for index, (expected, armed) in enumerate(cases):
+            with self.subTest(checkout=expected, armed=armed):
+                if index:
+                    self.setUp()
+                sha = self.push_to_main({'.devcontainer/devcontainer.json': '{}\n', 'incoming.txt': 'upstream\n'})
+                if expected == 'current':
+                    self.git('pull', '--quiet', '--ff-only', 'origin', 'main')
+                elif expected == 'tracked changes':
+                    (self.root / 'package.json').write_text('{"owner":"edit"}\n')
+                elif expected == 'a file is in the way':
+                    (self.root / 'incoming.txt').write_bytes(b'owner bytes\n\xff')
+                elif expected == 'diverged':
+                    (self.root / 'package.json').write_text('{"owner":"commit"}\n')
+                    self.git('commit', '--quiet', '-am', 'Local work')
+                state = state_dir(discover_project(self.root))
+                arming.write(state, {'schema': 1, 'armed': armed})
+                before = self.snapshot()
+                output, errors = io.StringIO(), io.StringIO()
+                with patch.dict(os.environ, CODESPACES=''), \
+                        patch('devcontainer_setup.project_sync.codespaces.Codespaces') as service, \
+                        contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                    service.return_value.binding.return_value = {'codespace': 'old-space',
+                                                                 'remote_root': '/workspaces/project'}
+                    name, config = _launch_on_default(None, self.root, 'owner/project', 'main', sha, None, {})
+                    self.assertIsNone(name)
+                    self.assertEqual(config, {})
+                    setup_continuity(self.root, None, 'new-space')
+                text = output.getvalue()
+                command = ('task work:cs:armed' if armed else 'task work:cs') + ' -- --rebind new-space'
+                self.assertEqual(errors.getvalue(), '')
+                self.assertIn('Checkout:', text)
+                self.assertIn(expected, text)
+                self.assertIn(f'HEAD {self.git("rev-parse", "--short", "HEAD")}', text)
+                self.assertIn('behind', text)
+                self.assertLess(text.index('Checkout:'), text.index(command))
+                self.assertNotIn('needs attention', text)
+                self.assertNotIn('deleted', text)
+                service.return_value.roots.assert_not_called()
+                service.return_value.pair.assert_not_called()
+                if expected in ('updated', 'current'):
+                    self.assertEqual(self.git('rev-parse', 'HEAD'), sha)
+                    self.assertIn('0 commits behind', text)
+                else:
+                    self.assertEqual(self.snapshot(), before)
+                    self.assertIn('refused', text)
+                    if expected == 'diverged':
+                        command = f'git -C {shlex.quote(str(self.root))} log --left-right --graph --oneline HEAD...origin/main'
+                    else:
+                        command = f'git -C {shlex.quote(str(self.root))} pull --ff-only'
+                    self.assertIn(command, text)
+                    self.assertLess(text.index(command), text.index('--rebind'))
+
+    def test_feature_branch_is_never_told_to_merge(self):
+        import contextlib
+        import io
+        from devcontainer_setup.__main__ import _launch_on_default
+
+        self.checkout_feature()
+        sha = self.push_to_main({'.devcontainer/devcontainer.json': '{}\n'})
+        before = self.snapshot()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _launch_on_default(None, self.root, 'owner/project', 'main', sha, None, {})
+        text = output.getvalue()
+        self.assertIn('Checkout:', text)
+        self.assertIn('another branch', text)
+        self.assertIn('Update the main checkout', text)
+        self.assertIn('In that checkout, run: git pull --ff-only', text)
+        self.assertNotIn('merge or pull', text)
+        self.assertNotIn(f'git -C {shlex.quote(str(self.root))} pull', text)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_contained_setup_does_not_claim_the_checkout_lacks_it(self):
+        import contextlib
+        import io
+        from devcontainer_setup.__main__ import _launch_on_default
+
+        sha = self.push_to_main({'.devcontainer/devcontainer.json': '{}\n'})
+        self.git('pull', '--quiet', '--ff-only', 'origin', 'main')
+        (self.root / 'package.json').write_text('{"owner":"edit"}\n')
+        before = self.snapshot()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _launch_on_default(None, self.root, 'owner/project', 'main', sha, None, {})
+        self.assertIn('Checkout:', output.getvalue())
+        self.assertIn('contains the reviewed setup', output.getvalue())
+        self.assertNotIn('lacks the new setup files', output.getvalue())
+        self.assertEqual(self.snapshot(), before)
 
     def test_setup_records_created_evidence_even_when_not_paired(self):
         # #61: setup records created evidence even when the Codespace is not paired.
