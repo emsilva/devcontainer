@@ -186,6 +186,25 @@ class LinksTests(unittest.TestCase):
             killed.assert_called_once_with(4200, signal.SIGTERM)
             self.assertEqual(json.loads((self.state / 'links-forwards.json').read_text())['forwards'], {})
 
+    def test_forward_end_reason_is_logged(self):
+        for reason in ('deadline', 'remote stopped listening', 'callback forward exited'):
+            with self.subTest(reason=reason), self.forwards() as (forwards, _, _), \
+                    self.assertLogs(self.links._LOG, level='INFO') as logs:
+                request = self.links.parse_request(packet())
+                self.handle(request, forwards)
+                if reason == 'callback forward exited':
+                    self.children[-1].returncode = 0
+                    forwards.active()
+                else:
+                    with mock.patch.object(self.links, 'remote_listening', return_value=False):
+                        forwards.tend(self.connection, now=221 if reason == 'deadline' else 102)
+                forwards.tend(self.connection, now=1000)
+                self.assertEqual(forwards.active(), set())
+                ended = [line for line in logs.output if 'Callback forward ended:' in line]
+                self.assertEqual(len(ended), 1)
+                self.assertIn('plaud web.plaud.ai port 8199', ended[0])
+                self.assertIn(reason, ended[0])
+
     def test_dead_forward_is_cleared_and_port_reusable(self):
         with self.forwards() as (forwards, launched, _):
             request = self.links.parse_request(packet())

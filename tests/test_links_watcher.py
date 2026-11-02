@@ -65,6 +65,115 @@ class WatcherTests(unittest.TestCase):
             self.assertTrue(ready.select(4), 'watcher emitted no request')
         return child.stdout.readline()
 
+    def worker_log(self, dispatch):
+        from devcontainer_setup.project_sync import scratch
+        def installed(_):
+            dispatch(logging.getLogger('project-sync-' + 'b' * 48))
+            raise scratch._Shutdown()
+        with mock.patch.object(scratch, '_config', return_value=self.config), \
+                mock.patch.object(scratch, '_saved_session', return_value=None), \
+                mock.patch.object(scratch, '_Notices'), \
+                mock.patch.object(scratch, 'install_mutagen', side_effect=installed), \
+                mock.patch.object(scratch.signal, 'signal'):
+            scratch.supervise(self.root, self.state, 'b' * 48)
+        return (self.state / 'scratch.log').read_text()
+
+    def test_link_outcomes_reach_the_worker_log(self):
+        helper = handler_tests.LinksTests('test_deadlines')
+        helper.setUp()
+        self.addCleanup(helper.doCleanups)
+        handlers = list(links._LOG.handlers)
+        settings = links._LOG.level, links._LOG.propagate
+        attached = []
+        levels = []
+        def dispatch(logger):
+            attached.extend(handler for handler in logger.handlers if handler in links._LOG.handlers)
+            levels.append((links._LOG.level, links._LOG.propagate))
+            with helper.forwards() as (forwards, _, _):
+                self.assertEqual(helper.handle(links.parse_request(packet()), forwards), 'forwarded')
+                busy = links.parse_request(packet(json.loads(packet())['url'].replace('8199', '1455')))
+                with mock.patch.object(links, 'check_port', return_value=(False, 'server (pid 4242)')):
+                    self.assertEqual(helper.handle(busy, forwards), 'busy')
+        try:
+            with mock.patch.object(logging.getLogger(), 'handle') as root_log:
+                log = self.worker_log(dispatch)
+            self.assertIn('Opened: plaud web.plaud.ai port 8199', log)
+            self.assertIn('Busy: plaud web.plaud.ai port 1455', log)
+            self.assertIn('server (pid 4242)', log)
+            self.assertEqual(len(attached), 1)
+            self.assertEqual(levels, [(logging.INFO, False)])
+            self.assertEqual(log.count('Opened:'), 1)
+            self.assertEqual(log.count('Busy:'), 1)
+            root_log.assert_not_called()
+            self.assertEqual(links._LOG.handlers, handlers)
+            self.assertEqual((links._LOG.level, links._LOG.propagate), settings)
+            self.assertIsNone(attached[0].stream)
+            from devcontainer_setup.project_sync import scratch
+            with mock.patch.object(scratch.project_state, 'process_identity',
+                                   side_effect=ValueError('fixture setup failure')):
+                with self.assertRaisesRegex(ValueError, 'fixture setup failure'):
+                    self.worker_log(dispatch)
+            self.assertEqual(links._LOG.handlers, handlers)
+            self.assertEqual((links._LOG.level, links._LOG.propagate), settings)
+            self.assertEqual(logging.getLogger('project-sync-' + 'b' * 48).handlers, [])
+        finally:
+            links._LOG.setLevel(settings[0])
+            links._LOG.propagate = settings[1]
+
+    def test_link_log_lines_never_hold_the_url(self):
+        helper = handler_tests.LinksTests('test_deadlines')
+        helper.setUp()
+        self.addCleanup(helper.doCleanups)
+        raw = packet(json.loads(packet())['url'] + '&code=SECRET&state=X')
+        request = links.parse_request(raw)
+        def dispatch(logger):
+            for outcome in ('opened', 'busy', 'remote', 'forward', 'browser', 'expired',
+                            'deadline', 'listener', 'exited'):
+                with helper.forwards() as (forwards, _, _), contextlib.ExitStack() as stack:
+                    if outcome == 'busy':
+                        stack.enter_context(mock.patch.object(links, 'check_port',
+                                                              return_value=(False, 'server (pid 4242)')))
+                    if outcome == 'remote':
+                        stack.enter_context(mock.patch.object(links, 'remote_listening', return_value=False))
+                    if outcome == 'forward':
+                        stack.enter_context(mock.patch.object(forwards, 'start', side_effect=ValueError(request.url)))
+                    result = links.handle(request, helper.connection, forwards, project='project',
+                                          now=lambda: 1000 if outcome == 'expired' else 101,
+                                          opener=lambda _: outcome != 'browser', notifier=lambda *args: None)
+                    expected = {'busy': 'busy', 'expired': 'expired', 'remote': 'rejected',
+                                'forward': 'rejected', 'browser': 'rejected'}.get(outcome, 'forwarded')
+                    self.assertEqual(result, expected)
+                    if outcome in ('deadline', 'listener'):
+                        with mock.patch.object(links, 'remote_listening', return_value=False):
+                            forwards.tend(helper.connection, now=221 if outcome == 'deadline' else 102)
+                    elif outcome == 'exited':
+                        helper.children[-1].returncode = 0
+                        forwards.active()
+            invalid = packet(request.url, schema=2) + b'\n'
+            child = subprocess.Popen([sys.executable, '-I', '-B', '-c',
+                                      'import os;os.write(1,' + repr(invalid) + ')'],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     start_new_session=True)
+            watcher = links.Watcher(mock.Mock(), self.state, 'project', logger)
+            try:
+                with mock.patch.object(links.subprocess, 'Popen', return_value=child):
+                    watcher._serve()
+            finally:
+                watcher.stop()
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=4)
+            self.assertIsNotNone(child.returncode)
+        log = self.worker_log(dispatch)
+        for forbidden in (request.url, 'https://', 'SECRET', 'code=', 'state=', 'redirect_uri='):
+            self.assertNotIn(forbidden, log)
+        self.assertEqual(log.count('Opened:'), 4)
+        for reason in ('deadline', 'remote stopped listening', 'callback forward exited'):
+            self.assertEqual(log.count('(' + reason + ')'), 1)
+        for outcome in ('Busy:', 'Rejected:', 'Forward start failed:',
+                        'Browser could not open:', 'Expired:', 'Skipped invalid link request'):
+            self.assertEqual(log.count(outcome), 1, outcome)
+
     def test_watcher_claims_once_and_streams_json(self):
         for number in range(20):
             (self.remote / 'requests' / f'{number}.json').write_bytes(self.request(number))
