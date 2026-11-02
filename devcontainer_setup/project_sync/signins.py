@@ -8,9 +8,12 @@ import json
 from pathlib import Path
 import re
 import shlex
+import signal
 import subprocess
+import time
 
-from .state import atomic_write
+from .links import _defer_signals, watcher_live
+from .state import atomic_write, locked, read_json
 
 
 @dataclass(frozen=True)
@@ -134,3 +137,183 @@ def write_record(state: Path, codespace: str, results: dict[str, dict], now: flo
         tools[tool.key] = row
     value = {'schema': 1, 'codespace': codespace, 'updated_at': now, 'tools': tools}
     atomic_write(Path(state) / 'signins.json', json.dumps(value).encode() + b'\n')
+
+
+NOT_CONNECTED = ('Sign-in needs this project connected to its Codespace. Run task work:cs, '
+                 'then task work:signin:all.')
+NOT_LISTENING = ("The Codespace is not reaching this Mac's link helper yet. Run task work:cs again, "
+                 'then task work:signin:all.')
+_HEARTBEAT = '''
+from pathlib import Path
+import time
+try:
+    print(time.time() - (Path.home() / '.local/state/devcontainer-links/mac-listening').stat().st_mtime)
+except OSError:
+    print(-1)
+'''
+
+
+def ready(state: Path, *, wait: float = 30) -> str | None:
+    deadline = time.monotonic() + wait
+    while True:
+        connected = watcher_live(state)
+        if connected:
+            try:
+                command = shlex.join(['python3', '-I', '-B', '-c', _HEARTBEAT])
+                answer = subprocess.run(_ssh(state, command), capture_output=True, text=True,
+                                        timeout=max(0.1, min(5, deadline - time.monotonic())))
+                if answer.returncode == 0 and 0 <= float(answer.stdout) <= 15 and watcher_live(state):
+                    return None
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return NOT_LISTENING if connected else NOT_CONNECTED
+        time.sleep(min(1, remaining))
+
+
+class _SigninStop(BaseException):
+    def __init__(self, number):
+        self.number = number
+
+
+def _end_login(child, number=signal.SIGTERM):
+    if child.poll() is not None:
+        child.wait()
+        return
+    try:
+        child.send_signal(number)
+    except ProcessLookupError:
+        pass
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
+
+
+def login(state: Path, tool: Tool) -> int:
+    child = None
+    try:
+        # Establish ownership before a deferred cancellation can be delivered.
+        with _defer_signals():
+            child = subprocess.Popen(_ssh(state, shlex.join(tool.login), terminal=True), start_new_session=False)
+        code = child.wait(timeout=tool.deadline)
+        return code if code >= 0 else 128 - code
+    except OSError:
+        if child is not None:
+            with _defer_signals():
+                _end_login(child)
+        return 1
+    except subprocess.TimeoutExpired:
+        with _defer_signals():
+            _end_login(child)
+        return 124
+    except BaseException as error:
+        number = error.number if isinstance(error, _SigninStop) else signal.SIGINT
+        if child is not None:
+            with _defer_signals():
+                _end_login(child, number)
+        raise
+
+
+def _line(tool, result, *, after=False):
+    state, identity = result['state'], result.get('identity')
+    if state == SIGNED_IN:
+        text = 'signed in' if after else 'already signed in'
+        if tool.key == 'claude' and identity:
+            text += ' as ' + identity
+    elif after:
+        text = 'not signed in (timed out or callback port busy: see the Mac notice)'
+    else:
+        text = {OTHER_METHOD: 'signed in another way; left as is', UNKNOWN: 'could not check sign-in; skipped',
+                ABSENT: 'not installed; skipped'}[state]
+    print(tool.label + ': ' + text, flush=True)
+
+
+def _summary(results):
+    signed, missing = [], []
+    for tool in TOOLS:
+        state = results.get(tool.key, {}).get('state', UNKNOWN)
+        if state in (SIGNED_IN, OTHER_METHOD):
+            signed.append(tool.label)
+        elif state != ABSENT:
+            missing.append(tool.label)
+    print('Signed in: ' + (', '.join(signed) or 'none') + '.', flush=True)
+    if missing:
+        print('Not signed in: ' + ', '.join(missing) + '. Retry with task work:signin:all.', flush=True)
+    return bool(missing)
+
+
+def run(project, state: Path, codespace: str) -> int:
+    state = Path(state)
+    # Catch contention only at acquisition, not a BlockingIOError from a tool.
+    lock = locked(state / 'signins.lock')
+    try:
+        lock.__enter__()
+    except BlockingIOError:
+        print('Another sign-in is already running for this project.')
+        return 1
+    previous, results, current, cancelled = {}, {}, None, 0
+
+    def interrupted(number, _):
+        raise _SigninStop(number)
+
+    try:
+        for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            previous[number] = signal.signal(number, interrupted)
+        try:
+            # A command may have read the binding just before a connect changed it.
+            try:
+                binding = read_json(state / 'scratch.json')
+            except FileNotFoundError:
+                binding = {}
+            if binding.get('codespace') != codespace:
+                print(NOT_CONNECTED)
+                return 1
+            refusal = ready(state)
+            if refusal:
+                print(refusal)
+                return 1
+            results = probe(state, [tool.key for tool in TOOLS])
+            for tool in TOOLS:
+                current = tool
+                if results[tool.key]['state'] != SIGNED_OUT:
+                    _line(tool, results[tool.key])
+                    continue
+                # A previous approval can take ten minutes: recheck both heartbeats.
+                refusal = ready(state)
+                if refusal:
+                    print(refusal)
+                    break
+                text = f'Signing in to {tool.label}. Approve the page that opens on this Mac.'
+                if tool.key == 'grok':
+                    text += ' Enter the code shown here.'
+                print(text, flush=True)
+                code = login(state, tool)
+                if code in (128 + signal.SIGINT, 128 + signal.SIGTERM, 128 + signal.SIGHUP):
+                    cancelled = code
+                    break
+                results[tool.key] = probe(state, [tool.key])[tool.key]
+                _line(tool, results[tool.key], after=True)
+        except (KeyboardInterrupt, _SigninStop) as error:
+            cancelled = 128 + (error.number if isinstance(error, _SigninStop) else signal.SIGINT)
+        cancellation = 'Sign-in cancelled' + (' during ' + current.label if current else '') + '.'
+        reported = False
+        try:
+            # Finish the receipt and summary even when cancellation arrives during fsync.
+            with _defer_signals():
+                if cancelled:
+                    print(cancellation, flush=True)
+                    reported = True
+                write_record(state, codespace, results, time.time())
+                missing = _summary(results)
+        except (KeyboardInterrupt, _SigninStop) as error:
+            cancelled = 128 + (error.number if isinstance(error, _SigninStop) else signal.SIGINT)
+            if not reported:
+                print(cancellation, flush=True)
+        return cancelled or int(missing)
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+        lock.__exit__(None, None, None)
