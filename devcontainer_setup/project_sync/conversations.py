@@ -434,7 +434,17 @@ def _record_origins(state, origins):
     # Merge under a separate lock so simultaneous captures cannot lose IDs.
     # This never nests the native publication and checkpoint store locks.
     with locked(state / 'conversation-origins.lock', blocking=True):
-        retained = _conversation_origins(state)
+        try:
+            retained = _conversation_origins(state)
+        except (ValueError, OSError):
+            # Keep the unreadable evidence without blocking native capture.
+            with _parent(state / 'conversation-origins.json', private=True) as (parent, name):
+                try:
+                    os.replace(name, name + '.invalid', src_dir_fd=parent, dst_dir_fd=parent)
+                except FileNotFoundError:
+                    pass  # The invalid file was removed after the failed read.
+                os.fsync(parent)
+            retained = dict(claude=set(), codex=set())
         for agent, ids in origins.items():
             retained[agent].update(ids)
         value = dict(schema=SCHEMA, sessions={agent: sorted(ids) for agent, ids in retained.items()})
@@ -442,8 +452,11 @@ def _record_origins(state, origins):
 
 
 def _started_here(project, state, agent, sid, env):
-    if sid in _conversation_origins(state)[agent]:
-        return True
+    try:
+        if sid in _conversation_origins(state)[agent]:
+            return True
+    except (ValueError, OSError):
+        pass  # A bad origin list does not invalidate a native original.
     home = sessions.native_home(agent, env)
     path = (home / 'projects' / sessions.claude_namespace(project.root) / (sid + '.jsonl')
             if agent == 'claude' else sessions._codex_index(home).get(sid))

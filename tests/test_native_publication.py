@@ -72,6 +72,64 @@ class PublicationTests(NativeFixture):
         self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
         self.assertEqual(json.loads(origins.read_bytes()), expected)
 
+    def test_invalid_origin_list_never_fails_capture(self):
+        sources = [self.codex(), self.claude()]
+        before = {path: path.read_bytes() for path in sources}
+        state = self.root / 'publication-state'
+        origins = state / 'conversation-origins.json'
+        invalid = origins.with_name(origins.name + '.invalid')
+        read_json = self.api.read_json
+        cases = [('json', b'{', False),
+                 ('schema', json.dumps(dict(schema=99, sessions=dict(claude=[], codex=[]))).encode(), False),
+                 ('unreadable', json.dumps(dict(schema=1, sessions=dict(claude=[], codex=[]))).encode(), True)]
+        for label, payload, unreadable in cases:
+            with self.subTest(origin_list=label):
+                self.api.atomic_write(origins, payload)
+                self.api.atomic_write(invalid, b'older invalid list\n')
+                def read(path):
+                    if path == origins and unreadable:
+                        raise PermissionError('fixture unreadable origin list')
+                    return read_json(path)
+                with patch.object(self.api, 'read_json', side_effect=read):
+                    try:
+                        captured = self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
+                    except (ValueError, OSError) as exc:
+                        self.fail('Invalid origin list stopped capture: ' + str(exc))
+                self.assertEqual(captured['issues'], [])
+                self.assertEqual({(e['agent'], e['session_id']) for e in captured['entries']},
+                                 {('claude', self.sid), ('codex', self.sid)})
+                self.assertEqual(invalid.read_bytes(), payload)
+                self.assertEqual(json.loads(origins.read_bytes()),
+                                 dict(schema=1, sessions=dict(claude=[self.sid], codex=[self.sid])))
+                self.assertEqual(origins.stat().st_mode & 0o777, 0o600)
+                self.assertEqual({path: path.read_bytes() for path in sources}, before)
+
+    def test_invalid_origin_list_falls_back_to_the_native_file(self):
+        source = self.claude()
+        original = source.read_bytes()
+        entry = dict(self.capture()['entries'][0], relayed=True)
+        state = self.root / 'publication-state'
+        origins = state / 'conversation-origins.json'
+        read_json = self.api.read_json
+        cases = [('json', b'{', False),
+                 ('schema', json.dumps(dict(schema=99, sessions=dict(claude=[], codex=[]))).encode(), False),
+                 ('unreadable', json.dumps(dict(schema=1, sessions=dict(claude=[], codex=[]))).encode(), True)]
+        for label, payload, unreadable in cases:
+            with self.subTest(origin_list=label):
+                self.api.atomic_write(origins, payload)
+                def read(path):
+                    if path == origins and unreadable:
+                        raise PermissionError('fixture unreadable origin list')
+                    return read_json(path)
+                with patch.object(self.api, 'read_json', side_effect=read):
+                    result = self.publish(entry)
+                self.assertEqual(result, dict(imported=[], issues=[], unchanged=[
+                    dict(agent='claude', source_session_id=self.sid, session_id=self.sid)]))
+                self.assertEqual(origins.read_bytes(), payload)
+                self.assertEqual(source.read_bytes(), original)
+                self.assertEqual(list(source.parent.glob('*.jsonl')), [source])
+                self.assertFalse((state / 'conversation-imports').exists())
+
     def test_relayed_entry_that_started_here_is_unchanged(self):
         source = self.claude()
         state = self.root / 'publication-state'
