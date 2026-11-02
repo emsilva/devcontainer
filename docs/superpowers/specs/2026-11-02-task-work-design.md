@@ -123,7 +123,9 @@ carries it.
 ### C. Checked delete (ruling 8, #62)
 
 - `task work:cs:delete [-- --codespace NAME]`; without a name, the current pairing. `-- --check --json` runs the
-  checks headless and makes no destructive call (call 2). The repository and account are verified on every run.
+  checks headless on the Mac and makes no destructive call (call 2); it needs the Mac's key and state
+  (`transport.py:317-319`), so an agent inside the Codespace cannot run it. The repository and account are verified on
+  every run.
 - Checks run over the package's read-only connection, never raw `gh codespace ssh`. A stopped or unreachable target
   reads `unknown` with an explicit "start it to check" action; it is never started silently. A target never paired
   from this Mac is checked only when a replace journal names it (its host key is accepted then); otherwise `unknown`,
@@ -171,8 +173,9 @@ is in and continues it (REPORT §3). The journal ends when the operation complet
 left to the checked delete), or when either Codespace is deleted (CHECK Q11).
 
 1. **Inspect OLD:** its live machine and cores, idle timeout, billing owner. Unreadable resources stop the operation
-   (no four-core fallback). Starting a stopped OLD to read it is an explicit choice. Consent for NEW is decided here
-   (stage A's rules); a decline ends the operation before anything is created (CHECK Q7).
+   (no four-core fallback). Starting a stopped OLD to read it is an explicit choice. For an armed project it compares
+   the saved gh account with the current one and says, before anything is spent, whether NEW will need a fresh typed
+   `arm` (the consent itself needs NEW's name and billing owner, so it is decided after step 3).
 2. **Create NEW** from `origin/<default>`'s tip, when it contains the checkout's installed setup files (otherwise it
    refuses and offers setup; CHECK Q4), with OLD's machine and idle timeout. It uses the ordinary launch receipt, which
    then names NEW; OLD's receipt is kept in the journal, and the resume hint names the replace rerun (CHECK Q5). The
@@ -183,8 +186,9 @@ left to the checked delete), or when either Codespace is deleted (CHECK Q11).
    rebuilds. Then, while OLD is still paired: list its running agents and ask the owner to end them or wait (never
    killed); run one final normal cycle (scratch flush and conversation capture) and record its receipts in the
    journal. After the move nothing can carry OLD's late writes to the Mac.
-4. **Move** sync, recovery (stage A's consent move) and Herdr to NEW, without entering Herdr's TUI. A nonzero Herdr
-   result is not "connected".
+4. **Move** sync, recovery and Herdr to NEW, without entering Herdr's TUI. For an armed project, stage A's consent
+   rules run first, now that NEW's name and billing owner are readable: the consent move, or a typed `arm` for NEW; a
+   decline keeps OLD paired and NEW listed (call 8; CHECK Q7). A nonzero Herdr result is not "connected".
 5. **Sign in fresh** with the step-3 sequence (every selected tool, Grok and each Claude account). A failed or skipped
    tool joins a retry list and does not block steps 6-7 (call 3).
 6. **Check NEW:** validation, a completed sync cycle, NEW's keeper if armed, Herdr reachable, and every OLD
@@ -261,8 +265,8 @@ layout, the bounded probe's structure, the Codespace-to-Mac stop request's forma
 1. **Four stages, two releases.** A and B ship when green; C and D after one live test of replace end to end. One
    release per stage would mean twelve project PRs with nothing for the owner to do differently in between; one
    release for all four would hold a finished headless stop behind the whole step (CHECK "Stage order").
-2. **Agents can check, not delete.** Ruling 8's "scriptable `work:cs:delete`" is read as: a task command an agent can
-   run with `--check --json` headless; deleting needs the typed word in a terminal and there is no `--yes` (rulings 7
+2. **Agents can check, not delete.** Ruling 8's "scriptable `work:cs:delete`" is read as: a task command an agent on
+   the Mac can run with `--check --json` headless; deleting needs the typed word in a terminal and there is no `--yes` (rulings 7
    and 8: stop is headless, delete "takes a typed `delete`"). REPORT §8.3 named this an owner question; it is the
    cautious reading and can be widened later.
 3. **A failed sign-in does not block replace's check or the delete offer.** It is listed for retry: sign-ins can be
