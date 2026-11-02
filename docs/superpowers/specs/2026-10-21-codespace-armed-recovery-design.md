@@ -232,7 +232,7 @@ A keeper that starts and finds the Codespace already stopped classifies with wha
   > Codespace restarted, we are back. You need to bring the services that you require up and continue with the work. (Automatic restart \<rid\>: GitHub's 12-hour stop at HH:MMZ, back at HH:MMZ. Restored agents came back with `--resume` and without their launch flags, so check each worker's model, effort and sandbox before dispatching to it.)
 
   The second part comes from the upstream ruling on #965 (section 3). A Codex worker launched read-only comes back with the Codespace's `~/.codex/config.toml` defaults, so it cannot be assumed to still be read-only.
-- **Proof of delivery.** Within 2 min, the rid appears in `agent read --source recent-unwrapped`, or the agent's status turns `working`. If neither happens and the agent is idle, send once more. Otherwise notify.
+- **Proof of delivery.** Submit with `agent prompt --wait --until working --until blocked --timeout 30000`; only observed activity proves submission. If it fails and the lead is `idle` or `done`, read the screen once: a visible rid selects one Enter followed by `agent wait` for activity; an absent rid selects one more prompt with the same activity check. Screen text alone never proves delivery; a `blocked` lead is reported as waiting for an answer, and any other unreadable or unknown status permits no further input.
 - **Logging.** The keeper logs the delivery, never the screen content.
 
 ### 6.7 Notifications

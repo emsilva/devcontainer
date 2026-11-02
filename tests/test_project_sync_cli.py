@@ -300,7 +300,7 @@ class OwnerHerdr:
     def prompt(self, name, text):
         self.prompts.append((name, text))
         self.status = 'working'
-        return True
+        return 'started'
 
     def read(self, name, lines=80):
         return ''

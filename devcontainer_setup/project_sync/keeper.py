@@ -768,9 +768,13 @@ class Keeper:
             last['resume'] = told
             who = f'its lead {name}' if name else 'its lead'
             _LOG.info('Resume %s: %s (%s)', rid, told, name or 'no lead')
-            if told in ('delivered', 'resent'):
+            if told in ('delivered', 'entered', 'resent'):
                 outcome(f'Herdr in {int(herdr_at - back_at)} s; {name or "lead"} told',
                         f' and {who} was told to resume; task work:status shows the restart.')
+            elif told == 'blocked':
+                outcome(f'{name or "lead"} waiting for an answer',
+                        f', and {who} was told to resume but is now waiting on a question or approval in its pane; '
+                        'answer it there.')
             elif told == 'no-lead':
                 outcome('no single lead', ', but no single lead-* agent was found on its Herdr machine; tell its '
                                           'lead to resume.')

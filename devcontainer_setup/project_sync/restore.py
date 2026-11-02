@@ -1,7 +1,8 @@
 """Restore after a restart: stale Herdr proxies, the project's Herdr machine, its lead and the resume prompt.
 
-Every Herdr call is bounded and reads a failure as "not yet": False, [] or ''. The process
-listing for a move is the exception: it returns None when ps cannot be read, so work:cs can say so.
+Every Herdr call is bounded. Prompts preserve the error kind; other calls read a failure as
+"not yet": False, [] or ''. The process listing for a move returns None when ps cannot be read,
+so work:cs can say so.
 """
 from __future__ import annotations
 
@@ -18,7 +19,6 @@ SENTENCE = ('Codespace restarted, we are back. You need to bring the services th
 READY = ('idle', 'done')  # Herdr's states for an agent ready for input
 SETTLE = 10
 IDLE_WAIT = 10 * 60
-PROOF_WAIT = 2 * 60
 REACH_WAIT = 10 * 60
 POLL = 10
 _AGENT = re.compile(r'[a-z][a-z0-9_-]{0,31}')
@@ -128,15 +128,26 @@ class Herdr:
             raise ValueError('herdr-machine.json names no usable Herdr machine; run task work:cs to reconnect Herdr')
         self.machine, self.run, self.timeout = machine_id, run, timeout
 
-    def _call(self, *args):
+    def _call_result(self, *args):
+        """(stdout, None) on success, (None, error code) on failure."""
         # Never a pane's HERDR_* variables: they would aim the command at that pane's session.
         env = {key: value for key, value in os.environ.items() if not key.startswith('HERDR_')}
         try:
             result = self.run(['herdr', *args], capture_output=True, text=True, timeout=self.timeout, env=env,
                               stdin=subprocess.DEVNULL)
         except (OSError, subprocess.TimeoutExpired):
-            return None
-        return result.stdout if result.returncode == 0 else None
+            return None, 'unavailable'
+        if result.returncode == 0:
+            return result.stdout, None
+        try:
+            code = json.loads(result.stderr)['error']['code']
+        except (ValueError, KeyError, TypeError):
+            code = None
+        return None, code if isinstance(code, str) and code else 'unknown'
+
+    def _call(self, *args):
+        out, _ = self._call_result(*args)
+        return out
 
     def _json(self, *args):
         out = self._call(*args)
@@ -160,12 +171,24 @@ class Herdr:
             return []
         return [agent for agent in agents if isinstance(agent, dict)] if isinstance(agents, list) else []
 
-    def prompt(self, name: str, text: str) -> bool:
-        # Never --wait: a restored lead reads idle before its UI is up, and the wait then
-        # times out although the prompt arrived (measured). resume() proves delivery itself.
+    def prompt(self, name: str, text: str) -> str:
+        # Text can arrive in the input box without submission; wait for working or blocked.
         if not _named(name) or '\0' in text:
+            return 'refused'
+        _, error = self._call_result('--machine', self.machine, 'agent', 'prompt', name, text, '--wait',
+                                     '--until', 'working', '--until', 'blocked', '--timeout', '30000')
+        return error or 'started'
+
+    def enter(self, name: str) -> bool:
+        if not _named(name):
             return False
-        return self._call('--machine', self.machine, 'agent', 'prompt', name, text) is not None
+        return self._call('--machine', self.machine, 'agent', 'send-keys', name, 'enter') is not None
+
+    def wait_active(self, name: str) -> bool:
+        if not _named(name):
+            return False
+        return self._call('--machine', self.machine, 'agent', 'wait', name, '--until', 'working',
+                          '--until', 'blocked', '--timeout', '30000') is not None
 
     def read(self, name: str, lines: int = 80) -> str:
         if not _named(name):
@@ -192,6 +215,12 @@ class _Ticked:
 
     def prompt(self, name, text):
         return self._after(self.herdr.prompt(name, text))
+
+    def enter(self, name):
+        return self._after(self.herdr.enter(name))
+
+    def wait_active(self, name):
+        return self._after(self.herdr.wait_active(name))
 
     def read(self, name, lines=80):
         return self._after(self.herdr.read(name, lines))
@@ -244,10 +273,11 @@ def _status(herdr, name):
 
 
 def _settled(herdr, name, now, sleep):
-    # Ready on two reads SETTLE s apart, within IDLE_WAIT.
+    # Ready with an interactive UI on two reads SETTLE s apart, within IDLE_WAIT.
     deadline, ready = now() + IDLE_WAIT, False
     while True:
-        if _status(herdr, name) in READY:
+        agent = next((agent for agent in herdr.agents() if agent.get('name') == name), {})
+        if agent.get('agent_status') in READY and agent.get('interactive_ready') is not False:
             if ready:
                 return True
             ready = True
@@ -258,20 +288,10 @@ def _settled(herdr, name, now, sleep):
         sleep(SETTLE)
 
 
-def _proven(herdr, name, rid, now, sleep):
-    # The rid alone (the lead may shorten the rest), or the lead at work, within PROOF_WAIT.
-    deadline = now() + PROOF_WAIT
-    while True:
-        sleep(min(POLL, max(0, deadline - now())))
-        if rid in herdr.read(name) or _status(herdr, name) == 'working':
-            return True
-        if now() >= deadline:
-            return False
-
-
 def resume(herdr: Herdr, rid: str, text: str, *, now=time.time, sleep=time.sleep,
            tick=None) -> tuple[str, str | None]:
-    """Spec 6.6: ('delivered' | 'resent' | 'no-lead' | 'busy' | 'undelivered', the lead's name or None).
+    """Spec 6.6: ('delivered' | 'entered' | 'resent' | 'blocked' | 'no-lead' | 'busy' | 'undelivered',
+    the lead's name or None).
 
     Never logs the screen. `tick`, when given, runs after each Herdr call, as the keeper's heartbeat.
     """
@@ -282,10 +302,20 @@ def resume(herdr: Herdr, rid: str, text: str, *, now=time.time, sleep=time.sleep
     name = found['name']
     if not _settled(herdr, name, now, sleep):
         return 'busy', name
-    herdr.prompt(name, text)
-    if _proven(herdr, name, rid, now, sleep):
+    if herdr.prompt(name, text) == 'started':
+        return ('blocked' if _status(herdr, name) == 'blocked' else 'delivered'), name
+    status = _status(herdr, name)
+    if status == 'working':
         return 'delivered', name
-    if _status(herdr, name) not in READY:
+    if status == 'blocked':
+        return 'blocked', name
+    if status not in READY:
         return 'undelivered', name
-    herdr.prompt(name, text)
-    return ('resent' if _proven(herdr, name, rid, now, sleep) else 'undelivered'), name
+    # The screen chooses a remedy only: the rid can still be in the unsent input box.
+    if rid in herdr.read(name):
+        if herdr.enter(name) and herdr.wait_active(name):
+            return ('blocked' if _status(herdr, name) == 'blocked' else 'entered'), name
+        return 'undelivered', name
+    if herdr.prompt(name, text) == 'started':
+        return ('blocked' if _status(herdr, name) == 'blocked' else 'resent'), name
+    return 'undelivered', name
