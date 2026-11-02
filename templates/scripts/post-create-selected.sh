@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-if ! sudo -n bash .devcontainer/scripts/system-path.sh "$PATH" "$(command -v python3)"; then
+if ! sudo -n bash .devcontainer/scripts/system-path.sh "$PATH" "$(command -v python3)" "$HOME/.local/bin/open-on-mac"; then
   # The recovery command expands PATH when copied into the user's shell.
   # shellcheck disable=SC2016
-  echo 'Could not configure system PATH; run: sudo bash .devcontainer/scripts/system-path.sh "$PATH" "$(command -v python3)"' >&2
+  echo 'Could not configure system PATH; run: sudo bash .devcontainer/scripts/system-path.sh "$PATH" "$(command -v python3)" "$HOME/.local/bin/open-on-mac"' >&2
   exit 1
 fi
 bash .devcontainer/scripts/install-agents.sh

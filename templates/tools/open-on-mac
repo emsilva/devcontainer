@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Queue browser requests for the connected Mac without waiting for it."""
+import json
+import os
+from pathlib import Path
+import secrets
+import sys
+import tempfile
+import time
+from urllib.parse import parse_qs, urlsplit
+
+SELF_SHOWING = {'claude', 'codex', 'opencode', 'gh', 'az'}
+
+
+def program_name(argv):
+    if 'azure.cli' in argv:
+        return 'az'
+    if not argv:
+        return 'unknown'
+    name = os.path.basename(argv[0])
+    if name in {'node', 'python', 'python3', 'bun'} and len(argv) > 1:
+        return os.path.basename(argv[1])
+    return name
+
+
+def requester(proc):
+    pid = os.getppid()
+    fallback = (pid, '', 'unknown', None, None)
+    visited = set()
+    while pid > 0 and pid not in visited:
+        visited.add(pid)
+        process = proc / str(pid)
+        try:
+            # comm may contain whitespace and parentheses; the final ')' ends it.
+            fields = (process / 'stat').read_text().rsplit(')', 1)[1].split()
+            parent, start = int(fields[1]), fields[19]
+            argv = [part.decode(errors='replace') for part in
+                    (process / 'cmdline').read_bytes().split(b'\0') if part]
+        except (OSError, ValueError, IndexError):
+            break
+        identity = (pid, start, program_name(argv), None, None)
+        if len(visited) == 1:
+            fallback = identity
+        for fd in (2, 1, 0):
+            descriptor = process / 'fd' / str(fd)
+            try:
+                tty = os.readlink(descriptor)
+            except OSError:
+                continue
+            if tty.startswith('/dev/pts/'):
+                return pid, start, identity[2], tty, descriptor
+        pid = parent
+    return fallback
+
+
+def valid_url(url):
+    if not url or len(url.encode('utf-8')) > 8192 or any(ord(c) < 32 or ord(c) == 127 for c in url):
+        return False
+    parsed = urlsplit(url)
+    if parsed.scheme not in {'http', 'https'} or not parsed.hostname:
+        return False
+    candidates = [parsed]
+    for redirect in parse_qs(parsed.query).get('redirect_uri', []):
+        target = urlsplit(redirect)
+        if target.scheme in {'http', 'https'}:
+            candidates.append(target)
+    return all(candidate.port is None or 1024 <= candidate.port <= 65535 for candidate in candidates)
+
+
+def main(argv: list[str], env: dict) -> int:
+    try:
+        if len(argv) != 2 or not valid_url(argv[1]):
+            return 1
+        browser = env.get('BROWSER')
+        if Path(argv[0]).name == 'xdg-open' and browser and (
+                os.path.realpath(browser) != os.path.realpath(__file__)):
+            os.execv(browser, [browser, argv[1]])
+
+        proc = Path(env.get('DEVCONTAINER_LINKS_PROC', '/proc'))
+        pid, start, program, tty, descriptor = requester(proc)
+        state = Path(env.get('DEVCONTAINER_LINKS_STATE',
+                             str(Path(env.get('HOME', str(Path.home()))) / '.local/state/devcontainer-links')))
+        for directory in (state, state / 'requests', state / 'claimed'):
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            directory.chmod(0o700)
+        created_at = time.time()
+        identity = f'{time.time_ns()}-{os.getpid()}-{secrets.token_hex(2)}'
+        request = dict(schema=1, id=identity, url=argv[1], created_at=created_at,
+                       program=program, pid=pid, start=start, tty=tty)
+        fd, temporary = tempfile.mkstemp(prefix='.request-', dir=state / 'requests')
+        try:
+            with os.fdopen(fd, 'w') as output:
+                os.fchmod(output.fileno(), 0o600)
+                json.dump(request, output)
+            os.replace(temporary, state / 'requests' / (identity + '.json'))
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+
+        try:
+            listening = time.time() - (state / 'mac-listening').stat().st_mtime <= 15
+        except FileNotFoundError:
+            listening = False
+        if listening:
+            return 0
+        if descriptor is not None and program not in SELF_SHOWING:
+            # Use the found fd so a disappearing terminal cannot create a file.
+            fd = os.open(descriptor, os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK)
+            try:
+                os.write(fd, ('\r\nOpen this link on your Mac:\n' + argv[1] + '\r\n').encode())
+            finally:
+                os.close(fd)
+        return 1
+    except (OSError, ValueError, UnicodeError):
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv, os.environ))

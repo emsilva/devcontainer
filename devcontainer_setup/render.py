@@ -20,7 +20,7 @@ RUNTIMES = {'python', 'node', 'ruby', 'go', 'rust'}
 CONFIG = '.devcontainer/devcontainer.json'
 LOCK = '.devcontainer/devcontainer-lock.json'
 NAMESPACE = 'devcontainerSetup'
-TOOL_ASSETS = ('ccswap-constraints.txt', 'plaud-cli/package.json', 'plaud-cli/package-lock.json', 'README.md')
+TOOL_ASSETS = ('open-on-mac', 'ccswap-constraints.txt', 'plaud-cli/package.json', 'plaud-cli/package-lock.json', 'README.md')
 # Plaud package-lock.json engines.node: mute-stream@2.0.0 and undici@6.29.1.
 PLAUD_NODE_RANGE = '^18.17.0 || >=20.5.0'
 RETIRED_HELPERS = {'.devcontainer/scripts/project_sync/' + name + '.py'

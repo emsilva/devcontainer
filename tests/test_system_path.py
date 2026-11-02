@@ -60,6 +60,8 @@ class SystemPathTests(unittest.TestCase):
         # PATH tests must not install or inspect actual coding tools.
         for name in ('install-agents.sh', 'install-tools.sh'):
             (project / '.devcontainer/scripts' / name).write_text('exit 0\n')
+        self.executable(self.home / '.local/bin/open-on-mac', '#!/bin/sh\nexit 0\n')
+        (self.home / '.local/bin/xdg-open').symlink_to('open-on-mac')
         check = files['.devcontainer/scripts/validate-selected.sh'].decode()
         commands = check.split('for tool in ', 1)[1].split(';', 1)[0].split()
         for name in commands:
@@ -69,6 +71,77 @@ class SystemPathTests(unittest.TestCase):
             self.executable(destination, '#!/bin/sh\nexit 0\n')
         env = dict(self.env, PATH=str(self.home / '.local/bin') + os.pathsep + self.env['PATH'])
         return project, env
+
+    def test_third_argument_writes_browser_line_once(self):
+        helper = LOCAL_BIN + '/open-on-mac'
+        self.environment.write_text('LANG=C.UTF-8\nBROWSER=x\nBROWSER=y\n')
+        self.assert_ok(self.writer(self.env['PATH'], helper))
+        self.assertEqual(self.environment.read_text().count('BROWSER='), 1)
+        self.assertIn('BROWSER="' + helper + '"\n', self.environment.read_text())
+        before = self.environment.read_bytes(), self.zshenv.read_bytes()
+        self.assert_ok(self.writer(self.env['PATH'], helper))
+        self.assertEqual(before, (self.environment.read_bytes(), self.zshenv.read_bytes()))
+
+    def test_zshenv_sets_browser_only_when_unset(self):
+        helper = LOCAL_BIN + '/open-on-mac'
+        self.assert_ok(self.writer(self.env['PATH'], helper))
+        content = self.zshenv.read_text()
+        self.assertIn(': ${BROWSER:=' + helper + '}\nexport BROWSER\n', content)
+        self.assertLess(content.index('export BROWSER'), content.index('# end devcontainer-setup PATH'))
+        if shutil.which('zsh'):
+            for existing, expected in [('', helper), ('/vscode/browser', '/vscode/browser')]:
+                env = dict(self.env, BROWSER=existing)
+                result = subprocess.run(['zsh', '-c', 'source "$1"; printf "%s" "$BROWSER"',
+                                         'test-zshenv', str(self.zshenv)], env=env, capture_output=True, text=True)
+                self.assert_ok(result)
+                self.assertEqual(result.stdout, expected)
+
+    def test_two_arguments_leave_browser_alone(self):
+        self.assert_ok(self.writer(self.env['PATH'], LOCAL_BIN + '/open-on-mac'))
+        self.environment.write_text(self.environment.read_text().replace('BROWSER="' + LOCAL_BIN + '/open-on-mac"',
+                                                                          'BROWSER=x'))
+        before = self.environment.read_bytes(), self.zshenv.read_bytes()
+        self.assert_ok(self.writer())
+        self.assertEqual(before, (self.environment.read_bytes(), self.zshenv.read_bytes()))
+
+    def test_rejects_relative_or_multiline_helper_path(self):
+        for helper in ('relative', '', '/bin/open\nBAD=x', '/bin/open\rBAD=x',
+                       '/bin/open with space', '/bin/open\ttab', '/bin/"open', "/bin/'open"):
+            with self.subTest(helper=helper):
+                result = self.writer(self.env['PATH'], helper)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('browser helper', result.stderr)
+                self.assertFalse(self.environment.exists())
+                self.assertFalse(self.zshenv.exists())
+
+    def test_validation_checks_link_helper_environment(self):
+        project, env = self.project_fixture()
+        helper = self.home / '.local/bin/open-on-mac'
+        link = self.home / '.local/bin/xdg-open'
+        self.assert_ok(self.writer(self.env['PATH'], str(helper)))
+        self.environment.write_text(self.environment.read_text().replace(LOCAL_BIN, str(self.home / '.local/bin')))
+
+        def validate():
+            return subprocess.run(['bash', '.devcontainer/scripts/validate-selected.sh'],
+                                  cwd=project, env=env, capture_output=True, text=True)
+
+        self.assert_ok(validate())
+        helper.unlink()
+        result = validate()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Missing browser helper', result.stderr)
+        self.executable(helper, '#!/bin/sh\nexit 0\n')
+        link.unlink()
+        link.symlink_to('/wrong-browser')
+        result = validate()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Wrong xdg-open link', result.stderr)
+        link.unlink()
+        link.symlink_to('open-on-mac')
+        self.environment.write_text(self.environment.read_text().replace('BROWSER=', 'OLD_BROWSER='))
+        result = validate()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Missing or wrong system BROWSER', result.stderr)
 
     def test_prepends_local_bin_once(self):
         self.environment.write_text('LANG=C.UTF-8\nPATH="/usr/local/bin:/usr/bin"\n')
@@ -134,9 +207,10 @@ fi
                                 cwd=project, env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr + step_error.read_text())
         passed = arguments.read_text().splitlines()
-        self.assertEqual(len(passed), 5)
-        self.assertTrue(Path(passed[-1]).is_absolute())
-        self.assertEqual(Path(passed[-1]).resolve(), Path(sys.executable).resolve())
+        self.assertEqual(len(passed), 6)
+        self.assertTrue(Path(passed[-2]).is_absolute())
+        self.assertEqual(Path(passed[-2]).resolve(), Path(sys.executable).resolve())
+        self.assertEqual(passed[-1], str(self.home / '.local/bin/open-on-mac'))
         self.assertTrue(self.environment.is_file())
 
     def test_feature_directories_from_caller_are_kept(self):
@@ -206,7 +280,7 @@ fi
                                 cwd=project, env=env, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0, 'Inherited HOME PATH must not satisfy the fresh-shell check')
         self.assertIn('Not on the PATH of a fresh shell: codex', result.stderr)
-        self.assert_ok(self.writer())
+        self.assert_ok(self.writer(self.env['PATH'], str(self.home / '.local/bin/open-on-mac')))
         self.assertIn(LOCAL_BIN, self.environment.read_text())
         # Map the container home to this isolated fixture after checking the writer's real prefix.
         self.environment.write_text(self.environment.read_text().replace(LOCAL_BIN, str(self.home / '.local/bin')))

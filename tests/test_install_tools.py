@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import tempfile
 import unittest
 
@@ -78,6 +79,44 @@ chmod +x "$package/dist/index.js"
 
     def calls(self):
         return self.log.read_text() if self.log.exists() else ''
+
+    def test_installs_open_on_mac_with_absolute_python(self):
+        self.assert_ok(self.run_helper())
+        helper = self.home / '.local/bin/open-on-mac'
+        self.assertTrue(helper.is_file(), 'open-on-mac was not installed')
+        python = shutil.which('python3', path=self.env['PATH'])
+        self.assertEqual(helper.read_text().splitlines()[0], '#!' + python)
+        self.assertEqual(helper.stat().st_mode & 0o777, 0o755)
+        link = self.home / '.local/bin/xdg-open'
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(link.resolve(), helper)
+        self.assert_ok(self.run_helper('--check'))
+
+    def test_check_fails_when_helper_missing(self):
+        self.assert_ok(self.run_helper())
+        helper = self.home / '.local/bin/open-on-mac'
+        helper.unlink(missing_ok=True)
+        self.assertNotEqual(self.run_helper('--check').returncode, 0)
+
+    def test_rerun_keeps_helper_identical(self):
+        self.assert_ok(self.run_helper())
+        helper = self.home / '.local/bin/open-on-mac'
+        self.assertTrue(helper.is_file(), 'open-on-mac was not installed')
+        before = helper.read_bytes(), helper.stat().st_mtime_ns
+        self.assert_ok(self.run_helper())
+        self.assertEqual((helper.read_bytes(), helper.stat().st_mtime_ns), before)
+        helper.chmod(0o700)
+        self.assertNotEqual(self.run_helper('--check').returncode, 0)
+        self.assert_ok(self.run_helper())
+        helper.write_text(helper.read_text() + '\n# stale helper\n')
+        self.assertNotEqual(self.run_helper('--check').returncode, 0)
+        self.assert_ok(self.run_helper('--update'))
+        self.assertEqual(helper.read_bytes(), before[0])
+        (self.home / '.local/bin/xdg-open').unlink()
+        (self.home / '.local/bin/xdg-open').symlink_to('/wrong-browser')
+        self.assertNotEqual(self.run_helper('--check').returncode, 0)
+        self.assert_ok(self.run_helper())
+        self.assert_ok(self.run_helper('--check'))
 
     def test_installs_pinned_ccswap_and_plaud(self):
         self.assert_ok(self.run_helper())

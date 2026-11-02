@@ -3,8 +3,8 @@ set -euo pipefail
 
 # The caller PATH retains Feature directories that sudo's secure_path drops.
 # It is data for /etc/environment, never the root process's command lookup path.
-if [ "$#" -ne 2 ]; then
-  echo 'Usage: system-path.sh <caller-path> <absolute-python-executable>' >&2
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+  echo 'Usage: system-path.sh <caller-path> <absolute-python-executable> [<browser-helper>]' >&2
   exit 2
 fi
 if [ "$(id -u)" -ne 0 ] && [ -z "${DEVCONTAINER_SYSTEM_ROOT:-}" ]; then
@@ -18,7 +18,7 @@ case "$2" in
   /*) ;;
   *) echo 'The Python executable must be an absolute path.' >&2; exit 2 ;;
 esac
-"$2" - "${DEVCONTAINER_SYSTEM_ROOT:-}" "$1" <<'PY'
+"$2" - "${DEVCONTAINER_SYSTEM_ROOT:-}" "$1" "${@:3}" <<'PY'
 import os
 from pathlib import Path
 import re
@@ -27,7 +27,10 @@ import stat
 import sys
 import tempfile
 
-prefix, caller_path = sys.argv[1:]
+prefix, caller_path, *browser_args = sys.argv[1:]
+browser = browser_args[0] if browser_args else None
+if browser is not None and (not browser.startswith('/') or any(c.isspace() or c in '\"\'' for c in browser)):
+    sys.exit('The browser helper must be an absolute path without whitespace or quotes.')
 root = Path(prefix) if prefix else Path('/')
 if not root.is_absolute():
     sys.exit('DEVCONTAINER_SYSTEM_ROOT must be absolute.')
@@ -64,6 +67,9 @@ escaped = path_value.replace('\\', '\\\\').replace('"', '\\"')
 path_line = 'PATH="' + escaped + '"\n'
 path_lines = re.compile(r'^[ \t]*PATH=.*(?:\n|$)', re.M)
 new_environment = replace_or_append(original_environment, path_lines, path_line)
+if browser is not None:
+    browser_lines = re.compile(r'^[ \t]*BROWSER=.*(?:\n|$)', re.M)
+    new_environment = replace_or_append(new_environment, browser_lines, 'BROWSER="' + browser + '"\n')
 
 block = '''# devcontainer-setup PATH
 path=(/home/vscode/.local/bin ${path:#/home/vscode/.local/bin})
@@ -72,6 +78,16 @@ export PATH
 '''
 original_zshenv = zshenv.read_text() if zshenv.exists() else ''
 marked = re.compile(r'^# devcontainer-setup PATH\n.*?^# end devcontainer-setup PATH(?:\n|$)', re.M | re.S)
+browser_block = ''
+if browser is not None:
+    # Quote shell metacharacters while keeping the ordinary absolute path readable.
+    browser_block = ': ${BROWSER:=' + shlex.quote(browser) + '}\nexport BROWSER\n'
+else:
+    existing_block = marked.search(original_zshenv)
+    if existing_block:
+        browser_block = ''.join(line for line in existing_block[0].splitlines(keepends=True)
+                                if line.startswith(': ${BROWSER:=') or line == 'export BROWSER\n')
+block = block.replace('# end devcontainer-setup PATH', browser_block + '# end devcontainer-setup PATH')
 new_zshenv = replace_or_append(original_zshenv, marked, block)
 
 

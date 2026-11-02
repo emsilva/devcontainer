@@ -51,6 +51,51 @@ fresh_shell_lookup() {
   fi
 }
 
+browser_helper="$HOME/.local/bin/open-on-mac"
+if [ ! -x "$browser_helper" ]; then
+  echo 'Missing browser helper: open-on-mac' >&2
+  missing=1
+fi
+if ! python3 - "$HOME/.local/bin/xdg-open" "$browser_helper" <<'PY'
+from pathlib import Path
+import sys
+
+link, helper = map(Path, sys.argv[1:])
+sys.exit(0 if link.is_symlink() and link.resolve() == helper.resolve() else 1)
+PY
+then
+  echo 'Wrong xdg-open link: expected open-on-mac' >&2
+  missing=1
+fi
+if ! system_browser=$(python3 - "${DEVCONTAINER_SYSTEM_ROOT:-}/etc/environment" "$browser_helper" <<'PY'
+from pathlib import Path
+import shlex
+import sys
+
+try:
+    values = [shlex.split(line.split('=', 1)[1], comments=True)
+              for line in Path(sys.argv[1]).read_text().splitlines()
+              if line.lstrip().startswith('BROWSER=')]
+    if values != [[sys.argv[2]]]:
+        sys.exit(1)
+    print(values[0][0])
+except (OSError, ValueError):
+    sys.exit(1)
+PY
+); then
+  echo 'Missing or wrong system BROWSER: expected open-on-mac' >&2
+  missing=1
+else
+  for shell in "${fresh_shells[@]}"; do
+    # shellcheck disable=SC2016
+    if ! env -i HOME="$HOME" USER="${USER:-vscode}" PATH="$system_path" BROWSER="$system_browser" \
+      "$shell" -c 'test "$BROWSER" = "$1"' fresh-browser "$browser_helper"; then
+      echo 'Wrong BROWSER in a fresh shell: expected open-on-mac' >&2
+      missing=1
+    fi
+  done
+fi
+
 # The renderer replaces this token with the selected command list.
 # shellcheck disable=SC2043
 for tool in __TOOLS__; do
