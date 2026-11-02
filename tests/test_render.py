@@ -128,6 +128,24 @@ class RenderTests(unittest.TestCase):
         (self.project / '.devcontainer/devcontainer.json').write_text(json.dumps(config))
         self.assertIn('Missing managed script registration: ' + name, validate(self.project))
 
+    def test_generated_link_helper_is_registered_and_configured(self):
+        from devcontainer_setup.render import validate
+        files = self.render()
+        name = '.devcontainer/tools/open-on-mac'
+        self.assertTrue(name in files, 'Missing generated open-on-mac asset')
+        self.assertEqual(files[name], (ROOT / 'templates/tools/open-on-mac').read_bytes())
+        self.assertIn(name, self.config(files)['customizations']['devcontainerSetup']['managedFiles'])
+        post = files['.devcontainer/scripts/post-create-selected.sh'].decode()
+        call = 'system-path.sh "$PATH" "$(command -v python3)" "$HOME/.local/bin/open-on-mac"'
+        self.assertEqual(post.count(call), 2, 'The setup and recovery commands both need the helper')
+        canonical = (ROOT / '.devcontainer/scripts/post-create.sh').read_text()
+        self.assertIn('system-path.sh "$PATH" "$(command -v python3)"; then', canonical)
+        self.assertNotIn('open-on-mac', canonical)
+        self.install(files)
+        self.assertEqual(validate(self.project), [])
+        (self.project / name).unlink()
+        self.assertIn('Missing managed helper/file: ' + name, validate(self.project))
+
     def test_generated_tools_are_locked_registered_and_ordered(self):
         from devcontainer_setup.render import validate
         files = self.render()
@@ -326,7 +344,13 @@ class RenderTests(unittest.TestCase):
             path.chmod(0o755)
         system = self.project / 'system/etc'
         system.mkdir(parents=True)
-        (system / 'environment').write_text('PATH="' + str(bins) + os.pathsep + os.environ['PATH'] + '"\n')
+        browser = self.project / '.local/bin/open-on-mac'
+        browser.parent.mkdir(parents=True)
+        browser.write_text('#!/bin/sh\nexit 0\n')
+        browser.chmod(0o755)
+        (browser.parent / 'xdg-open').symlink_to('open-on-mac')
+        (system / 'environment').write_text('PATH="' + str(bins) + os.pathsep + os.environ['PATH'] + '"\n'
+                                          'BROWSER="' + str(browser) + '"\n')
         manager = bins / 'pnpm'
         for version, expected in [('9.15.4', 0), ('12.11.2', 1)]:
             manager.write_text('#!/bin/sh\necho ' + version + '\n')
@@ -426,7 +450,10 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(config['build']['dockerfile'], 'Dockerfile')
         for name, data in files.items():
             if name.endswith('.sh') and name != '.devcontainer/scripts/install-agents.sh':
-                self.assertLess(len(data.splitlines()), 100)
+                # The PATH, installer and validator now also own browser setup.
+                limit = 150 if Path(name).name in {'system-path.sh', 'install-tools.sh',
+                                                  'validate-selected.sh'} else 100
+                self.assertLess(len(data.splitlines()), limit, name)
 
     def test_unmanaged_environment_requires_explicit_polyglot(self):
         dc = self.project / '.devcontainer'

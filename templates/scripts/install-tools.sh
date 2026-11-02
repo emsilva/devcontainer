@@ -48,7 +48,45 @@ PY
   PLAUD_TELEMETRY_DISABLED=1 PLAUD_NO_UPDATE_NOTIFIER=1 "$local_bin/plaud" --help >/dev/null
 }
 
+install_browser_helper() {
+  local python
+  python=$(command -v python3)
+  "$python" - "$tools_dir/open-on-mac" "$local_bin" "$python" "$mode" <<'PY'
+import os
+from pathlib import Path
+import stat
+import sys
+import tempfile
+
+source, local_bin, python, mode = sys.argv[1:]
+if not Path(python).is_absolute():
+    sys.exit('The browser helper needs an absolute Python executable.')
+directory = Path(local_bin)
+helper, link = directory / 'open-on-mac', directory / 'xdg-open'
+content = ('#!' + python + '\n').encode() + Path(source).read_bytes().split(b'\n', 1)[1]
+complete = (helper.is_file() and not helper.is_symlink() and helper.read_bytes() == content
+            and stat.S_IMODE(helper.stat().st_mode) == 0o755)
+linked = link.is_symlink() and link.resolve() == helper.resolve()
+if mode == '--check':
+    sys.exit(0 if complete and linked else 'Missing or changed open-on-mac helper or xdg-open link.')
+directory.mkdir(parents=True, exist_ok=True)
+if not complete:
+    fd, temporary = tempfile.mkstemp(prefix='.open-on-mac-', dir=directory)
+    try:
+        with os.fdopen(fd, 'wb') as output:
+            output.write(content)
+            os.fchmod(output.fileno(), 0o755)
+        os.replace(temporary, helper)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+if not linked:
+    link.unlink(missing_ok=True)
+    link.symlink_to('open-on-mac')
+PY
+}
+
 umask 077
+install_browser_helper
 if [ "$mode" != --check ] && { [ "$mode" = --update ] || ! check_ccswap >/dev/null 2>&1; }; then
   pending=ccswap
   mkdir -p "$local_bin"
