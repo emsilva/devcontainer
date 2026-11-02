@@ -112,6 +112,10 @@ or other unvalidated native formats are reported. Start agent conversations
 from the checkout root so its scope can be established. An unfinished turn may
 not be available until its next supported completion.
 
+Passing the version check admits a release for validation only. The record,
+scope, ancestry and completed-turn checks decide which histories can sync;
+an unknown Codex record type is refused.
+
 Native Codex can hide automated `exec` sessions and histories containing only
 inherited turns from its default resume picker. Such imports are reported as
 issues; they are not counted as successfully available conversations.

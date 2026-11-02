@@ -206,8 +206,16 @@ def _validate_claude(rows, sid, roots):
 
 
 def _version(agent, version):
-    if not isinstance(version, str) or not re.fullmatch(r'(?:0\.(163|164)\.\d+|0\.164\.0-alpha\.1)' if agent == 'codex' else r'2\.1\.\d+', version):
-        raise ValueError(f'Unsupported {agent} native version: {version!r}')
+    if agent == 'codex' and version == '0.164.0-alpha.1':
+        return
+    match = re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', version) if isinstance(version, str) else None
+    if match:
+        major, minor, patch = map(int, match.groups())
+        if agent == 'codex' and major == 0 and (minor, patch) >= (163, 0):
+            return
+        if agent == 'claude' and major == 2 and (minor, patch) >= (1, 0):
+            return
+    raise ValueError(f'Unsupported {agent} native version: {version!r}')
 
 
 def _codex_index(home):
@@ -232,6 +240,8 @@ def _codex_index(home):
 
 
 def _validate_codex_dependencies(rows, meta, physical_id):
+    if meta.get('attached_thread'):
+        raise ValueError('Unsupported Codex attached-thread dependency')
     if meta.get('id') != physical_id and not meta.get('history_base'):
         raise ValueError('Native root session ID does not match physical identity')
     if isinstance(meta.get('source'), dict):
