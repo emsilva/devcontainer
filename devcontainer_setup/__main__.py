@@ -751,7 +751,8 @@ def _resolve_launch(api: Codespaces, project: Path, branch: str, paired: str | N
             if (data.get('repository', {}).get('full_name', '').lower() == repo.lower()
                     and data.get('git_status', {}).get('ref') == branch):
                 try:
-                    return _reuse_options(api, paired, branch, 'rebuild', data)
+                    api.resource_settings(data)
+                    return _no_codespace()
                 except ValueError as error:
                     return {'action': 'rebuild', 'name': paired, 'machine': None,
                             'idle_timeout': (f'{data["idle_timeout_minutes"]}m'
@@ -850,7 +851,7 @@ def _codespace_choice(ui: Gum, api: Codespaces, project: Path, branch: str, *, p
                                check=False)
         metadata = (json.loads(published_config).get('customizations', {}).get('devcontainerSetup', {})
                     if published_config else {})
-        selected = (f'rebuild {paired}' if usable else matching or
+        selected = ('none' if usable else matching or
                     ('none' if metadata.get('selections') else CREATE_CODESPACE))
         choice = ui.choose('Codespace', list(choices), selected)
         action, name = choices[choice]

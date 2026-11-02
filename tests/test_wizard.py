@@ -229,10 +229,57 @@ class ReviewRerunTests(unittest.TestCase):
         api.get.return_value = WizardCliTests._space('paired')
         api.resource_settings = Codespaces.resource_settings
         with patch.object(wizard, '_repository', return_value='owner/project'):
-            launch = wizard._resolve_launch(api, self.root, 'main', 'paired')
+            self.assertEqual(wizard._resolve_launch(api, self.root, 'main', 'paired')['action'], 'none')
+            launch = wizard._reuse_options(api, 'paired', 'main', 'rebuild', api.get.return_value)
         self.assertEqual((launch['action'], launch['name'], launch['machine'], launch['idle_timeout']),
                          ('rebuild', 'paired', 'premiumLinux', '60m'))
         api.machines.assert_not_called()
+
+    def test_resolve_launch_keeps_usable_paired_as_none(self):
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard
+        from devcontainer_setup.codespaces import Codespaces
+        api = Mock()
+        api.get.return_value = dict(WizardCliTests._space('paired'),
+                                    repository={'full_name': 'OWNER/Project'})
+        api.resource_settings = Codespaces.resource_settings
+        with patch.object(wizard, '_repository', return_value='owner/project'):
+            launch = wizard._resolve_launch(api, self.root, 'main', 'paired')
+        self.assertEqual(launch, wizard._no_codespace())
+        api.existing.assert_not_called()
+        api.machines.assert_not_called()
+
+    def test_resolve_launch_unusable_paired_keeps_fallback(self):
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard
+        from devcontainer_setup.codespaces import Codespaces
+        paired, other = WizardCliTests._space('paired'), WizardCliTests._space('other')
+        for unavailable in (dict(paired, git_status={'ref': 'feature'}),
+                            dict(paired, repository={'full_name': 'owner/elsewhere'}),
+                            ValueError('Not visible (HTTP 404)')):
+            with self.subTest(unavailable=unavailable):
+                api = Mock()
+                def get(name):
+                    if name == 'paired':
+                        if isinstance(unavailable, ValueError):
+                            raise unavailable
+                        return unavailable
+                    return other
+                api.get.side_effect = get
+                api.existing.return_value = [paired, other]
+                api.resource_settings = Codespaces.resource_settings
+                with patch.object(wizard, '_repository', return_value='owner/project'):
+                    launch = wizard._resolve_launch(api, self.root, 'main', 'paired')
+                    self.assertEqual((launch['action'], launch['name']), ('reuse', 'other'))
+                    self.assertIn('Paired Codespace paired is unavailable', launch['warning'])
+                    self.assertEqual((launch['machine'], launch['idle_timeout']), ('premiumLinux', '60m'))
+                    # Once the pairing is readable on this branch again, stop proposing another reuse.
+                    api.get.side_effect = None
+                    api.get.return_value = paired
+                    api.existing.reset_mock()
+                    self.assertEqual(wizard._resolve_launch(api, self.root, 'main', 'paired')['action'], 'none')
+                    api.existing.assert_not_called()
+                api.machines.assert_not_called()
 
     def test_unreadable_paired_machine_is_asked_not_defaulted(self):
         from unittest.mock import Mock
@@ -509,14 +556,20 @@ class WizardCliTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertIn('default branch', output)
 
-    def test_paired_defaults_to_rebuild_with_force(self):
+    def test_paired_defaults_to_none_with_rebuild_listed(self):
+        result, menus, _, _, _ = self._split_menu([self._space('paired')], paired='paired')
+        self.assertEqual(menus[0][2], 'none')
+        self.assertIn('rebuild paired', menus[0][1])
+        self.assertEqual(result['action'], 'none')
+
+    def test_choosing_rebuild_forces_rebuild_on_paired(self):
         import contextlib
         import io
         from unittest.mock import Mock
         from devcontainer_setup import __main__ as wizard
-        result, menus, _, _, api = self._split_menu([self._space('paired')], paired='paired')
+        result, menus, _, _, api = self._split_menu([self._space('paired')], paired='paired', choice='rebuild paired')
         self.assertEqual((result['action'], result['name']), ('rebuild', 'paired'))
-        self.assertEqual(menus[0][2], 'rebuild paired')
+        self.assertEqual(menus[0][2], 'none')
         self.assertEqual((result['machine'], result['idle_timeout']), ('premiumLinux', '60m'))
         api.launch = Mock(return_value='paired')
         update = {'state': 'current', 'reason': None, 'head': 'abc1234', 'behind': 0}
@@ -530,6 +583,8 @@ class WizardCliTests(unittest.TestCase):
                                       result, {'apply_dotfiles': False})
         self.assertIs(api.launch.call_args.kwargs['force_rebuild'], True)
         self.assertEqual(api.launch.call_args.kwargs['resume'], 'paired')
+        self.assertEqual(api.launch.call_args.kwargs['machine'], 'premiumLinux')
+        self.assertEqual(api.launch.call_args.kwargs['idle_timeout'], '60m')
         self.assertEqual(api.launch.call_args.kwargs['open_after_create'], 'none')
 
     def test_existing_unpaired_codespace_is_listed_and_default_reused(self):
@@ -1103,7 +1158,7 @@ class WizardCliTests(unittest.TestCase):
         options, selected = self._existing_menu([
             {'name': 'first', 'git_status': {'ref': 'main'}},
             {'name': 'second', 'git_status': {'ref': 'main'}}])
-        self.assertEqual(selected, ('rebuild second',))
+        self.assertEqual(selected, ('none',))
         self.assertEqual(options, ['none', 'rebuild second', 'reuse first'])
 
     def test_existing_codespace_menu_never_defaults_to_create(self):
