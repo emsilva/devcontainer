@@ -413,9 +413,9 @@ def setup_checkout(project: Path):
     if not _github_repository(project):
         yield project, None
         return
-    from .project_sync.state import discover_project, setup_worktree_root
+    from .project_sync.state import discover_project, ensure_setup_worktree_root
     default = default_branch(project)
-    root = setup_worktree_root(discover_project(project))
+    root = ensure_setup_worktree_root(discover_project(project))
     worktree, branch = setup_worktree(project, root)
     start = git(project, 'rev-parse', f'refs/heads/{branch}')
     try:

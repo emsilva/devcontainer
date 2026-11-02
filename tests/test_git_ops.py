@@ -2,6 +2,7 @@ import contextlib
 import io
 import os
 from pathlib import Path
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -335,6 +336,7 @@ class SetupWorktreeTests(unittest.TestCase):
         isolated.start()
         self.addCleanup(isolated.stop)
         self.root = self.base / 'state/setup-worktrees/project'
+        self.root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.project = self.make_project('project')
         self.clones = 0
 
@@ -388,6 +390,93 @@ class SetupWorktreeTests(unittest.TestCase):
                 calls.append(tuple(args[3:]))
             return real(args, **kwargs)
         return calls, patch.object(operations.subprocess, 'run', side_effect=record)
+
+    @contextlib.contextmanager
+    def namespace_checkout(self, state_home):
+        from devcontainer_setup.__main__ import setup_checkout
+        from devcontainer_setup.project_sync.state import Project
+        project = Project(self.project, 'git@github.com:owner/project', 'github.com/owner/project', 'a' * 24)
+        # Only identity discovery is synthetic: Git uses the fixture's local
+        # bare origin, including the wizard's actual creation and cleanup path.
+        with patch.dict(os.environ, XDG_STATE_HOME=str(state_home)), \
+                patch('devcontainer_setup.__main__._github_repository', return_value='owner/project'), \
+                patch('devcontainer_setup.project_sync.state.discover_project', return_value=project):
+            with setup_checkout(self.project) as (checkout, default):
+                self.assertEqual(default, 'main')
+                yield project, checkout
+
+    def test_first_setup_creates_a_private_namespace(self):
+        from devcontainer_setup.project_sync.state import read_json, state_dir
+        home = self.base / 'fresh/state'
+        namespace = home / 'devcontainer-setup'
+        previous = os.umask(0o022)
+        try:
+            with self.namespace_checkout(home) as (project, checkout):
+                root = namespace / 'setup-worktrees' / project.project_id
+                self.assertEqual(checkout.parent, root)
+                for path in (home, namespace, root.parent, root):
+                    mode = stat.S_IMODE(path.stat().st_mode)
+                    self.assertEqual(mode, 0o700, f'{path} mode {mode:04o}; expected 0700')
+                with self.assertRaises(FileNotFoundError):
+                    read_json(state_dir(project, {'XDG_STATE_HOME': str(home)}) / 'missing.json')
+                self.assertEqual((checkout / 'app.txt').read_text(), 'original\n')
+        finally:
+            os.umask(previous)
+        self.assertEqual(git(self.project, 'branch', '--list', 'setup/*'), '')
+
+    def test_setup_repairs_a_loose_namespace_it_owns(self):
+        home = self.base / 'loose'
+        namespace = home / 'devcontainer-setup'
+        root = namespace / 'setup-worktrees' / ('a' * 24)
+        root.mkdir(parents=True)
+        home.chmod(0o755)
+        for mode in (0o755, 0o777, 0o2750):
+            with self.subTest(mode=f'{mode:04o}'):
+                for path in (namespace, root.parent, root):
+                    path.chmod(mode)
+                with self.namespace_checkout(home):
+                    for path in (namespace, root.parent, root):
+                        actual = stat.S_IMODE(path.stat().st_mode)
+                        self.assertEqual(actual, 0o700, f'{path} mode {actual:04o}; expected 0700')
+                    self.assertEqual(stat.S_IMODE(home.stat().st_mode), 0o755)
+
+    def test_setup_refuses_a_symlinked_or_foreign_namespace(self):
+        components = ('', 'devcontainer-setup', 'devcontainer-setup/setup-worktrees',
+                      'devcontainer-setup/setup-worktrees/' + 'a' * 24)
+        for index, component in enumerate(components):
+            with self.subTest(symlink=component or 'state home'):
+                home, outside = self.base / f'linked-{index}', self.base / f'outside-{index}'
+                outside.mkdir(mode=0o755)
+                link = home / component
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(outside, target_is_directory=True)
+                with self.assertRaises(OSError):
+                    with self.namespace_checkout(home):
+                        pass
+                self.assertEqual(list(outside.iterdir()), [])
+                self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o755)
+        for index, component in enumerate(components[1:]):
+            with self.subTest(foreign=component):
+                home = self.base / f'foreign-{index}'
+                directory = home / component
+                directory.mkdir(parents=True)
+                directory.chmod(0o755)
+                target = directory.stat()
+                real_fstat = os.fstat
+                def foreign_owner(fd):
+                    info = real_fstat(fd)
+                    if (info.st_dev, info.st_ino) == (target.st_dev, target.st_ino):
+                        fields = list(info)
+                        fields[4] = os.geteuid() + 1
+                        return os.stat_result(fields)
+                    return info
+                with patch('devcontainer_setup.project_sync.state.os.fstat', side_effect=foreign_owner):
+                    with self.assertRaises(PermissionError) as caught:
+                        with self.namespace_checkout(home):
+                            pass
+                self.assertIn(str(directory), str(caught.exception))
+                self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o755)
+                self.assertEqual(list(directory.iterdir()), [])
 
     def test_default_branch_reads_origin_head_without_the_network(self):
         git(self.project, 'remote', 'set-url', 'origin', str(self.base / 'unreachable.git'))

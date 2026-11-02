@@ -159,12 +159,21 @@ def setup_worktree_root(project: Project, env: Mapping | None = None) -> Path:
     return _state_home(env) / 'devcontainer-setup/setup-worktrees' / project.project_id
 
 
+def ensure_setup_worktree_root(project: Project, env: Mapping | None = None) -> Path:
+    """Create and validate setup's private root without following symlinks."""
+    root = setup_worktree_root(project, env)
+    # Walk through the root itself; the placeholder is never opened or created.
+    with _parent(root / '.directory', create=True, private=True):
+        pass
+    return root
+
+
 @contextmanager
 def _parent(path: Path, create: bool = False, private: bool = False):
     """Walk using directory descriptors so symlink swaps cannot redirect writes."""
     path = Path(path)
     if not path.is_absolute() or '..' in path.parts or path.name in ('', '.', '..'):
-        raise ValueError('State path must be absolute without traversal')
+        raise ValueError(f'State path {path} must be absolute without traversal')
     # Match the state layout, not an arbitrary project directory with the same
     # basename. Native transcript destinations and notes readers remain mixed
     # ownership; they must never chmod unrelated user directories.
@@ -175,6 +184,8 @@ def _parent(path: Path, create: bool = False, private: bool = False):
                 continue
             rest = path.parts[index + 1:]
             if ((len(rest) >= 3 and rest[0] == 'projects' and re.fullmatch(r'[0-9a-f]{24}', rest[1]))
+                    # Only setup's managed root, never checkout contents below it.
+                    or (len(rest) == 3 and rest[0] == 'setup-worktrees' and re.fullmatch(r'[0-9a-f]{24}', rest[1]))
                     or rest in (('host.json',), ('host.lock',))):
                 boundary = index
                 break
@@ -190,6 +201,7 @@ def _parent(path: Path, create: bool = False, private: bool = False):
             next_fd = os.open(piece, flags, dir_fd=fd)
             try:
                 if boundary is not None:
+                    directory = Path(*path.parts[:index + 1])
                     info = os.fstat(next_fd)
                     mode = stat.S_IMODE(info.st_mode)
                     if index < boundary:
@@ -198,17 +210,18 @@ def _parent(path: Path, create: bool = False, private: bool = False):
                         # safe parents; never change unmanaged ancestors.
                         if (info.st_uid not in (0, os.geteuid())
                                 or (mode & 0o022 and not mode & stat.S_ISVTX)):
-                            raise PermissionError('Unsafe state namespace ancestor')
+                            raise PermissionError(f'Unsafe state namespace ancestor {directory}')
                     else:
                         if info.st_uid != os.geteuid():
-                            raise PermissionError('State namespace is owned by another user')
+                            raise PermissionError(f'State namespace {directory} is owned by another user')
                         if mode != 0o700:
                             if not create:
-                                raise PermissionError('State namespace is not private')
+                                raise PermissionError(f'State namespace {directory} is not private (mode {mode:04o}); '
+                                                      f'run chmod 700 {directory}')
                             os.fchmod(next_fd, 0o700)
                     current = os.stat(piece, dir_fd=fd, follow_symlinks=False)
                     if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
-                        raise PermissionError('State directory changed during validation')
+                        raise PermissionError(f'State directory {directory} changed during validation')
             except BaseException:
                 os.close(next_fd)
                 raise
