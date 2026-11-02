@@ -50,7 +50,9 @@ account, nothing copied) and ruling 13 (ccswap on every Codespace), in
    (`claude auth login --claudeai --email <account>`, then `claude auth status --json` must show that email, then
    `ccswap add --alias <label>`; finally `ccswap switch <default>`; an account counts as signed in when ccswap's own
    account list holds that identity), OpenCode (`opencode auth login openai --method chatgpt-token-sharing`;
-   `opencode auth list --format json` has an `openai` connection), then GitHub and Azure per the owner inputs.
+   `opencode auth list --format json` has an `openai` connection), Grok (`grok login --device-auth`; `grok models`
+   prints `You are logged in with grok.com.` when signed in and `You are not authenticated.` when not, exit 0 both),
+   then GitHub and Azure per the owner inputs.
 5. **Status.** A check that cannot run (network) is "unknown", never "signed out". The Mac keeps only identity and
    state per Codespace, never a URL, code or token.
 6. **Failures and cancel.** A failed, declined or timed-out tool is reported by name and the sequence goes on; the end
@@ -60,6 +62,27 @@ account, nothing copied) and ruling 13 (ccswap on every Codespace), in
 7. **Before building: a spike.** That `claude auth login` for a second account, after `ccswap add` saved the first,
    keeps the first account usable on ccswap 0.42.0 (REPORT marks it unverified). Run in the live session; if it fails,
    the Claude part is redesigned before the plan.
+
+## Live findings (2026-11-02, test Codespaces on innovate; log `tmp/codespace-lifecycle/link-helper/LIVE.md`)
+
+- **Ruling 24 (owner, 13:56Z):** "now grok cli as well pls ... needs to be part of the installation and login." Grok is
+  installed with the other agents (builder grok-xhigh-9005) and joins this sequence.
+- Every CLI below signed in on a fresh Codespace through the link helper, the owner approving in the Mac browser:
+  `plaud login`; `codex login` (the first attempt left no callback forward and never finished, cause unrecorded
+  because the link helper's log lines were dropped, fixed by builder linklog-xhigh-2594; the retry worked);
+  `claude auth login --claudeai` (localhost redirect over the IPv4-only forward); `opencode auth login openai
+  --method chatgpt-token-sharing`; `env -u GITHUB_TOKEN gh auth login --hostname github.com --git-protocol https
+  --web` (answer `n` to "Authenticate Git", device code shown in the Codespace terminal); `grok login --device-auth`
+  (device page opened on the Mac, code shown in the terminal).
+- `grok login --oauth` did not finish: its redirect is `http://127.0.0.1:<port>/callback` and the forward was up for
+  the whole 10 minutes, but after approval x.ai showed a code page instead of redirecting. The sequence uses
+  `--device-auth` until that is understood.
+- A second `claude auth login --claudeai` signed the browser's current claude.ai account in again; a second account
+  needs `--email <second>` and the owner switching account in the browser. The ccswap two-account spike was skipped
+  by the owner and stays unverified.
+- `plaud me` reports `[AUTH_FAILED]` when signed out; `opencode auth logout` needs a terminal (account picker).
+- **A rebuild erases everything outside `/workspaces`:** after `gh codespace rebuild` every tool above was signed out
+  and the Codespace's Claude conversation files were gone (measured 14:54Z). This sharpens owner input 4.
 
 ## Owner inputs (pending; each changes the build)
 
