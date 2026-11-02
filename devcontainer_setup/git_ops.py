@@ -111,7 +111,7 @@ def setup_worktree(project: Path, root: Path) -> tuple[Path, str]:
             print(f'Note: an earlier setup left the worktree {path} on {held or "a detached HEAD"}. Inspect it, '
                   f'then remove it with git -C {shlex.quote(str(project))} worktree remove {shlex.quote(str(path))}',
                   file=sys.stderr)
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    root.mkdir(mode=0o700, exist_ok=True)
     path = root / branch.replace('/', '-')
     if path.exists() or path.is_symlink():
         path = Path(tempfile.mkdtemp(prefix=path.name + '-', dir=root))

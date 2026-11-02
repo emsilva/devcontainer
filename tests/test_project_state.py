@@ -255,6 +255,17 @@ except BlockingIOError:
             read_json(self.directory / 'record.json')
         self.assertEqual(stat.S_IMODE(self.namespace.stat().st_mode), 0o777)
 
+    def test_loose_namespace_read_names_path_and_chmod(self):
+        for mode in (0o755, 0o770, 0o2777):
+            with self.subTest(mode=f'{mode:04o}'):
+                self.namespace.chmod(mode)
+                with self.assertRaises(PermissionError) as caught:
+                    read_json(self.directory / 'missing.json')
+                self.assertEqual(str(caught.exception),
+                                 f'State namespace {self.namespace} is not private (mode {mode:04o}); '
+                                 f'run chmod 700 {self.namespace}')
+                self.assertEqual(stat.S_IMODE(self.namespace.stat().st_mode), mode)
+
 
 class LockDescriptorTests(unittest.TestCase):
     def test_lock_exposes_the_live_descriptor_until_context_exit(self):
