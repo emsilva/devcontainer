@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -929,7 +930,25 @@ def setup_continuity(project: Path, ui, codespace: str | None) -> None:
                 raise ValueError('No matching project checkout was found in the selected Codespace.')
             root = roots[0] if len(roots) == 1 else ui.choose('Which remote project checkout?', roots)
         service.pair(codespace, root)
-        print('Codespace paired. Run task work:cs to open Herdr and start project sync.', flush=True)
+        try:
+            connect = ui.confirm('Connect and sign in now?', True)
+        except Cancelled:
+            connect = False
+        if not connect:
+            print('Codespace paired. Run task work:cs to connect, then task work:signin:all to sign in.', flush=True)
+        elif not (project / '.devcontainer/scripts/project_sync/signins.py').is_file():
+            print(f'Update this checkout (git -C {shlex.quote(str(project))} pull --ff-only), '
+                  'then run task work:cs and task work:signin:all.', flush=True)
+        else:
+            # Terminal Ctrl-C also reaches the child; let it finish its own cleanup.
+            previous = signal.signal(signal.SIGINT, lambda number, frame: None)
+            try:
+                code = subprocess.call(['bash', '.devcontainer/scripts/project-sync.sh', 'work', '--codespace',
+                                        '--then-signin-all'], cwd=project)
+            finally:
+                signal.signal(signal.SIGINT, previous)
+            if code:
+                print('Setup is preserved. Run task work:cs, then task work:signin:all.', flush=True)
     except Cancelled:
         print('Setup is preserved. Run task work:cs on your Mac to finish connecting.', file=sys.stderr)
     except (ValueError, OSError, subprocess.TimeoutExpired) as error:

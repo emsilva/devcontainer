@@ -403,6 +403,196 @@ class ReviewRerunTests(unittest.TestCase):
                 self.assertEqual(self.prompts, [])
 
 
+class SetupSignInTests(unittest.TestCase):
+    def setUp(self):
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve() / 'project with spaces'
+        self.root.mkdir()
+        self.marker = self.root / '.devcontainer/scripts/project_sync/signins.py'
+        self.marker.parent.mkdir(parents=True)
+        self.marker.touch()
+        self.ui = Mock()
+        self.ui.confirm.return_value = True
+        self.service = Mock(spec=['binding', 'roots', 'pair'])
+        self.service.binding.return_value = None
+        self.service.roots.return_value = ['/workspaces/project']
+        self.real_call = subprocess.call
+        self.connect = Mock(return_value=0)
+        patches = (
+            patch.dict(os.environ, CODESPACES=''),
+            patch('devcontainer_setup.project_sync.state.discover_project', return_value=object()),
+            patch('devcontainer_setup.project_sync.state.state_dir', return_value=self.root / 'state'),
+            patch('devcontainer_setup.project_sync.codespaces.Codespaces', return_value=self.service),
+            patch.object(wizard.subprocess, 'call', self.connect),
+        )
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def offer(self):
+        import contextlib
+        import io
+        from devcontainer_setup import __main__ as wizard
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            wizard.setup_continuity(self.root, self.ui, 'paired')
+        return output.getvalue()
+
+    def assert_connect(self):
+        self.ui.confirm.assert_called_once_with('Connect and sign in now?', True)
+        self.service.pair.assert_called_once_with('paired', '/workspaces/project')
+        self.connect.assert_called_once_with(
+            ['bash', '.devcontainer/scripts/project-sync.sh', 'work', '--codespace', '--then-signin-all'],
+            cwd=self.root)
+
+    def test_pairing_offers_connect_and_sign_in(self):
+        self.offer()
+        self.assert_connect()
+        self.service.roots.assert_called_once_with('paired')
+
+    def test_rebuild_of_paired_offers_sign_in(self):
+        self.service.binding.return_value = {'codespace': 'paired', 'remote_root': '/workspaces/rebuilt'}
+        self.offer()
+        self.ui.confirm.assert_called_once_with('Connect and sign in now?', True)
+        self.service.pair.assert_called_once_with('paired', '/workspaces/rebuilt')
+        self.service.roots.assert_not_called()
+        self.connect.assert_called_once_with(
+            ['bash', '.devcontainer/scripts/project-sync.sh', 'work', '--codespace', '--then-signin-all'],
+            cwd=self.root)
+
+    def test_failed_connect_prints_recovery(self):
+        import signal
+        previous = signal.getsignal(signal.SIGINT)
+        self.connect.return_value = 1
+        output = self.offer()
+        self.assertIn('Setup is preserved. Run task work:cs, then task work:signin:all.', output)
+        self.assert_connect()
+        self.assertIs(signal.getsignal(signal.SIGINT), previous)
+        self.connect.side_effect = OSError('Cannot start the checkout script')
+        output = self.offer()
+        self.assertIs(signal.getsignal(signal.SIGINT), previous)
+        self.assertIn('Setup is preserved.', output)
+
+    def test_declining_prints_both_commands(self):
+        self.ui.confirm.return_value = False
+        output = self.offer()
+        self.assertIn('Codespace paired. Run task work:cs to connect, then task work:signin:all to sign in.', output)
+        self.connect.assert_not_called()
+        self.service.pair.assert_called_once_with('paired', '/workspaces/project')
+
+    def test_cancelling_offer_prints_both_commands(self):
+        from devcontainer_setup.ui import Cancelled
+        self.ui.confirm.side_effect = Cancelled()
+        output = self.offer()
+        self.assertIn('Codespace paired. Run task work:cs to connect, then task work:signin:all to sign in.', output)
+        self.connect.assert_not_called()
+        self.service.pair.assert_called_once_with('paired', '/workspaces/project')
+
+    def test_offer_without_updated_checkout_prints_commands(self):
+        self.marker.unlink()
+        output = self.offer()
+        self.assertIn(f'Update this checkout (git -C {shlex.quote(str(self.root))} pull --ff-only), '
+                      'then run task work:cs and task work:signin:all.', output)
+        self.connect.assert_not_called()
+        self.service.pair.assert_called_once_with('paired', '/workspaces/project')
+
+    def test_no_offer_when_pairing_stays_elsewhere(self):
+        self.service.binding.return_value = {'codespace': 'other', 'remote_root': '/workspaces/other'}
+        with patch('devcontainer_setup.project_sync.arming.read', return_value={'armed': False}):
+            output = self.offer()
+        self.assertIn('still paired with other', output)
+        self.ui.confirm.assert_not_called()
+        self.connect.assert_not_called()
+        self.service.pair.assert_not_called()
+        self.service.binding.return_value = None
+        self.offer()
+        self.assert_connect()
+
+    def test_no_offer_inside_a_codespace(self):
+        with patch.dict(os.environ, CODESPACES='true'):
+            self.offer()
+        self.ui.confirm.assert_not_called()
+        self.connect.assert_not_called()
+        self.service.pair.assert_not_called()
+        self.offer()
+        self.assert_connect()
+
+    def test_wizard_does_not_import_workspace_to_connect(self):
+        with patch('devcontainer_setup.project_sync.workspace.remote',
+                   side_effect=AssertionError('Connect through the checkout script')) as remote:
+            self.offer()
+        remote.assert_not_called()
+        self.assert_connect()
+
+    def test_checkout_script_runs_in_project_and_finishes(self):
+        from devcontainer_setup import __main__ as wizard
+        script = self.root / '.devcontainer/scripts/project-sync.sh'
+        script.write_text('#!/usr/bin/env bash\nset -euo pipefail\npwd > signin-invocation\n'
+                          'printf "%s\\n" "$@" >> signin-invocation\n')
+        with patch.object(wizard.subprocess, 'call', self.real_call):
+            self.offer()
+        receipt = self.root / 'signin-invocation'
+        self.assertTrue(receipt.is_file(), 'The checkout script must run to completion before setup returns')
+        self.assertEqual(receipt.read_text().splitlines(),
+                         [str(self.root), 'work', '--codespace', '--then-signin-all'])
+
+    def test_ctrl_c_waits_for_checkout_cleanup_and_restores_handler(self):
+        import selectors
+        import signal
+        child = '''import signal, sys, time
+from pathlib import Path
+def cancel(number, frame):
+    time.sleep(0.6)
+    Path('signin-cleaned').write_text('finished')
+    raise SystemExit(130)
+signal.signal(signal.SIGINT, cancel)
+print('READY', flush=True)
+signal.pause()
+'''
+        script = self.root / '.devcontainer/scripts/project-sync.sh'
+        script.write_text(f'#!/usr/bin/env bash\nexec {shlex.quote(sys.executable)} -u -c {shlex.quote(child)}\n')
+        runner = '''import signal, sys
+from pathlib import Path
+from unittest.mock import Mock, patch
+from devcontainer_setup import __main__ as wizard
+project = Path(sys.argv[1])
+service = Mock()
+service.binding.return_value = None
+service.roots.return_value = ['/workspaces/project']
+ui = Mock()
+ui.confirm.return_value = True
+before = signal.getsignal(signal.SIGINT)
+with patch('devcontainer_setup.project_sync.state.discover_project', return_value=object()), \\
+     patch('devcontainer_setup.project_sync.state.state_dir', return_value=project / 'state'), \\
+     patch('devcontainer_setup.project_sync.codespaces.Codespaces', return_value=service):
+    wizard.setup_continuity(project, ui, 'paired')
+assert signal.getsignal(signal.SIGINT) is before
+print('HANDLER_RESTORED', flush=True)
+'''
+        process = subprocess.Popen([sys.executable, '-u', '-c', runner, str(self.root)], cwd=SOURCE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            with selectors.DefaultSelector() as ready:
+                ready.register(process.stdout, selectors.EVENT_READ)
+                self.assertTrue(ready.select(timeout=5), 'The local fake checkout must become ready')
+            self.assertEqual(process.stdout.readline().strip(), 'READY')
+            os.killpg(process.pid, signal.SIGINT)
+            output, error = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 0, error)
+            self.assertEqual((self.root / 'signin-cleaned').read_text(), 'finished')
+            self.assertIn('HANDLER_RESTORED', output)
+            self.assertIn('Setup is preserved. Run task work:cs, then task work:signin:all.', output)
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate(timeout=5)
+
+
 class WizardCliTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
