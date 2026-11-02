@@ -40,6 +40,124 @@ class PublicationTests(NativeFixture):
             mocked.start(); self.addCleanup(mocked.stop)
         return source, leaf, entry, env, turns, resumes
 
+    def test_capture_records_sessions_started_here(self):
+        self.codex()
+        self.claude()
+        entry = next(e for e in self.capture()['entries'] if e['agent'] == 'claude')
+        imported = self.publish(entry)['imported'][0]['session_id']
+        state = self.root / 'publication-state'
+        captured = self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
+        self.assertEqual(captured['issues'], [])
+        self.assertNotIn(imported, [e['session_id'] for e in captured['entries']])
+        origins = state / 'conversation-origins.json'
+        self.assertTrue(origins.exists(), 'Capture must retain the sessions started here')
+        self.assertEqual(json.loads(origins.read_bytes()),
+                         dict(schema=1, sessions=dict(claude=[self.sid], codex=[self.sid])))
+        self.assertEqual(origins.stat().st_mode & 0o777, 0o600)
+
+    def test_capture_remembers_refused_sessions_and_only_grows(self):
+        codex, claude = self.codex(), self.claude()
+        codex.write_bytes(codex.read_bytes().replace(b'0.163.0', b'0.100.0'))
+        claude.write_bytes(claude.read_bytes().replace(b'2.1.302', b'1.0.000'))
+        state = self.root / 'publication-state'
+        origins = state / 'conversation-origins.json'
+        previous = str(uuid.uuid4())
+        self.api.atomic_write(origins, json.dumps(dict(schema=1, sessions=dict(claude=[previous], codex=[]))).encode())
+        captured = self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
+        self.assertEqual(captured['entries'], [])
+        self.assertEqual({issue['agent'] for issue in captured['issues']}, {'claude', 'codex'})
+        expected = dict(schema=1, sessions=dict(claude=sorted([previous, self.sid]), codex=[self.sid]))
+        self.assertEqual(json.loads(origins.read_bytes()), expected)
+        codex.unlink(); claude.unlink()
+        self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
+        self.assertEqual(json.loads(origins.read_bytes()), expected)
+
+    def test_relayed_entry_that_started_here_is_unchanged(self):
+        source = self.claude()
+        state = self.root / 'publication-state'
+        captured = self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
+        entry = dict(captured['entries'][0], relayed=True)
+        before = {p: p.read_bytes() for root in (self.home, state) for p in root.rglob('*') if p.is_file()}
+        for _ in range(3):
+            result = self.publish(entry)
+            self.assertEqual(result, dict(imported=[], issues=[], unchanged=[
+                dict(agent='claude', source_session_id=self.sid, session_id=self.sid)]))
+        self.assertEqual(list(source.parent.glob('*.jsonl')), [source])
+        self.assertFalse((state / 'conversation-imports').exists())
+        self.assertEqual({p: p.read_bytes() for root in (self.home, state) for p in root.rglob('*') if p.is_file()}, before)
+
+    def test_deleted_origin_transcript_is_not_recreated(self):
+        source = self.claude()
+        state = self.root / 'publication-state'
+        captured = self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
+        entry = dict(captured['entries'][0], relayed=True)
+        source.unlink()
+        result = self.publish(entry)
+        self.assertEqual(result, dict(imported=[], issues=[], unchanged=[
+            dict(agent='claude', source_session_id=self.sid, session_id=self.sid)]))
+        self.assertFalse(source.exists())
+        self.assertEqual(list(source.parent.glob('*.jsonl')), [])
+        self.assertFalse((state / 'conversation-imports').exists())
+
+    def test_relayed_entry_from_elsewhere_publishes_with_a_new_id(self):
+        source = self.claude()
+        original = source.read_bytes()
+        captured = self.api.capture_conversations(self.project, self.store, state=self.root / 'source-state', env=self.env)
+        entry = dict(captured['entries'][0], relayed=True)
+        env = dict(self.env, CLAUDE_CONFIG_DIR=str(self.root / 'replacement-claude'))
+        result = self.publish(entry, env=env)
+        self.assertEqual(result['issues'], [])
+        self.assertEqual(result['unchanged'], [])
+        self.assertEqual(len(result['imported']), 1)
+        imported = result['imported'][0]
+        self.assertEqual(imported['source_session_id'], self.sid)
+        self.assertNotEqual(imported['session_id'], self.sid)
+        self.assertEqual(source.read_bytes(), original)
+        state = self.root / 'publication-state'
+        captured = self.api.capture_conversations(self.project, self.store, state=state, env=env)
+        self.assertEqual(captured, dict(schema=1, entries=[], issues=[]))
+        self.assertTrue((state / 'conversation-origins.json').exists(), 'Capture must record an empty origin list for imports')
+        self.assertEqual(json.loads((state / 'conversation-origins.json').read_bytes()),
+                         dict(schema=1, sessions=dict(claude=[], codex=[])))
+        self.assertEqual(self.publish(entry, env=env)['unchanged'], [imported])
+
+    def test_relayed_native_origin_is_found_without_a_prior_capture(self):
+        self.claude()
+        _, _, codex_entry, _, _, resumes = self.codex_ancestor_fixture()
+        claude_entry = next(e for e in self.capture()['entries'] if e['agent'] == 'claude')
+        for entry in (claude_entry, codex_entry):
+            with self.subTest(agent=entry['agent']):
+                result = self.publish(dict(entry, relayed=True))
+                self.assertEqual(result, dict(imported=[], issues=[], unchanged=[
+                    dict(agent=entry['agent'], source_session_id=entry['session_id'], session_id=entry['session_id'])]))
+        self.assertEqual(resumes, [])
+        self.assertFalse((self.root / 'publication-state/conversation-imports').exists())
+
+    def test_unrelayed_codex_ancestor_publishes_as_today(self):
+        source, leaf_id, _, env, turns, resumes = self.codex_ancestor_fixture()
+        leaf_turn = str(uuid.uuid4())
+        self.codex(leaf_id, parent=(source, source.stat().st_size, len(source.read_bytes().splitlines())), rows=[
+            dict(type='event_msg', payload=dict(type='task_started', turn_id=leaf_turn)),
+            dict(type='event_msg', payload=dict(type='task_complete', turn_id=leaf_turn))])
+        leaf = next(e for e in self.capture()['entries'] if e['session_id'] == leaf_id)
+        original = source.read_bytes()
+        # The destination already owns this ancestor; publishing the leaf
+        # borrows it rather than claiming the file as an import it created.
+        target = self.api._codex_target(Path(env['CODEX_HOME']), source.name)
+        target.parent.mkdir(parents=True)
+        target.write_bytes(original)
+        ancestor = next(e for e in self.capture()['entries'] if e['session_id'] == self.sid)
+        turns.append(leaf_turn)
+        self.assertEqual(self.publish(leaf, env=env)['issues'], [])
+        turns.pop()
+        result = self.publish(ancestor, env=env)
+        self.assertEqual(result['issues'], [])
+        self.assertEqual(result['unchanged'], [])
+        self.assertEqual(len(result['imported']), 1)
+        self.assertNotEqual(result['imported'][0]['session_id'], self.sid)
+        self.assertEqual(target.read_bytes(), original)
+        self.assertEqual(len(resumes), 2)
+
     def advance_ancestor(self, source, leaf, turns, *, metadata_only=False):
         ordinal = len(source.read_bytes().splitlines())
         if metadata_only:

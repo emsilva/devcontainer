@@ -407,10 +407,56 @@ def _import_aliases(project, state):
     return aliases
 
 
+def _created_imports(project, state):
+    """Native files claimed by publication journals, including pending ones."""
+    return {(receipt['agent'], item['destination'])
+            for receipt in _publication_receipts(project, state)
+            for item in receipt.get('files', []) if item.get('created') is True}
+
+
+def _conversation_origins(state):
+    try:
+        value = read_json(Path(state) / 'conversation-origins.json')
+    except FileNotFoundError:
+        return dict(claude=set(), codex=set())
+    origins = value.get('sessions')
+    if (value.get('schema') != SCHEMA or not isinstance(origins, dict)
+            or set(origins) != {'claude', 'codex'}
+            or any(not isinstance(ids, list) for ids in origins.values())):
+        raise ValueError('Invalid conversation origin list')
+    return {agent: {sessions.session_uuid(sid) for sid in ids} for agent, ids in origins.items()}
+
+
+def _record_origins(state, origins):
+    if state is None:
+        return
+    state = Path(state)
+    # Merge under a separate lock so simultaneous captures cannot lose IDs.
+    # This never nests the native publication and checkpoint store locks.
+    with locked(state / 'conversation-origins.lock', blocking=True):
+        retained = _conversation_origins(state)
+        for agent, ids in origins.items():
+            retained[agent].update(ids)
+        value = dict(schema=SCHEMA, sessions={agent: sorted(ids) for agent, ids in retained.items()})
+        atomic_write(state / 'conversation-origins.json', json.dumps(value, sort_keys=True).encode() + b'\n', mode=0o600)
+
+
+def _started_here(project, state, agent, sid, env):
+    if sid in _conversation_origins(state)[agent]:
+        return True
+    home = sessions.native_home(agent, env)
+    path = (home / 'projects' / sessions.claude_namespace(project.root) / (sid + '.jsonl')
+            if agent == 'claude' else sessions._codex_index(home).get(sid))
+    return (path is not None and sessions._safe(path).is_file()
+            and (agent, str(path)) not in _created_imports(project, state))
+
+
 def capture_conversations(project, store, *, state=None, env=None, historical_roots=()):
     """Observe ordinary project sessions without a native process or writer lock."""
     scopes = _scopes(project, state, historical_roots)
     result = dict(schema=SCHEMA, entries=[], issues=[])
+    origins = dict(claude=set(), codex=set())
+    imported = _created_imports(project, state)
     def issue(agent, sid, error):
         result['issues'].append(dict(agent=agent, session_id=sid, reason=sessions.display_text(str(error), 400)))
     def keep(retained, entry):
@@ -461,6 +507,8 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
             approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, first, store)))
             if meta.get('cwd') not in approved:
                 continue
+            if ('codex', str(path)) not in imported:
+                origins['codex'].add(sid)
             retained, entry = _codex_entry(project, store, sid, index, state=state, scopes=scopes)
         except (ValueError, OSError) as exc:
             issue('codex', sid, exc)
@@ -481,12 +529,15 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
                 sessions.session_uuid(sid)
                 if (_claude_entrypoint(path) or '').startswith('sdk-'):
                     continue  # Agent SDK and claude -p runs are not conversations.
+                if ('claude', str(path)) not in imported:
+                    origins['claude'].add(sid)
                 retained, entry = _claude_entry(project, store, sid, path, state=state, scopes=scopes)
             except (ValueError, OSError) as exc:
                 issue('claude', sid, exc)
                 continue
             keep(retained, entry)
             del retained
+    _record_origins(state, origins)
     result['entries'].sort(key=lambda item: (-item['updated_at'], item['agent'], item['session_id']))
     return result
 
@@ -1062,6 +1113,9 @@ def publish_conversations(project, store, snapshot_id, *, state=None, env=None):
     for entry in conversations['entries']:
         try:
             agent, sid, by_id, order = _preflight(project, store, entry)
+            if entry.get('relayed') is True and _started_here(project, state, agent, sid, env):
+                result['unchanged'].append(dict(agent=agent, source_session_id=sid, session_id=sid))
+                continue
             key = _revision(entry, by_id, order)
             receipt_path = state / 'conversation-imports' / key / 'receipt.json'
             try:
