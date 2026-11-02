@@ -26,6 +26,34 @@ class RenderTests(unittest.TestCase):
         from devcontainer_setup.render import render
         return render(self.project, ROOT, dict(self.selection, **changes), REF)
 
+    def test_scan_decisions_are_sorted_separate_and_preserved(self):
+        decisions = [{'kind': 'tool', 'value': 'aws', 'answer': False},
+                     {'kind': 'port', 'value': 8080, 'answer': True}]
+        files = self.render(scanDecisions=decisions)
+        marker = json.loads(files['.devcontainer/devcontainer.json'])['customizations']['devcontainerSetup']
+        self.assertEqual(marker.get('scanDecisions'), list(reversed(decisions)))
+        self.assertNotIn('scanDecisions', marker['selections'])
+        self.install(files)
+        again = self.render()
+        self.assertEqual(files, again)
+        from devcontainer_setup.render import validate
+        self.assertEqual(validate(self.project), [])
+
+    def test_scan_decisions_reject_malformed_records(self):
+        for decisions in ({}, [None], [{'kind': 'tool', 'value': 'aws'}],
+                          [{'kind': 'tool', 'value': 'aws', 'answer': 'maybe'}],
+                          [{'kind': 'runtime-conflict', 'value': {}, 'answer': '3.13'}],
+                          [{'kind': 'runtime-conflict', 'value': {'runtime': [], 'declarations': ['3.12']}, 'answer': '3.13'}],
+                          [{'kind': 'runtime-conflict', 'value': {'runtime': 'python', 'declarations': ['3.12']}, 'answer': True}],
+                          [{'kind': 'manager', 'value': {'family': 'node', 'choices': ['pnpm']}, 'answer': True}],
+                          [{'kind': 'manager-version', 'value': {'family': 'node', 'manager': 'pnpm', 'declarations': ['12.0.0']}, 'answer': True}]):
+            with self.subTest(decisions=decisions):
+                try:
+                    with self.assertRaisesRegex(ValueError, 'scanDecisions'):
+                        self.render(scanDecisions=decisions)
+                except TypeError:
+                    self.fail('Malformed scanDecisions must raise a descriptive ValueError')
+
     def install(self, files):
         for name, data in files.items():
             target = self.project / name

@@ -152,6 +152,46 @@ def _selections(values):
     return selected
 
 
+def _scan_decisions(values):
+    if not isinstance(values, list):
+        raise ValueError('scanDecisions must be a list')
+    records = {}
+    for record in values:
+        if (not isinstance(record, dict) or set(record) != {'kind', 'value', 'answer'}
+                or record['kind'] not in ('runtime', 'tool', 'port', 'manager', 'runtime-conflict', 'manager-version')
+                or not isinstance(record['value'], (str, int, dict))
+                or type(record['value']) is bool
+                or not isinstance(record['answer'], (bool, str))
+                or (record['kind'] in ('runtime', 'tool', 'port') and type(record['answer']) is not bool)):
+            raise ValueError('Malformed scanDecisions record')
+        kind, value = record['kind'], record['value']
+        answer = record['answer']
+        if ((kind in ('runtime-conflict', 'manager-version')
+             and not (isinstance(answer, str) and answer))
+                or (kind == 'manager' and answer is not False and not (isinstance(answer, str) and answer))):
+            raise ValueError('Malformed scanDecisions answer')
+        if kind in ('runtime', 'tool'):
+            valid = isinstance(value, str) and bool(value)
+        elif kind == 'port':
+            valid = type(value) is int and 1 <= value <= 65535
+        else:
+            fields = {'runtime-conflict': {'runtime', 'declarations'},
+                      'manager': {'family', 'choices'},
+                      'manager-version': {'family', 'manager', 'declarations'}}[kind]
+            valid = isinstance(value, dict) and set(value) == fields
+            if valid:
+                family = value.get('family', value.get('runtime'))
+                items = value.get('choices', value.get('declarations'))
+                valid = (isinstance(family, str) and family in RUNTIMES and isinstance(items, list) and bool(items)
+                         and all(isinstance(item, str) and item for item in items)
+                         and (kind != 'manager-version' or isinstance(value['manager'], str)))
+        if not valid:
+            raise ValueError('Malformed scanDecisions value')
+        key = (record['kind'], json.dumps(record['value'], sort_keys=True))
+        records[key] = copy.deepcopy(record)
+    return [records[key] for key in sorted(records)]
+
+
 def _merge_config(current, previous, desired, path=(), adopted_paths=frozenset()):
     """Three-way merge; ports, editor configuration, and project hooks are user-owned."""
     if path in adopted_paths:
@@ -493,6 +533,8 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
         limitations['compose'] = 'The locked Docker Feature only supports none/v1/v2; its apt Compose package has no exact version option'
     config.setdefault('customizations', {})[NAMESPACE] = {
         'version': 1, 'sourceRef': source_ref, 'selections': selected,
+        'scanDecisions': _scan_decisions(selections.get('scanDecisions',
+                                         marker.get('scanDecisions', []) if marker else [])),
         'dependencies': dependencies, 'pinningLimitations': limitations,
         'adoptedPaths': sorted([list(path) for path in adopted_paths]),
         'managedConfig': snapshot, 'managedFiles': dict(sorted(managed_files.items()))}
@@ -516,6 +558,7 @@ def validate(project: Path) -> list[str]:
         if not re.fullmatch(r'[0-9a-f]{40}', marker.get('sourceRef', '')):
             errors.append('Generator sourceRef must be an immutable commit')
         selected = _selections(marker.get('selections', {}))
+        _scan_decisions(marker.get('scanDecisions', []))
         features = config.get('features', {})
         if selected['package_managers'].get('node') == 'pnpm':
             expected = selected['package_manager_versions'].get('node', '12.11.2')

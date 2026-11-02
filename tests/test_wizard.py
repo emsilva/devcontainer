@@ -11,6 +11,351 @@ from unittest.mock import patch
 SOURCE = Path(__file__).resolve().parents[1]
 
 
+class ReviewRerunTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.environment = patch.dict(os.environ, {
+            'XDG_CONFIG_HOME': str(self.root / 'config'),
+            'XDG_STATE_HOME': str(self.root / 'state')})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        from devcontainer_setup import __main__ as wizard
+        self.found = {'runtimes': {name: {'selected': name == 'python', 'version': None,
+                       'conflicts': [], 'evidence': []} for name in wizard.RUNTIME_DEFAULTS},
+                      'tools': {}, 'ports': [], 'package_managers': {}, 'warnings': []}
+        self.preferences = {'apply_dotfiles': False, 'dotfiles_repo': '', 'agentic_tools': True}
+        self.chosen = dict(wizard.defaults(self.found, self.preferences, {}), continuity=False)
+        self.prompts = []
+        self.rendered = []
+
+    def run_wizard(self, *, saved=True, decisions=None, answers=None, github=False, api=None, changes=None):
+        import contextlib
+        import io
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard
+        answers = answers or {}
+        case = self
+        class UI:
+            def answer(self, title, default):
+                case.prompts.append(title)
+                value = answers.get(title, default)
+                return value.pop(0) if title == 'Review setup' and isinstance(value, list) else value
+            def multi(self, title, options, selected): return self.answer(title, selected)
+            def confirm(self, title, default=True): return self.answer(title, default)
+            def input(self, title, value=''): return self.answer(title, value)
+            def choose(self, title, options, selected=None):
+                default = 'Cancel' if title == 'Review setup' else selected or options[0]
+                return self.answer(title, default)
+        @contextlib.contextmanager
+        def checkout(project): yield project, 'main' if github else None
+        metadata = {'selections': self.chosen} if saved else {}
+        if decisions is not None:
+            metadata['scanDecisions'] = decisions
+        original_render = wizard.render
+        def render(*args, **kwargs):
+            files = original_render(*args, **kwargs)
+            self.rendered.append(json.loads(files['.devcontainer/devcontainer.json']))
+            return files
+        plan = Mock(changed=['.devcontainer/devcontainer.json'], start_branch='main', branch='setup/devcontainer')
+        plan.commit.return_value = 'a' * 40
+        self.plan = plan
+        def git_plan(*args, **kwargs):
+            if changes is not None:
+                plan.changed = changes.pop(0)
+            return plan
+        self.api = api or Mock()
+        self.api.setup_prs.return_value = []
+        self.api.existing.return_value = []
+        if api is None:
+            self.api.machines.return_value = [{'name': 'standardLinux32gb', 'cpus': 4,
+                'memory_in_bytes': 16 * 1024**3, 'storage_in_bytes': 32 * 1024**3}]
+        output = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            for name, value in {'Gum': UI, 'Codespaces': lambda: self.api,
+                    'load_preferences': lambda: self.preferences, '_github_repository': lambda p: 'owner/project' if github else None,
+                    '_repository': lambda p: 'owner/project', 'default_branch': lambda p: 'main',
+                    'setup_checkout': checkout, 'scan': lambda p: self.found, '_metadata': lambda p: metadata,
+                    '_check_revision': lambda *a: None, 'proposed_branch': lambda p: 'setup/devcontainer',
+                    'git': lambda p, *a, **k: 'setup/devcontainer' if a[0] == 'branch' else '{}', 'render': render,
+                    'integrate_taskfile': lambda *a: None, 'integrate_continuity': lambda *a: None,
+                    'check_candidate': lambda *a: None, 'GitPlan': git_plan,
+                    '_paired_codespace': lambda p: None, '_ensure_runner': lambda *a: None,
+                    'repository_access': lambda *a: True, '_merge_and_launch': Mock(return_value=(None, {}))}.items():
+                stack.enter_context(patch.object(wizard, name, value))
+            stack.enter_context(contextlib.redirect_stdout(output))
+            stack.enter_context(contextlib.redirect_stderr(output))
+            try:
+                self.result = wizard.interactive(self.root, self.found, metadata, 'a' * 40, None)
+            except wizard.Cancelled:
+                self.result = 130
+        self.output = output.getvalue()
+        return self.rendered[-1]['customizations']['devcontainerSetup']
+
+    def test_saved_answers_with_no_new_finding_open_at_review(self):
+        self.run_wizard()
+        self.assertEqual(self.prompts, ['Review setup'])
+        self.plan.apply.assert_not_called()
+        # The scan's chosen candidate for a range is not a new exact constraint.
+        self.prompts.clear()
+        self.chosen['runtimes']['node'] = '24'
+        self.found['runtimes']['node'].update(selected=True, version='20',
+            evidence=['package.json: Node manifest engines.node=>=20'])
+        self.run_wizard()
+        self.assertEqual(self.prompts, ['Review setup'])
+        self.prompts.clear()
+        self.run_wizard(answers={'Review setup': ['View diff', 'Cancel']})
+        self.assertEqual(self.prompts, ['Review setup', 'Review setup'])
+        self.plan.diff.assert_called_once()
+        self.plan.apply.assert_not_called()
+        self.prompts.clear()
+        from devcontainer_setup import __main__ as wizard
+        launch = {'action': 'rebuild', 'name': 'paired', 'machine': 'premiumLinux', 'idle_timeout': '60m'}
+        with patch.object(wizard, '_resolve_launch', return_value=launch):
+            self.run_wizard(github=True, changes=[[], ['.devcontainer/devcontainer.json']])
+        self.assertEqual(self.prompts, ['Review setup'])
+        self.assertTrue(self.rendered[-1]['customizations']['devcontainerSetup']['selections']['ssh'])
+
+    def test_rerun_asks_only_the_new_finding(self):
+        self.found['runtimes']['rust'].update(selected=True, version='1.99.1')
+        self.found['tools']['aws'] = {'selected': True, 'evidence': ['build.sh: aws s3']}
+        decisions = [{'kind': 'tool', 'value': 'aws', 'answer': False}]
+        marker = self.run_wizard(decisions=decisions, answers={'Add rust runtime (1.99.1)?': True})
+        self.assertEqual(self.prompts, ['Add rust runtime (1.99.1)?', 'Review setup'])
+        self.assertEqual(marker['selections']['runtimes']['rust'], '1.99.1')
+        self.assertEqual(marker['scanDecisions'], [
+            {'kind': 'runtime', 'value': 'rust', 'answer': True}, *decisions])
+        self.chosen = marker['selections']
+        # Tool/port/manager and conflict questions use the same persisted, targeted route.
+        self.prompts.clear()
+        self.found['ports'] = [8080]
+        self.found['runtimes']['python']['conflicts'] = ['old: 3.12', 'new: >=3.13']
+        self.found['package_managers']['python'] = {'selected': 'uv', 'conflicts': [],
+                                                  'versions': {'uv': {'version': None, 'conflicts': []}}}
+        marker = self.run_wizard(decisions=marker['scanDecisions'], answers={
+            'python package manager': 'uv', 'Forward port 8080?': False,
+            'python version (resolve declarations above)': '3.13'})
+        self.assertEqual(self.prompts, ['python package manager', 'Forward port 8080?',
+            'python version (resolve declarations above)', 'Review setup'])
+        self.chosen = marker['selections']
+        self.prompts.clear()
+        self.run_wizard(decisions=marker['scanDecisions'])
+        self.assertEqual(self.prompts, ['Review setup'])
+        self.run_wizard(github=True, decisions=marker['scanDecisions'], answers={
+            'Review setup': ['Change answers', 'Cancel'], 'Project tools': [], 'Publish': 'local commit only'})
+        self.assertFalse('will be asked again' in self.output,
+                         'An already published decline must not be described as a new local answer')
+
+    def test_recorded_decline_is_not_asked_again(self):
+        self.found['tools']['aws'] = {'selected': True, 'evidence': ['build.sh: aws s3']}
+        marker = self.run_wizard(answers={'Add AWS CLI?': False})
+        self.assertEqual(self.prompts, ['Add AWS CLI?', 'Review setup'])
+        self.assertEqual(marker['scanDecisions'], [{'kind': 'tool', 'value': 'aws', 'answer': False}])
+        self.prompts.clear()
+        self.run_wizard(decisions=marker['scanDecisions'])
+        self.assertEqual(self.prompts, ['Review setup'])
+
+    def test_evidence_path_change_is_not_a_finding(self):
+        from devcontainer_setup import __main__ as wizard
+        self.assertTrue(callable(getattr(wizard, '_new_findings', None)), 'Normalize findings independently of evidence paths')
+        self.found['runtimes']['python']['conflicts'] = ['old/.python-version: 3.12', 'pyproject.toml: >=3.13']
+        first = wizard._new_findings(self.found, self.chosen, [])
+        self.assertEqual(len(first), 1)
+        decisions = [dict(first[0], answer='3.13')]
+        self.found['runtimes']['python']['conflicts'][0] = 'new/.python-version: 3.12'
+        self.assertEqual(wizard._new_findings(self.found, self.chosen, decisions), [])
+
+    def test_declared_manager_version_is_adopted_without_a_question(self):
+        self.chosen['package_managers'] = {'node': 'pnpm', 'rust': 'cargo'}
+        self.chosen['runtimes']['node'] = '24'
+        self.chosen['package_manager_versions'] = {'node': '12.0.0'}
+        self.found['package_managers']['node'] = {'selected': 'pnpm', 'conflicts': [],
+            'versions': {'pnpm': {'version': '12.11.2', 'conflicts': []}}}
+        marker = self.run_wizard()
+        self.assertEqual(self.prompts, ['Review setup'])
+        self.assertEqual(marker['selections']['package_manager_versions'], {'node': '12.11.2'})
+        self.assertEqual(marker['selections']['package_managers'], {'node': 'pnpm'})
+
+    def test_project_dotfiles_off_overrides_user_default(self):
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard
+        self.preferences.update(apply_dotfiles=True, dotfiles_repo='owner/dotfiles')
+        personal = self.root / '.devcontainer/devcontainer.env'
+        personal.parent.mkdir()
+        personal.write_bytes(b'OWNER_SETTING=preserve\n')
+        marker = self.run_wizard(answers={'Review setup': 'Continue'})
+        self.assertIs(marker['selections']['dotfiles'], False)
+        self.assertIs(self.preferences['apply_dotfiles'], True)
+        self.assertEqual(personal.read_bytes(), b'OWNER_SETTING=preserve\n')
+        saved = json.loads((self.root / 'config/devcontainer-setup/config.json').read_text())
+        self.assertIs(saved['apply_dotfiles'], True)
+        config = {'customizations': {'devcontainerSetup': {'selections': {'dotfiles': False}}}}
+        api = Mock()
+        update = {'state': 'current', 'reason': None, 'head': 'abc1234', 'behind': 0}
+        with patch.object(wizard, 'default_contains', return_value=True), \
+                patch.object(wizard, 'merged_setup_branches', return_value=[]), \
+                patch('devcontainer_setup.git_ops.checkout_update', return_value=update), \
+                patch.object(wizard, 'git', return_value=json.dumps(config)):
+            wizard._launch_on_default(api, self.root, 'owner/project', 'main', 'a' * 40,
+                {'action': 'create', 'name': None, 'machine': 'premium', 'idle_timeout': '1h'}, self.preferences)
+        self.assertIsNone(api.launch.call_args.kwargs['dotfiles_repo'])
+
+    def test_missing_dotfiles_repo_is_asked_when_project_wants_dotfiles(self):
+        self.chosen['dotfiles'] = True
+        marker = self.run_wizard(answers={'Dotfiles repository': 'owner/dotfiles'})
+        self.assertEqual(self.prompts, ['Dotfiles repository', 'Review setup'])
+        self.assertTrue(marker['selections']['dotfiles'])
+        self.assertFalse(self.preferences['apply_dotfiles'])
+        self.assertEqual(self.preferences['dotfiles_repo'], 'owner/dotfiles')
+        self.prompts.clear()
+        (self.root / '.devcontainer').mkdir()
+        self.run_wizard(answers={'Review setup': 'Continue'})
+        self.assertEqual(self.prompts, ['Review setup'])
+        self.assertEqual((self.root / '.devcontainer/devcontainer.env').read_text(), 'DOTFILES_REPO=owner/dotfiles\n')
+        self.assertFalse(json.loads((self.root / 'config/devcontainer-setup/config.json').read_text())['apply_dotfiles'])
+
+    def test_paired_premium_rebuilds_on_premium_despite_stale_receipt(self):
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard
+        from devcontainer_setup.codespaces import Codespaces, receipt_path
+        self.assertTrue(callable(getattr(wizard, '_resolve_launch', None)), 'Resolve launch resources before Review')
+        receipt = receipt_path(self.root / 'state', 'owner/project', 'main')
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps({'repository': 'owner/project', 'branch': 'main', 'codespace': 'paired',
+            'commit': 'a' * 40, 'validated_commit': 'a' * 40, 'rebuild_pending': False,
+            'machine': 'standardLinux32gb', 'idle_timeout_minutes': 30}))
+        api = Mock()
+        api.get.return_value = WizardCliTests._space('paired')
+        api.resource_settings = Codespaces.resource_settings
+        with patch.object(wizard, '_repository', return_value='owner/project'):
+            launch = wizard._resolve_launch(api, self.root, 'main', 'paired')
+        self.assertEqual((launch['action'], launch['name'], launch['machine'], launch['idle_timeout']),
+                         ('rebuild', 'paired', 'premiumLinux', '60m'))
+        api.machines.assert_not_called()
+
+    def test_unreadable_paired_machine_is_asked_not_defaulted(self):
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard
+        from devcontainer_setup.codespaces import Codespaces
+        self.assertTrue(callable(getattr(wizard, '_resolve_launch', None)), 'Missing live machine must require an answer')
+        api = Mock()
+        api.resource_settings = Codespaces.resource_settings
+        api.get.return_value = dict(WizardCliTests._space('paired'), machine=None)
+        api.existing.return_value = [api.get.return_value]
+        api.machines.return_value = [{'name': 'premiumLinux', 'cpus': 8,
+            'memory_in_bytes': 32 * 1024**3, 'storage_in_bytes': 64 * 1024**3}]
+        with patch.object(wizard, '_repository', return_value='owner/project'):
+            launch = wizard._resolve_launch(api, self.root, 'main', 'paired')
+        self.assertIsNone(launch['machine'])
+        self.assertIn('machine', launch['warning'].lower())
+        # Exercise the pending resource question through interactive, before Review.
+        with patch.object(wizard, '_resolve_launch', return_value=launch):
+            self.run_wizard(github=True, api=api)
+        self.assertEqual(self.prompts, ['Codespaces machine', 'Review setup'])
+        self.assertIn('premiumLinux', self.output)
+
+    def test_change_answers_opens_full_editor(self):
+        self.run_wizard(github=True, answers={'Review setup': ['Change answers', 'Cancel'],
+            'Codespace': 'create like last time', 'Advanced environment options?': True,
+            'Show advanced launch options?': True})
+        self.assertEqual(self.prompts[0], 'Review setup')
+        for title in ('Project runtimes (Python, Node and uv included)', 'Project tools',
+                      'Sync scratch files and project notes with your Mac?',
+                      'Apply dotfiles inside the container?', 'Advanced environment options?',
+                      'Publish', 'Codespace', 'Show advanced launch options?', 'Editor after create'):
+            self.assertIn(title, self.prompts[1:])
+        from devcontainer_setup import __main__ as wizard
+        self.assertFalse((self.root / 'config/devcontainer-setup/open-after-create.json').exists())
+        self.run_wizard(answers={'Review setup': ['Change answers', 'Continue'], 'Editor after create': 'browser'})
+        self.assertEqual(wizard.load_open_after_create(), 'browser')
+        saved = json.loads((self.root / 'config/devcontainer-setup/config.json').read_text())
+        self.assertEqual(set(saved), {'version', 'apply_dotfiles', 'dotfiles_repo', 'agentic_tools'})
+
+    def test_first_setup_still_walks_every_screen(self):
+        self.found['tools']['aws'] = {'selected': True, 'evidence': []}
+        marker = self.run_wizard(saved=False, answers={'Project tools': []})
+        self.assertEqual(self.prompts, ['Project runtimes (Python, Node and uv included)', 'Project tools',
+            'Sync scratch files and project notes with your Mac?', 'Apply dotfiles inside the container?',
+            'Advanced environment options?', 'Publish', 'Codespace', 'Review setup'])
+        self.assertEqual(marker.get('scanDecisions'), [{'kind': 'tool', 'value': 'aws', 'answer': False}])
+        self.assertFalse('will be asked again' in self.output,
+                         'A no-origin local commit already records the answers')
+        self.prompts.clear()
+        self.run_wizard(saved=False, github=True, answers={'Project tools': [], 'Publish': 'local commit only'})
+        self.assertIn('will be asked again', self.output)
+
+    def test_create_like_last_time_uses_history_and_asks_for_missing_machine(self):
+        import contextlib
+        import io
+        from devcontainer_setup import __main__ as wizard
+        from devcontainer_setup.codespaces import receipt_path
+        from unittest.mock import Mock
+        receipt = receipt_path(self.root / 'state', 'owner/project', 'main')
+        receipt.parent.mkdir(parents=True)
+        record = {'repository': 'owner/project', 'branch': 'main', 'codespace': 'old',
+                  'commit': 'a' * 40, 'validated_commit': 'a' * 40, 'rebuild_pending': False,
+                  'machine': 'premiumLinux', 'idle_timeout_minutes': 90}
+        labels = ['4 cores (standardLinux32gb)', '8 cores (premiumLinux)']
+        menus = []
+        class UI:
+            def choose(self, title, options, selected=None):
+                menus.append((title, list(options), selected))
+                return selected or options[-1]
+        for machine, expected in (('premiumLinux', labels[1]), ('retired', None), (None, None)):
+            with self.subTest(machine=machine):
+                receipt.write_text(json.dumps(dict(record, machine=machine)))
+                with patch.object(wizard, '_repository', return_value='owner/project'), \
+                        contextlib.redirect_stdout(io.StringIO()) as output:
+                    editor = wizard._LaunchEditor(UI(), self.root, 'main')
+                    editor.choose('Codespaces machine', labels, labels[0])
+                    editor.choose('Stop when idle for', ['30m', '1h'], '30m')
+                self.assertEqual(menus[-2][2], expected)
+                self.assertEqual(menus[-1][2], '90m')
+                self.assertIn('90m', menus[-1][1])
+                if expected is None:
+                    self.assertIn('machine', output.getvalue())
+        receipt.write_text(json.dumps(record))
+        api = Mock()
+        api.existing.return_value = []
+        api.machines.return_value = [dict(name=name, cpus=cores, memory_in_bytes=16 * 1024**3,
+            storage_in_bytes=32 * 1024**3) for name, cores in (('standardLinux32gb', 4), ('premiumLinux', 8))]
+        class LaunchUI(UI):
+            def choose(self, title, options, selected=None):
+                if title == 'Codespace': return 'create like last time'
+                return super().choose(title, options, selected)
+            def confirm(self, title, default=True): return False
+        with patch.object(wizard, '_repository', return_value='owner/project'), \
+                patch.object(wizard, '_paired_codespace', return_value=None), \
+                patch.object(wizard, 'git', return_value='{}'):
+            options = wizard._launch_options(LaunchUI(), api, self.root, 'main', None)
+        self.assertEqual((options['machine'], options['idle_timeout']), ('premiumLinux', '90m'))
+
+    def test_manager_change_does_not_ask_about_the_old_managers_version(self):
+        self.chosen['runtimes']['node'] = '24'
+        self.chosen['package_managers'] = {'node': 'pnpm'}
+        self.chosen['package_manager_versions'] = {'node': '12.0.0'}
+        self.found['package_managers']['node'] = {'selected': None, 'conflicts': ['node: conflicting package managers: npm, pnpm'],
+            'versions': {'npm': {'version': None, 'conflicts': []},
+                         'pnpm': {'version': None, 'conflicts': ['a: 12.0.0', 'b: 12.11.2']}}}
+        try:
+            marker = self.run_wizard(answers={'node package manager': 'npm',
+                'pnpm version (resolve declarations above; exact x.y.z)': '12.11.2'})
+        except ValueError as error:
+            self.fail(f'The abandoned manager must not leave a version override: {error}')
+        self.assertEqual(self.prompts, ['node package manager', 'Review setup'])
+        self.assertEqual(marker['selections']['package_managers'], {'node': 'npm'})
+        self.assertEqual(marker['selections']['package_manager_versions'], {})
+
+    def test_malformed_saved_answers_stop_before_prompting(self):
+        for previous in (None, [], 'invalid'):
+            with self.subTest(previous=previous):
+                self.chosen = previous
+                with self.assertRaisesRegex(ValueError, 'selections'):
+                    self.run_wizard()
+                self.assertEqual(self.prompts, [])
+
+
 class WizardCliTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1091,7 +1436,7 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
                 seen.setdefault('choices', []).append(title)
                 if title == 'Review setup':
                     seen['worktrees'] = case.git('worktree', 'list', '--porcelain')
-                if title == 'Publish' and title not in answers:
+                if title in ('Publish', 'Editor after create') and title not in answers:
                     return selected
                 if title not in answers:
                     raise AssertionError(f'Unexpected choice: {title}')
@@ -1661,9 +2006,20 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.git('pull', '--quiet', '--ff-only', 'origin', 'main')
         (self.root / 'scratch.txt').write_text('untracked owner work\n')
         before = self.snapshot()
+        trace = {}
+        class UI(self.ui(self.LAUNCH, trace)):
+            reviews = 0
+            def choose(self, title, options, selected=None):
+                answer = super().choose(title, options, selected)
+                if title == 'Review setup':
+                    self.reviews += 1
+                    if self.reviews == 1:
+                        return 'Change answers'
+                return answer
         with patch.object(GitPlan, 'push', side_effect=AssertionError('an empty setup branch was pushed')):
-            seen = self.interact(dict(self.LAUNCH, **{'Create or open the selected codespace on main?': True}))
+            seen = self.interact(self.LAUNCH, ui=UI)
         self.assertEqual(seen['result'], 0, seen['output'])
+        self.assertEqual(trace['choices'][0], 'Review setup')
         self.assertIn('Files: already configured', seen['output'])
         self.assertNotIn('lacks the new setup files', seen['output'])
         self.assertEqual(self.snapshot(), before)
