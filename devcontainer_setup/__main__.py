@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -750,13 +751,7 @@ def _resolve_launch(api: Codespaces, project: Path, branch: str, paired: str | N
             data = api.get(paired)
             if (data.get('repository', {}).get('full_name', '').lower() == repo.lower()
                     and data.get('git_status', {}).get('ref') == branch):
-                try:
-                    return _reuse_options(api, paired, branch, 'rebuild', data)
-                except ValueError as error:
-                    return {'action': 'rebuild', 'name': paired, 'machine': None,
-                            'idle_timeout': (f'{data["idle_timeout_minutes"]}m'
-                                             if data.get('idle_timeout_minutes') is not None else None),
-                            'warning': str(error)}
+                return _no_codespace()
             warning = f'Paired Codespace {paired} is unavailable for rebuild on {branch}; it is on {data.get("git_status", {}).get("ref")}.'
         except ValueError as error:
             warning = f'Paired Codespace {paired} is unavailable: {error}'
@@ -850,20 +845,33 @@ def _codespace_choice(ui: Gum, api: Codespaces, project: Path, branch: str, *, p
                                check=False)
         metadata = (json.loads(published_config).get('customizations', {}).get('devcontainerSetup', {})
                     if published_config else {})
-        selected = (f'rebuild {paired}' if usable else matching or
+        selected = ('none' if usable else matching or
                     ('none' if metadata.get('selections') else CREATE_CODESPACE))
         choice = ui.choose('Codespace', list(choices), selected)
         action, name = choices[choice]
         if action == 'none':
             return _no_codespace()
         if name:
-            return _reuse_options(api, name, branch, action, paired_data if name == paired else None)
+            try:
+                return _reuse_options(api, name, branch, action, paired_data if name == paired else None)
+            except ValueError as error:
+                if action != 'rebuild':
+                    raise
+                return _ask_launch_resources(ui, api, project, {
+                    'action': action, 'name': name, 'machine': None,
+                    'idle_timeout': (f'{paired_data["idle_timeout_minutes"]}m'
+                                     if paired_data.get('idle_timeout_minutes') is not None else None),
+                    'location': paired_data.get('location'),
+                    'retention': (f'{paired_data["retention_period_minutes"]}m'
+                                  if paired_data.get('retention_period_minutes') is not None else None),
+                    'warning': str(error)})
         # No allocation before Review; launch rechecks availability at the merged SHA.
         machines = api.machines(repo)
         if not machines:
             raise ValueError('No available Codespaces machines for this repository/account.')
     except ValueError as error:
         return _launch_unavailable(ui, error)
+    ui = _LaunchEditor(ui, project, branch)
     labels = {f'{m["cpus"]} cores / {m["memory_in_bytes"] // (1024**3)} GB RAM / '
               f'{m["storage_in_bytes"] // (1024**3)} GB disk ({m["name"]})': m for m in machines}
     selected = next((label for label, machine in labels.items() if machine['cpus'] == 4), next(iter(labels)))
@@ -881,7 +889,7 @@ def _codespace_choice(ui: Gum, api: Codespaces, project: Path, branch: str, *, p
 def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume: str | None,
                     *, published: bool = True) -> dict:
     if not resume or not published:
-        return _codespace_choice(_LaunchEditor(ui, project, branch), api, project, branch, published=published)
+        return _codespace_choice(ui, api, project, branch, published=published)
     # --resume is an explicit reuse, never a forced rebuild or an invitation to create another.
     choice = ui.choose('Codespace', ['none', f'reuse {resume}'], f'reuse {resume}')
     if choice == 'none':
@@ -928,7 +936,25 @@ def setup_continuity(project: Path, ui, codespace: str | None) -> None:
                 raise ValueError('No matching project checkout was found in the selected Codespace.')
             root = roots[0] if len(roots) == 1 else ui.choose('Which remote project checkout?', roots)
         service.pair(codespace, root)
-        print('Codespace paired. Run task work:cs to open Herdr and start project sync.', flush=True)
+        try:
+            connect = ui.confirm('Connect and sign in now?', True)
+        except Cancelled:
+            connect = False
+        if not connect:
+            print('Codespace paired. Run task work:cs to connect, then task work:signin:all to sign in.', flush=True)
+        elif not (project / '.devcontainer/scripts/project_sync/signins.py').is_file():
+            print(f'Update this checkout (git -C {shlex.quote(str(project))} pull --ff-only), '
+                  'then run task work:cs and task work:signin:all.', flush=True)
+        else:
+            # Terminal Ctrl-C also reaches the child; let it finish its own cleanup.
+            previous = signal.signal(signal.SIGINT, lambda number, frame: None)
+            try:
+                code = subprocess.call(['bash', '.devcontainer/scripts/project-sync.sh', 'work', '--codespace',
+                                        '--then-signin-all'], cwd=project)
+            finally:
+                signal.signal(signal.SIGINT, previous)
+            if code:
+                print('Setup is preserved. Run task work:cs, then task work:signin:all.', flush=True)
     except Cancelled:
         print('Setup is preserved. Run task work:cs on your Mac to finish connecting.', file=sys.stderr)
     except (ValueError, OSError, subprocess.TimeoutExpired) as error:

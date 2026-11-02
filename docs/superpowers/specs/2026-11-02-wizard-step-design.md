@@ -13,7 +13,8 @@ analysis with file:line evidence and three red tests: `tmp/codespace-lifecycle/w
   opt-in preference keeps it for anyone who wants it."
 - Ruling 3: "A rerun opens at Review. It uses the recorded selections, the remembered dotfiles, and last time's
   machine and idle timeout, and asks only about what the scan finds that's new. With a Codespace paired, the
-  Codespace menu defaults to rebuilding it, never to 'Create a new codespace'."
+  Codespace menu defaults to rebuilding it, never to 'Create a new codespace'." The rebuild default is superseded by
+  ruling 28 (2026-11-02): "Leave it as it is"; see the [fresh sign-ins design](2026-11-02-fresh-signins-design.md).
 - Ruling 4: "Keep the merge prompt, made clearer. y/N, default No, with the review-bypass context on its own line."
 - Ruling 22: "A rebuild or replacement keeps the cores of the Codespace it replaces."
 - #63 (issue text): setup leaves the checkout behind without saying why, then points at the rebind on old code.
@@ -25,7 +26,8 @@ analysis with file:line evidence and three red tests: `tmp/codespace-lifecycle/w
   `open_after_create` to `browser` or `vscode`.
 - An ordinary rerun of a configured project shows Review first, built from the saved answers; it asks a question
   before Review only for a new scan finding.
-- With a paired Codespace, the Codespace choice defaults to rebuilding it, on the machine it has now.
+- With a usable paired Codespace, the Codespace choice defaults to `none` (ruling 28). An explicit rebuild keeps its
+  live machine and idle timeout (ruling 22).
 - After a merge, the owner's default-branch checkout is fast-forwarded when that is safe; when it is not, setup says
   exactly why and what to run, before any connection or rebind instruction.
 
@@ -52,7 +54,8 @@ analysis with file:line evidence and three red tests: `tmp/codespace-lifecycle/w
 `After setup` is replaced by two choices, both on Review:
 - **Publish:** `merge into <default>` (default with a GitHub origin) or `local commit only` (default otherwise).
   Push, PR and merge depend on Publish only, on the normal path and on the resumed-open-PR path alike.
-- **Codespace:** `none`; `rebuild <paired name>` (when the pairing is usable; then it is the default); `reuse <name>`
+- **Codespace:** `none` (the default when the pairing is usable); `rebuild <paired name>` (an explicit choice when
+  the pairing is usable); `reuse <name>`
   for every other Codespace of the repository, as today, so a second one is never created silently (ruling 14.1,
   `test_existing_codespace_menu_never_defaults_to_create`); `create like last time` only when no usable pairing exists.
   Default without a pairing: reuse an existing Codespace on this branch if there is one, else `none` on a rerun and
@@ -89,11 +92,13 @@ analysis with file:line evidence and three red tests: `tmp/codespace-lifecycle/w
 
 ### Machine and idle timeout (ruling 22)
 
-- Rebuild of the paired Codespace: its live machine and idle timeout (`Codespaces.get(name)`), never a receipt.
+- Explicit rebuild of the paired Codespace: its live machine and idle timeout (`Codespaces.get(name)`), never a
+  receipt. A usable paired Codespace stays as it is on a rerun unless a rebuild is chosen (ruling 28).
 - Create like last time without a pairing: the last successful launch receipt for this repository's default branch.
 - No history: ask once (today's machine and idle screens), then remember through the receipt.
-- A recorded machine that is no longer offered, or a paired Codespace whose machine cannot be read: say so on Review
-  and ask; never fall back to four cores silently. Review and the launch line show the resolved values.
+- A recorded machine that is no longer offered, or an explicitly selected paired rebuild whose live machine cannot
+  be read: say why and ask; never substitute a receipt or silently use four cores for the rebuild. Review and the
+  launch line show the resolved values. Leaving a paired Codespace as it is needs no machine metadata.
 
 ### Merge prompt (ruling 4)
 

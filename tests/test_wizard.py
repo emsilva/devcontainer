@@ -30,7 +30,7 @@ class ReviewRerunTests(unittest.TestCase):
         self.prompts = []
         self.rendered = []
 
-    def run_wizard(self, *, saved=True, decisions=None, answers=None, github=False, api=None, changes=None):
+    def run_wizard(self, *, saved=True, decisions=None, answers=None, github=False, api=None, changes=None, paired=None):
         import contextlib
         import io
         from unittest.mock import Mock
@@ -81,7 +81,7 @@ class ReviewRerunTests(unittest.TestCase):
                     'git': lambda p, *a, **k: 'setup/devcontainer' if a[0] == 'branch' else '{}', 'render': render,
                     'integrate_taskfile': lambda *a: None, 'integrate_continuity': lambda *a: None,
                     'check_candidate': lambda *a: None, 'GitPlan': git_plan,
-                    '_paired_codespace': lambda p: None, '_ensure_runner': lambda *a: None,
+                    '_paired_codespace': lambda p: paired, '_ensure_runner': lambda *a: None,
                     'repository_access': lambda *a: True, '_merge_and_launch': Mock(return_value=(None, {}))}.items():
                 stack.enter_context(patch.object(wizard, name, value))
             stack.enter_context(contextlib.redirect_stdout(output))
@@ -229,31 +229,93 @@ class ReviewRerunTests(unittest.TestCase):
         api.get.return_value = WizardCliTests._space('paired')
         api.resource_settings = Codespaces.resource_settings
         with patch.object(wizard, '_repository', return_value='owner/project'):
-            launch = wizard._resolve_launch(api, self.root, 'main', 'paired')
+            self.assertEqual(wizard._resolve_launch(api, self.root, 'main', 'paired')['action'], 'none')
+            launch = wizard._reuse_options(api, 'paired', 'main', 'rebuild', api.get.return_value)
         self.assertEqual((launch['action'], launch['name'], launch['machine'], launch['idle_timeout']),
                          ('rebuild', 'paired', 'premiumLinux', '60m'))
         api.machines.assert_not_called()
+
+    def test_resolve_launch_keeps_usable_paired_as_none(self):
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard
+        from devcontainer_setup.codespaces import Codespaces
+        api = Mock()
+        api.get.return_value = dict(WizardCliTests._space('paired'),
+                                    repository={'full_name': 'OWNER/Project'})
+        api.resource_settings = Codespaces.resource_settings
+        with patch.object(wizard, '_repository', return_value='owner/project'):
+            launch = wizard._resolve_launch(api, self.root, 'main', 'paired')
+        self.assertEqual(launch, wizard._no_codespace())
+        api.existing.assert_not_called()
+        api.machines.assert_not_called()
+
+    def test_resolve_launch_unusable_paired_keeps_fallback(self):
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard
+        from devcontainer_setup.codespaces import Codespaces
+        paired, other = WizardCliTests._space('paired'), WizardCliTests._space('other')
+        for unavailable in (dict(paired, git_status={'ref': 'feature'}),
+                            dict(paired, repository={'full_name': 'owner/elsewhere'}),
+                            ValueError('Not visible (HTTP 404)')):
+            with self.subTest(unavailable=unavailable):
+                api = Mock()
+                def get(name):
+                    if name == 'paired':
+                        if isinstance(unavailable, ValueError):
+                            raise unavailable
+                        return unavailable
+                    return other
+                api.get.side_effect = get
+                api.existing.return_value = [paired, other]
+                api.resource_settings = Codespaces.resource_settings
+                with patch.object(wizard, '_repository', return_value='owner/project'):
+                    launch = wizard._resolve_launch(api, self.root, 'main', 'paired')
+                    self.assertEqual((launch['action'], launch['name']), ('reuse', 'other'))
+                    self.assertIn('Paired Codespace paired is unavailable', launch['warning'])
+                    self.assertEqual((launch['machine'], launch['idle_timeout']), ('premiumLinux', '60m'))
+                    # Once the pairing is readable on this branch again, stop proposing another reuse.
+                    api.get.side_effect = None
+                    api.get.return_value = paired
+                    api.existing.reset_mock()
+                    self.assertEqual(wizard._resolve_launch(api, self.root, 'main', 'paired')['action'], 'none')
+                    api.existing.assert_not_called()
+                api.machines.assert_not_called()
 
     def test_unreadable_paired_machine_is_asked_not_defaulted(self):
         from unittest.mock import Mock
         from devcontainer_setup import __main__ as wizard
         from devcontainer_setup.codespaces import Codespaces
-        self.assertTrue(callable(getattr(wizard, '_resolve_launch', None)), 'Missing live machine must require an answer')
         api = Mock()
         api.resource_settings = Codespaces.resource_settings
         api.get.return_value = dict(WizardCliTests._space('paired'), machine=None)
         api.existing.return_value = [api.get.return_value]
         api.machines.return_value = [{'name': 'premiumLinux', 'cpus': 8,
             'memory_in_bytes': 32 * 1024**3, 'storage_in_bytes': 64 * 1024**3}]
+        with patch.object(wizard, '_launch_history', side_effect=AssertionError('Rebuild must not use a receipt')) as history:
+            self.run_wizard(github=True, api=api, paired='paired',
+                            answers={'Review setup': ['Change answers', 'Cancel'], 'Codespace': 'rebuild paired'})
+        self.assertEqual(self.prompts[0], 'Review setup')
+        self.assertIn('Codespaces machine', self.prompts)
+        self.assertLess(self.prompts.index('Codespace'), self.prompts.index('Codespaces machine'))
+        self.assertNotIn('Stop when idle for', self.prompts)
+        self.assertIn('premiumLinux', self.output)
+        api.machines.assert_called_once_with('owner/project')
+        history.assert_not_called()
+
+    def test_rerun_with_unreadable_paired_machine_defaults_to_none(self):
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard
+        api = Mock()
+        api.get.return_value = dict(WizardCliTests._space('paired'), machine=None)
+        api.resource_settings.side_effect = ValueError('Existing codespace machine metadata is unavailable')
         with patch.object(wizard, '_repository', return_value='owner/project'):
             launch = wizard._resolve_launch(api, self.root, 'main', 'paired')
-        self.assertIsNone(launch['machine'])
-        self.assertIn('machine', launch['warning'].lower())
-        # Exercise the pending resource question through interactive, before Review.
-        with patch.object(wizard, '_resolve_launch', return_value=launch):
-            self.run_wizard(github=True, api=api)
-        self.assertEqual(self.prompts, ['Codespaces machine', 'Review setup'])
-        self.assertIn('premiumLinux', self.output)
+        self.assertEqual(launch['action'], 'none')
+        self.run_wizard(github=True, api=api, paired='paired')
+        self.assertEqual(self.prompts, ['Review setup'])
+        api.resource_settings.assert_not_called()
+        api.machines.assert_not_called()
+        api.existing.assert_not_called()
 
     def test_change_answers_opens_full_editor(self):
         self.run_wizard(github=True, answers={'Review setup': ['Change answers', 'Cancel'],
@@ -354,6 +416,196 @@ class ReviewRerunTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'selections'):
                     self.run_wizard()
                 self.assertEqual(self.prompts, [])
+
+
+class SetupSignInTests(unittest.TestCase):
+    def setUp(self):
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve() / 'project with spaces'
+        self.root.mkdir()
+        self.marker = self.root / '.devcontainer/scripts/project_sync/signins.py'
+        self.marker.parent.mkdir(parents=True)
+        self.marker.touch()
+        self.ui = Mock()
+        self.ui.confirm.return_value = True
+        self.service = Mock(spec=['binding', 'roots', 'pair'])
+        self.service.binding.return_value = None
+        self.service.roots.return_value = ['/workspaces/project']
+        self.real_call = subprocess.call
+        self.connect = Mock(return_value=0)
+        patches = (
+            patch.dict(os.environ, CODESPACES=''),
+            patch('devcontainer_setup.project_sync.state.discover_project', return_value=object()),
+            patch('devcontainer_setup.project_sync.state.state_dir', return_value=self.root / 'state'),
+            patch('devcontainer_setup.project_sync.codespaces.Codespaces', return_value=self.service),
+            patch.object(wizard.subprocess, 'call', self.connect),
+        )
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def offer(self):
+        import contextlib
+        import io
+        from devcontainer_setup import __main__ as wizard
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            wizard.setup_continuity(self.root, self.ui, 'paired')
+        return output.getvalue()
+
+    def assert_connect(self):
+        self.ui.confirm.assert_called_once_with('Connect and sign in now?', True)
+        self.service.pair.assert_called_once_with('paired', '/workspaces/project')
+        self.connect.assert_called_once_with(
+            ['bash', '.devcontainer/scripts/project-sync.sh', 'work', '--codespace', '--then-signin-all'],
+            cwd=self.root)
+
+    def test_pairing_offers_connect_and_sign_in(self):
+        self.offer()
+        self.assert_connect()
+        self.service.roots.assert_called_once_with('paired')
+
+    def test_rebuild_of_paired_offers_sign_in(self):
+        self.service.binding.return_value = {'codespace': 'paired', 'remote_root': '/workspaces/rebuilt'}
+        self.offer()
+        self.ui.confirm.assert_called_once_with('Connect and sign in now?', True)
+        self.service.pair.assert_called_once_with('paired', '/workspaces/rebuilt')
+        self.service.roots.assert_not_called()
+        self.connect.assert_called_once_with(
+            ['bash', '.devcontainer/scripts/project-sync.sh', 'work', '--codespace', '--then-signin-all'],
+            cwd=self.root)
+
+    def test_failed_connect_prints_recovery(self):
+        import signal
+        previous = signal.getsignal(signal.SIGINT)
+        self.connect.return_value = 1
+        output = self.offer()
+        self.assertIn('Setup is preserved. Run task work:cs, then task work:signin:all.', output)
+        self.assert_connect()
+        self.assertIs(signal.getsignal(signal.SIGINT), previous)
+        self.connect.side_effect = OSError('Cannot start the checkout script')
+        output = self.offer()
+        self.assertIs(signal.getsignal(signal.SIGINT), previous)
+        self.assertIn('Setup is preserved.', output)
+
+    def test_declining_prints_both_commands(self):
+        self.ui.confirm.return_value = False
+        output = self.offer()
+        self.assertIn('Codespace paired. Run task work:cs to connect, then task work:signin:all to sign in.', output)
+        self.connect.assert_not_called()
+        self.service.pair.assert_called_once_with('paired', '/workspaces/project')
+
+    def test_cancelling_offer_prints_both_commands(self):
+        from devcontainer_setup.ui import Cancelled
+        self.ui.confirm.side_effect = Cancelled()
+        output = self.offer()
+        self.assertIn('Codespace paired. Run task work:cs to connect, then task work:signin:all to sign in.', output)
+        self.connect.assert_not_called()
+        self.service.pair.assert_called_once_with('paired', '/workspaces/project')
+
+    def test_offer_without_updated_checkout_prints_commands(self):
+        self.marker.unlink()
+        output = self.offer()
+        self.assertIn(f'Update this checkout (git -C {shlex.quote(str(self.root))} pull --ff-only), '
+                      'then run task work:cs and task work:signin:all.', output)
+        self.connect.assert_not_called()
+        self.service.pair.assert_called_once_with('paired', '/workspaces/project')
+
+    def test_no_offer_when_pairing_stays_elsewhere(self):
+        self.service.binding.return_value = {'codespace': 'other', 'remote_root': '/workspaces/other'}
+        with patch('devcontainer_setup.project_sync.arming.read', return_value={'armed': False}):
+            output = self.offer()
+        self.assertIn('still paired with other', output)
+        self.ui.confirm.assert_not_called()
+        self.connect.assert_not_called()
+        self.service.pair.assert_not_called()
+        self.service.binding.return_value = None
+        self.offer()
+        self.assert_connect()
+
+    def test_no_offer_inside_a_codespace(self):
+        with patch.dict(os.environ, CODESPACES='true'):
+            self.offer()
+        self.ui.confirm.assert_not_called()
+        self.connect.assert_not_called()
+        self.service.pair.assert_not_called()
+        self.offer()
+        self.assert_connect()
+
+    def test_wizard_does_not_import_workspace_to_connect(self):
+        with patch('devcontainer_setup.project_sync.workspace.remote',
+                   side_effect=AssertionError('Connect through the checkout script')) as remote:
+            self.offer()
+        remote.assert_not_called()
+        self.assert_connect()
+
+    def test_checkout_script_runs_in_project_and_finishes(self):
+        from devcontainer_setup import __main__ as wizard
+        script = self.root / '.devcontainer/scripts/project-sync.sh'
+        script.write_text('#!/usr/bin/env bash\nset -euo pipefail\npwd > signin-invocation\n'
+                          'printf "%s\\n" "$@" >> signin-invocation\n')
+        with patch.object(wizard.subprocess, 'call', self.real_call):
+            self.offer()
+        receipt = self.root / 'signin-invocation'
+        self.assertTrue(receipt.is_file(), 'The checkout script must run to completion before setup returns')
+        self.assertEqual(receipt.read_text().splitlines(),
+                         [str(self.root), 'work', '--codespace', '--then-signin-all'])
+
+    def test_ctrl_c_waits_for_checkout_cleanup_and_restores_handler(self):
+        import selectors
+        import signal
+        child = '''import signal, sys, time
+from pathlib import Path
+def cancel(number, frame):
+    time.sleep(0.6)
+    Path('signin-cleaned').write_text('finished')
+    raise SystemExit(130)
+signal.signal(signal.SIGINT, cancel)
+print('READY', flush=True)
+signal.pause()
+'''
+        script = self.root / '.devcontainer/scripts/project-sync.sh'
+        script.write_text(f'#!/usr/bin/env bash\nexec {shlex.quote(sys.executable)} -u -c {shlex.quote(child)}\n')
+        runner = '''import signal, sys
+from pathlib import Path
+from unittest.mock import Mock, patch
+from devcontainer_setup import __main__ as wizard
+project = Path(sys.argv[1])
+service = Mock()
+service.binding.return_value = None
+service.roots.return_value = ['/workspaces/project']
+ui = Mock()
+ui.confirm.return_value = True
+before = signal.getsignal(signal.SIGINT)
+with patch('devcontainer_setup.project_sync.state.discover_project', return_value=object()), \\
+     patch('devcontainer_setup.project_sync.state.state_dir', return_value=project / 'state'), \\
+     patch('devcontainer_setup.project_sync.codespaces.Codespaces', return_value=service):
+    wizard.setup_continuity(project, ui, 'paired')
+assert signal.getsignal(signal.SIGINT) is before
+print('HANDLER_RESTORED', flush=True)
+'''
+        process = subprocess.Popen([sys.executable, '-u', '-c', runner, str(self.root)], cwd=SOURCE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            with selectors.DefaultSelector() as ready:
+                ready.register(process.stdout, selectors.EVENT_READ)
+                self.assertTrue(ready.select(timeout=5), 'The local fake checkout must become ready')
+            self.assertEqual(process.stdout.readline().strip(), 'READY')
+            os.killpg(process.pid, signal.SIGINT)
+            output, error = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 0, error)
+            self.assertEqual((self.root / 'signin-cleaned').read_text(), 'finished')
+            self.assertIn('HANDLER_RESTORED', output)
+            self.assertIn('Setup is preserved. Run task work:cs, then task work:signin:all.', output)
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate(timeout=5)
 
 
 class WizardCliTests(unittest.TestCase):
@@ -509,14 +761,20 @@ class WizardCliTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertIn('default branch', output)
 
-    def test_paired_defaults_to_rebuild_with_force(self):
+    def test_paired_defaults_to_none_with_rebuild_listed(self):
+        result, menus, _, _, _ = self._split_menu([self._space('paired')], paired='paired')
+        self.assertEqual(menus[0][2], 'none')
+        self.assertIn('rebuild paired', menus[0][1])
+        self.assertEqual(result['action'], 'none')
+
+    def test_choosing_rebuild_forces_rebuild_on_paired(self):
         import contextlib
         import io
         from unittest.mock import Mock
         from devcontainer_setup import __main__ as wizard
-        result, menus, _, _, api = self._split_menu([self._space('paired')], paired='paired')
+        result, menus, _, _, api = self._split_menu([self._space('paired')], paired='paired', choice='rebuild paired')
         self.assertEqual((result['action'], result['name']), ('rebuild', 'paired'))
-        self.assertEqual(menus[0][2], 'rebuild paired')
+        self.assertEqual(menus[0][2], 'none')
         self.assertEqual((result['machine'], result['idle_timeout']), ('premiumLinux', '60m'))
         api.launch = Mock(return_value='paired')
         update = {'state': 'current', 'reason': None, 'head': 'abc1234', 'behind': 0}
@@ -530,6 +788,8 @@ class WizardCliTests(unittest.TestCase):
                                       result, {'apply_dotfiles': False})
         self.assertIs(api.launch.call_args.kwargs['force_rebuild'], True)
         self.assertEqual(api.launch.call_args.kwargs['resume'], 'paired')
+        self.assertEqual(api.launch.call_args.kwargs['machine'], 'premiumLinux')
+        self.assertEqual(api.launch.call_args.kwargs['idle_timeout'], '60m')
         self.assertEqual(api.launch.call_args.kwargs['open_after_create'], 'none')
 
     def test_existing_unpaired_codespace_is_listed_and_default_reused(self):
@@ -1103,7 +1363,7 @@ class WizardCliTests(unittest.TestCase):
         options, selected = self._existing_menu([
             {'name': 'first', 'git_status': {'ref': 'main'}},
             {'name': 'second', 'git_status': {'ref': 'main'}}])
-        self.assertEqual(selected, ('rebuild second',))
+        self.assertEqual(selected, ('none',))
         self.assertEqual(options, ['none', 'rebuild second', 'reuse first'])
 
     def test_existing_codespace_menu_never_defaults_to_create(self):
