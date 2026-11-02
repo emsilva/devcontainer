@@ -197,7 +197,7 @@ class Forwards:
             self.stop(port)
             raise
 
-    def stop(self, port: int) -> None:
+    def stop(self, port: int, *, reason: str = 'stopped by owner') -> None:
         child = self.children.get(port)
         if child is not None:
             if child.poll() is None:
@@ -210,18 +210,21 @@ class Forwards:
             else:
                 child.wait(timeout=5)
             self.children.pop(port, None)
-        self.requests.pop(port, None)
+        context = self.requests.pop(port, None)
         self._record(port, None)
+        if context:
+            request, _, _ = context
+            _LOG.info('Callback forward ended: %s %s port %s (%s)',
+                      request.program, request.host, port, reason)
 
     def active(self) -> set[int]:
         for port, child in list(self.children.items()):
             if child.poll() is not None:
                 context = self.requests.get(port)
-                self.stop(port)
+                self.stop(port, reason='callback forward exited')
                 if context:
                     request, project, notifier = context
                     notifier(project, request.program, request.host, f'Port {port}: callback forward ended')
-                    _LOG.info('Callback forward ended: %s %s port %s', request.program, request.host, port)
         return set(self.children)
 
     def watch(self, request, project, notifier):
@@ -235,10 +238,10 @@ class Forwards:
             request, _, _ = self.requests[port]
             limit = deadline(request)
             if limit is not None and now >= limit:
-                self.stop(port)
+                self.stop(port, reason='deadline')
         for port in ports:
             if port in self.children and not remote_listening(connection, port):
-                self.stop(port)
+                self.stop(port, reason='remote stopped listening')
 
     def end_left_behind(self) -> list[int]:
         ended = []
@@ -325,6 +328,7 @@ def handle(request: Request, connection, forwards: Forwards, *, project: str, no
            opener=open_url, notifier=notify_link) -> str:
     limit = deadline(request)
     if limit is not None and now() >= limit:
+        _LOG.info('Expired: %s %s port %s', request.program, request.host, request.port or 'none')
         return 'expired'
     if request.port is not None:
         if request.port not in forwards.active():
@@ -341,21 +345,27 @@ def handle(request: Request, connection, forwards: Forwards, *, project: str, no
                             text=f'{request.program}: {request.host}: {detail}')).encode(), timeout=10)
                     except (OSError, ValueError):
                         pass
-                _LOG.info('Busy: %s %s port %s', request.program, request.host, request.port)
+                _LOG.info('Busy: %s %s port %s holder %s',
+                          request.program, request.host, request.port, holder or 'unknown listener')
                 return 'busy'
             if not remote_listening(connection, request.port):
                 notifier(project, request.program, request.host, f'Port {request.port} is no longer listening')
+                _LOG.info('Rejected: %s %s port %s (remote port is not listening)',
+                          request.program, request.host, request.port)
                 return 'rejected'
             try:
                 forwards.start(request.port)
             except (OSError, ValueError, subprocess.TimeoutExpired):
                 notifier(project, request.program, request.host, f'Port {request.port}: callback forward failed')
+                _LOG.info('Forward start failed: %s %s port %s', request.program, request.host, request.port)
                 return 'rejected'
         forwards.watch(request, project, notifier)
     if not opener(request.url):
         notifier(project, request.program, request.host, 'Browser could not open the link')
+        _LOG.info('Browser could not open: %s %s port %s',
+                  request.program, request.host, request.port or 'none')
         if request.port is not None:
-            forwards.stop(request.port)
+            forwards.stop(request.port, reason='browser could not open')
         return 'rejected'
     notifier(project, request.program, request.host, f'Port {request.port}' if request.port else '')
     _LOG.info('Opened: %s %s port %s', request.program, request.host, request.port or 'none')

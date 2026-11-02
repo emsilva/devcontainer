@@ -1,6 +1,7 @@
 """Detached scratch reconciliation and project conversation synchronization."""
 from __future__ import annotations
 import base64
+from contextlib import ExitStack
 import hashlib
 import io
 import json
@@ -605,18 +606,27 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
         raise _Shutdown()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, shutdown)
-    with locked(state / 'scratch-supervisor.lock'):
+    with locked(state / 'scratch-supervisor.lock'), ExitStack() as log_cleanup:
         config = _config(root, state)
         atomic_write(state / '.log-ready', b'1\n')
         log_path = state / 'scratch.log'
         if log_path.is_symlink():
             raise ValueError('Scratch log must not be a symlink.')
         handler = RotatingFileHandler(log_path, maxBytes=256 * 1024, backupCount=2)
+        log_cleanup.callback(handler.close)
         handler.setFormatter(project_state.log_formatter())
         os.chmod(log_path, 0o600)
         logger = logging.getLogger('project-sync-' + nonce)
         logger.setLevel(logging.INFO)
         logger.addHandler(handler)
+        log_cleanup.callback(logger.removeHandler, handler)
+        links_logger = logging.getLogger('project-sync-links')
+        log_cleanup.callback(links_logger.setLevel, links_logger.level)
+        log_cleanup.callback(setattr, links_logger, 'propagate', links_logger.propagate)
+        links_logger.setLevel(logging.INFO)
+        links_logger.propagate = False
+        links_logger.addHandler(handler)
+        log_cleanup.callback(links_logger.removeHandler, handler)
         receipt = _saved_session(state, config)
         previous = read_json(state / RUNTIME) if (state / RUNTIME).exists() else {}
         same = previous.get('binding', previous.get('prepared_binding')) == config
@@ -803,8 +813,6 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                 except Exception:
                     logger.info('Private Mutagen daemon cleanup requires retry.')
             update('stopped' if cleanup_ok else 'cleanup_required', process_identity=None)
-            handler.close()
-            logger.removeHandler(handler)
 
 
 if __name__ == '__main__':
