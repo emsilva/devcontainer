@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from devcontainer_setup.project_sync.state import atomic_write, read_json
+
 try:
     from devcontainer_setup.project_sync import checkpoint_store
 except ImportError:
@@ -26,6 +28,164 @@ class StoreTests(unittest.TestCase):
         path = self.path / 'checkpoints' / family / digest
         when = path.stat().st_mtime - days * 86400
         os.utime(path, (when, when))
+
+    def conversation(self, body, *, sid='session', agent='claude'):
+        # Codex dependencies can precede the head in the files list.
+        return dict(agent=agent, session_id=sid, source_root='/workspaces/project',
+                    cutoff=dict(bytes=len(body)), files=[
+                        dict(session_id='ancestor', blob=self.store.put(b'ancestor context')),
+                        dict(session_id=sid, blob=self.store.put(body))])
+
+    def receive(self, *entries, source='codespace'):
+        snapshot = self.store.save(dict(schema=2, conversations=dict(entries=list(entries), issues=[])))
+        self.store.acknowledge(snapshot, source=source)
+        return snapshot
+
+    def relay_records(self):
+        return sorted((self.path / 'checkpoints/relay').glob('*.json'))
+
+    def test_codespace_acknowledge_records_each_entry(self):
+        entries = [self.conversation(b'A', sid='one'), self.conversation(b'B', sid='two', agent='codex')]
+        self.receive(*entries)
+        records = self.relay_records()
+        self.assertEqual(len(records), 2)
+        for path in records:
+            record = read_json(path)
+            canonical = json.dumps(record['entry'], sort_keys=True, separators=(',', ':'),
+                                   ensure_ascii=True, allow_nan=False).encode()
+            self.assertEqual(path.name, hashlib.sha256(canonical).hexdigest() + '.json')
+            self.assertEqual(set(record), {'schema', 'entry', 'received_at'})
+            self.assertEqual(record['schema'], 1)
+            self.assertTrue(record['received_at'].endswith('+00:00'))
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(self.store.relay_entries(), ([dict(entry, relayed=True) for entry in entries], []))
+        # Callers cannot add relay metadata to the retained entry itself.
+        self.assertTrue(all('relayed' not in read_json(path)['entry'] for path in records))
+
+    def test_desktop_acknowledge_records_nothing(self):
+        self.receive(self.conversation(b'A', sid='one'), self.conversation(b'B', sid='two'), source='desktop')
+        self.assertEqual(self.store.relay_entries(), ([], []))
+        self.assertEqual(self.relay_records(), [])
+
+    def test_appended_revision_retires_the_earlier_record(self):
+        earlier, later = self.conversation(b'A'), self.conversation(b'AB')
+        self.receive(earlier)
+        self.receive(later)
+        self.assertEqual(len(self.relay_records()), 1)
+        self.assertEqual(self.store.relay_entries(), ([dict(later, relayed=True)], []))
+
+    def test_older_revision_arriving_later_is_not_recorded(self):
+        later, earlier = self.conversation(b'AB'), self.conversation(b'A')
+        self.receive(later)
+        self.receive(earlier)
+        self.assertEqual(len(self.relay_records()), 1)
+        self.assertEqual(self.store.relay_entries(), ([dict(later, relayed=True)], []))
+
+    def test_diverging_revisions_of_one_session_are_both_kept(self):
+        entries = [self.conversation(b'AB'), self.conversation(b'AC')]
+        for entry in entries:
+            self.receive(entry)
+        self.assertEqual(len(self.relay_records()), 2)
+        self.assertEqual(self.store.relay_entries(), ([dict(entry, relayed=True) for entry in entries], []))
+
+    def test_collect_keeps_record_blobs_after_keep_days(self):
+        entry = self.conversation(b'only retained in the relay')
+        snapshot = self.receive(entry)
+        self.receive()  # Replaces the only receipt that named the old manifest.
+        self.age('manifests', snapshot, checkpoint_store.KEEP_DAYS + 2)
+        for item in entry['files']:
+            self.age('objects', item['blob'], checkpoint_store.KEEP_DAYS + 2)
+        for path in self.relay_records():
+            when = path.stat().st_mtime - (checkpoint_store.KEEP_DAYS + 2) * 86400
+            os.utime(path, (when, when))
+        loose = self.store.put(b'unreferenced')
+        self.age('objects', loose, checkpoint_store.GRACE_SECONDS / 86400 + 1)
+        collected = self.store.collect(apply=True)
+        self.assertEqual((collected['manifests'], collected['objects']), (1, 1))
+        self.assertEqual([self.store.read(item['blob']) for item in entry['files']],
+                         [b'ancestor context', b'only retained in the relay'])
+        self.assertEqual(self.store.relay_entries(), ([dict(entry, relayed=True)], []))
+
+    def test_seeding_uses_current_receipt_and_unsuperseded_journals(self):
+        received = self.conversation(b'received', sid='received')
+        snapshot = self.store.save(dict(conversations=dict(entries=[received])))
+        atomic_write(self.path / 'checkpoints/receipts/codespace.json', json.dumps(dict(
+            snapshot_id=snapshot, received_at='2026-10-30T00:00:00+00:00')).encode())
+        imported = self.conversation(b'imported', sid='imported')
+        for key, status, superseded in (('b', 'complete', False), ('c', 'complete', True),
+                                        ('d', 'importing', False)):
+            entry = imported if key == 'b' else self.conversation(key.encode(), sid=key)
+            journal = self.path / 'conversation-imports' / (key * 64)
+            atomic_write(journal / 'receipt.json', json.dumps(dict(
+                status=status, source_checkpoint=entry)).encode())
+            if superseded:
+                atomic_write(journal / 'superseded.json', b'{}')
+        self.assertEqual(self.store.relay_entries(),
+                         ([dict(received, relayed=True), dict(imported, relayed=True)], []))
+        marker = self.path / 'checkpoints/relay/seeded'
+        self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
+        late = self.conversation(b'late journal', sid='late')
+        atomic_write(self.path / 'conversation-imports' / ('e' * 64) / 'receipt.json',
+                     json.dumps(dict(status='complete', source_checkpoint=late)).encode())
+        self.assertEqual(self.store.relay_entries(),
+                         ([dict(received, relayed=True), dict(imported, relayed=True)], []))
+
+    def test_unreadable_record_is_an_issue_not_a_failure(self):
+        missing = self.conversation(b'missing', sid='missing')
+        corrupt = self.conversation(b'corrupt dependency', sid='corrupt')
+        corrupt['files'][0]['blob'] = self.store.put(b'unique dependency')
+        healthy = self.conversation(b'healthy', sid='healthy')
+        self.receive(missing, corrupt, healthy)
+        (self.path / 'checkpoints/objects' / missing['files'][1]['blob']).unlink()
+        path = self.path / 'checkpoints/objects' / corrupt['files'][0]['blob']
+        path.chmod(0o600)
+        path.write_bytes(b'corrupt')
+        self.assertEqual(self.store.relay_entries(), ([dict(healthy, relayed=True)], [
+            dict(agent='claude', session_id=sid, reason='Relayed conversation checkpoint is unreadable')
+            for sid in ('missing', 'corrupt')]))
+
+    def test_records_survive_an_interrupted_receipt_and_retry(self):
+        first, second = self.conversation(b'first', sid='first'), self.conversation(b'second', sid='second')
+        self.receive(first)
+        previous = self.store.latest('codespace')
+        snapshot = self.store.save(dict(conversations=dict(entries=[second])))
+        real = checkpoint_store.atomic_write
+        def interrupted(path, data, *args, **kwargs):
+            if path.name == 'codespace.json':
+                raise OSError('interrupted receipt')
+            return real(path, data, *args, **kwargs)
+        with mock.patch.object(checkpoint_store, 'atomic_write', side_effect=interrupted):
+            with self.assertRaisesRegex(OSError, 'interrupted receipt'):
+                self.store.acknowledge(snapshot, source='codespace')
+        self.assertEqual(self.store.latest('codespace'), previous)
+        self.assertEqual(self.store.relay_entries(),
+                         ([dict(first, relayed=True), dict(second, relayed=True)], []))
+        self.store.acknowledge(snapshot, source='codespace')
+        self.assertEqual(len(self.relay_records()), 2)
+
+    def test_first_acknowledgement_seeds_the_receipt_before_replacing_it(self):
+        old = self.conversation(b'before upgrade')
+        snapshot = self.store.save(dict(conversations=dict(entries=[old])))
+        atomic_write(self.path / 'checkpoints/receipts/codespace.json', json.dumps(dict(
+            snapshot_id=snapshot, received_at='2026-10-30T00:00:00+00:00')).encode())
+        self.receive()
+        self.assertEqual(self.store.relay_entries(), ([dict(old, relayed=True)], []))
+
+    def test_matching_session_ids_from_different_agents_are_both_kept(self):
+        entries = [self.conversation(b'AB'), self.conversation(b'A', agent='codex')]
+        for entry in entries:
+            self.receive(entry)
+        self.assertEqual(len(self.relay_records()), 2)
+        self.assertEqual(self.store.relay_entries(), ([dict(entry, relayed=True) for entry in entries], []))
+
+    def test_unreadable_head_cannot_prove_retirement(self):
+        earlier, later = self.conversation(b'A'), self.conversation(b'AB')
+        self.receive(earlier)
+        (self.path / 'checkpoints/objects' / earlier['files'][1]['blob']).unlink()
+        self.receive(later)
+        self.assertEqual(len(self.relay_records()), 2)
+        self.assertEqual(self.store.relay_entries(), ([dict(later, relayed=True)], [dict(
+            agent='claude', session_id='session', reason='Relayed conversation checkpoint is unreadable')]))
 
     def test_collect_keeps_named_and_recent_manifests_and_what_they_reference(self):
         old, recent, named, loose, fresh = (self.store.put(name.encode()) for name in ('old', 'recent', 'named', 'loose', 'fresh'))

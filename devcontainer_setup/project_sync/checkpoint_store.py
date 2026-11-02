@@ -126,7 +126,7 @@ class Store:
         self._verify(manifest)
         return self._immutable('manifests', data)
 
-    def load(self, snapshot_id: str) -> dict:
+    def _manifest(self, snapshot_id: str) -> dict:
         data = self._read(self._path('manifests', snapshot_id), snapshot_id)
         try:
             manifest = json.loads(data)
@@ -134,6 +134,10 @@ class Store:
             raise ValueError('Corrupt checkpoint manifest') from error
         if _canonical(manifest) != data:
             raise ValueError('Checkpoint manifest is not canonical')
+        return manifest
+
+    def load(self, snapshot_id: str) -> dict:
+        manifest = self._manifest(snapshot_id)
         self._verify(manifest)
         return manifest
 
@@ -145,7 +149,11 @@ class Store:
     def acknowledge(self, snapshot_id: str, *, source: str) -> dict:
         path = self._receipt(source)
         with locked(self.root / 'store.lock', blocking=True):
-            self.load(snapshot_id)
+            manifest = self.load(snapshot_id)
+            if source == 'codespace':
+                # Preserve the pre-upgrade receipt before this one replaces it.
+                self._seed_relay()
+                self._record_received(manifest)
             receipt = {'snapshot_id': snapshot_id,
                        'received_at': datetime.now(timezone.utc).isoformat()}
             atomic_write(path, _canonical(receipt), mode=0o600)
@@ -165,6 +173,86 @@ class Store:
             raise ValueError('Checkpoint acknowledgement has no timezone')
         self.load(receipt['snapshot_id'])
         return receipt
+
+    def _relay_records(self):
+        return [(path, read_json(path)) for path in sorted((self.root / 'relay').glob('*.json'))]
+
+    def _head(self, entry: dict) -> bytes | None:
+        try:
+            head = next(item for item in entry['files'] if item['session_id'] == entry['session_id'])
+            return self.read(head['blob'])
+        except (OSError, ValueError, KeyError, TypeError, StopIteration):
+            return None  # An unreadable head proves no append relationship.
+
+    def _record_received(self, manifest: dict) -> None:
+        """Register received entries while the caller holds store.lock."""
+        for entry in manifest.get('conversations', {}).get('entries', []):
+            digest = hashlib.sha256(_canonical(entry)).hexdigest()
+            path = self.root / 'relay' / (digest + '.json')
+            head = self._head(entry)
+            retired = []
+            for old_path, record in self._relay_records():
+                old = record['entry']
+                if old_path == path:
+                    break  # A retry preserves the original receipt time.
+                if (old.get('agent'), old.get('session_id')) != (entry.get('agent'), entry.get('session_id')):
+                    continue
+                old_head = self._head(old)
+                if head is None or old_head is None:
+                    continue
+                if old_head.startswith(head):
+                    break  # A live revision already contains the new entry.
+                if head.startswith(old_head):
+                    retired.append(old_path)
+            else:
+                record = dict(schema=1, entry=entry, received_at=datetime.now(timezone.utc).isoformat())
+                # A crash must leave an extra old record, never lose the new one.
+                atomic_write(path, _canonical(record), mode=0o600)
+                for old_path in retired:
+                    with _parent(old_path, private=True) as (parent, name):
+                        os.unlink(name, dir_fd=parent)
+
+    def _seed_relay(self) -> None:
+        """Migrate retained receipt/journal pointers once, under store.lock."""
+        marker = self.root / 'relay' / 'seeded'
+        try:
+            read_json(marker)
+        except FileNotFoundError:
+            pass
+        else:
+            return
+        try:
+            receipt = read_json(self._receipt('codespace'))
+        except FileNotFoundError:
+            pass
+        else:
+            # Read verified manifest text without requiring all its blobs: a lost
+            # blob becomes a per-entry relay issue, not a failed migration.
+            self._record_received(self._manifest(receipt['snapshot_id']))
+        for path in sorted((self.state / 'conversation-imports').glob('*/receipt.json')):
+            receipt = read_json(path)
+            if receipt.get('status') != 'complete' or path.with_name('superseded.json').exists():
+                continue
+            entry = receipt.get('source_checkpoint')
+            if isinstance(entry, dict):
+                self._record_received(dict(conversations=dict(entries=[entry])))
+        atomic_write(marker, _canonical(dict(schema=1)), mode=0o600)
+
+    def relay_entries(self) -> tuple[list[dict], list[dict]]:
+        """Verified received conversations, oldest first, and per-entry issues."""
+        entries, issues = [], []
+        with locked(self.root / 'store.lock', blocking=True):
+            self._seed_relay()
+            for _, record in sorted(self._relay_records(), key=lambda item: item[1]['received_at']):
+                entry = record['entry']
+                try:
+                    self._verify(entry)
+                except (OSError, ValueError):
+                    issues.append(dict(agent=entry['agent'], session_id=entry['session_id'],
+                                       reason='Relayed conversation checkpoint is unreadable'))
+                else:
+                    entries.append(dict(entry, relayed=True))
+        return entries, issues
 
     def collect(self, *, apply: bool = False, keep_days: float = KEEP_DAYS,
                 grace_seconds: float = GRACE_SECONDS) -> dict:
@@ -190,6 +278,8 @@ class Store:
             # Published conversations keep proving their source against these blobs.
             for receipt in (self.state / 'conversation-imports').glob('*/receipt.json'):
                 live.update(_strings(read_json(receipt)))
+            for _, record in self._relay_records():
+                live.update(_strings(record))
             doomed = [('manifests', digest, info) for digest, info in manifests.items() if digest not in kept]
             doomed += [('objects', digest, info) for digest, info in self._entries('objects').items()
                        if digest not in live and info.st_mtime < now - grace_seconds]
