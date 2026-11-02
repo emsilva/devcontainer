@@ -150,10 +150,13 @@ the lead has them).
 
 **Interfaces:**
 - Consumes: `Store.relay_entries()` (Task 1); the started-here check inside `publish_conversations` (Task 2).
-- Produces: `replication.capture(project, store, *, env=None, historical_roots=())` (unchanged signature)
-  returns a manifest whose `conversations.entries` are the native entries followed by `relay_entries()[0]`
-  (an entry identical, as canonical JSON, to one already present is left out), and whose `issues` include
-  `relay_entries()[1]`.
+- Produces: `replication.capture(project, store, *, env=None, historical_roots=(), relay=False)`. With
+  `relay=True` it returns a manifest whose `conversations.entries` are the native entries followed by
+  `relay_entries()[0]` (an entry identical, as canonical JSON, to one already present is left out), and whose
+  `issues` include `relay_entries()[1]`; with the default it is today's capture. `sync_project_data` passes
+  `relay=True` only for its own outbound capture; the remote capture through `rpc.py` keeps the default, so a
+  Codespace never seeds, records or relays (ruling 2026-11-02, BLOCKED-100-3.1; test
+  `test_codespace_capture_never_relays`).
 
 - [ ] **Step 1: Write the failing tests** in `tests/test_replication.py` (`ReplicationTests`; a replacement is a
   second `IsolatedPythonConnection` with its own home and `RemoteEndpoint`):
