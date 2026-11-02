@@ -42,30 +42,54 @@ class Clock:
 
 
 class FakeHerdr:
-    """One lead whose status a script drives; prompt and read are recorded."""
+    """One lead with scripted submissions, unsent input, readiness and activity."""
 
-    def __init__(self, clock, statuses=('idle',), shows_rid_after=None, working_after_prompt=False, agents=None):
+    def __init__(self, clock, statuses=('idle',), shows_rid_after=None, working_after_prompt=False, agents=None,
+                 prompt_results=None, interactive_ready=None, active_after_enter=None, started_status='working'):
         self.clock, self.statuses, self.reads = clock, list(statuses), 0
-        self.shows_rid_after, self.working_after_prompt = shows_rid_after, working_after_prompt
+        self.shows_rid_after = shows_rid_after
+        self.prompt_results = list(prompt_results or ('started' if working_after_prompt else 'agent_prompt_stalled',))
+        self.interactive_ready, self.active_after_enter = interactive_ready, active_after_enter
+        self.started_status = started_status
+        self.active, self.screen_reads, self.enters, self.waits = None, [], [], []
         self.prompts, self.extra = [], agents or []
 
     def status(self):
-        if self.working_after_prompt and self.prompts:
-            return 'working'
+        if self.active:
+            return self.active
         status = self.statuses[min(self.reads, len(self.statuses) - 1)]
         self.reads += 1
         return status
 
     def agents(self):
-        return [{'name': 'lead-proj', 'agent_status': self.status()}] + self.extra
+        ready = self.interactive_ready
+        if isinstance(ready, tuple):
+            ready = ready[min(self.reads, len(ready) - 1)]
+        agent = {'name': 'lead-proj', 'agent_status': self.status()}
+        if ready is not None:
+            agent['interactive_ready'] = ready
+        return [agent] + self.extra
 
     def prompt(self, name, text):
         self.prompts.append((name, text, self.clock.t))
+        result = self.prompt_results[min(len(self.prompts) - 1, len(self.prompt_results) - 1)]
+        if result == 'started':
+            self.active = self.started_status
+        return result
+
+    def enter(self, name):
+        self.enters.append(name)
+        self.active = self.active_after_enter
         return True
 
+    def wait_active(self, name):
+        self.waits.append(name)
+        return self.active in ('working', 'blocked')
+
     def read(self, name, lines=80):
+        self.screen_reads.append((name, lines))
         if self.shows_rid_after is not None and len(self.prompts) >= self.shows_rid_after:
-            return 'some screen\n> r-012820Z noted, bringing services up\n'
+            return 'some screen\n> text r-012820Z\n'
         return 'some screen without the id\n'
 
 
@@ -170,6 +194,15 @@ if mode == 'hang':
     time.sleep(5)
 if mode == 'fail':
     sys.exit(1)
+if mode == 'error':
+    print(json.dumps({{'error': {{'code': os.environ['FAKE_HERDR_ERROR']}}, 'id': 'cli:agent:prompt'}}), file=sys.stderr)
+    sys.exit(1)
+if mode == 'bad-error':
+    print('not json', file=sys.stderr)
+    sys.exit(1)
+if mode == 'odd-error':
+    print(json.dumps({{'error': []}}), file=sys.stderr)
+    sys.exit(1)
 if mode == 'garbage':
     print('not json')
 elif args[:2] == ['machine', 'status']:
@@ -199,22 +232,80 @@ class HerdrTests(unittest.TestCase):
     def recorded(self):
         return [json.loads(line) for line in self.calls.read_text().splitlines()]
 
+    def test_prompt_waits_for_activity_with_a_longer_subprocess_timeout(self):
+        calls = []
+
+        def run(args, **kwargs):
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 0, '{"result":{"type":"ok"}}', '')
+        self.assertEqual(restore.Herdr('m-1', run=run).prompt('lead-proj', 'resume'), 'started')
+        args, kwargs = calls[0]
+        self.assertEqual(args, ['herdr', '--machine', 'm-1', 'agent', 'prompt', 'lead-proj', 'resume',
+                                '--wait', '--until', 'working', '--until', 'blocked', '--timeout', '30000'])
+        self.assertEqual(kwargs['timeout'], 60)
+        self.assertEqual(kwargs['stdin'], subprocess.DEVNULL)
+
+    def test_enter_and_wait_active_use_machine_and_drop_herdr_env(self):
+        herdr = restore.Herdr('m-1')
+        self.assertTrue(callable(getattr(herdr, 'enter', None)), 'Herdr.enter is missing')
+        self.assertTrue(callable(getattr(herdr, 'wait_active', None)), 'Herdr.wait_active is missing')
+        self.assertTrue(herdr.enter('lead-proj'))
+        self.assertTrue(herdr.wait_active('lead-proj'))
+        calls = self.recorded()
+        self.assertEqual([call['args'] for call in calls], [
+            ['--machine', 'm-1', 'agent', 'send-keys', 'lead-proj', 'enter'],
+            ['--machine', 'm-1', 'agent', 'wait', 'lead-proj', '--until', 'working', '--until', 'blocked',
+             '--timeout', '30000']])
+        for call in calls:
+            self.assertFalse([key for key in call['env'] if key.startswith('HERDR_')])
+        with patch.dict(os.environ, {'FAKE_HERDR_MODE': 'fail'}):
+            self.assertFalse(herdr.enter('lead-proj'))
+            self.assertFalse(herdr.wait_active('lead-proj'))
+
+    def test_prompt_preserves_stderr_error_codes(self):
+        herdr = restore.Herdr('m-1')
+        for code in ('agent_prompt_stalled', 'timeout', 'agent_not_found', 'agent_blocked'):
+            with self.subTest(code=code), patch.dict(os.environ, {'FAKE_HERDR_MODE': 'error',
+                                                                  'FAKE_HERDR_ERROR': code}):
+                self.assertEqual(herdr.prompt('lead-proj', 'resume'), code)
+                self.assertFalse(herdr.reachable())
+                self.assertEqual(herdr.agents(), [])
+                self.assertEqual(herdr.read('lead-proj'), '')
+        for mode in ('fail', 'bad-error', 'odd-error'):
+            with self.subTest(mode=mode), patch.dict(os.environ, {'FAKE_HERDR_MODE': mode}):
+                self.assertEqual(herdr.prompt('lead-proj', 'resume'), 'unknown')
+
+    def test_prompt_reports_unavailable_on_hang_or_oserror(self):
+        with patch.dict(os.environ, {'FAKE_HERDR_MODE': 'hang'}):
+            self.assertEqual(restore.Herdr('m-1', timeout=.2).prompt('lead-proj', 'resume'), 'unavailable')
+        with patch.dict(os.environ, {'PATH': '/nonexistent'}):
+            self.assertEqual(restore.Herdr('m-1').prompt('lead-proj', 'resume'), 'unavailable')
+
+    def test_input_guards_refuse_names_and_nul_without_spawning(self):
+        herdr = restore.Herdr('m-1')
+        for name in ('--wait', 'Lead X', '', None, 'lead\0x', 'x' * 33):
+            with self.subTest(name=name):
+                self.assertEqual(herdr.prompt(name, 'resume'), 'refused')
+                self.assertFalse(herdr.enter(name))
+                self.assertFalse(herdr.wait_active(name))
+        self.assertEqual(herdr.prompt('lead-proj', 'resume\0text'), 'refused')
+        self.assertFalse(self.calls.exists())
+
     def test_herdr_calls_drop_herdr_env(self):
         herdr = restore.Herdr('m-1')
         self.assertTrue(herdr.reachable())
         self.assertEqual([agent.get('name') for agent in herdr.agents()], ['lead-proj', None])
-        self.assertTrue(herdr.prompt('lead-proj', 'Codespace restarted (r-012820Z)'))
+        self.assertEqual(herdr.prompt('lead-proj', 'Codespace restarted (r-012820Z)'), 'started')
         self.assertIn('r-012820Z', herdr.read('lead-proj'))
         calls = self.recorded()
         self.assertEqual([call['args'] for call in calls], [
             ['machine', 'status', 'm-1', '--json'],
             ['--machine', 'm-1', 'agent', 'list'],
-            ['--machine', 'm-1', 'agent', 'prompt', 'lead-proj', 'Codespace restarted (r-012820Z)'],
+            ['--machine', 'm-1', 'agent', 'prompt', 'lead-proj', 'Codespace restarted (r-012820Z)',
+             '--wait', '--until', 'working', '--until', 'blocked', '--timeout', '30000'],
             ['--machine', 'm-1', 'agent', 'read', 'lead-proj', '--source', 'recent-unwrapped', '--lines', '80']])
         for call in calls:
             self.assertFalse([key for key in call['env'] if key.startswith('HERDR_')], call['env'])
-            # A restored agent can read idle before its UI is up; --wait then times out though delivered.
-            self.assertNotIn('--wait', call['args'])
 
     def test_hanging_herdr_is_bounded_and_not_fatal(self):
         herdr = restore.Herdr('m-1', timeout=0.2)
@@ -222,7 +313,7 @@ class HerdrTests(unittest.TestCase):
             started = time.monotonic()
             self.assertFalse(herdr.reachable())
             self.assertEqual(herdr.agents(), [])
-            self.assertFalse(herdr.prompt('lead-proj', 'text'))
+            self.assertEqual(herdr.prompt('lead-proj', 'text'), 'unavailable')
             self.assertEqual(herdr.read('lead-proj'), '')
             self.assertLess(time.monotonic() - started, 4)
         for mode in ('fail', 'garbage'):
@@ -230,7 +321,7 @@ class HerdrTests(unittest.TestCase):
                 self.assertFalse(herdr.reachable())
                 self.assertEqual(herdr.agents(), [])
         with patch.dict(os.environ, {'FAKE_HERDR_MODE': 'fail'}):
-            self.assertFalse(herdr.prompt('lead-proj', 'text'))
+            self.assertEqual(herdr.prompt('lead-proj', 'text'), 'unknown')
             self.assertEqual(herdr.read('lead-proj'), '')
         with patch.dict(os.environ, {'PATH': '/nonexistent'}):
             self.assertFalse(restore.Herdr('m-1').reachable())
@@ -240,7 +331,7 @@ class HerdrTests(unittest.TestCase):
             with self.subTest(machine=machine), self.assertRaisesRegex(ValueError, 'task work:cs'):
                 restore.Herdr(machine)
         herdr = restore.Herdr('m-1')
-        self.assertFalse(herdr.prompt('--wait', 'text'))
+        self.assertEqual(herdr.prompt('--wait', 'text'), 'refused')
         self.assertEqual(herdr.read('Lead X'), '')
         self.assertFalse(self.calls.exists())
 
@@ -292,6 +383,81 @@ class ResumeTests(unittest.TestCase):
     def resume(self, herdr, clock):
         return restore.resume(herdr, 'r-012820Z', 'text r-012820Z', now=clock.now, sleep=clock.sleep)
 
+    def test_rid_on_screen_without_activity_is_not_delivered(self):
+        clock = Clock()
+        herdr = FakeHerdr(clock, shows_rid_after=1)
+        self.assertEqual(self.resume(herdr, clock), ('undelivered', 'lead-proj'))
+        self.assertEqual(herdr.enters, ['lead-proj'])
+        self.assertEqual(len(herdr.prompts), 1)
+        self.assertEqual(herdr.waits, ['lead-proj'])
+        self.assertEqual(len(herdr.screen_reads), 1)
+
+    def test_unsent_text_gets_one_enter_then_counts_as_entered(self):
+        for status, outcome in (('working', 'entered'), ('blocked', 'blocked')):
+            with self.subTest(status=status):
+                clock = Clock()
+                herdr = FakeHerdr(clock, shows_rid_after=1, active_after_enter=status)
+                self.assertEqual(self.resume(herdr, clock), (outcome, 'lead-proj'))
+                self.assertEqual(len(herdr.prompts), 1)
+                self.assertEqual(herdr.enters, ['lead-proj'])
+                self.assertEqual(herdr.waits, ['lead-proj'])
+                self.assertEqual(len(herdr.screen_reads), 1)
+        clock = Clock()
+        refused = FakeHerdr(clock, shows_rid_after=1)
+        with patch.object(refused, 'enter', return_value=False), patch.object(refused, 'wait_active') as wait:
+            self.assertEqual(self.resume(refused, clock), ('undelivered', 'lead-proj'))
+        wait.assert_not_called()
+
+    def test_lost_text_is_prompted_once_more(self):
+        for second, status, outcome in (('started', 'working', 'resent'), ('started', 'blocked', 'blocked'),
+                                        ('agent_prompt_stalled', 'idle', 'undelivered')):
+            with self.subTest(second=second, status=status):
+                clock = Clock()
+                herdr = FakeHerdr(clock, prompt_results=('agent_prompt_stalled', second), started_status=status)
+                self.assertEqual(self.resume(herdr, clock), (outcome, 'lead-proj'))
+                self.assertEqual(len(herdr.prompts), 2)
+                self.assertEqual(herdr.enters, [])
+                self.assertEqual(herdr.waits, [])
+                self.assertEqual(len(herdr.screen_reads), 1)
+
+    def test_no_input_after_a_stall_unless_ready(self):
+        for status, outcome in (('blocked', 'blocked'), ('unknown', 'undelivered'), (None, 'undelivered'),
+                                ('working', 'delivered')):
+            with self.subTest(status=status):
+                clock = Clock()
+                herdr = FakeHerdr(clock, statuses=('idle', 'idle', 'idle', status), shows_rid_after=1)
+                self.assertEqual(self.resume(herdr, clock), (outcome, 'lead-proj'))
+                self.assertEqual(len(herdr.prompts), 1)
+                self.assertEqual(herdr.enters, [])
+                self.assertEqual(herdr.waits, [])
+                self.assertEqual(herdr.screen_reads, [])
+
+    def test_started_prompt_is_delivered_without_reading_the_screen(self):
+        for status, outcome in (('working', 'delivered'), ('blocked', 'blocked'), ('idle', 'delivered'),
+                                (None, 'delivered')):
+            with self.subTest(status=status):
+                clock = Clock()
+                herdr = FakeHerdr(clock, working_after_prompt=True, started_status=status)
+                with patch.object(herdr, 'agents', wraps=herdr.agents) as agents:
+                    self.assertEqual(self.resume(herdr, clock), (outcome, 'lead-proj'))
+                self.assertEqual(agents.call_count, 4)  # Find, settle twice, then read status once.
+                self.assertEqual(herdr.screen_reads, [])
+                self.assertEqual(herdr.enters, [])
+                self.assertEqual(len(herdr.prompts), 1)
+
+    def test_settled_waits_for_interactive_ready(self):
+        clock = Clock()
+        never = FakeHerdr(clock, working_after_prompt=True, interactive_ready=False)
+        self.assertEqual(self.resume(never, clock), ('busy', 'lead-proj'))
+        self.assertEqual(never.prompts, [])
+        self.assertEqual(clock.t - 1_000_000.0, restore.IDLE_WAIT)
+        for ready, delay in ((None, 1), ((False, False, True, True), 2)):
+            with self.subTest(ready=ready):
+                clock = Clock()
+                herdr = FakeHerdr(clock, working_after_prompt=True, interactive_ready=ready)
+                self.assertEqual(self.resume(herdr, clock), ('delivered', 'lead-proj'))
+                self.assertEqual(herdr.prompts[0][2] - 1_000_000.0, delay * restore.SETTLE)
+
     def test_resume_names_the_lead_it_prompted(self):
         # The keeper's notice names the lead from this answer, with no Herdr call of its own.
         clock = Clock()
@@ -307,16 +473,18 @@ class ResumeTests(unittest.TestCase):
         # The prompt follows the second idle read in a row.
         self.assertEqual(herdr.prompts[0][2], 1_000_000.0 + 3 * restore.SETTLE)
         clock = Clock()
-        by_screen = FakeHerdr(clock, ['idle'], shows_rid_after=1)
-        self.assertEqual(self.resume(by_screen, clock), ('delivered', 'lead-proj'))
+        by_screen = FakeHerdr(clock, ['idle'], shows_rid_after=1, active_after_enter='working')
+        self.assertEqual(self.resume(by_screen, clock), ('entered', 'lead-proj'))
         self.assertEqual(len(by_screen.prompts), 1)
+        self.assertEqual(by_screen.enters, ['lead-proj'])
 
     def test_resume_resends_once_when_rid_absent(self):
         clock = Clock()
-        herdr = FakeHerdr(clock, ['idle'], shows_rid_after=2)
+        herdr = FakeHerdr(clock, ['idle'], shows_rid_after=2,
+                          prompt_results=('agent_prompt_stalled', 'started'))
         self.assertEqual(self.resume(herdr, clock), ('resent', 'lead-proj'))
         self.assertEqual(len(herdr.prompts), 2)
-        self.assertEqual(herdr.prompts[1][2] - herdr.prompts[0][2], restore.PROOF_WAIT)
+        self.assertEqual(herdr.prompts[1][2], herdr.prompts[0][2])
         clock = Clock()
         never = FakeHerdr(clock, ['idle'])
         self.assertEqual(self.resume(never, clock), ('undelivered', 'lead-proj'))
@@ -324,7 +492,7 @@ class ResumeTests(unittest.TestCase):
         clock = Clock()
         # Not idle after the first prompt (blocked on a dialog): no second prompt.
         blocked = FakeHerdr(clock, ['idle', 'idle', 'idle', 'blocked'])
-        self.assertEqual(self.resume(blocked, clock), ('undelivered', 'lead-proj'))
+        self.assertEqual(self.resume(blocked, clock), ('blocked', 'lead-proj'))
         self.assertEqual(len(blocked.prompts), 1)
 
     def test_resume_waits_for_idle_then_gives_up_busy(self):
@@ -355,12 +523,27 @@ class ResumeTests(unittest.TestCase):
             def read(self, name, lines=80):
                 log.append('call')
                 return super().read(name, lines)
-        herdr = Counting(clock, ['idle'])
-        restore.wait_reachable(herdr, now=clock.now, sleep=clock.sleep, tick=lambda: log.append('tick'))
-        self.assertEqual(restore.resume(herdr, 'r-012820Z', 'text', now=clock.now, sleep=clock.sleep,
-                                        tick=lambda: log.append('tick')), ('undelivered', 'lead-proj'))
-        self.assertGreater(log.count('call'), 10)
-        self.assertEqual(log, ['call', 'tick'] * log.count('call'))
+
+            def enter(self, name):
+                log.append('call')
+                return super().enter(name)
+
+            def wait_active(self, name):
+                log.append('call')
+                return super().wait_active(name)
+        for shows_rid in (None, 1):
+            with self.subTest(shows_rid=shows_rid):
+                log.clear()
+                herdr = Counting(clock, ['done'], shows_rid_after=shows_rid)
+                restore.wait_reachable(herdr, now=clock.now, sleep=clock.sleep, tick=lambda: log.append('tick'))
+                self.assertEqual(restore.resume(herdr, 'r-012820Z', 'text', now=clock.now, sleep=clock.sleep,
+                                                tick=lambda: log.append('tick')), ('undelivered', 'lead-proj'))
+                self.assertEqual(log, ['call', 'tick'] * log.count('call'))
+                if shows_rid:
+                    self.assertEqual(herdr.enters, ['lead-proj'])
+                    self.assertEqual(herdr.waits, ['lead-proj'])
+                else:
+                    self.assertEqual(len(herdr.prompts), 2)
 
     def test_resume_without_exactly_one_lead_sends_nothing(self):
         clock = Clock()

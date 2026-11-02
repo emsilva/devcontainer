@@ -63,7 +63,7 @@ class FakeHerdr:
         for agent in self.list:
             if agent.get('name') == name and self.works:
                 agent['agent_status'] = 'working'
-        return True
+        return 'started' if self.works else 'agent_prompt_stalled'
 
     def read(self, name, lines=80):
         return ''
@@ -640,6 +640,29 @@ class KeeperStepTests(unittest.TestCase):
         k = self.keeper([up(T0, last_used_at=anchor)] + [down(at) for at in stops], herdr=FakeHerdr())
         self.run_steps(k, [T0] + stops)
         self.assertEqual((self.api.posts, self.notes, self.runtime()['down']['kind']), (0, [], 'OWNER'))
+
+    def test_entered_resume_notifies_that_the_lead_was_told(self):
+        stops, readings = self.lifetime([down(T0 + LIFE), up(T0 + LIFE + 60, last_used_at=T0 + LIFE)])
+        k = self.keeper(readings, herdr=FakeHerdr())
+        with patch.object(restore, 'resume', return_value=('entered', 'lead-proj')):
+            self.run_steps(k, [T0] + stops)
+        last = self.runtime()['last_restart']
+        self.assertEqual(last['resume'], 'entered')
+        self.assertIn('lead-proj told', last['outcome'])
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn('its lead lead-proj was told to resume', self.notes[0])
+
+    def test_blocked_resume_notifies_that_the_lead_is_waiting_on_a_question(self):
+        stops, readings = self.lifetime([down(T0 + LIFE), up(T0 + LIFE + 60, last_used_at=T0 + LIFE)])
+        k = self.keeper(readings, herdr=FakeHerdr())
+        with patch.object(restore, 'resume', return_value=('blocked', 'lead-proj')):
+            self.run_steps(k, [T0] + stops)
+        last = self.runtime()['last_restart']
+        self.assertEqual(last['resume'], 'blocked')
+        self.assertIn('lead-proj waiting for an answer', last['outcome'])
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn(', and its lead lead-proj was told to resume but is now waiting on a question or approval '
+                      'in its pane; answer it there.', self.notes[0])
 
     def test_restart_outcomes_notify_once_each(self):
         cases = (
