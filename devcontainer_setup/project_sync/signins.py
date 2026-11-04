@@ -245,7 +245,7 @@ def _line(tool, result, *, after=False, code=0):
         text = 'signed in' if after else 'already signed in'
         if tool.key == 'claude' and identity:
             text += ' as ' + identity
-    elif after:
+    elif after and state not in (OTHER_METHOD, ABSENT):
         text = _failure(tool, state, code)
     else:
         text = {OTHER_METHOD: 'signed in another way; left as is', UNKNOWN: 'could not check sign-in; skipped',

@@ -238,6 +238,18 @@ class SequenceTests(unittest.TestCase):
                 self.assertEqual(code, 0 if after == 'signed-in' else 1)
                 self.assertNotIn('callback port busy: see the Mac notice', out)
 
+    def test_line_after_login_agrees_with_summary_for_other_states(self):
+        # An API-key login exits 0 and probes as other-method; the summary counts
+        # it as signed in, so the line must not say "still reports signed out".
+        for after, line in (('other-method', 'Codex: signed in another way; left as is'),
+                            ('absent', 'Codex: not installed; skipped')):
+            with self.subTest(after=after):
+                code, out, _, _ = self.sequence(self.states(codex='signed-out'),
+                                                follow=[{'codex': {'state': after, 'identity': None}}], login=0)
+                self.assertIn(line + '\n', out)
+                self.assertEqual(code, 0)
+        self.assertIn('Signed in: Plaud, Claude, OpenCode, Grok.', out)
+
     def test_deadline_line_counts_seconds_when_not_whole_minutes(self):
         code, out, _, _ = self.sequence(self.states(plaud='signed-out'),
                                         follow=[{'plaud': {'state': 'signed-out', 'identity': None}}], login=124)
