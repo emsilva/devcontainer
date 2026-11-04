@@ -217,14 +217,36 @@ def login(state: Path, tool: Tool) -> int:
         raise
 
 
-def _line(tool, result, *, after=False):
+def _span(seconds):
+    if seconds % 60:
+        return f'{seconds} seconds'
+    minutes = seconds // 60
+    return f'{minutes} minute' + ('' if minutes == 1 else 's')
+
+
+def _failure(tool, state, code):
+    # Name what the login's exit code shows; the probe after a dropped
+    # connection usually cannot answer either.
+    if code == 255:
+        return 'not signed in (the connection to the Codespace dropped)'
+    if code == 124:
+        return (f'not signed in (no approval within {_span(tool.deadline)}; '
+                'if a Mac notice said the callback port is busy, free it first)')
+    if code:
+        return f'not signed in (the sign-in command exited with code {code})'
+    if state == UNKNOWN:
+        return 'not confirmed (could not check the sign-in afterwards)'
+    return f'not signed in (the sign-in finished, but {tool.label} still reports signed out)'
+
+
+def _line(tool, result, *, after=False, code=0):
     state, identity = result['state'], result.get('identity')
     if state == SIGNED_IN:
         text = 'signed in' if after else 'already signed in'
         if tool.key == 'claude' and identity:
             text += ' as ' + identity
-    elif after:
-        text = 'not signed in (timed out or callback port busy: see the Mac notice)'
+    elif after and state not in (OTHER_METHOD, ABSENT):
+        text = _failure(tool, state, code)
     else:
         text = {OTHER_METHOD: 'signed in another way; left as is', UNKNOWN: 'could not check sign-in; skipped',
                 ABSENT: 'not installed; skipped'}[state]
@@ -295,7 +317,7 @@ def run(project, state: Path, codespace: str) -> int:
                     cancelled = code
                     break
                 results[tool.key] = probe(state, [tool.key])[tool.key]
-                _line(tool, results[tool.key], after=True)
+                _line(tool, results[tool.key], after=True, code=code)
         except (KeyboardInterrupt, _SigninStop) as error:
             cancelled = 128 + (error.number if isinstance(error, _SigninStop) else signal.SIGINT)
         cancellation = 'Sign-in cancelled' + (' during ' + current.label if current else '') + '.'

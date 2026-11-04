@@ -368,6 +368,21 @@ class WatcherTests(unittest.TestCase):
             connection.ssh_config.assert_not_called()
         self.assertEqual(path.read_bytes(), b'worker port 40001\n')
 
+    def test_signin_waits_for_ssh_before_publishing_config(self):
+        # A forward restarted during the SSH wait moves to a new port; a config
+        # published before that would point every ssh -L at the dead one.
+        from devcontainer_setup.project_sync import scratch
+        self.state.mkdir()
+        with mock.patch.object(links, 'watcher_live', return_value=False), \
+                mock.patch.object(scratch, '_config', return_value=self.config), \
+                mock.patch('devcontainer_setup.project_sync.transport.CodespaceConnection') as factory:
+            connection = factory.return_value.__enter__.return_value
+            connection.python.return_value = b''
+            self.assertEqual(links.signin_main(self.root, self.state), 0)
+        names = [call[0] for call in connection.method_calls]
+        self.assertIn('ensure_ready', names)
+        self.assertLess(names.index('ensure_ready'), names.index('ssh_config'))
+
     def test_signin_restores_config_and_preserves_newer_worker_config(self):
         from devcontainer_setup.project_sync import scratch
         self.state.mkdir()

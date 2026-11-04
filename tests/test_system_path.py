@@ -96,6 +96,81 @@ class SystemPathTests(unittest.TestCase):
                 self.assert_ok(result)
                 self.assertEqual(result.stdout, expected)
 
+    def secrets_shell(self, lines, *, interactive=True, bash=False, **env):
+        # Codespaces exports .env-secrets only for bash login shells over SSH;
+        # Herdr panes are interactive non-login zsh and get none of them.
+        import base64
+        self.assertTrue(shutil.which('zsh'), 'zsh is required for this test')
+        real = '/workspaces/.codespaces/shared/.env-secrets'
+        self.assertIn(real, (self.etc / 'bash.bashrc' if bash else self.zshenv).read_text())
+        secrets = self.root / 'env-secrets'
+        secrets.write_text(''.join(
+            line if isinstance(line, str) else line[0] + '=' + base64.b64encode(line[1].encode()).decode() + '\n'
+            for line in lines))
+        source = self.etc / 'bash.bashrc' if bash else self.zshenv
+        copy = self.root / 'rc-under-test'
+        copy.write_text(source.read_text().replace(real, str(secrets)))
+        names = ('GITHUB_TOKEN', 'OTHER_SECRET', 'PERSONAL_PAT', 'GH_TOKEN', 'DEVCONTAINER_SECRETS_LOADED')
+        shell = {k: v for k, v in self.env.items() if k not in names}
+        # The guard stays set while the shell starts, so a real /etc/zsh/zshenv
+        # block (zsh -f still reads it) never loads real secrets into a test
+        # whose failure output would print them; the script drops it before
+        # sourcing the copy unless this case says it was already loaded.
+        loaded = env.pop('DEVCONTAINER_SECRETS_LOADED', None)
+        shell.update(env, DEVCONTAINER_SECRETS_LOADED='1')
+        report = ('' if loaded else 'unset DEVCONTAINER_SECRETS_LOADED; ') + (
+            'source "$1"; printf "%s\\n" "${GITHUB_TOKEN-unset}|${OTHER_SECRET-unset}|'
+            '${DEVCONTAINER_SECRETS_LOADED-unset}"')
+        argv = (['bash', '--norc', '--noprofile'] if bash else ['zsh', '-f']) + (['-i'] if interactive else [])
+        result = subprocess.run(argv + ['-c', report, 'test-rc', str(copy)],
+                                env=shell, capture_output=True, text=True)
+        self.assert_ok(result)
+        return result.stdout.strip()
+
+    def test_interactive_zsh_loads_codespace_secrets_once(self):
+        self.assert_ok(self.writer(self.env['PATH'], LOCAL_BIN + '/open-on-mac'))
+        lines = [('GITHUB_TOKEN', 'token value'), ('OTHER_SECRET', 'a=b c'), 'no-separator\n',
+                 ('BAD-NAME', 'x'), ('9START', 'x')]
+        self.assertEqual(self.secrets_shell(lines), 'token value|a=b c|1')
+        # A value already in the environment wins, as in a VS Code terminal.
+        self.assertEqual(self.secrets_shell(lines, GITHUB_TOKEN='already'), 'already|a=b c|1')
+        # A shell under one that already loaded them (an agent's command) skips the file.
+        self.assertEqual(self.secrets_shell(lines, DEVCONTAINER_SECRETS_LOADED='1'), 'unset|unset|1')
+        # One-off commands (sync over SSH, scripts) are not interactive and pay nothing.
+        self.assertEqual(self.secrets_shell(lines, interactive=False), 'unset|unset|unset')
+
+    def test_personal_pat_keeps_github_token_variables_out(self):
+        # post-create.sh logs gh in with PERSONAL_PAT and unsets these on purpose;
+        # gh would let an exported GITHUB_TOKEN override that login.
+        self.assert_ok(self.writer(self.env['PATH'], LOCAL_BIN + '/open-on-mac'))
+        lines = [('GITHUB_TOKEN', 'codespace token'), ('PERSONAL_PAT', 'pat'), ('OTHER_SECRET', 'kept')]
+        for bash in (False, True):
+            with self.subTest(bash=bash):
+                self.assertEqual(self.secrets_shell(lines, bash=bash), 'unset|kept|1')
+
+    def test_interactive_bash_loads_codespace_secrets_once(self):
+        # Herdr panes were bash on one project (2026-10-20, #35).
+        bashrc = self.etc / 'bash.bashrc'
+        bashrc.write_text('# distro bash.bashrc\n')
+        self.assert_ok(self.writer(self.env['PATH'], LOCAL_BIN + '/open-on-mac'))
+        self.assert_ok(self.writer(self.env['PATH'], LOCAL_BIN + '/open-on-mac'))
+        content = bashrc.read_text()
+        self.assertTrue(content.startswith('# distro bash.bashrc\n'))
+        self.assertEqual(content.count('# devcontainer-setup secrets\n'), 1)
+        lines = [('GITHUB_TOKEN', 'token value'), ('OTHER_SECRET', 'a=b c'), 'no-separator\n', ('BAD-NAME', 'x')]
+        self.assertEqual(self.secrets_shell(lines, bash=True), 'token value|a=b c|1')
+        self.assertEqual(self.secrets_shell(lines, bash=True, GITHUB_TOKEN='already'), 'already|a=b c|1')
+        self.assertEqual(self.secrets_shell(lines, bash=True, DEVCONTAINER_SECRETS_LOADED='1'), 'unset|unset|1')
+        self.assertEqual(self.secrets_shell(lines, bash=True, interactive=False), 'unset|unset|unset')
+
+    def test_secrets_lines_survive_a_rerun_without_browser_once(self):
+        self.assert_ok(self.writer(self.env['PATH'], LOCAL_BIN + '/open-on-mac'))
+        self.assert_ok(self.writer(self.env['PATH']))
+        content = self.zshenv.read_text()
+        self.assertEqual(content.count('export DEVCONTAINER_SECRETS_LOADED=1'), 1)
+        self.assertLess(content.index('.env-secrets'), content.index('# end devcontainer-setup PATH'))
+        self.assertIn(': ${BROWSER:=' + LOCAL_BIN + '/open-on-mac}\n', content)
+
     def test_two_arguments_leave_browser_alone(self):
         self.assert_ok(self.writer(self.env['PATH'], LOCAL_BIN + '/open-on-mac'))
         self.environment.write_text(self.environment.read_text().replace('BROWSER="' + LOCAL_BIN + '/open-on-mac"',

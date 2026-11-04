@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
@@ -415,6 +416,18 @@ def main(argv=None):
     except (OSError, ValueError) as error:
         print(str(error), file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        # Context managers have already unwound; subprocess.call ends its child.
+        # Ignore further Ctrl-C so none turns this line into a traceback; one
+        # already pending raises inside the call, so repeat until it takes.
+        while True:
+            try:
+                signal.signal(signal.SIGINT, signal.SIG_IGN)
+                break
+            except KeyboardInterrupt:
+                pass
+        print('Cancelled.', file=sys.stderr)
+        return 130
 
 
 if __name__ == '__main__':

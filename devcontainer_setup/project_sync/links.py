@@ -648,6 +648,8 @@ def _signin_config(connection, state):
         except FileNotFoundError:
             return None
     published = False
+    # Before the lock and outside deferred signals: the wait can take 45 s.
+    connection.ensure_ready()
     try:
         with _defer_signals(), locked(state / 'links-ssh-config.lock', blocking=True):
             allowed = not watcher_live(state)

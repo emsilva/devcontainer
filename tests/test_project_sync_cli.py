@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -849,6 +850,39 @@ class ProjectSyncCLITests(unittest.TestCase):
             self.assertEqual(main(['--project', str(self.root), 'work', '--stop']), 0)
             self.assertEqual(keeper_stop.call_count, 2)
             worker_stop.assert_called_once_with(state)
+
+    def test_ctrl_c_prints_one_line_and_exits_130_without_traceback(self):
+        # The live test's Ctrl-C during Herdr setup ended work:cs in a traceback.
+        from unittest import mock
+        from devcontainer_setup.project_sync import __main__ as cli
+        with mock.patch.object(cli, 'run', side_effect=KeyboardInterrupt), \
+                mock.patch.object(cli.signal, 'signal', side_effect=[KeyboardInterrupt, None]) as handler, \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(cli.main(['work', '--codespace']), 130)
+        self.assertEqual(err.getvalue(), 'Cancelled.\n')
+        # A second Ctrl-C (timeout and fast double presses deliver two) can land
+        # while the first is being handled; it must not become a traceback.
+        self.assertEqual(handler.call_args_list, [mock.call(signal.SIGINT, signal.SIG_IGN)] * 2)
+
+    def test_real_sigint_prints_one_line_without_traceback(self):
+        import subprocess as sp
+        code = ("import sys,time; sys.path.insert(0, sys.argv[1]); "
+                "from devcontainer_setup.project_sync import __main__ as m; "
+                "m.run = lambda a: (print('up', flush=True), time.sleep(30)); "
+                "raise SystemExit(m.main(['work', '--status']))")
+        child = sp.Popen([sys.executable, '-I', '-c', code, str(Path(__file__).resolve().parents[1])],
+                         stdout=sp.PIPE, stderr=sp.PIPE, text=True)
+        try:
+            self.assertEqual(child.stdout.readline().strip(), 'up')
+            child.send_signal(signal.SIGINT)
+            _, err = child.communicate(timeout=10)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+        self.assertEqual(child.returncode, 130)
+        self.assertNotIn('Traceback', err)
+        self.assertEqual(err.strip(), 'Cancelled.')
 
     def test_missing_pairing_has_actionable_error_without_traceback(self):
         result = self.run_cli('scratch', 'start')

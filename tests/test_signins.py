@@ -213,11 +213,48 @@ class SequenceTests(unittest.TestCase):
         code, out, login, _ = self.sequence(initial, follow=[{'plaud': initial['plaud']}, {'grok': initial['grok']}], login=[1, 1])
         self.assertEqual(code, 1)
         self.assertEqual([c.args[1].key for c in login.call_args_list], ['plaud', 'grok'])
-        self.assertIn('Grok: not signed in (timed out or callback port busy: see the Mac notice)', out)
+        self.assertIn('Grok: not signed in (the sign-in command exited with code 1)', out)
         self.assertIn('Not signed in: Plaud, Grok. Retry with task work:signin:all.', out)
         self.assertIn(' Enter the code shown here.', out)
         code, out, _, _ = self.sequence(self.states(grok='signed-out'), follow=[{'grok': initial['grok']}], login=1)
         self.assertIn('Not signed in: Grok. Retry with task work:signin:all.', out)
+
+    def test_failed_login_names_what_happened(self):
+        # The line follows the login's exit code, not a guess: ssh exits 255 when
+        # the connection drops, and login() returns 124 at its own deadline.
+        cases = [
+            (255, 'unknown', 'Codex: not signed in (the connection to the Codespace dropped)'),
+            (124, 'signed-out', 'Codex: not signed in (no approval within 10 minutes; '
+                                'if a Mac notice said the callback port is busy, free it first)'),
+            (0, 'signed-out', 'Codex: not signed in (the sign-in finished, but Codex still reports signed out)'),
+            (0, 'unknown', 'Codex: not confirmed (could not check the sign-in afterwards)'),
+            (255, 'signed-in', 'Codex: signed in'),
+        ]
+        for login, after, line in cases:
+            with self.subTest(login=login, after=after):
+                code, out, _, _ = self.sequence(self.states(codex='signed-out'),
+                                                follow=[{'codex': {'state': after, 'identity': None}}], login=login)
+                self.assertIn(line + '\n', out)
+                self.assertEqual(code, 0 if after == 'signed-in' else 1)
+                self.assertNotIn('callback port busy: see the Mac notice', out)
+
+    def test_line_after_login_agrees_with_summary_for_other_states(self):
+        # An API-key login exits 0 and probes as other-method; the summary counts
+        # it as signed in, so the line must not say "still reports signed out".
+        for after, line in (('other-method', 'Codex: signed in another way; left as is'),
+                            ('absent', 'Codex: not installed; skipped')):
+            with self.subTest(after=after):
+                code, out, _, _ = self.sequence(self.states(codex='signed-out'),
+                                                follow=[{'codex': {'state': after, 'identity': None}}], login=0)
+                self.assertIn(line + '\n', out)
+                self.assertEqual(code, 0)
+        self.assertIn('Signed in: Plaud, Claude, OpenCode, Grok.', out)
+
+    def test_deadline_line_counts_seconds_when_not_whole_minutes(self):
+        code, out, _, _ = self.sequence(self.states(plaud='signed-out'),
+                                        follow=[{'plaud': {'state': 'signed-out', 'identity': None}}], login=124)
+        self.assertIn('Plaud: not signed in (no approval within 150 seconds; '
+                      'if a Mac notice said the callback port is busy, free it first)\n', out)
 
     def test_cancel_stops_sequence_and_keeps_record(self):
         code, out, login, _ = self.sequence(self.states(plaud='signed-out', codex='signed-out', claude='signed-out'),

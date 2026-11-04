@@ -97,7 +97,12 @@ Copy, exact (`{T}` is the label):
 - Before a login: `Signing in to {T}. Approve the page that opens on this Mac.` (Grok adds ` Enter the code shown here.`)
 - Already signed in: `{T}: already signed in` (Claude: `Claude: already signed in as {email}`)
 - After a login that worked: `{T}: signed in` (Claude: `Claude: signed in as {email}`)
-- Login not finished: `{T}: not signed in (timed out or callback port busy: see the Mac notice)` (design §6)
+- Login not finished (design §6, amended 2026-11-04), by the login's exit code:
+  - 255: `{T}: not signed in (the connection to the Codespace dropped)`
+  - 124: `{T}: not signed in (no approval within {deadline}; if a Mac notice said the callback port is busy, free it first)` ({deadline} is `10 minutes`, or `150 seconds` for Plaud)
+  - other non-zero N: `{T}: not signed in (the sign-in command exited with code N)`
+  - 0, still signed out: `{T}: not signed in (the sign-in finished, but {T} still reports signed out)`
+  - 0, cannot check: `{T}: not confirmed (could not check the sign-in afterwards)`
 - Other method: `{T}: signed in another way; left as is`
 - Unknown: `{T}: could not check sign-in; skipped`
 - Absent: `{T}: not installed; skipped`

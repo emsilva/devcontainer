@@ -313,6 +313,78 @@ class SSHReadinessTests(unittest.TestCase):
     def result(code=0, stdout=b'', stderr=b''):
         return subprocess.CompletedProcess(['ssh'], code, stdout, stderr)
 
+    def forwards(self, *children):
+        from unittest.mock import MagicMock
+        self.connection.child = children[0]
+        self.connection.api = MagicMock()
+        self.connection.api.child_env.return_value = {}
+        return list(children[1:])
+
+    @staticmethod
+    def child(*polls):
+        from unittest.mock import Mock
+        process = Mock()
+        process.poll.side_effect = list(polls) + [polls[-1]] * 20
+        return process
+
+    def test_forward_that_exits_before_ssh_is_ready_is_restarted(self):
+        # #42: right after a boot the first forward can come up before the
+        # Codespace's sshd and exit; a new forward then connects.
+        from unittest.mock import MagicMock, patch
+        restarted = self.forwards(self.child(1), self.child(None))
+        with patch.object(self.transport.subprocess, 'Popen', side_effect=restarted) as spawn, \
+                patch.object(self.transport.socket, 'create_connection', return_value=MagicMock()), \
+                patch.object(self.transport.subprocess, 'run',
+                             side_effect=[self.result(), self.result(stdout=b'done')]) as run, \
+                patch.object(self.transport.time, 'sleep'):
+            self.assertEqual(self.connection.python('op()', b'payload'), b'done')
+        self.assertEqual(spawn.call_count, 1)
+        self.assertEqual(spawn.call_args.args[0],
+                         ['gh', 'codespace', 'ports', 'forward', '2222:' + str(self.connection.port), '-c', 'bound-name'])
+        probe = Path(run.call_args_list[0].args[0][2])
+        self.assertIn(f'  Port {self.connection.port}\n', probe.read_text())
+        self.assertEqual([c.args[0][-1] for c in run.call_args_list][0], 'true')
+        self.assertEqual(run.call_args_list[1].kwargs['input'], b'payload')
+
+    def test_ensure_ready_settles_the_port_before_a_config_is_published(self):
+        from unittest.mock import MagicMock, patch
+        restarted = self.forwards(self.child(1), self.child(None))
+        first_port = self.connection.port
+        with patch.object(self.transport.subprocess, 'Popen', side_effect=restarted), \
+                patch.object(self.transport.socket, 'create_connection', return_value=MagicMock()), \
+                patch.object(self.transport.subprocess, 'run', return_value=self.result()) as run, \
+                patch.object(self.transport.time, 'sleep'):
+            self.connection.ensure_ready()
+            self.connection.ensure_ready()  # Already ready: no second probe.
+        self.assertEqual(run.call_count, 1)
+        published = self.connection.state / 'published-config'
+        self.connection.ssh_config(published)
+        self.assertIn(f'  Port {self.connection.port}\n', published.read_text())
+        self.assertNotEqual(self.connection.port, first_port)
+
+    def test_failed_restart_reports_the_forward_not_authentication(self):
+        from unittest.mock import MagicMock, patch
+        restarted = self.forwards(self.child(1), self.child(1))
+        with patch.object(self.transport.subprocess, 'Popen', side_effect=restarted), \
+                patch.object(self.transport.socket, 'create_connection', side_effect=OSError), \
+                patch.object(self.transport.subprocess, 'run') as run, \
+                patch.object(self.transport.time, 'sleep'):
+            with self.assertRaisesRegex(ValueError, 'port forward stopped before SSH became ready; retry task work:cs'):
+                self.connection.python('op()', b'payload')
+        run.assert_not_called()
+
+    def test_forward_that_keeps_exiting_fails_without_sending_payload(self):
+        from unittest.mock import MagicMock, patch
+        restarted = self.forwards(self.child(1), self.child(None, 1), self.child(None, 1))
+        with patch.object(self.transport.subprocess, 'Popen', side_effect=restarted) as spawn, \
+                patch.object(self.transport.socket, 'create_connection', return_value=MagicMock()), \
+                patch.object(self.transport.subprocess, 'run') as run, \
+                patch.object(self.transport.time, 'sleep'):
+            with self.assertRaisesRegex(ValueError, 'port forward stopped before SSH became ready; retry task work:cs'):
+                self.connection.python('op()', b'payload')
+        self.assertEqual(spawn.call_count, 2)
+        run.assert_not_called()
+
     def test_open_forward_waits_for_ssh_then_sends_each_payload_once(self):
         from unittest.mock import patch
         responses = [self.result(255, stderr=b'Connection reset by peer'),
