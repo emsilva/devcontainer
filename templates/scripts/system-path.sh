@@ -88,41 +88,26 @@ else:
     if existing_block:
         browser_block = ''.join(line for line in existing_block[0].splitlines(keepends=True)
                                 if line.startswith(': ${BROWSER:=') or line == 'export BROWSER\n')
-# Codespaces exports its secrets only for bash login shells over SSH
-# (/etc/profile.d/codespaces.sh); Herdr panes are interactive non-login zsh and
-# would get none. Load them once per process tree, never over a set value.
-secrets_block = r'''if [[ -o interactive && -z ${DEVCONTAINER_SECRETS_LOADED-} && -r /workspaces/.codespaces/shared/.env-secrets ]]; then
+# Codespaces exports its secrets only for bash login shells over SSH; Herdr panes
+# are interactive non-login zsh or bash (#35). One text serves both: load once per
+# process tree, never over a set value, and keep the GitHub token variables out
+# when post-create logged gh in with PERSONAL_PAT, which they would override.
+secrets = r'''if [[ $- == *i* && -z ${DEVCONTAINER_SECRETS_LOADED-} && -r /workspaces/.codespaces/shared/.env-secrets ]]; then
   export DEVCONTAINER_SECRETS_LOADED=1
-  () {
-    local line key value
-    while IFS= read -r line || [[ -n $line ]]; do
-      key=${line%%=*}
-      [[ $line == *=* && -n $key && $key != [0-9]* && $key != *[^A-Za-z0-9_]* ]] || continue
-      [[ -n ${(P)key+set} ]] && continue
-      value=$(print -rn -- "${line#*=}" | base64 -d 2>/dev/null) || continue
-      export "$key=$value"
-    done < /workspaces/.codespaces/shared/.env-secrets
-  }
-fi
-'''
-block = block.replace('# end devcontainer-setup PATH',
-                      browser_block + secrets_block + '# end devcontainer-setup PATH')
-new_zshenv = replace_or_append(original_zshenv, marked, block)
-# The same for interactive bash (Herdr panes were bash on one project, #35).
-bash_block = r'''# devcontainer-setup secrets
-if [[ $- == *i* && -z ${DEVCONTAINER_SECRETS_LOADED-} && -r /workspaces/.codespaces/shared/.env-secrets ]]; then
-  export DEVCONTAINER_SECRETS_LOADED=1
+  __dc_skip=; grep -q '^PERSONAL_PAT=' /workspaces/.codespaces/shared/.env-secrets && __dc_skip=' GH_TOKEN GITHUB_TOKEN GH_AUTH_TOKEN '
   while IFS= read -r __dc_line || [[ -n $__dc_line ]]; do
     __dc_key=${__dc_line%%=*}
-    [[ $__dc_line == *=* && $__dc_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-    [[ -n ${!__dc_key+set} ]] && continue
+    [[ $__dc_line == *=* && $__dc_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ && $__dc_skip != *" $__dc_key "* ]] || continue
+    eval "[[ -z \${$__dc_key+set} ]]" || continue
     __dc_value=$(printf %s "${__dc_line#*=}" | base64 -d 2>/dev/null) || continue
     export "$__dc_key=$__dc_value"
   done < /workspaces/.codespaces/shared/.env-secrets
-  unset __dc_line __dc_key __dc_value
+  unset __dc_line __dc_key __dc_value __dc_skip
 fi
-# end devcontainer-setup secrets
 '''
+block = block.replace('# end devcontainer-setup PATH', browser_block + secrets + '# end devcontainer-setup PATH')
+new_zshenv = replace_or_append(original_zshenv, marked, block)
+bash_block = '# devcontainer-setup secrets\n' + secrets + '# end devcontainer-setup secrets\n'
 original_bashrc = bashrc.read_text() if bashrc.exists() else ''
 bash_marked = re.compile(r'^# devcontainer-setup secrets\n.*?^# end devcontainer-setup secrets(?:\n|$)', re.M | re.S)
 new_bashrc = replace_or_append(original_bashrc, bash_marked, bash_block)

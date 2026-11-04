@@ -9,7 +9,8 @@ This repository contains **no real secrets** — only placeholders and examples.
   Codespaces itself exports them only to VS Code terminals and bash login shells over SSH;
   the setup's blocks in `/etc/zsh/zshenv` and `/etc/bash.bashrc` also load them into
   interactive zsh and bash (Herdr panes and the agents in them), once per process tree and
-  never over a value already set.
+  never over a value already set. When `PERSONAL_PAT` is a secret, `GH_TOKEN`, `GITHUB_TOKEN`
+  and `GH_AUTH_TOKEN` stay out, so they cannot override the `gh` login post-create makes with it.
 - For **local** `devcontainer up`, copy `.devcontainer/devcontainer.env.example` to
   `.devcontainer/devcontainer.env` (gitignored) and fill it in.
 - Never commit `.devcontainer/devcontainer.env`, a real `PERSONAL_PAT`, or any token.

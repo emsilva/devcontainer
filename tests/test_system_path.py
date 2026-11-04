@@ -110,9 +110,17 @@ class SystemPathTests(unittest.TestCase):
         source = self.etc / 'bash.bashrc' if bash else self.zshenv
         copy = self.root / 'rc-under-test'
         copy.write_text(source.read_text().replace(real, str(secrets)))
-        shell = dict({k: v for k, v in self.env.items() if k not in ('GITHUB_TOKEN', 'OTHER_SECRET')}, **env)
-        report = ('source "$1"; printf "%s\\n" "${GITHUB_TOKEN-unset}|${OTHER_SECRET-unset}|'
-                  '${DEVCONTAINER_SECRETS_LOADED-unset}"')
+        names = ('GITHUB_TOKEN', 'OTHER_SECRET', 'PERSONAL_PAT', 'GH_TOKEN', 'DEVCONTAINER_SECRETS_LOADED')
+        shell = {k: v for k, v in self.env.items() if k not in names}
+        # The guard stays set while the shell starts, so a real /etc/zsh/zshenv
+        # block (zsh -f still reads it) never loads real secrets into a test
+        # whose failure output would print them; the script drops it before
+        # sourcing the copy unless this case says it was already loaded.
+        loaded = env.pop('DEVCONTAINER_SECRETS_LOADED', None)
+        shell.update(env, DEVCONTAINER_SECRETS_LOADED='1')
+        report = ('' if loaded else 'unset DEVCONTAINER_SECRETS_LOADED; ') + (
+            'source "$1"; printf "%s\\n" "${GITHUB_TOKEN-unset}|${OTHER_SECRET-unset}|'
+            '${DEVCONTAINER_SECRETS_LOADED-unset}"')
         argv = (['bash', '--norc', '--noprofile'] if bash else ['zsh', '-f']) + (['-i'] if interactive else [])
         result = subprocess.run(argv + ['-c', report, 'test-rc', str(copy)],
                                 env=shell, capture_output=True, text=True)
@@ -131,10 +139,19 @@ class SystemPathTests(unittest.TestCase):
         # One-off commands (sync over SSH, scripts) are not interactive and pay nothing.
         self.assertEqual(self.secrets_shell(lines, interactive=False), 'unset|unset|unset')
 
+    def test_personal_pat_keeps_github_token_variables_out(self):
+        # post-create.sh logs gh in with PERSONAL_PAT and unsets these on purpose;
+        # gh would let an exported GITHUB_TOKEN override that login.
+        self.assert_ok(self.writer(self.env['PATH'], LOCAL_BIN + '/open-on-mac'))
+        lines = [('GITHUB_TOKEN', 'codespace token'), ('PERSONAL_PAT', 'pat'), ('OTHER_SECRET', 'kept')]
+        for bash in (False, True):
+            with self.subTest(bash=bash):
+                self.assertEqual(self.secrets_shell(lines, bash=bash), 'unset|kept|1')
+
     def test_interactive_bash_loads_codespace_secrets_once(self):
         # Herdr panes were bash on one project (2026-10-20, #35).
         bashrc = self.etc / 'bash.bashrc'
-        bashrc.write_text('# distro bash.bashrc\n[ -z "$PS1" ] && return\n')
+        bashrc.write_text('# distro bash.bashrc\n')
         self.assert_ok(self.writer(self.env['PATH'], LOCAL_BIN + '/open-on-mac'))
         self.assert_ok(self.writer(self.env['PATH'], LOCAL_BIN + '/open-on-mac'))
         content = bashrc.read_text()
