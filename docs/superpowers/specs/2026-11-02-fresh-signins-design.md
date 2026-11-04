@@ -57,7 +57,10 @@ account, nothing copied), ruling 13 (ccswap on every Codespace) and the owner's 
    state per Codespace, never a URL, code or token.
 6. **Failures and cancel.** A failed, declined or timed-out tool is reported by name and the sequence goes on; the end
    prints a one-line summary and the retry command. The borrowed watcher's result is not visible to the sequence, so a
-   tool that did not finish is reported as "not signed in (timed out or callback port busy: see the Mac notice)". Ctrl-C
+   tool that did not finish is reported by what the login's exit code shows: a dropped connection (ssh exit 255), no
+   approval before the deadline (a busy callback port looks like this; its Mac notice names it), another exit code, or
+   a login that finished while the tool still reports signed out or cannot be checked (amended 2026-11-04: the live
+   test lost Codex to a dropped tunnel and the old single line blamed a timeout or busy port). Ctrl-C
    or a cancel stops the current tool's session, prints the summary and exits; nothing else is undone.
 7. **No spike.** The ccswap two-account spike (call 9) is retired: the sequence signs in one Claude account
    (ruling 25), and further accounts are the owner's to add.
