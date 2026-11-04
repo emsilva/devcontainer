@@ -96,23 +96,25 @@ class SystemPathTests(unittest.TestCase):
                 self.assert_ok(result)
                 self.assertEqual(result.stdout, expected)
 
-    def secrets_shell(self, lines, *, interactive=True, **env):
+    def secrets_shell(self, lines, *, interactive=True, bash=False, **env):
         # Codespaces exports .env-secrets only for bash login shells over SSH;
         # Herdr panes are interactive non-login zsh and get none of them.
         import base64
         self.assertTrue(shutil.which('zsh'), 'zsh is required for this test')
         real = '/workspaces/.codespaces/shared/.env-secrets'
-        self.assertIn(real, self.zshenv.read_text())
+        self.assertIn(real, (self.etc / 'bash.bashrc' if bash else self.zshenv).read_text())
         secrets = self.root / 'env-secrets'
         secrets.write_text(''.join(
             line if isinstance(line, str) else line[0] + '=' + base64.b64encode(line[1].encode()).decode() + '\n'
             for line in lines))
-        copy = self.root / 'zshenv-under-test'
-        copy.write_text(self.zshenv.read_text().replace(real, str(secrets)))
+        source = self.etc / 'bash.bashrc' if bash else self.zshenv
+        copy = self.root / 'rc-under-test'
+        copy.write_text(source.read_text().replace(real, str(secrets)))
         shell = dict({k: v for k, v in self.env.items() if k not in ('GITHUB_TOKEN', 'OTHER_SECRET')}, **env)
-        result = subprocess.run(['zsh', '-f'] + (['-i'] if interactive else []) +
-                                ['-c', 'source "$1"; print -r -- "${GITHUB_TOKEN-unset}|${OTHER_SECRET-unset}|'
-                                       '${DEVCONTAINER_SECRETS_LOADED-unset}"', 'test-zshenv', str(copy)],
+        report = ('source "$1"; printf "%s\\n" "${GITHUB_TOKEN-unset}|${OTHER_SECRET-unset}|'
+                  '${DEVCONTAINER_SECRETS_LOADED-unset}"')
+        argv = (['bash', '--norc', '--noprofile'] if bash else ['zsh', '-f']) + (['-i'] if interactive else [])
+        result = subprocess.run(argv + ['-c', report, 'test-rc', str(copy)],
                                 env=shell, capture_output=True, text=True)
         self.assert_ok(result)
         return result.stdout.strip()
@@ -128,6 +130,21 @@ class SystemPathTests(unittest.TestCase):
         self.assertEqual(self.secrets_shell(lines, DEVCONTAINER_SECRETS_LOADED='1'), 'unset|unset|1')
         # One-off commands (sync over SSH, scripts) are not interactive and pay nothing.
         self.assertEqual(self.secrets_shell(lines, interactive=False), 'unset|unset|unset')
+
+    def test_interactive_bash_loads_codespace_secrets_once(self):
+        # Herdr panes were bash on one project (2026-10-20, #35).
+        bashrc = self.etc / 'bash.bashrc'
+        bashrc.write_text('# distro bash.bashrc\n[ -z "$PS1" ] && return\n')
+        self.assert_ok(self.writer(self.env['PATH'], LOCAL_BIN + '/open-on-mac'))
+        self.assert_ok(self.writer(self.env['PATH'], LOCAL_BIN + '/open-on-mac'))
+        content = bashrc.read_text()
+        self.assertTrue(content.startswith('# distro bash.bashrc\n'))
+        self.assertEqual(content.count('# devcontainer-setup secrets\n'), 1)
+        lines = [('GITHUB_TOKEN', 'token value'), ('OTHER_SECRET', 'a=b c'), 'no-separator\n', ('BAD-NAME', 'x')]
+        self.assertEqual(self.secrets_shell(lines, bash=True), 'token value|a=b c|1')
+        self.assertEqual(self.secrets_shell(lines, bash=True, GITHUB_TOKEN='already'), 'already|a=b c|1')
+        self.assertEqual(self.secrets_shell(lines, bash=True, DEVCONTAINER_SECRETS_LOADED='1'), 'unset|unset|1')
+        self.assertEqual(self.secrets_shell(lines, bash=True, interactive=False), 'unset|unset|unset')
 
     def test_secrets_lines_survive_a_rerun_without_browser_once(self):
         self.assert_ok(self.writer(self.env['PATH'], LOCAL_BIN + '/open-on-mac'))

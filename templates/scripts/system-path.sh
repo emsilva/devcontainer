@@ -39,6 +39,7 @@ if '\n' in caller_path or '\r' in caller_path:
 local_bin = '/home/vscode/.local/bin'
 environment = root / 'etc/environment'
 zshenv = root / 'etc/zsh/zshenv'
+bashrc = root / 'etc/bash.bashrc'
 
 
 def replace_or_append(content, pattern, replacement):
@@ -107,6 +108,24 @@ fi
 block = block.replace('# end devcontainer-setup PATH',
                       browser_block + secrets_block + '# end devcontainer-setup PATH')
 new_zshenv = replace_or_append(original_zshenv, marked, block)
+# The same for interactive bash (Herdr panes were bash on one project, #35).
+bash_block = r'''# devcontainer-setup secrets
+if [[ $- == *i* && -z ${DEVCONTAINER_SECRETS_LOADED-} && -r /workspaces/.codespaces/shared/.env-secrets ]]; then
+  export DEVCONTAINER_SECRETS_LOADED=1
+  while IFS= read -r __dc_line || [[ -n $__dc_line ]]; do
+    __dc_key=${__dc_line%%=*}
+    [[ $__dc_line == *=* && $__dc_key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    [[ -n ${!__dc_key+set} ]] && continue
+    __dc_value=$(printf %s "${__dc_line#*=}" | base64 -d 2>/dev/null) || continue
+    export "$__dc_key=$__dc_value"
+  done < /workspaces/.codespaces/shared/.env-secrets
+  unset __dc_line __dc_key __dc_value
+fi
+# end devcontainer-setup secrets
+'''
+original_bashrc = bashrc.read_text() if bashrc.exists() else ''
+bash_marked = re.compile(r'^# devcontainer-setup secrets\n.*?^# end devcontainer-setup secrets(?:\n|$)', re.M | re.S)
+new_bashrc = replace_or_append(original_bashrc, bash_marked, bash_block)
 
 
 def atomic_write(path, content):
@@ -128,5 +147,6 @@ def atomic_write(path, content):
 
 atomic_write(environment, new_environment)
 atomic_write(zshenv, new_zshenv)
+atomic_write(bashrc, new_bashrc)
 print('Configured system PATH for /home/vscode/.local/bin.')
 PY
