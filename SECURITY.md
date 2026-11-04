@@ -6,6 +6,9 @@ This repository contains **no real secrets** — only placeholders and examples.
 
 - In **GitHub Codespaces**, provide credentials as **Codespaces secrets** (Settings →
   Codespaces → Secrets). They are injected as environment variables automatically.
+  Codespaces itself exports them only to VS Code terminals and bash login shells over SSH;
+  the setup's `/etc/zsh/zshenv` block also loads them into interactive zsh (Herdr panes and
+  the agents in them), once per process tree and never over a value already set.
 - For **local** `devcontainer up`, copy `.devcontainer/devcontainer.env.example` to
   `.devcontainer/devcontainer.env` (gitignored) and fill it in.
 - Never commit `.devcontainer/devcontainer.env`, a real `PERSONAL_PAT`, or any token.

@@ -96,6 +96,47 @@ class SystemPathTests(unittest.TestCase):
                 self.assert_ok(result)
                 self.assertEqual(result.stdout, expected)
 
+    def secrets_shell(self, lines, *, interactive=True, **env):
+        # Codespaces exports .env-secrets only for bash login shells over SSH;
+        # Herdr panes are interactive non-login zsh and get none of them.
+        import base64
+        self.assertTrue(shutil.which('zsh'), 'zsh is required for this test')
+        real = '/workspaces/.codespaces/shared/.env-secrets'
+        self.assertIn(real, self.zshenv.read_text())
+        secrets = self.root / 'env-secrets'
+        secrets.write_text(''.join(
+            line if isinstance(line, str) else line[0] + '=' + base64.b64encode(line[1].encode()).decode() + '\n'
+            for line in lines))
+        copy = self.root / 'zshenv-under-test'
+        copy.write_text(self.zshenv.read_text().replace(real, str(secrets)))
+        shell = dict({k: v for k, v in self.env.items() if k not in ('GITHUB_TOKEN', 'OTHER_SECRET')}, **env)
+        result = subprocess.run(['zsh', '-f'] + (['-i'] if interactive else []) +
+                                ['-c', 'source "$1"; print -r -- "${GITHUB_TOKEN-unset}|${OTHER_SECRET-unset}|'
+                                       '${DEVCONTAINER_SECRETS_LOADED-unset}"', 'test-zshenv', str(copy)],
+                                env=shell, capture_output=True, text=True)
+        self.assert_ok(result)
+        return result.stdout.strip()
+
+    def test_interactive_zsh_loads_codespace_secrets_once(self):
+        self.assert_ok(self.writer(self.env['PATH'], LOCAL_BIN + '/open-on-mac'))
+        lines = [('GITHUB_TOKEN', 'token value'), ('OTHER_SECRET', 'a=b c'), 'no-separator\n',
+                 ('BAD-NAME', 'x'), ('9START', 'x')]
+        self.assertEqual(self.secrets_shell(lines), 'token value|a=b c|1')
+        # A value already in the environment wins, as in a VS Code terminal.
+        self.assertEqual(self.secrets_shell(lines, GITHUB_TOKEN='already'), 'already|a=b c|1')
+        # A shell under one that already loaded them (an agent's command) skips the file.
+        self.assertEqual(self.secrets_shell(lines, DEVCONTAINER_SECRETS_LOADED='1'), 'unset|unset|1')
+        # One-off commands (sync over SSH, scripts) are not interactive and pay nothing.
+        self.assertEqual(self.secrets_shell(lines, interactive=False), 'unset|unset|unset')
+
+    def test_secrets_lines_survive_a_rerun_without_browser_once(self):
+        self.assert_ok(self.writer(self.env['PATH'], LOCAL_BIN + '/open-on-mac'))
+        self.assert_ok(self.writer(self.env['PATH']))
+        content = self.zshenv.read_text()
+        self.assertEqual(content.count('export DEVCONTAINER_SECRETS_LOADED=1'), 1)
+        self.assertLess(content.index('.env-secrets'), content.index('# end devcontainer-setup PATH'))
+        self.assertIn(': ${BROWSER:=' + LOCAL_BIN + '/open-on-mac}\n', content)
+
     def test_two_arguments_leave_browser_alone(self):
         self.assert_ok(self.writer(self.env['PATH'], LOCAL_BIN + '/open-on-mac'))
         self.environment.write_text(self.environment.read_text().replace('BROWSER="' + LOCAL_BIN + '/open-on-mac"',

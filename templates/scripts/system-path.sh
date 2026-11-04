@@ -87,7 +87,25 @@ else:
     if existing_block:
         browser_block = ''.join(line for line in existing_block[0].splitlines(keepends=True)
                                 if line.startswith(': ${BROWSER:=') or line == 'export BROWSER\n')
-block = block.replace('# end devcontainer-setup PATH', browser_block + '# end devcontainer-setup PATH')
+# Codespaces exports its secrets only for bash login shells over SSH
+# (/etc/profile.d/codespaces.sh); Herdr panes are interactive non-login zsh and
+# would get none. Load them once per process tree, never over a set value.
+secrets_block = r'''if [[ -o interactive && -z ${DEVCONTAINER_SECRETS_LOADED-} && -r /workspaces/.codespaces/shared/.env-secrets ]]; then
+  export DEVCONTAINER_SECRETS_LOADED=1
+  () {
+    local line key value
+    while IFS= read -r line || [[ -n $line ]]; do
+      key=${line%%=*}
+      [[ $line == *=* && -n $key && $key != [0-9]* && $key != *[^A-Za-z0-9_]* ]] || continue
+      [[ -n ${(P)key+set} ]] && continue
+      value=$(print -rn -- "${line#*=}" | base64 -d 2>/dev/null) || continue
+      export "$key=$value"
+    done < /workspaces/.codespaces/shared/.env-secrets
+  }
+fi
+'''
+block = block.replace('# end devcontainer-setup PATH',
+                      browser_block + secrets_block + '# end devcontainer-setup PATH')
 new_zshenv = replace_or_append(original_zshenv, marked, block)
 
 
