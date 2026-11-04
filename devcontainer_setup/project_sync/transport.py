@@ -329,26 +329,30 @@ class CodespaceConnection:
         self.api = ReadOnlyAPI(self.codespace, github_token(self.env))
         self.api.__enter__()
         try:
-            with socket.socket() as sock:
-                sock.bind(('127.0.0.1', 0))
-                self.port = sock.getsockname()[1]
-            self.child = subprocess.Popen(
-                ['gh', 'codespace', 'ports', 'forward', '2222:' + str(self.port), '-c', self.codespace],
-                env=self.api.child_env(self.env), stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-            deadline = time.monotonic() + 40
-            while self.child.poll() is None:
-                try:
-                    with socket.create_connection(('127.0.0.1', self.port), timeout=.5):
-                        return self
-                except OSError:
-                    if time.monotonic() > deadline:
-                        break
-                    time.sleep(.2)
-            raise ValueError('Codespace forward unavailable; it may be stopped or authentication expired. No start request was allowed.')
+            self._open_forward(40)
+            return self
         except BaseException:
             self.__exit__()
             raise
+
+    def _open_forward(self, wait):
+        with socket.socket() as sock:
+            sock.bind(('127.0.0.1', 0))
+            self.port = sock.getsockname()[1]
+        self.child = subprocess.Popen(
+            ['gh', 'codespace', 'ports', 'forward', '2222:' + str(self.port), '-c', self.codespace],
+            env=self.api.child_env(self.env), stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        deadline = time.monotonic() + wait
+        while self.child.poll() is None:
+            try:
+                with socket.create_connection(('127.0.0.1', self.port), timeout=.5):
+                    return
+            except OSError:
+                if time.monotonic() > deadline:
+                    break
+                time.sleep(.2)
+        raise ValueError('Codespace forward unavailable; it may be stopped or authentication expired. No start request was allowed.')
 
     def ssh_config(self, path: Path) -> None:
         from .state import atomic_write
@@ -378,13 +382,21 @@ class CodespaceConnection:
         # The local forwarding socket can accept connections before the tunnel
         # or sshd is ready. Retry only this harmless probe, never an RPC payload.
         deadline = time.monotonic() + 45
-        waiting = False
+        waiting, restarts = False, 0
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ValueError('Codespace SSH was not ready within 45 seconds; retry task work:cs and inspect Codespace status if it persists.')
             if self.child is not None and self.child.poll() is not None:
-                raise ValueError('Codespace port forward stopped before SSH became ready; retry task work:cs.')
+                # Right after a boot the forward can come up before the
+                # Codespace's sshd and then exit (#42); a new one connects.
+                # Only this probe has run, so restarting sends nothing twice.
+                if restarts == 2:
+                    raise ValueError('Codespace port forward stopped before SSH became ready; retry task work:cs.')
+                restarts += 1
+                self._open_forward(min(40, remaining))
+                self.ssh_config(path)
+                continue
             try:
                 result = subprocess.run(
                     ['ssh', '-F', str(path), '-T', 'project-sync', 'true'],
