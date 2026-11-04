@@ -391,10 +391,14 @@ class CodespaceConnection:
                 # Right after a boot the forward can come up before the
                 # Codespace's sshd and then exit (#42); a new one connects.
                 # Only this probe has run, so restarting sends nothing twice.
+                stopped = 'Codespace port forward stopped before SSH became ready; retry task work:cs.'
                 if restarts == 2:
-                    raise ValueError('Codespace port forward stopped before SSH became ready; retry task work:cs.')
+                    raise ValueError(stopped)
                 restarts += 1
-                self._open_forward(min(40, remaining))
+                try:
+                    self._open_forward(min(40, remaining))
+                except ValueError:
+                    raise ValueError(stopped) from None
                 self.ssh_config(path)
                 continue
             try:
@@ -417,6 +421,13 @@ class CodespaceConnection:
                 print('Waiting for Codespace SSH to become ready…', file=sys.stderr)
                 waiting = True
             time.sleep(min(.5, max(0, deadline - time.monotonic())))
+
+    def ensure_ready(self):
+        # Publish a shared SSH config only after this: a forward restarted
+        # during the wait moves to a new port.
+        if not self._ready:
+            self.ssh_config(self._probe_config)
+            self._wait_for_ssh(self._probe_config)
 
     def python(self, code: str, payload: bytes = b'', timeout: int = 60) -> bytes:
         path = self._probe_config

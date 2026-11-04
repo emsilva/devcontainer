@@ -346,6 +346,33 @@ class SSHReadinessTests(unittest.TestCase):
         self.assertEqual([c.args[0][-1] for c in run.call_args_list][0], 'true')
         self.assertEqual(run.call_args_list[1].kwargs['input'], b'payload')
 
+    def test_ensure_ready_settles_the_port_before_a_config_is_published(self):
+        from unittest.mock import MagicMock, patch
+        restarted = self.forwards(self.child(1), self.child(None))
+        first_port = self.connection.port
+        with patch.object(self.transport.subprocess, 'Popen', side_effect=restarted), \
+                patch.object(self.transport.socket, 'create_connection', return_value=MagicMock()), \
+                patch.object(self.transport.subprocess, 'run', return_value=self.result()) as run, \
+                patch.object(self.transport.time, 'sleep'):
+            self.connection.ensure_ready()
+            self.connection.ensure_ready()  # Already ready: no second probe.
+        self.assertEqual(run.call_count, 1)
+        published = self.connection.state / 'published-config'
+        self.connection.ssh_config(published)
+        self.assertIn(f'  Port {self.connection.port}\n', published.read_text())
+        self.assertNotEqual(self.connection.port, first_port)
+
+    def test_failed_restart_reports_the_forward_not_authentication(self):
+        from unittest.mock import MagicMock, patch
+        restarted = self.forwards(self.child(1), self.child(1))
+        with patch.object(self.transport.subprocess, 'Popen', side_effect=restarted), \
+                patch.object(self.transport.socket, 'create_connection', side_effect=OSError), \
+                patch.object(self.transport.subprocess, 'run') as run, \
+                patch.object(self.transport.time, 'sleep'):
+            with self.assertRaisesRegex(ValueError, 'port forward stopped before SSH became ready; retry task work:cs'):
+                self.connection.python('op()', b'payload')
+        run.assert_not_called()
+
     def test_forward_that_keeps_exiting_fails_without_sending_payload(self):
         from unittest.mock import MagicMock, patch
         restarted = self.forwards(self.child(1), self.child(None, 1), self.child(None, 1))
