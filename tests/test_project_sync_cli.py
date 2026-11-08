@@ -308,6 +308,19 @@ class OwnerHerdr:
 
 
 class OwnerPowerTests(unittest.TestCase):
+    def test_codespace_stop_inside_a_codespace_sends_a_request(self):
+        from unittest import mock
+        from devcontainer_setup.project_sync import __main__ as cli, power
+        args = parser().parse_args(['work', '--codespace-stop'])
+        with mock.patch.object(cli, 'discover_project', return_value=mock.Mock()), \
+                mock.patch.object(cli, 'state_dir', return_value=self.state), \
+                mock.patch.dict(os.environ, CODESPACES='true', GITHUB_TOKEN='fixture'), \
+                mock.patch.object(power, 'request_from_codespace', create=True, return_value=130) as request, \
+                mock.patch.object(power, 'stop') as stop:
+            self.assertEqual(cli.run(args), 130)
+        request.assert_called_once_with(home=Path.home(), env=os.environ)
+        stop.assert_not_called()
+
     def missing_power(self, restart, confirmed=True):
         from unittest import mock
         from devcontainer_setup.project_sync import arming

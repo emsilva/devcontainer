@@ -308,6 +308,7 @@ class CodespaceConnection:
         self.port = None
         self.accept_new = False
         self._ready = False
+        self._closed = False
         # A reconnect or background worker may share this project state while
         # owning a different forward. Never rewrite another connection's port.
         self._probe_config = self.state / ('ssh-probe-config-' + secrets.token_hex(16))
@@ -430,6 +431,8 @@ class CodespaceConnection:
             self._wait_for_ssh(self._probe_config)
 
     def python(self, code: str, payload: bytes = b'', timeout: int = 60) -> bytes:
+        if self._closed:
+            raise ValueError('The Codespace connection is closed')
         path = self._probe_config
         self.ssh_config(path)
         if not self._ready:
@@ -449,6 +452,7 @@ class CodespaceConnection:
         return result.stdout
 
     def __exit__(self, *exc):
+        self._closed = True
         self._ready = False
         try:
             _terminate(self.child)

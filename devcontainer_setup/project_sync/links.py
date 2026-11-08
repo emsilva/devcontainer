@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from contextlib import contextmanager
 import errno
+import inspect
 import json
 import logging
 import math
@@ -20,7 +21,7 @@ import threading
 import time
 from urllib.parse import parse_qs, urlsplit
 
-from . import notify
+from . import notify, power, state as project_state
 from .state import atomic_write, locked, process_identity, read_json
 
 _LOG = logging.getLogger('project-sync-links')
@@ -374,19 +375,20 @@ def handle(request: Request, connection, forwards: Forwards, *, project: str, no
 
 # stdin stays open for the worker's stream. At EOF the same source is a one-shot
 # snapshot; SIGNINS_ONLY leaves ordinary links queued for the connected worker.
-REMOTE_WATCHER = r'''import json,math,os,select,stat,sys,time
+REMOTE_WATCHER = r'''import json,math,os,re,select,stat,sys,time
 from pathlib import Path
 from urllib.parse import parse_qs,urlsplit
 
 base=Path.home()/'.local/state/devcontainer-links'
 requests=base/'requests'
 claimed=base/'claimed'
-for directory in (base,requests,claimed):
+stops=base/'stops'
+for directory in (base,requests,claimed,stops):
  directory.mkdir(mode=0o700,parents=True,exist_ok=True)
  if directory.is_symlink() or not directory.is_dir(): raise ValueError('Unsafe link state')
  directory.chmod(0o700)
 
-def read(path):
+def read(path,stop=False):
  fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
  try:
   info=os.fstat(fd)
@@ -394,6 +396,15 @@ def read(path):
   raw=os.read(fd,65537)
   if len(raw)>65536: raise ValueError('Invalid file')
   value=json.loads(raw)
+  if stop:
+   if (not isinstance(value,dict) or set(value)!={'schema','kind','id','created_at','codespace'}
+       or type(value['schema']) is not int or value['schema']!=1 or value['kind']!='stop'
+       or not isinstance(value['id'],str) or not re.fullmatch(r'[0-9]+-[0-9]+-[0-9a-f]{8}',value['id'])
+       or not isinstance(value['codespace'],str)
+       or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,99}',value['codespace'])
+       or type(value['created_at']) not in (int,float) or not math.isfinite(value['created_at'])
+       or not 0<=time.time()-value['created_at']<=60): raise ValueError('Invalid stop request')
+   return value
   if (not isinstance(value,dict) or type(value.get('schema')) is not int or value['schema']!=1
       or not {'id','url','created_at','program','pid','start','tty'}<=value.keys()
       or type(value['created_at']) not in (int,float) or not math.isfinite(value['created_at'])):
@@ -418,12 +429,26 @@ def discard(path):
 due=0
 while True:
  if time.monotonic()>=due:
-  fd=os.open(base/'mac-listening',os.O_CREAT|os.O_WRONLY|os.O_NOFOLLOW|os.O_NONBLOCK,0o600)
-  try:
-   if not stat.S_ISREG(os.fstat(fd).st_mode): raise ValueError('Invalid heartbeat')
-   os.utime(fd,None)
-  finally: os.close(fd)
+  names=['mac-listening'] if globals().get('SIGNINS_ONLY',False) else ['mac-listening','stop-listening-v1']
+  for name in names:
+   fd=os.open(base/name,os.O_CREAT|os.O_WRONLY|os.O_NOFOLLOW|os.O_NONBLOCK,0o600)
+   try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode): raise ValueError('Invalid heartbeat')
+    os.fchmod(fd,0o600)
+    os.utime(fd,None)
+   finally: os.close(fd)
   due=time.monotonic()+5
+ if not globals().get('SIGNINS_ONLY',False):
+  for source in stops.glob('*.json'):
+   target=claimed/(str(time.time_ns())+'-'+str(os.getpid())+'-'+os.urandom(4).hex()+'.json')
+   try: source.rename(target)
+   except FileNotFoundError: continue
+   try:
+    value=read(target,stop=True)
+    print(json.dumps(value,separators=(',',':')),flush=True)
+   except Exception:
+    print('Skipped stale or invalid stop request',file=sys.stderr,flush=True)
+   finally: discard(target)
  for source in requests.glob('*.json'):
   if globals().get('SIGNINS_ONLY',False):
    try:
@@ -442,6 +467,20 @@ while True:
   finally: discard(target)
  if select.select([sys.stdin],[],[],.2)[0] and not os.read(sys.stdin.fileno(),4096): break
 '''
+
+
+def _stop_answer_source():
+    # Ship the same atomic writer, including its no-follow parent walk, because
+    # isolated remote Python cannot import the Mac's installed package.
+    return ('import json,os,re,stat,sys,uuid\nfrom pathlib import Path\n'
+            'from contextlib import contextmanager\n'
+            + inspect.getsource(project_state._parent) + '\n'
+            + inspect.getsource(project_state.atomic_write) + '\n'
+            + "value=json.load(sys.stdin)\n"
+              "identity=value.pop('id')\n"
+              "if not re.fullmatch(r'[0-9]+-[0-9]+-[0-9a-f]{8}',identity): raise ValueError('Invalid stop id')\n"
+              "path=Path.home()/'.local/state/devcontainer-links/stops'/(identity+'.result')\n"
+              "atomic_write(path,json.dumps(value).encode())\n")
 
 
 def watcher_live(state: Path) -> bool:
@@ -493,6 +532,53 @@ class Watcher(threading.Thread):
         self._halt = threading.Event()
         self._stream_lock = threading.Lock()
         self._stream = None
+        self._stopping = None
+
+    def _stop_answer(self, value, ok, message):
+        self.logger.info('Stop requested from the Codespace: %s', message)
+        if not self._halt.is_set():
+            try:
+                self.connection.python(_stop_answer_source(), json.dumps(dict(
+                    id=value['id'], ok=ok, message=message)).encode(), timeout=10)
+            except Exception:
+                self.logger.info('Could not write the Codespace stop answer; check task work:status')
+
+    def _stop_request(self, value):
+        if (set(value) != {'schema', 'kind', 'id', 'created_at', 'codespace'}
+                or type(value['schema']) is not int or value['schema'] != 1 or value['kind'] != 'stop'
+                or not isinstance(value['id'], str) or not re.fullmatch(r'[0-9]+-[0-9]+-[0-9a-f]{8}', value['id'])
+                or not isinstance(value['codespace'], str)
+                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,99}', value['codespace'])
+                or type(value['created_at']) not in (int, float) or not math.isfinite(value['created_at'])):
+            self.logger.info('Skipped stale or invalid stop request')
+            return
+        if self._halt.is_set():
+            return
+        if value['codespace'] != self.connection.codespace:
+            self._stop_answer(value, False, 'The stop request names another Codespace; nothing stopped.')
+            return
+        if value['created_at'] > self.now() + 5:
+            self._stop_answer(value, False, 'The stop request is ahead of the Mac clock; nothing stopped.')
+            return
+        if self._stopping is not None and self._stopping.is_alive():
+            self._stop_answer(value, False, 'A stop is already in progress.')
+            return
+
+        def stopping():
+            try:
+                result = power.stop(self.state, expected=value['codespace'],
+                                    until=value['created_at'] + power.WINDOW, halted=self._halt.is_set)
+                ok, message = True, result.message
+            except Exception as error:
+                ok = False
+                message = (str(error) if isinstance(error, ValueError) else
+                           'The stop could not finish; check task work:status on your Mac.')
+                if '://' in message or any(ord(char) < 32 for char in message):
+                    message = 'The stop could not finish; check task work:status on your Mac.'
+            self._stop_answer(value, ok, message)
+
+        self._stopping = threading.Thread(target=stopping, name='codespace-stop', daemon=False)
+        self._stopping.start()
 
     def _heartbeat(self):
         value = dict(pid=os.getpid(), process_identity=self.identity,
@@ -573,6 +659,10 @@ class Watcher(threading.Thread):
                                 self.logger.info('Link watcher reported a skipped request or stream error')
                                 continue
                             try:
+                                value = json.loads(raw)
+                                if isinstance(value, dict) and value.get('kind') == 'stop':
+                                    self._stop_request(value)
+                                    continue
                                 request = parse_request(raw)
                             except ValueError:
                                 self.logger.info('Skipped invalid link request')
@@ -624,6 +714,10 @@ class Watcher(threading.Thread):
                 self.join(timeout=60)
                 if self.is_alive():
                     raise ValueError('Link watcher has not stopped')
+            if self._stopping is not None:
+                self._stopping.join(timeout=90)
+                if self._stopping.is_alive():
+                    raise ValueError('Codespace stop request has not finished')
             _stop_owned(self.forwards)
             self._clear()
 

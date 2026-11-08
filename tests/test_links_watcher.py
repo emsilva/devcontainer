@@ -186,6 +186,78 @@ class WatcherTests(unittest.TestCase):
         self.assertEqual(list((self.remote / 'claimed').iterdir()), [])
         self.assertTrue(all(not err for _, err in outputs))
 
+    def stop_packet(self, **changes):
+        value = dict(schema=1, kind='stop', id='100-1-abcdef01', created_at=time.time(), codespace='fixture')
+        value.update(changes)
+        stops = self.remote / 'stops'
+        stops.mkdir(exist_ok=True)
+        path = stops / (value['id'] + '.json')
+        path.write_text(json.dumps(value))
+        return path, value
+
+    def test_watcher_streams_a_fresh_stop_request(self):
+        path, value = self.stop_packet()
+        result = path.with_suffix('.result')
+        result.write_text('answer stays here')
+        out, error = self.finish(self.remote_child())
+        self.assertEqual([json.loads(line) for line in out.splitlines()], [value])
+        self.assertFalse(path.exists())
+        self.assertEqual(result.read_text(), 'answer stays here')
+        self.assertEqual(list((self.remote / 'claimed').iterdir()), [])
+        self.assertEqual(error, b'')
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_stale_stop_request_is_discarded(self):
+        for index, stamp in enumerate((time.time() - 61, time.time() + 30, float('nan'))):
+            self.stop_packet(id=f'100-{index}-abcdef01', created_at=stamp)
+        out, error = self.finish(self.remote_child())
+        self.assertEqual(out, b'')
+        self.assertEqual(error.splitlines(), [b'Skipped stale or invalid stop request'] * 3)
+        self.assertEqual(list((self.remote / 'stops').iterdir()), [])
+
+    def test_invalid_stop_files_are_discarded_without_leaking_content(self):
+        stops = self.remote / 'stops'
+        path, _ = self.stop_packet(extra='PRIVATE-FIXTURE')
+        target = self.home / 'untouched-stop'
+        target.write_bytes(path.read_bytes())
+        (stops / 'symlink.json').symlink_to(target)
+        (stops / 'big.json').write_bytes(b'X' * 65537)
+        os.mkfifo(stops / 'fifo.json')
+        (stops / 'directory.json').mkdir()
+        self.stop_packet(id='100-2-abcdef01', schema=True)
+        self.stop_packet(id='100-3-abcdef01', codespace='../unsafe')
+        out, error = self.finish(self.remote_child())
+        self.assertEqual(out, b'')
+        self.assertEqual(error.splitlines(), [b'Skipped stale or invalid stop request'] * 7)
+        self.assertTrue(target.exists())
+        self.assertEqual(list(stops.iterdir()), [])
+
+    def test_signins_only_watcher_leaves_stop_requests(self):
+        path, _ = self.stop_packet()
+        out, error = self.finish(self.remote_child(signin=True))
+        self.assertTrue(path.exists())
+        self.assertFalse((self.remote / 'stop-listening-v1').exists())
+        self.assertTrue((self.remote / 'mac-listening').exists())
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((out, error), (b'', b''))
+
+    def test_normal_watcher_advertises_the_stop_capability(self):
+        capability = self.remote / 'stop-listening-v1'
+        capability.touch()
+        os.utime(capability, (1, 1))
+        child = self.remote_child()
+        deadline = time.monotonic() + 4
+        while capability.stat().st_mtime == 1 and time.monotonic() < deadline:
+            time.sleep(.02)
+        stamp = capability.stat().st_mtime
+        self.assertLess(abs(time.time() - stamp), 2)
+        deadline = time.monotonic() + 7
+        while capability.stat().st_mtime == stamp and time.monotonic() < deadline:
+            time.sleep(.05)
+        self.assertGreater(capability.stat().st_mtime, stamp)
+        self.assertEqual(self.finish(child), (b'', b''))
+        self.assertEqual(capability.stat().st_mode & 0o777, 0o600)
+
     def test_watcher_skips_bad_request_files(self):
         requests = self.remote / 'requests'
         target = self.home / 'untouched'
@@ -549,6 +621,158 @@ class WatcherTests(unittest.TestCase):
         self.assertEqual([json.loads(line)['id'] for line in out.splitlines()], ['100-2-abcd'])
         self.assertEqual([path.name for path in requests.iterdir()], ['link.json'])
         self.assertEqual(error, b'')
+
+
+class StopWatcherTests(unittest.TestCase):
+    def setUp(self):
+        from devcontainer_setup.project_sync import arming, lifecycle, power
+        from devcontainer_setup.project_sync.state import atomic_write
+        self.power, self.arming = power, arming
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.state = Path(temporary.name).resolve()
+        self.clock = time.time()
+        self.connection = mock.Mock(codespace='fixture')
+        self.connection.child.poll.return_value = None
+        self.log = mock.Mock()
+        self.watcher = links.Watcher(self.connection, self.state, 'project', self.log, now=lambda: self.clock)
+        self.addCleanup(self.watcher.stop)
+        atomic_write(self.state / 'scratch.json', json.dumps({'codespace': 'fixture'}).encode())
+        arming.write(self.state, dict(schema=1, armed=True, codespace='fixture', gh_user='fixture-user'))
+        self.fake = mock.Mock()
+        self.fake.post_stop.return_value = 202
+        patch = mock.patch.object(lifecycle, 'LifecycleAPI', return_value=self.fake)
+        patch.start()
+        self.addCleanup(patch.stop)
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        for name in ('CODESPACES', 'GH_TOKEN', 'GITHUB_TOKEN'):
+            os.environ.pop(name, None)
+
+    def packet(self, **changes):
+        value = dict(schema=1, kind='stop', id='100-1-abcdef01', created_at=self.clock, codespace='fixture')
+        value.update(changes)
+        return value
+
+    def join_handler(self):
+        thread = getattr(self.watcher, '_stopping', None)
+        if thread is not None:
+            thread.join(5)
+            self.assertFalse(thread.is_alive(), 'stop handler did not finish')
+
+    def answer(self):
+        self.join_handler()
+        self.connection.python.assert_called_once()
+        call = self.connection.python.call_args
+        self.assertEqual(call.kwargs['timeout'], 10)
+        # Run the real answer publisher locally under an isolated HOME.
+        result = subprocess.run([sys.executable, '-I', '-B', '-c', call.args[0]], input=call.args[1],
+                                env=dict(os.environ, HOME=str(self.state)), capture_output=True, timeout=4)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        path = self.state / '.local/state/devcontainer-links/stops/100-1-abcdef01.result'
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        return json.loads(path.read_bytes())
+
+    def test_stop_request_goes_to_power_not_links(self):
+        value = self.packet()
+        child = subprocess.Popen([sys.executable, '-I', '-B', '-c',
+                                  'import json;print(' + repr(json.dumps(value)) + ',flush=True)'],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 start_new_session=True)
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        with mock.patch.object(links.subprocess, 'Popen', return_value=child), \
+                mock.patch.object(links, 'handle') as handle, \
+                mock.patch.object(self.power, 'stop', return_value=mock.Mock(message='Stopped.')) as stop:
+            self.watcher._serve()
+            self.join_handler()
+            stop.assert_called_once_with(self.state, expected='fixture', until=value['created_at'] + 60,
+                                         halted=self.watcher._halt.is_set)
+            handle.assert_not_called()
+        self.assertEqual(self.answer(), {'ok': True, 'message': 'Stopped.'})
+
+    def test_stop_request_for_another_codespace_is_refused(self):
+        with mock.patch.object(self.power, 'stop') as stop:
+            self.watcher._stop_request(self.packet(codespace='other-fixture'))
+            self.join_handler()
+            stop.assert_not_called()
+        self.assertFalse(self.answer()['ok'])
+        self.log.info.assert_called_once()
+
+    def test_line_delivered_after_expiry_is_refused(self):
+        self.clock = time.time()
+        self.watcher._stop_request(self.packet(created_at=time.time() - 100))
+        answer = self.answer()
+        self.assertFalse(answer['ok'])
+        self.assertIn('expired', answer['message'])
+        self.assertNotIn('owner_stop_at', self.arming.read(self.state))
+        self.fake.post_stop.assert_not_called()
+
+    def test_request_from_the_future_is_refused(self):
+        with mock.patch.object(self.power, 'stop') as stop:
+            self.watcher._stop_request(self.packet(created_at=self.clock + 10))
+            self.join_handler()
+            stop.assert_not_called()
+        self.assertFalse(self.answer()['ok'])
+
+    def test_stop_expires_while_waiting_for_the_lock(self):
+        from devcontainer_setup.project_sync.state import locked
+        stamp = time.time() - 59.8
+        self.clock = time.time()
+        with locked(self.state / 'workspace-control.lock', blocking=True):
+            self.watcher._stop_request(self.packet(created_at=stamp))
+            self.join_handler()
+        self.assertFalse(self.answer()['ok'])
+        self.assertNotIn('owner_stop_at', self.arming.read(self.state))
+        self.fake.post_stop.assert_not_called()
+
+    def test_second_stop_while_one_runs_is_answered_busy(self):
+        entered, release = threading.Event(), threading.Event()
+        def stopping(*args, **kwargs):
+            entered.set()
+            if not release.wait(4):
+                raise ValueError('fixture handler not released')
+            return mock.Mock(message='Stopped.')
+        with mock.patch.object(self.power, 'stop', side_effect=stopping) as stop:
+            try:
+                self.watcher._stop_request(self.packet(created_at=time.time()))
+                self.assertTrue(entered.wait(2))
+                self.watcher._stop_request(self.packet(id='100-2-abcdef01', created_at=time.time()))
+                call = self.connection.python.call_args
+                self.assertEqual(json.loads(call.args[1])['ok'], False)
+                self.assertEqual(json.loads(call.args[1])['message'], 'A stop is already in progress.')
+                stop.assert_called_once()
+            finally:
+                release.set()
+                self.join_handler()
+
+    def test_watcher_stop_joins_the_stop_handler(self):
+        from devcontainer_setup.project_sync.state import locked
+        attempted = threading.Event()
+        @contextlib.contextmanager
+        def observed(*args, **kwargs):
+            attempted.set()
+            with locked(*args, **kwargs) as lock:
+                yield lock
+        with locked(self.state / 'workspace-control.lock', blocking=True), \
+                mock.patch.object(self.power, 'locked', side_effect=observed):
+            self.clock = time.time()
+            self.watcher._stop_request(self.packet())
+            self.assertTrue(attempted.wait(3))
+            self.watcher.stop()
+            self.assertFalse(self.watcher._stopping.is_alive())
+        self.assertNotIn('owner_stop_at', self.arming.read(self.state))
+        self.fake.post_stop.assert_not_called()
+        self.connection.python.assert_not_called()
+
+    def test_failed_answer_is_logged_without_raising_or_leaking(self):
+        self.connection.python.side_effect = ValueError('https://private.example/?token=PRIVATE-FIXTURE')
+        with mock.patch.object(self.power, 'stop', return_value=mock.Mock(message='Stopped.')):
+            self.watcher._stop_request(self.packet(created_at=time.time()))
+            self.join_handler()
+        self.assertTrue(self.connection.python.called)
+        self.assertNotIn('PRIVATE-FIXTURE', str(self.log.info.call_args_list))
+        self.assertIn('answer', str(self.log.info.call_args_list).lower())
 
 
 if __name__ == '__main__':

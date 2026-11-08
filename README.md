@@ -52,7 +52,7 @@ small helpers, and a Taskfile include. Personal preferences live in
 | `task work:cs:armed` | Connect as `work:cs`, then arm restart after GitHub's 12-hour stop |
 | `task work:hold -- 09:30` / `-- off` | Hold restarts and resume prompts until a local time / end the hold |
 | `task work:disarm` | Stop this project's keeper and its keep-alive; sync continues |
-| `task work:cs:stop` | Stop the Codespace and keep it stopped |
+| `task work:cs:stop` | Stop the Codespace and keep it stopped, from your Mac or through its connected Mac worker |
 | `task work:cs:restart` | Restart the Codespace now; an armed project's lead is told to resume |
 | `task work:logs` | Show recent keeper and worker logs, merged by time |
 | `task devcontainer:setup` | Review or change the setup |

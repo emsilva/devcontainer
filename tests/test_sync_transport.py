@@ -235,6 +235,17 @@ class ConnectionProbeOwnershipTests(unittest.TestCase):
         self.assertEqual(first_path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(second_path.stat().st_mode & 0o777, 0o600)
 
+    def test_python_after_exit_raises_instead_of_reconnecting(self):
+        from unittest.mock import patch
+        self.first.__exit__()
+        with patch.object(self.first, '_wait_for_ssh') as ready, \
+                patch.object(self.transport.subprocess, 'run', return_value=self.success()) as run:
+            with self.assertRaisesRegex(ValueError, '^The Codespace connection is closed$'):
+                self.first.python('must_not_run()')
+        ready.assert_not_called()
+        run.assert_not_called()
+        self.assertFalse(self.first._probe_config.exists())
+
     def test_nested_connection_cannot_retarget_in_flight_python(self):
         from unittest.mock import patch
         observed = []

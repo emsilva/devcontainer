@@ -1,14 +1,79 @@
 """Owner stops shared by the headless CLI and the Mac worker."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
+import secrets
+import stat
 import time
 
 from . import arming, lifecycle, scratch
-from .state import locked, read_json
+from .state import atomic_write, locked, read_json
+
+LINKS = '.local/state/devcontainer-links'
+WINDOW = 60
+LISTENING_AGE = 15
+CAPABILITY = 'stop-listening-v1'
+
+
+def request_from_codespace(*, home: Path, env: Mapping, now=time.time, sleep=time.sleep,
+                           wait: float = WINDOW) -> int:
+    """Queue a stop only for a capable worker; unlink arbitrates cancellation with its claim."""
+    base = home / LINKS
+    try:
+        heartbeat = (base / CAPABILITY).lstat()
+        listening = stat.S_ISREG(heartbeat.st_mode) and 0 <= now() - heartbeat.st_mtime <= LISTENING_AGE
+    except FileNotFoundError:
+        listening = False
+    if not listening:
+        print('No Mac worker is connected to this Codespace, so nothing stops. Stop it from your Mac with '
+              'task work:cs:stop; otherwise it stops after its idle timeout.')
+        return 1
+    from .transport import _name
+    codespace = _name(env.get('CODESPACE_NAME'))
+    identity = f'{time.time_ns()}-{os.getpid()}-{secrets.token_hex(4)}'
+    request = base / 'stops' / (identity + '.json')
+    answer = request.with_suffix('.result')
+    created = now()
+
+    def remove_request():
+        try:
+            request.unlink()
+            return True
+        except OSError:
+            # Missing means claimed; every other failure is equally uncertain.
+            return False
+
+    try:
+        atomic_write(request, json.dumps(dict(schema=1, kind='stop', id=identity,
+                                              created_at=created, codespace=codespace)).encode())
+        until = created + wait
+        while now() < until:
+            try:
+                value = read_json(answer)
+            except FileNotFoundError:
+                sleep(0.5)
+                continue
+            if (set(value) != {'ok', 'message'} or type(value['ok']) is not bool
+                    or not isinstance(value['message'], str)):
+                raise ValueError('Invalid Mac stop answer; check task work:status on your Mac.')
+            answer.unlink()
+            print(('Your Mac recorded this as your stop. ' if value['ok'] else '') + value['message'])
+            return 0 if value['ok'] else 1
+        if remove_request():
+            print('Your Mac did not take the stop request within 60 seconds, so nothing stops. '
+                  'Check task work:status on your Mac.')
+        else:
+            print('Your Mac took the stop request but has not answered; check task work:status on your Mac.')
+        return 1
+    except KeyboardInterrupt:
+        print('Cancelled; nothing stops.' if remove_request()
+              else 'Cancelled, but your Mac already took the stop request.')
+        return 130
 
 
 @dataclass(frozen=True)

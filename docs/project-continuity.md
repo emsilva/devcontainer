@@ -30,7 +30,7 @@ create checkouts. Uncommitted code stays on the host where it was edited.
 | `task work:cs:armed` | Connect as `work:cs`, then arm restart after GitHub's 12-hour stop |
 | `task work:hold -- 09:30` / `-- off` | Hold restarts and resume prompts until a local time / end the hold |
 | `task work:disarm` | Stop this project's keeper and its keep-alive; sync continues |
-| `task work:cs:stop` | Record your stop, then stop the Codespace; it is never restarted |
+| `task work:cs:stop` | Record your stop, then stop the Codespace, from your Mac or through its connected Mac worker |
 | `task work:cs:restart` | Stop and start the Codespace now, outside the restart budget |
 | `task work:logs` | Show the last keeper and worker log lines, merged by time |
 
@@ -202,11 +202,26 @@ stale Herdr proxy, waits up to 10 minutes for Herdr, and sends the project's one
 outcome, a Codespace that something else started, and every stop it does not
 restart except your own, gets one Mac notification that names what to run.
 `task work:cs:stop` records your stop first, so it is never restarted, even when
-GitHub refuses the request. `task work:cs:restart` restarts with you present,
+GitHub refuses the request. It runs without a terminal on your Mac. Inside the
+Codespace it asks the connected Mac worker to record and carry out the stop;
+the Codespace's `GITHUB_TOKEN` is not used for this. The worker must support
+stop requests; an older worker or a sign-in-only connection is insufficient.
+With no capable worker it prints "No Mac worker is connected to this Codespace,
+so nothing stops" and leaves no request; the idle timeout still applies.
+On success it prints "Your Mac recorded this as your stop" before the result.
+If the Mac has not taken the request within 60 seconds, it removes it and
+prints "Your Mac did not take the stop request within 60 seconds, so nothing
+stops." If the Mac took it but has not answered, it says so and directs you to
+`task work:status` on your Mac. An uncertain removal has the same outcome.
+Ctrl-C prints "Cancelled; nothing stops." only when it removes the request;
+otherwise it prints "Cancelled, but your Mac already took the stop request."
+An expired request cannot run later.
+
+`task work:cs:restart` stays Mac-only and requires a terminal. It restarts
 outside the budget; for an armed project the keeper then restores Herdr and
-tells the lead. Both run on your Mac, use the armed account, or the active gh
-account for an unarmed project, and refuse while `GH_TOKEN` or `GITHUB_TOKEN` is
-set. Run task work:cs after a Mac restart; for an armed project it starts recovery again. Until then recovery is off.
+tells the lead. The Mac's stop and restart use the armed account, or the active
+gh account for an unarmed project, and refuse while `GH_TOKEN` or `GITHUB_TOKEN`
+is set on the Mac. Run task work:cs after a Mac restart; for an armed project it starts recovery again. Until then recovery is off.
 Arming refuses while another gh process, such as a project's own `cs:ports` forward or a mirror script, holds this Codespace's link; stop it first.
 The managed notes tell agents in the Codespace which ports reach the owner, and
 the Mac URL for each.

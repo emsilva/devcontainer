@@ -13,6 +13,130 @@ from devcontainer_setup.project_sync import arming, lifecycle
 from devcontainer_setup.project_sync.state import atomic_write, locked
 
 
+class CodespaceStopWriterTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name).resolve()
+        self.base = self.home / '.local/state/devcontainer-links'
+        self.base.mkdir(parents=True)
+        self.clock = 2000.0
+        self.hook = lambda: None
+
+    def capable(self):
+        path = self.base / 'stop-listening-v1'
+        path.touch()
+        os.utime(path, (self.clock, self.clock))
+
+    def request(self):
+        files = list((self.base / 'stops').glob('*.json'))
+        self.assertEqual(len(files), 1)
+        return files[0]
+
+    def sleep(self, seconds):
+        self.assertEqual(seconds, 0.5)
+        self.clock += seconds
+        self.hook()
+
+    def run_writer(self):
+        from devcontainer_setup.project_sync import power
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            result = power.request_from_codespace(home=self.home, env={'CODESPACE_NAME': 'fixture'},
+                                                  now=lambda: self.clock, sleep=self.sleep, wait=1)
+        return result, output.getvalue().strip()
+
+    def test_writer_requires_the_stop_capability(self):
+        (self.base / 'mac-listening').touch()
+        for age in (None, 16):
+            with self.subTest(age=age):
+                if age is not None:
+                    self.capable()
+                    os.utime(self.base / 'stop-listening-v1', (self.clock - age,) * 2)
+                result, text = self.run_writer()
+                self.assertEqual(result, 1)
+                self.assertIn('No Mac worker is connected to this Codespace, so nothing stops.', text)
+                self.assertFalse((self.base / 'stops').exists())
+
+    def answer(self, ok=True):
+        path = self.request()
+        path.unlink()  # The watcher claimed it before answering.
+        atomic_write(path.with_suffix('.result'), json.dumps({'ok': ok, 'message': 'Recorded.'}).encode())
+        self.hook = lambda: None
+
+    def test_answer_is_printed_and_removed(self):
+        self.capable()
+        self.hook = self.answer
+        self.assertEqual(self.run_writer(), (0, 'Your Mac recorded this as your stop. Recorded.'))
+        self.assertEqual(list((self.base / 'stops').iterdir()), [])
+
+    def test_refused_answer_is_printed_without_success_prefix(self):
+        self.capable()
+        self.hook = lambda: self.answer(False)
+        self.assertEqual(self.run_writer(), (1, 'Recorded.'))
+        self.assertEqual(list((self.base / 'stops').iterdir()), [])
+
+    def test_unclaimed_request_is_removed_at_the_deadline(self):
+        self.capable()
+        result, text = self.run_writer()
+        self.assertEqual(result, 1)
+        self.assertIn('within 60 seconds, so nothing stops', text)
+        self.assertEqual(list((self.base / 'stops').iterdir()), [])
+
+    def test_claimed_without_answer_says_so(self):
+        self.capable()
+        def claim():
+            self.request().rename(self.base / 'claimed.json')
+            self.hook = lambda: None
+        self.hook = claim
+        result, text = self.run_writer()
+        self.assertEqual(result, 1)
+        self.assertIn('took the stop request but has not answered', text)
+        self.assertNotIn('nothing stops', text)
+
+    def test_cancel_races_the_claim_in_both_orders(self):
+        self.capable()
+        for claimed in (False, True):
+            with self.subTest(claimed=claimed):
+                def cancel():
+                    if claimed:
+                        self.request().rename(self.base / 'claimed.json')
+                    raise KeyboardInterrupt
+                self.hook = cancel
+                result, text = self.run_writer()
+                self.assertEqual(result, 130)
+                self.assertEqual(text, 'Cancelled, but your Mac already took the stop request.' if claimed
+                                 else 'Cancelled; nothing stops.')
+                self.assertEqual(list((self.base / 'stops').iterdir()), [])
+
+    def test_deadline_unlink_error_is_uncertain(self):
+        self.capable()
+        unlink = Path.unlink
+        def denied(path, *args, **kwargs):
+            if path.parent == self.base / 'stops' and path.suffix == '.json':
+                raise PermissionError('fixture unlink denied')
+            return unlink(path, *args, **kwargs)
+        with mock.patch.object(Path, 'unlink', denied):
+            result, text = self.run_writer()
+        self.assertEqual(result, 1)
+        self.assertIn('took the stop request but has not answered', text)
+        self.assertNotIn('nothing stops', text)
+
+    def test_request_file_shape(self):
+        self.capable()
+        def inspect():
+            path = self.request()
+            value = json.loads(path.read_bytes())
+            self.assertEqual(set(value), {'schema', 'kind', 'id', 'created_at', 'codespace'})
+            self.assertEqual(value, dict(schema=1, kind='stop', id=path.stem, created_at=2000.0,
+                                         codespace='fixture'))
+            self.assertRegex(path.name, r'^[0-9]+-[0-9]+-[0-9a-f]{8}\.json$')
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+            self.answer()
+        self.hook = inspect
+        self.assertEqual(self.run_writer()[0], 0)
+
+
 class PowerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

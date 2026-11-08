@@ -326,6 +326,9 @@ def run(args):
         if args.logs:
             return _logs(state, args.follow)
         if args.codespace_stop:
+            if os.environ.get('CODESPACES') == 'true':
+                from . import power
+                return power.request_from_codespace(home=Path.home(), env=os.environ)
             return _owner_power(project, state, restart=False)
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise ValueError('Work entrypoints require a terminal; use task work:status for scripts')
