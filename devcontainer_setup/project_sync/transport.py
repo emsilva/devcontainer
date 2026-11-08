@@ -59,6 +59,9 @@ def _deleted_from_list(status, body, name):
         return None
     if any(row['name'] == name for row in rows):
         return False
+    total = obj.get('total_count')
+    if type(total) is int and total != len(rows):
+        return None
     return True if len(rows) < 100 else None
 
 

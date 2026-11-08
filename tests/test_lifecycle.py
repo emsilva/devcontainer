@@ -339,6 +339,15 @@ class LifecycleAPITests(unittest.TestCase):
         self.assertEqual((row.ok, row.state, row.http), (False, None, 404))
         self.assertEqual(len(calls), 2)
 
+    def test_a_404_with_a_mismatched_total_count_stays_unreadable(self):
+        def upstream(method, url, token):
+            if url.endswith('?per_page=100'):
+                return 200, json.dumps({'total_count': 101, 'codespaces': [{'name': 'other'}]}).encode()
+            return 404, b'{}'
+        api = lifecycle.LifecycleAPI(self.NAME, upstream=upstream, token_reader=lambda: 't')
+        row = api.read()
+        self.assertEqual((row.ok, row.state, row.http), (False, None, 404))
+
     def test_a_401_stays_an_auth_reading_without_a_list_call(self):
         # #60: authorization errors never trigger deletion confirmation.
         for status in (401, 403):
