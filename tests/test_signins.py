@@ -287,7 +287,31 @@ class SequenceTests(unittest.TestCase):
             spawn.return_value.wait.return_value = 0
             self.assertEqual(self.signins.login(self.state, self.signins.TOOLS[-1]), 0)
         spawn.assert_called_once_with(['ssh', '-F', str(self.state / 'ssh-config'), '-t', 'project-sync',
-                                       'bash', '-lc', "'grok login --device-auth'"], start_new_session=False)
+                                       'bash', '-lc', shlex.quote('trap "exit 130" INT; grok login --device-auth')],
+                                      start_new_session=False)
+
+    def test_ctrl_c_on_the_codespace_reads_as_a_cancel(self):
+        # Through ssh -t the Mac never sees Ctrl-C: the Codespace terminal sends SIGINT to the
+        # login's process group, and a tool killed by it made ssh exit 255, read as a dropped link.
+        marker = self.state / 'started'
+        tool = replace(self.signins.TOOLS[0], login=('sh', '-c', f'touch {shlex.quote(str(marker))}; sleep 30'))
+        with patch.object(self.signins.subprocess, 'Popen') as spawn:
+            spawn.return_value.wait.return_value = 0
+            self.signins.login(self.state, tool)
+        argv = spawn.call_args.args[0]
+        self.assertEqual(argv[-3:-1], ['bash', '-lc'])
+        remote = subprocess.Popen(['bash', '-c', shlex.split(argv[-1])[0]], start_new_session=True)
+        try:
+            deadline = time.monotonic() + 5
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(marker.exists(), 'the remote command never started the login')
+            os.killpg(remote.pid, signal.SIGINT)
+            self.assertEqual(remote.wait(timeout=5), 128 + signal.SIGINT)
+        finally:
+            if remote.poll() is None:
+                os.killpg(remote.pid, signal.SIGKILL)
+                remote.wait()
 
     def test_term_ends_current_login(self):
         self.assertTrue(callable(self.signins.run))

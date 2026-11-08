@@ -197,7 +197,10 @@ def login(state: Path, tool: Tool) -> int:
     try:
         # Establish ownership before a deferred cancellation can be delivered.
         with _defer_signals():
-            child = subprocess.Popen(_ssh(state, shlex.join(tool.login), terminal=True), start_new_session=False)
+            # ssh -t sends Ctrl-C to the Codespace, not to this process. A tool killed by it
+            # makes ssh exit 255, the code for a dropped link; the trap turns it into 130.
+            command = 'trap "exit 130" INT; ' + shlex.join(tool.login)
+            child = subprocess.Popen(_ssh(state, command, terminal=True), start_new_session=False)
         code = child.wait(timeout=tool.deadline)
         return code if code >= 0 else 128 - code
     except OSError:

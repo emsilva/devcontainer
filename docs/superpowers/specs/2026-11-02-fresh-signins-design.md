@@ -61,7 +61,9 @@ account, nothing copied), ruling 13 (ccswap on every Codespace) and the owner's 
    approval before the deadline (a busy callback port looks like this; its Mac notice names it), another exit code, or
    a login that finished while the tool still reports signed out or cannot be checked (amended 2026-11-04: the live
    test lost Codex to a dropped tunnel and the old single line blamed a timeout or busy port). Ctrl-C
-   or a cancel stops the current tool's session, prints the summary and exits; nothing else is undone.
+   or a cancel stops the current tool's session, prints the summary and exits; nothing else is undone. Through `ssh -t`
+   Ctrl-C reaches the Codespace, not the Mac, so the remote command traps SIGINT and exits 130 (amended 2026-11-07:
+   on innovate, Ctrl-C during Plaud and Codex read as a dropped connection and the sequence went on).
 7. **No spike.** The ccswap two-account spike (call 9) is retired: the sequence signs in one Claude account
    (ruling 25), and further accounts are the owner's to add.
 8. **Reruns leave a paired Codespace as it is** (ruling 28, superseding ruling 3's rebuild default). The wizard's
