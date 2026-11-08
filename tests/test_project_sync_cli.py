@@ -715,6 +715,19 @@ class ProjectSyncCLITests(unittest.TestCase):
                                '--project', str(self.root), *args], env=self.env,
                               capture_output=True, text=True)
 
+    def test_codespace_stop_runs_without_a_terminal(self):
+        for name in ('CODESPACES', 'GH_TOKEN', 'GITHUB_TOKEN'):
+            self.env.pop(name, None)
+        result = self.run_cli('work', '--codespace-stop')
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn('require a terminal', result.stderr)
+        self.assertIn('Pair a Codespace first', result.stderr)
+
+    def test_codespace_restart_still_requires_a_terminal(self):
+        result = self.run_cli('work', '--codespace-restart')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Work entrypoints require a terminal', result.stderr)
+
     def test_readonly_status_does_not_create_state_or_load_checkout_python(self):
         (self.root / 'sitecustomize.py').write_text('raise RuntimeError("checkout injection")\n')
         result = self.run_cli('scratch', 'status')

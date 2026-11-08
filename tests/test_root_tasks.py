@@ -1,4 +1,5 @@
 import hashlib
+import re
 import unittest
 from devcontainer_setup.root_tasks import integrate
 
@@ -64,10 +65,12 @@ class RootTasksTests(unittest.TestCase):
             self.assertIn('  ' + name + ':\n', template)
             self.assertIn('  ' + name + ':\n', generator)
             self.assertIn('task: devcontainer:' + name + '\n', changed)
-        for name in ('work:cs:armed', 'work:cs:stop', 'work:cs:restart'):
+        for name in ('work:cs:armed', 'work:cs:restart'):
             self.assertIn('  ' + name + ':\n    interactive: true\n', changed)
-        for name in ('work:disarm', 'work:hold', 'work:logs'):
-            self.assertNotIn('  ' + name + ':\n    interactive', changed)
+        for name in ('work:disarm', 'work:hold', 'work:cs:stop', 'work:logs'):
+            for text in (changed, template, generator):
+                stanza = re.split(r'\n(?=  \S)', text.split('  ' + name + ':\n', 1)[1], maxsplit=1)[0]
+                self.assertNotIn('interactive:', stanza)
         self.assertEqual(integrate(changed), changed)
 
     def test_edited_owned_block_refused(self):
