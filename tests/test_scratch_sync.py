@@ -271,7 +271,7 @@ class ScratchTests(unittest.TestCase):
                         patch('devcontainer_setup.project_sync.transport.CodespaceConnection', Connection), \
                         patch.object(m, 'install_mutagen', return_value=binary), \
                         patch.object(m, '_mutagen', side_effect=mutagen), \
-                        patch('devcontainer_setup.project_sync.state.process_identity', side_effect=lambda pid: 'project_sync.scratch --supervise ' + str(state) + ' ' + nonce if worker.is_alive() else None), \
+                        patch('devcontainer_setup.project_sync.state.process_identity', side_effect=lambda pid, **_: 'project_sync.scratch --supervise ' + str(state) + ' ' + nonce if worker.is_alive() else None), \
                         patch.object(m.signal, 'signal'), patch.object(m.threading, 'Event', return_value=exiting), \
                         patch.object(m, 'start', side_effect=start), \
                         patch.object(workspace, '_prerequisites'), \

@@ -107,7 +107,7 @@ def move_consent(state: Path, value: dict, *, project_name: str, new: str, now: 
                  consent_sha256=hashlib.sha256(consent_text(project_name, new, owner).encode()).hexdigest())
     if ports is not None:
         moved['ports'] = sorted(ports)
-    for key in ('owner_stop_at', 'pending_restore'):
+    for key in ('owner_stop_at', 'owner_stop_codespace', 'pending_restore'):
         moved.pop(key, None)
     atomic_write(Path(state) / 'arming-history' / f'{time.time_ns()}.json',
                  json.dumps(value, sort_keys=True).encode() + b'\n')
@@ -184,8 +184,8 @@ def hold_until(value: str, now: float) -> float | None:
     return at.timestamp()
 
 
-def record_owner_stop(state: Path, now: float) -> None:
-    write(state, dict(read(state), owner_stop_at=now))
+def record_owner_stop(state: Path, now: float, codespace: str) -> None:
+    write(state, dict(read(state), owner_stop_at=now, owner_stop_codespace=codespace))
 
 
 def clear_pending_restore(state: Path, rid: str) -> None:

@@ -373,18 +373,18 @@ def wait_gone(runtime: dict, timeout: float) -> bool:
     return False
 
 
-def process_identity(pid):
+def process_identity(pid, *, timeout: float = 5):
     """Start time and argv of a live process, or None; it pins a pid against reuse."""
     if not isinstance(pid, int) or pid <= 1:
         return None
     result = subprocess.run(['ps', '-p', str(pid), '-o', 'lstart=', '-o', 'args='],
-                            capture_output=True, text=True, timeout=5)
+                            capture_output=True, text=True, timeout=timeout)
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def owned_process(runtime: dict, state: Path, *, flag: str, module: str) -> bool:
+def owned_process(runtime: dict, state: Path, *, flag: str, module: str, timeout: float = 5) -> bool:
     """True only for the live process a runtime record launched: pid, start time, argv and nonce."""
-    identity = process_identity(runtime.get('pid'))
+    identity = process_identity(runtime.get('pid'), timeout=timeout)
     nonce = runtime.get('nonce')
     return bool(identity and isinstance(nonce, str) and len(nonce) == 48
                 and flag in identity and module in identity

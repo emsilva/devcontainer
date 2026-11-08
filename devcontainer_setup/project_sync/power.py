@@ -125,7 +125,7 @@ def stop(state: Path, *, expected: str | None = None, until: float | None = None
         if armed and value.get('codespace') != codespace:
             raise ValueError('The paired Codespace is not the armed one; run task work:cs:armed')
         stopped_at = check_request()
-        arming.record_owner_stop(state, stopped_at)
+        arming.record_owner_stop(state, stopped_at, codespace)
 
     # Use the account and target captured in the same transaction as the owner stop.
     api = api or lifecycle.LifecycleAPI(codespace, value.get('gh_user') if armed else None)

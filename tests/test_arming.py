@@ -115,8 +115,9 @@ class ArmingTests(unittest.TestCase):
             arming.hold_until('25:99', now)
 
     def test_record_owner_stop(self):
-        arming.record_owner_stop(self.dir, 55.0)
+        arming.record_owner_stop(self.dir, 55.0, 'cs-1')
         self.assertEqual(arming.read(self.dir)['owner_stop_at'], 55.0)
+        self.assertEqual(arming.read(self.dir)['owner_stop_codespace'], 'cs-1')
 
 
 class ConsentMoveTests(unittest.TestCase):
@@ -184,11 +185,12 @@ class ConsentMoveTests(unittest.TestCase):
         self.assertCountEqual(archived, [self.armed, first])
 
     def test_move_retires_owner_stop_and_pending_restore(self):
-        value = dict(self.armed, owner_stop_at=1500.0, pending_restore={'rid': 'r1'}, extra='kept')
+        value = dict(self.armed, owner_stop_at=1500.0, owner_stop_codespace='old-cs', pending_restore={'rid': 'r1'}, extra='kept')
         arming.write(self.state, value)
         arming.move_consent(self.state, value, project_name='proj', new='new-cs', now=2000.0)
         moved = arming.read(self.state)
         self.assertNotIn('owner_stop_at', moved)
+        self.assertNotIn('owner_stop_codespace', moved)
         self.assertNotIn('pending_restore', moved)
         self.assertEqual(moved['extra'], 'kept')
         archived = [json.loads(p.read_text()) for p in (self.state / 'arming-history').glob('*.json')]

@@ -439,7 +439,7 @@ class KeeperStepTests(unittest.TestCase):
                     if change == 'hold':
                         arming.write(self.state, dict(value, hold_until=self.clock + 3600))
                     elif change == 'owner':
-                        arming.record_owner_stop(self.state, self.clock)
+                        arming.record_owner_stop(self.state, self.clock, 'cs-1')
                     elif change == 'disarm':
                         arming.write(self.state, dict(value, armed=False))
                     elif change == 'repair':
@@ -625,7 +625,7 @@ class KeeperStepTests(unittest.TestCase):
 
     def test_owner_stop_is_never_restarted(self):
         # work:cs:stop records the stop before its POST, so the keeper reads OWNER, logs it and waits.
-        arming.record_owner_stop(self.state, T0 + 3600)
+        arming.record_owner_stop(self.state, T0 + 3600, 'cs-1')
         stops = [T0 + 3700 + 60 * i for i in range(60)]
         k = self.keeper([up(T0, last_used_at=T0 - 60)] + [down(at) for at in stops], herdr=FakeHerdr())
         self.run_steps(k, [T0] + stops)
@@ -635,7 +635,7 @@ class KeeperStepTests(unittest.TestCase):
         # Even when GitHub's 12-hour stop falls inside the hour the owner stopped it in.
         self.setUp()
         anchor = T0 - LIFE + 3600
-        arming.record_owner_stop(self.state, anchor + LIFE + 10)
+        arming.record_owner_stop(self.state, anchor + LIFE + 10, 'cs-1')
         stops = [anchor + LIFE + 20 + 60 * i for i in range(60)]
         k = self.keeper([up(T0, last_used_at=anchor)] + [down(at) for at in stops], herdr=FakeHerdr())
         self.run_steps(k, [T0] + stops)
@@ -923,7 +923,7 @@ class KeeperStepTests(unittest.TestCase):
         herdr, anchor, rid = FakeHerdr(), T0 - 3600, 'o-000500Z'
 
         def owner_stop():
-            arming.record_owner_stop(self.state, self.clock)
+            arming.record_owner_stop(self.state, self.clock, 'cs-1')
             return up(self.clock, last_used_at=anchor)
 
         def back():
@@ -979,7 +979,7 @@ class KeeperStepTests(unittest.TestCase):
                       'resume. See task work:status.', self.notes[0])
 
     def test_owner_stop_is_logged_only(self):
-        arming.record_owner_stop(self.state, T0 + 3600)
+        arming.record_owner_stop(self.state, T0 + 3600, 'cs-1')
         stops = [T0 + 3700 + 60 * i for i in range(4)]
         k = self.keeper([up(T0, last_used_at=T0 - 60)] + [down(at) for at in stops])
         self.run_steps(k, [T0] + stops)
