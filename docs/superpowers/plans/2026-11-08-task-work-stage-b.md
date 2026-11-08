@@ -10,16 +10,16 @@ and `Next:` commands and exits 0. A conversation the paired Codespace refused ca
 `standing.py` reads local facts without side effects; `probe.py` runs every GitHub and Git read as owned child
 processes under one 2-second monotonic deadline; `overview.py` turns facts into lines and actions (pure) and, in Task 4,
 drives the printer and menu; `forget.py` records a forgotten conversation, and the outbound capture drops it at the
-source. Setup facts that generated projects cannot import (metadata marker, launch receipt, setup PRs, generator tip,
-checkout comparison) get small runtime readers, each pinned by a parity test to the setup function it mirrors.
+source. Setup facts that generated projects cannot import (metadata marker, launch receipt, root Taskfile, setup PRs,
+generator tip, checkout comparison) get small runtime readers, each pinned by a parity test to the setup code it mirrors.
 
 **Tech Stack:** Python 3 standard library (vendored, run as `python3 -I -B`), go-task, `unittest`, Gum (only when
 already installed or cached).
 
-**Spec:** `docs/superpowers/specs/2026-11-02-task-work-design.md` (sha256 `b443ce89…`), section "B. `task work`", its
-Anti-goals, Constraints, Owner answers 2 (forget) and "Tests the plan must include" (B list). Source inventory with
-file:line evidence at 8fa4035: `tmp/codespace-lifecycle/task-work/stage-b/inventory/INVENTORY.md` (sha256
-`4b2590068d9f…`, cited below as INV §n). Line numbers below are at 7ecc53c, the stage A tip.
+**Spec:** `docs/superpowers/specs/2026-11-02-task-work-design.md`, section "B. `task work`", its Anti-goals,
+Constraints, Owner answers 2 (forget) and "Tests the plan must include" (B list). Source inventory at 8fa4035:
+`tmp/codespace-lifecycle/task-work/stage-b/inventory/INVENTORY.md` (sha256 `4b2590068d9f…`, INV §n). Plan check this
+revision answers: `tmp/codespace-lifecycle/task-work/stage-b/plancheck/CHECK.md` (F1-F22). Line numbers are at 7ecc53c.
 
 ## Global Constraints
 
@@ -34,28 +34,49 @@ file:line evidence at 8fa4035: `tmp/codespace-lifecycle/task-work/stage-b/invent
   `lifecycle.LifecycleAPI`, `transport.github_token()`, `arming.account()`, `Store.latest()`/`load()`/`present()`/
   `relay_entries()`, setup's `checkout_update()`/`fetch_release()`, `terminal.gum_binary()` or `terminal.Gum()` without
   a binary (INV §2). No file under the state directory, the checkout or the cache is created or changed.
-- A bare HTTP 404, an empty answer, a truncated or failed list, or a list read under another account never means
-  "deleted" (spec Anti-goals, #60). Only a complete inventory from the account recorded for the pairing does.
+- "Deleted" needs a complete inventory of the account recorded for the pairing that lacks the paired name, or the
+  keeper's own deleted verdict. A 404, an empty, truncated or failed list, a repository-filtered list, or a list read
+  under another or unknown account never means deleted (spec Anti-goals, #60).
 - Do not name a module `work.py`: it is in `render.RETIRED_HELPERS` (`devcontainer_setup/render.py:26-27`).
-- Every untrusted string shown (Codespace, branch and PR names, agent and session ids, reasons) is stripped of
-  control and format characters before display. Executed commands are argv tuples; shown commands are `shlex.join`.
-- Stdlib only. No new key in the user `config.json`. New state files use `state.atomic_write` (private, atomic).
+- Untrusted text (Codespace, branch, PR and path names, agent and session ids, reasons) shown in a state line goes
+  through `overview.fit` (control and format characters dropped). An action whose argv holds a character of category
+  `Cc`, `Cf`, `Zl` or `Zp` is not offered; a problem line says so instead. Executed commands are argv tuples; shown
+  commands are `shlex.join(argv)`, never truncated.
+- Stdlib only. No new key in the user `config.json`; `arming.json` may gain keys (CHECK C7). New state files use
+  `state.atomic_write` (private, atomic).
 - No client, organization or Codespace names in code, tests, docs or commit messages (the repository is public).
 - Times shown are local `HH:MM`, or `YYYY-MM-DD HH:MM` when not today.
 
+## Calls made by the lead (each can be overruled)
+
+1. **Without a terminal, one frame after the join** (CHECK F12). On a terminal the local-only frame shows first and is
+   redrawn when the probe joins (spec line 109). A script or agent gains nothing from a provisional frame and two
+   frames would be ambiguous; the spec line now says so.
+2. **The keeper's deleted verdict stands as dated evidence** (CHECK F1). It is the runtime's existing proof (same
+   token's account inventory, a first page under `per_page=100` with fewer than 100 rows is complete) and `task
+   work:status` already shows it.
+3. **A keychain dialog cannot be ruled out by environment** (CHECK F2). The printer reads the token the way every
+   runtime command does (`gh auth token`), with prompts disabled, and the 2-second kill bounds it; a token not handed
+   over in time is `unknown`.
+4. **Forget drops the conversation's own entry only** (CHECK F19). Another conversation that depends on its files
+   still carries what it needs to resume; dependency validation is unchanged.
+5. **A 40-hex `SETUP_DEVCONTAINER_REF` is a pin, not an observation** (CHECK F4): no generator line is shown for it.
+
 ## Review Focus
 
-1. **A probe child that ignores SIGTERM or leaves a grandchild** (gh waiting on a keychain prompt, git on a
-   credential helper): `join()` still returns by the deadline and nothing it started outlives it (Task 2
-   `test_grandchild_is_gone_after_the_deadline`).
-2. **Evidence from the previous pairing after a rebind** (keeper runtime, worker cycle or arming naming OLD): never
-   labels the current pairing (Task 1 `test_records_for_another_codespace_are_ignored`).
-3. **Hostile or wide names**: an escape sequence, a newline or CJK/emoji text in a Codespace, branch or session name
-   neither reaches the terminal raw nor breaks 78 cells (Task 3 `test_untrusted_text_is_sanitized_and_fits`).
-4. **Ctrl-C or Esc at any point**: during the probe, nothing it started survives and the exit is 130 with
-   `Cancelled.`; at the menu, nothing runs and the exit is 0 with `Nothing ran.` (Task 4 tests).
-5. **An owner-defined root `work:cs`** (or any alias) that is not the managed one: the menu runs and prints
-   `task devcontainer:work:cs`, never the owner's task (Task 3 `test_owner_alias_is_not_assumed_managed`).
+1. **A probe child that leaves a grandchild** (gh waiting on the keychain, a git helper), including after its own
+   leader exits: `join()` returns by the deadline and nothing in its process groups outlives it (Task 2
+   `test_grandchild_is_gone_after_the_deadline`, `test_exited_leader_with_a_live_grandchild`).
+2. **Evidence from the previous pairing after a rebind** (keeper runtime, worker cycle or owner stop naming OLD):
+   never labels the current pairing (Task 1 `test_records_for_another_codespace_are_ignored`).
+3. **Hostile or wide names**: an escape sequence, a newline or CJK/emoji text in a Codespace, branch, path or session
+   name neither reaches the terminal raw (state lines, menu items, `Next:`, `Running:`) nor breaks 78 cells (Task 3
+   `test_untrusted_text_never_reaches_the_terminal`).
+4. **Ctrl-C or Esc**: during the probe, nothing it started survives, exit 130 with `Cancelled.`; at the menu, nothing
+   runs, exit 0 with `Nothing ran.` (Task 4 `test_ctrl_c_during_the_probe_leaves_nothing_running`,
+   `test_ctrl_c_or_esc_at_the_menu_runs_nothing`).
+5. **An owner-defined root `work:cs`** that is not the managed one, or an edited managed block: the menu runs and
+   prints `task devcontainer:work:cs`, never the owner's task (Task 3 `test_owner_alias_is_not_assumed_managed`).
 
 ---
 
@@ -64,32 +85,37 @@ file:line evidence at 8fa4035: `tmp/codespace-lifecycle/task-work/stage-b/invent
 **Files:**
 - Create: `devcontainer_setup/project_sync/standing.py`
 - Modify: `devcontainer_setup/project_sync/state.py:376-392` (`process_identity`, `owned_process` gain
-  `timeout: float = 5`, passed through to `ps`; callers unchanged)
-- Test: `tests/test_standing.py` (new)
+  `timeout: float = 5`, passed to `ps`), `devcontainer_setup/project_sync/arming.py:110,187-188`
+  (`record_owner_stop(state, now, codespace)` also writes `owner_stop_codespace`; `move_consent` retires it with
+  `owner_stop_at`), `devcontainer_setup/project_sync/power.py` (passes the Codespace it validated under the lock)
+- Test: `tests/test_standing.py` (new); `tests/test_power.py`, `tests/test_arming*.py` callers of `record_owner_stop`;
+  `tests/test_scratch_sync.py:274` (its `process_identity` stub becomes `lambda pid, **_: …`)
 
 **Interfaces:**
 - Produces, in `standing.py` (all frozen dataclasses):
   - `Checkout`: `default: str`, `branch: str | None`, `relation: str` (one of `current`, `behind`, `ahead`,
     `diverged`, `detached`, `other-branch`, `no-remote-ref`, `unknown`), `behind: int`, `ahead: int`,
-    `fetched_at: float | None` (mtime of `git rev-parse --git-path FETCH_HEAD`, else None).
+    `copied_at: float | None` (the newest reflog time of `refs/remotes/origin/<default>`, else None; never `FETCH_HEAD`).
   - `Launch`: `codespace: str`, `complete: bool` (`commit` is 40 hex, `validated_commit == commit`,
     `rebuild_pending is False`).
-  - `Refusal`: `agent: str`, `session_id: str`, `reason: str`.
-  - `Local`: `root: Path`, `state: Path`, `repository: str` (origin's `owner/repo`, spelling preserved as setup's
-    `_github_repository` keeps it), `generated: bool` (this package runs from `<root>/.devcontainer/scripts/project_sync`),
-    `in_codespace: bool` (`CODESPACES == 'true'`), `setup: str` (`installed`, `partial`, `missing`, `unmanaged`,
-    `unknown`, or `source` when not generated), `source_ref: str | None`, `pairing: str | None`,
-    `armed: bool | None` (None = unreadable), `gh_user: str | None` (arming's `gh_user`, else the keeper runtime's,
-    each only when it names the pairing), `owner_stop_at: float | None`, `started_at: float | None` (the pairing's
-    latest `started_at` in `start-evidence.json`, read raw),
-    `hold_until: float | None`, `keeper: str` (`running`, `stale`, `stopped`, `unknown`),
-    `keeper_heartbeat_age: float | None`, `reading: tuple[str, float] | None` (keeper's last `(state, at)`),
-    `deleted_at: float | None` (keeper `phase == 'deleted'`), `down_kind: str | None` (`OWNER`, `LIFETIME`, `OTHER`),
-    `down_at: float | None`, `worker: str` (`running`, `stopped`, `unknown`), `cycle_at: float | None`,
-    `refusals: tuple[Refusal, ...]`, `launch: Launch | None`, `checkout: Checkout`, `problems: tuple[str, ...]`.
-  - `read(root: Path, *, env: Mapping[str, str] = os.environ, timeout: float = 1.0) -> Local`. Never raises for bad
-    state: an unreadable file becomes `unknown`/None plus one `problems` entry naming the file
-    (`'arming.json cannot be read'`).
+  - `Refusal`: `agent: str` (fullmatches `[a-z][a-z0-9_-]{0,31}`), `session_id: str` (fullmatches
+    `[A-Za-z0-9._-]{1,128}`), `reason: str`.
+  - `Local`: `root: Path`, `state: Path | None` (None when `state_dir` refuses; its message goes to `problems`),
+    `repository: str` (origin's `owner/repo`, spelling preserved as setup's `_github_repository` keeps it),
+    `generated: bool` (this package runs from `<root>/.devcontainer/scripts/project_sync`), `in_codespace: bool`
+    (`CODESPACES == 'true'`), `setup: str` (`installed`, `partial`, `missing`, `unmanaged`, `unknown`, or `source` when
+    not generated), `source_ref: str | None`, `taskfile: str | None` (the root Taskfile's name), `managed:
+    frozenset[str] | None` (aliases in a valid managed block; None when absent, edited or ambiguous), `pairing: str |
+    None`, `armed: bool | None` (None = unreadable), `gh_user: str | None` (arming's, else the keeper runtime's, each
+    only when it names the pairing), `owner_stop_at: float | None` (only for the pairing, below), `hold_until: float |
+    None`, `started_at: float | None` (the pairing's `started_at` in `start-evidence.json`, read raw), `last_up_at:
+    float | None`, `keeper: str` (`running`, `stale`, `stopped`, `unknown`), `keeper_heartbeat_age: float | None`,
+    `reading: tuple[str, float] | None`, `deleted_at: float | None`, `down_kind: str | None`, `down_at: float | None`,
+    `worker: str` (`running`, `stopped`, `unknown`), `cycle_at: float | None`, `refusals: tuple[Refusal, ...]`,
+    `launch: Launch | None`, `checkout: Checkout`, `problems: tuple[str, ...]`.
+  - `read(root: Path, *, env: Mapping[str, str] = os.environ, timeout: float = 1.0) -> Local`. Never raises: an
+    unreadable file becomes `unknown`/None plus one `problems` entry naming it (`'arming.json cannot be read'`).
+  - `refusals(state: Path, project, binding: dict) -> tuple[Refusal, ...]`: the refusal reader Task 5 also uses.
 - Rules `read` follows:
   - Every subprocess (git, ps) gets `timeout`; git runs with `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`. A
     timeout makes only that fact `unknown`. No `git status`, `fetch` or `merge`.
@@ -97,19 +123,25 @@ file:line evidence at 8fa4035: `tmp/codespace-lifecycle/task-work/stage-b/invent
     `customizations.devcontainerSetup`; `unknown` on malformed JSON or a `sourceRef` that is not 40 hex; `partial`
     when installed but neither `R/workspace.json` nor `R/scratch.json` exists (spec line 108; test file existence,
     not `workspace.registry()`, which synthesizes defaults); else `installed`.
-  - Keeper, worker and arming records count only when they name the current `pairing` (keeper runtime `codespace`,
-    worker `binding` equal to `scratch.json`, arming `codespace`); otherwise they are ignored (Review Focus 2).
-    Process liveness uses `state.owned_process(..., timeout=timeout)` with the flags `keeper.status` and
-    `scratch.status` pass today; `stale` means owned with heartbeat age over `keeper.HEARTBEAT_STALE`.
-  - `down_kind`: the keeper record's `down.kind` when present; else `lifecycle.classify()` with the inputs
-    `keeper._classify` uses (`keeper.py:513-518`: `last_up_at`, `down.first_at`, `anchor.at` plus `anchor.also`,
-    `owner_stop_at`), called directly (the method logs and notifies).
-  - `refusals`: from `scratch-runtime.json` `conversations` when `schema == 3`, `completed_at` is set and the worker
-    binding matches: `directions.desktop_to_codespace.publication_issues` entries with string `agent` and
-    `session_id`. Capture issues are not refusals.
-  - `launch`: the receipt at `<setup state home>/devcontainer-setup/<sha256(f'{repo}:{default}')[:16]>.json`, where the
-    setup state home is an absolute `XDG_STATE_HOME`, else `~/.local/state` (setup's resolver, not continuity's;
-    INV §1). Kept only when `repository == repo`, `branch == default` and `codespace` is a valid name. Never migrated.
+  - `taskfile`/`managed`: the names and order setup's `integrate_taskfile` accepts (`devcontainer_setup/__main__.py:
+    81-87`); more than one present is ambiguous. The managed block is valid only when it matches `root_tasks.integrate`'s
+    pattern and its sha256 (`devcontainer_setup/root_tasks.py:16-24`); an edited block adds a problem
+    `'The managed work tasks in TASKFILE were edited'`.
+  - Records count only when they name the current `pairing`: keeper runtime `codespace`; worker `binding` equal to
+    `scratch.json`; arming `codespace` for consent fields. The owner stop counts when `owner_stop_codespace` names the
+    pairing, or, for a record without that key, when arming's `codespace` does (an unarmed legacy stop is ignored).
+  - Keeper liveness: `state.owned_process(..., timeout=timeout)` with `keeper.status`'s flags; `stale` = owned with
+    no heartbeat or one older than `keeper.HEARTBEAT_STALE` (as `keeper.py:74-79` treats it). `down_kind`/`down_at`
+    come only from a `running` keeper's record with a numeric `down.first_at` and a `down.kind` in `OWNER`,
+    `LIFETIME`, `OTHER`; no fallback classification. `reading` is `reading` when `ok` is true and `state` a string,
+    else `last_ok`'s `(state, at)`, else None.
+  - `refusals`: the worker cycle counts when `schema == 3`, `completed_at` is set, the worker `binding` equals
+    `binding`, and the cycle's `project_id`, `identity`, `local_root` and `remote_root` match the project and binding
+    (as `workspace.py:359-364` checks them); then each `directions.desktop_to_codespace.publication_issues` entry
+    whose ids match the `Refusal` patterns (others add one problem). Capture issues are not refusals.
+  - `launch`: the receipt at `<setup state home>/devcontainer-setup/<sha256(f'{repo}:{default}')[:16]>.json`, the
+    setup state home being an absolute `XDG_STATE_HOME`, else `~/.local/state` (setup's resolver, not continuity's;
+    INV §1). Kept when `repository == repo`, `branch == default` and `codespace` is a valid name. Never migrated.
 
 - [ ] **Step 1: Write the tests** in `tests/test_standing.py` (temporary Git repos with an `origin`, `XDG_STATE_HOME`
   in a temp dir, fake `ps` through a patched `state.process_identity`):
@@ -117,27 +149,36 @@ file:line evidence at 8fa4035: `tmp/codespace-lifecycle/task-work/stage-b/invent
 ```python
 def test_reading_creates_and_changes_nothing(self):
     # hash every file under the checkout, the state dir and XDG_CACHE_HOME before and after read(); equal;
-    # also with no state dir at all (it must still not exist afterwards)
-
+    # with no state dir at all it still does not exist afterwards
 def test_setup_states(self):            # missing, unmanaged, malformed -> unknown, partial, installed, source
 def test_records_for_another_codespace_are_ignored(self):
-    # scratch.json names 'new-cs'; keeper runtime, worker binding and arming name 'old-cs'
-    self.assertIsNone(local.reading); self.assertEqual(local.refusals, ()); self.assertIsNone(local.down_kind)
+    # scratch.json names 'new-cs'; keeper runtime, worker binding, arming and owner_stop_codespace name 'old-cs'
+    self.assertIsNone(local.reading); self.assertEqual(local.refusals, ()); self.assertIsNone(local.owner_stop_at)
+def test_unarmed_owner_stop_names_its_codespace(self):
+    # power.stop on an unarmed pairing -> arming.json has owner_stop_at and owner_stop_codespace; read() keeps it
+def test_stopped_keeper_gives_no_stop_classification(self):   # stale OWNER record, keeper not owned -> down_kind None
+def test_failed_reading_falls_back_to_last_ok(self)
 def test_unreadable_arming_is_unknown_not_unarmed(self):
     self.assertIsNone(local.armed); self.assertIn('arming.json cannot be read', local.problems)
 def test_process_check_timeout_is_unknown(self):   # process_identity raises TimeoutExpired -> keeper == 'unknown'
-def test_refusals_come_from_publication_issues_only(self)
+def test_refusals_need_a_matching_cycle(self):     # foreign project_id or remote_root -> (); capture issues -> ()
 def test_checkout_relations(self):     # current, behind 2, ahead 1, diverged, detached, other-branch, no-remote-ref
+def test_copy_time_is_the_tracking_refs_own(self):
+    # setup's --no-write-fetch-head fetch moves origin/main: copied_at changes; a later fetch of another ref: unchanged
 def test_checkout_matches_setup_decision(self):
-    # for each fixture, run git_ops.checkout_update on a copy (with a local bare origin so its fetch is offline):
-    # behind -> 'updated'; current -> 'current'; diverged -> refused 'diverged'; detached -> 'detached';
-    # other-branch -> 'other-branch'; and read() on the original left HEAD, index and refs byte-identical
+    # each fixture copied; git_ops.checkout_update on the copy (local bare origin, offline): behind -> 'updated';
+    # current -> 'current'; diverged -> 'diverged'; detached -> 'detached'; other-branch -> 'other-branch';
+    # read() on the original leaves HEAD, index and refs byte-identical
 def test_metadata_matches_setup(self):  # render() output -> source_ref equals __main__._metadata(...)['sourceRef']
 def test_launch_receipt_matches_setup(self):
-    # path equals codespaces.receipt_path(state_home, repo, default) for absolute XDG_STATE_HOME and the default
-    # home, a mixed-case owner/repo and a slash in the branch; complete == bool(__main__._launch_history(...))
-    # for complete, unvalidated, rebuild_pending and wrong-branch fixtures
+    # path equals codespaces.receipt_path(state_home, repo, default) for absolute XDG_STATE_HOME and the default home,
+    # a mixed-case owner/repo and a slash in the branch; complete == bool(__main__._launch_history(...)) for complete,
+    # unvalidated, rebuild_pending and wrong-branch fixtures
 def test_repository_spelling_matches_setup(self):  # equals __main__._github_repository for mixed-case origins
+def test_managed_aliases_match_root_tasks(self):
+    # integrate() output under each of the 8 Taskfile names -> managed == set(root_tasks.ALIASES);
+    # an owner 'work:cs' outside the block -> not in managed; an edited block -> None plus its problem; two Taskfiles -> None
+def test_unresolvable_state_home_is_a_problem(self)  # state_dir raises -> state None, problem names it
 ```
 
 - [ ] **Step 2: Run them; they fail** (`standing` does not exist).
@@ -145,14 +186,15 @@ def test_repository_spelling_matches_setup(self):  # equals __main__._github_rep
 Run: `python3 -m unittest tests.test_standing -v`
 Expected: exit 1, `ModuleNotFoundError: No module named 'devcontainer_setup.project_sync.standing'`.
 
-- [ ] **Step 3: Implement** `standing.py` as in Interfaces, and the `timeout` keyword in `state.py`.
+- [ ] **Step 3: Implement** `standing.py` as in Interfaces, the `timeout` keyword in `state.py`, and the
+  `owner_stop_codespace` producer in `arming.py`/`power.py` (the keeper keeps reading `owner_stop_at` project-wide).
 
 - [ ] **Step 4: Run the gates.** Run: `task check && task test`. Expected: exit 0.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add devcontainer_setup/project_sync/standing.py devcontainer_setup/project_sync/state.py tests/test_standing.py
+git add -A devcontainer_setup/project_sync tests
 git commit -m "Read where a project stands from local state without side effects"
 ```
 
@@ -167,62 +209,81 @@ git commit -m "Read where a project stands from local state without side effects
   - `Request`: `repository: str` (`owner/repo`), `default: str`, `want_prs: bool`, `generator: tuple[str, str] | None`
     (repository URL or path, ref). Built by the caller; this task does not import `standing`.
   - `Observation`: `status: str` (`ok`, `unknown` = no answer before the deadline, `failed`), `value: object`,
-    `at: float | None` (`time.time()` when answered), `reason: str | None` (short and fixed: `no answer within 2 s`,
-    `not signed in to GitHub`, `request failed`, `incomplete list`, `answer too large`).
-  - `Space`: `name: str`, `state: str`, `last_used_at: str | None`.
-  - `Remote`: `account: Observation` (login), `spaces: Observation` (`tuple[Space, ...]` of this repository; `ok`
-    only when every page parsed and, where `total_count` is present, the row count equals it), `setup_prs:
-    Observation` (`tuple[int, ...]` PR numbers), `upstream: Observation` (40-hex SHA).
+    `at: float | None` (`time.time()` when answered), `reason: str | None`, one of: `no answer within 2 s`,
+    `not signed in to GitHub`, `request failed`, `incomplete list`, `answer too large`, `gh is not installed`,
+    `git is not installed`, `pinned`.
+  - `Space`: `name: str`, `state: str`, `last_used_at: float | None` (GitHub's "last known time this codespace was
+    started", parsed from ISO 8601).
+  - `Remote`: `account: Observation` (login), `names: Observation` (`frozenset[str]` of every Codespace name in the
+    account, `ok` only when complete, below), `spaces: Observation` (`tuple[Space, ...]` of this repository, from the
+    same answer), `setup_prs: Observation` (`tuple[int, ...]` PR numbers), `upstream: Observation` (40-hex SHA).
   - `generator_request(env: Mapping[str, str]) -> tuple[str, str]`: `SETUP_DEVCONTAINER_REPO` (default
-    `https://github.com/emsilva/devcontainer.git`) and `SETUP_DEVCONTAINER_REF` (default `main`), as
-    `upgrade_handoff` reads them (`devcontainer_setup/__main__.py:481-483`).
+    `https://github.com/emsilva/devcontainer.git`) and `SETUP_DEVCONTAINER_REF` (default `main`), as `upgrade_handoff`
+    reads them (`devcontainer_setup/__main__.py:481-483`).
   - `start(request: Request, *, env: Mapping[str, str] = os.environ, deadline: float = 2.0, clock=time.monotonic,
-    popen=subprocess.Popen) -> Probe`, returning at once. `Probe.join() -> Remote` returns no later than
-    `start + deadline` plus reaping; `Probe.cancel() -> None` kills and reaps. Both are idempotent.
-- Children, all with `start_new_session=True`, stdin `DEVNULL`, stdout and stderr read through one `selectors` loop
-  (no threads), 2 MiB stdout cap each:
+    popen=subprocess.Popen) -> Probe`, returning at once. `Probe.join() -> Remote` returns by `start + deadline` plus
+    reaping; `Probe.cancel() -> None` kills and reaps. Both idempotent; neither raises for a child's failure.
+- Children, all `start_new_session=True`, stdin `DEVNULL`, stdout and stderr read through one `selectors` loop (no
+  threads), 2 MiB stdout cap each. `FileNotFoundError` from `popen` makes that observation `failed` (`gh is not
+  installed` / `git is not installed`).
   1. Token: `GH_TOKEN` from `env` when set; else `gh auth token --hostname github.com` (plus `--user
-     $DEVCONTAINER_GH_USER` when set), env `transport.clean_env(env)`. No token: account, spaces and PRs are `failed`,
-     `not signed in to GitHub`.
-  2. Once the token is in: `gh api --hostname github.com user`, `gh api --hostname github.com
-     'user/codespaces?per_page=100' --paginate --slurp`, and when `want_prs`, `gh api --hostname github.com
-     'repos/<repo>/pulls?state=open&base=<default>&per_page=100' --paginate --slurp`; env `clean_env(env)` plus
-     `GH_TOKEN`, `GH_PROMPT_DISABLED=1`, `GH_NO_UPDATE_NOTIFIER=1`. Rows filter like `Codespaces.spaces()`
-     (`repository.full_name` case-insensitive, `transport._name` valid); PRs like setup's `setup_prs`
-     (`devcontainer_setup/codespaces.py:146-153`: head ref fullmatches `setup/devcontainer(?:-[1-9][0-9]*)?`, head repo
-     is this repository).
-  3. From the start, when `generator` is set: `git -c credential.helper= ls-remote -- <url> <ref>` with
-     `GIT_TERMINAL_PROMPT=0` and `GIT_SSH_COMMAND='ssh -o BatchMode=yes'`; a 40-hex `ref` is its own answer and
-     spawns nothing; take `refs/heads/<ref>`, else `refs/tags/<ref>^{}`, else `refs/tags/<ref>`. A local directory
-     URL resolves as `fetch_release` does.
-- At the deadline, on `cancel()` and on any exception: `os.killpg(pgid, SIGKILL)` every child still running, then
-  `wait()` each. Finished observations are kept; unfinished ones are `unknown`. Never parse or show stderr text.
+     $DEVCONTAINER_GH_USER` when set), env `transport.clean_env(env)` plus `GH_PROMPT_DISABLED=1`,
+     `GH_NO_UPDATE_NOTIFIER=1`. No token: account, names, spaces and PRs are `failed`, `not signed in to GitHub`.
+  2. Once the token is in: `gh api --hostname github.com user`; `gh api --hostname github.com
+     'user/codespaces?per_page=100' --paginate --slurp`; when `want_prs`, `gh api --hostname github.com
+     'repos/<repo>/pulls?' + urlencode({'state': 'open', 'base': default, 'per_page': 100}) --paginate --slurp`
+     (as setup builds it, `devcontainer_setup/codespaces.py:146-153`); env as the token child plus `GH_TOKEN`.
+  3. From the start, when `generator` is set and its ref is not 40 hex (a 40-hex ref is `unknown`, `pinned`, and
+     spawns nothing): `git -c core.hooksPath=/dev/null ls-remote -- <url> <patterns>` with the environment
+     `releases._git` builds (every `GIT_*` removed, then `GIT_TERMINAL_PROMPT=0`, `GIT_CONFIG_NOSYSTEM=1`,
+     `GIT_CONFIG_GLOBAL=/dev/null`; `devcontainer_setup/releases.py:15-25`) plus `GIT_SSH_COMMAND='ssh -o
+     BatchMode=yes'`, and without `SSH_ASKPASS`. Patterns: for a ref `R` not starting with `refs/`, `refs/heads/R
+     refs/tags/R refs/tags/R^{}`; for `refs/…`, `R R^{}`. Answer: the head; else the peeled tag; else the tag. A local
+     directory URL resolves as `fetch_release` does. Transports: https, ssh, local path.
+- Completeness of `names`: gh exited 0; the answer is a list of pages, each a dict whose `codespaces` is a list; every
+  row has a valid name (`transport._name`); and when pages carry `total_count`, every page's agrees and equals the
+  number of distinct names; without `total_count`, the last page holds fewer than 100 rows. Otherwise `failed`,
+  `incomplete list`. `spaces` filters the same rows by `repository.full_name` (case-insensitive), as
+  `Codespaces.spaces()` does (`project_sync/codespaces.py:54-64`); PRs filter as setup's `setup_prs`.
+- A child is done when its leader has exited and its pipes reached EOF. At the deadline, on `cancel()`, on any
+  exception and after normal completion, `os.killpg(pgid, SIGKILL)` every child's group whether or not its leader is
+  still running (`ProcessLookupError` ignored), then `wait()` each leader. Descendants that start their own session
+  are not owned (gh and git do not); this is the stated limit. Never parse or show stderr text.
 
 - [ ] **Step 1: Write the tests** in `tests/test_probe.py`, with fake `gh` and `git` scripts first on `PATH` (each
-  appends one line to a calls file, then answers from a fixture or sleeps):
+  appends its argv and selected env to a calls file, then answers from a fixture or sleeps):
 
 ```python
 def test_all_reads_finish_inside_the_deadline(self):        # fast fakes -> every Observation 'ok', join < 1 s
 def test_slow_read_is_unknown_and_the_rest_are_kept(self):
     # fake 'gh api user/codespaces…' sleeps 30 s
-    self.assertEqual(remote.spaces.status, 'unknown'); self.assertEqual(remote.account.status, 'ok')
+    self.assertEqual(remote.names.status, 'unknown'); self.assertEqual(remote.account.status, 'ok')
     self.assertLess(elapsed, 2.5)
 def test_grandchild_is_gone_after_the_deadline(self):
     # fake gh forks a child that ignores SIGTERM and sleeps 60 s, writing both pids to a file
     remote = probe.start(request, env=env, deadline=0.5).join()
-    for pid in pids: self.assertFalse(alive(pid))       # os.kill(pid, 0) raises ProcessLookupError
+    for pid in pids: self.assertFalse(alive(pid))
+def test_exited_leader_with_a_live_grandchild(self):   # leader exits at once, grandchild holds stdout open -> killed
 def test_cancel_kills_and_reaps(self)
-def test_only_get_requests_are_made(self):
-    # calls file: no '--method POST', no 'codespace start', no 'auth login', no 'fetch'; and no file created
-    # under XDG_CACHE_HOME or the state dir
-def test_incomplete_or_malformed_list_is_not_ok(self):     # total_count mismatch, page without 'codespaces',
-                                                            # non-JSON, exit 1, 3 MiB answer -> never 'ok'
+def test_only_reads_are_made(self):
+    # calls file: no '--method' other than GET, no 'codespace', no 'auth login', no 'fetch'; no file created under
+    # XDG_CACHE_HOME or the state dir
+def test_child_environments_disable_prompts(self):
+    # token and api children have GH_PROMPT_DISABLED=1 and no GH_TOKEN except the api ones; git has no GIT_* but the
+    # four set, no SSH_ASKPASS, GIT_CONFIG_GLOBAL=/dev/null; a global gitconfig with credential.helper and
+    # core.askpass set is not consulted (fake helper records nothing)
+def test_list_completeness(self):
+    # repository renamed (paired name under another full_name) -> names has it, spaces does not;
+    # total_count mismatch, a row without a name, a page without 'codespaces', non-JSON, exit 1, 3 MiB -> names failed
+def test_missing_binaries_are_failed_observations(self)    # PATH without gh or git
 def test_setup_pr_filter_matches_setup(self):
-    # the same multipage slurped fixture through setup Codespaces.setup_prs (command patched) and through the probe:
-    # same PR numbers; fork, null head repo, 'setup/devcontainer-0', 'setup/devcontainerx', a numbered suffix
+    # the same multipage slurped fixture through setup Codespaces.setup_prs (command patched) and the probe:
+    # same numbers; fork, null head repo, 'setup/devcontainer-0', 'setup/devcontainerx', a numbered suffix; and the
+    # query for a base of 'release/one&two+x#y' equals setup's
 def test_upstream_tip_matches_fetch_release(self):
-    # temporary local generator repo; probe tip == releases.fetch_release(repo, ref, cache=tmp)[1] for a branch,
-    # an annotated tag and a 40-hex ref; the probe's own run creates no files anywhere
+    # temporary local generator repo: probe tip == releases.fetch_release(repo, ref, cache=tmp)[1] for a branch, an
+    # annotated tag, a lightweight tag and 'refs/heads/…'; a missing ref -> failed; a 40-hex ref -> unknown 'pinned';
+    # the probe's own run creates no files anywhere
 def test_no_token_is_failed_without_api_calls(self)
 ```
 
@@ -248,116 +309,132 @@ git commit -m "Read Codespaces, setup pull requests and the generator tip under 
 **Interfaces:**
 - Consumes: `standing.Local`, `standing.Refusal` (Task 1); `probe.Remote`, `probe.Observation`, `probe.Space` (Task 2).
 - Produces, in `overview.py`:
-  - `Action` (frozen dataclass): `key: str`, `label: str`, `argv: tuple[str, ...]`; property `command -> str`
-    (`shlex.join(argv)`); property `item -> str` (`f'{label}  ({command})'`, the menu text).
+  - `Action` (frozen dataclass): `key: str` (target-qualified: `pair:NAME`, `forget:AGENT:ID`; others plain),
+    `label: str`, `argv: tuple[str, ...]`; property `command -> str` (`shlex.join(argv)`); property `item -> str`
+    (`f'{fit(label)}  ({command})'`, the menu text).
   - `View` (frozen dataclass): `lines: tuple[str, ...]` (at most 6, each at most 78 cells), `actions: tuple[Action, ...]`.
   - `view(local: Local, remote: Remote | None, *, forgotten: frozenset[tuple[str, str]] = frozenset(),
-    now: float | None = None) -> View`. Pure. `remote=None` means the probe has not joined yet: every fact that needs
-    it reads `checking GitHub…`.
+    now: float | None = None) -> View`. Pure: reads no file. `remote=None` means the probe has not joined: every fact
+    that needs it reads `checking GitHub…`.
   - `cells(text: str) -> int` (East Asian Wide and Fullwidth count 2, combining marks 0) and
-    `fit(text: str, width: int = 78) -> str` (drops `Cc`/`Cf` characters, then cuts to `width` cells ending in `…`).
+    `fit(text: str, width: int = 78) -> str` (drops `Cc`, `Cf`, `Zl`, `Zp` characters, then cuts to `width` cells
+    ending in `…`).
   - `task_command(local: Local, alias: str, *args: str) -> tuple[str, ...]`: not generated → `('task', alias, *args)`;
-    generated and the root `Taskfile.yml`'s managed block (`# devcontainer-setup:work-tasks begin … end`) defines
-    `alias` → `('task', alias, *args)`; otherwise `('task', 'devcontainer:' + alias, *args)`. Setup and upgrade are
-    `task devcontainer:setup` / `task devcontainer:upgrade:self` in generated projects and `task setup` (no upgrade)
-    otherwise. `args` start with `'--'` when present.
+    generated and `alias in (local.managed or ())` → `('task', alias, *args)`; otherwise `('task', 'devcontainer:' +
+    alias, *args)`. Setup is `task devcontainer:setup` in generated projects, `task setup` otherwise; upgrade is
+    `task devcontainer:upgrade:self`, generated only. `args` start with `'--'` when present.
   - `next_lines(view: View) -> list[str]`: `['Next: ' + action.command for action in view.actions]`.
 
-**Codespace state** (the paired one; first rule that applies):
+**Codespace state** of the pairing: `normalize(raw: str) -> str` maps `Available` → available; `Shutdown` → stopped;
+`ShuttingDown` → stopping; `Starting`, `Provisioning`, `Queued`, `Rebuilding`, `Awaiting`, `Exporting`, `Updating`,
+`Created` → starting; `Failed`, `Unavailable`, `Archived` → failed; `Deleted` → deleted; anything else → other. Then,
+first rule that applies:
 
 | Evidence | State |
 |---|---|
-| `remote.spaces` ok and lists the pairing | its `state`, `checked HH:MM` |
-| `remote.spaces` ok, pairing absent, `remote.account` ok and equal to `local.gh_user` | `deleted`, `confirmed HH:MM` |
-| `local.deleted_at` (the keeper's own confirmed inventory) | `deleted`, `confirmed HH:MM` |
-| `remote.spaces` ok, pairing absent, account not proven equal | `missing` |
-| `local.reading` | its state, `as of HH:MM` |
-| otherwise | `unknown`, with the observation's reason |
+| `remote.spaces` ok and lists the pairing | `normalize(state)`, `checked HH:MM` |
+| `remote.names` ok without the pairing, `remote.account` ok and equal to `local.gh_user` | deleted, `confirmed HH:MM` |
+| `local.deleted_at` (the keeper's own verdict) | deleted, `confirmed HH:MM` |
+| `remote.names` ok without the pairing (account not proven) | missing |
+| `local.reading` | `normalize(state)`, `as of HH:MM` |
+| otherwise | unknown, with the observation's reason |
 
-`Shutdown` is stopped by you when `down_kind == 'OWNER'`, or when `owner_stop_at` is set and `started_at` is not
-later than it. `Starting`, `Provisioning`, `Queued`,
-`Rebuilding`, `Awaiting`, `Exporting`, `Updating` read starting; `ShuttingDown` reads stopping; `Failed`,
-`Unavailable`, `Archived` read failed.
+Stopped is **by you** when `local.down_kind == 'OWNER'`, or when `local.owner_stop_at` is set and is not earlier than
+any of `local.started_at`, `local.last_up_at` and the pairing's `Space.last_used_at`; stopped by GitHub's limit when
+`down_kind == 'LIFETIME'`; not by you when `down_kind == 'OTHER'`; else reason unknown.
 
-**Lines.** Each fact is a `(rank, text)`; sorted by rank (stable), the first 6 kept, each passed through `fit`.
-Exact copy (`NAME`, `USER`, `N` substituted; `(checked HH:MM)` / `(as of HH:MM)` is the state's suffix):
+**Primary situation**, first that applies: in a Codespace; not set up (`setup` missing, unmanaged, unknown or partial);
+setup PRs open (`setup_prs` ok and non-empty); failed (state failed); launch incomplete (`launch` not complete, its
+Codespace the pairing or no pairing); deleted; missing; unpaired; then the pairing's state (available, stopped,
+starting, stopping, other, unknown). Overlays apply to every situation except in a Codespace.
+
+**Lines.** Each fact is `(rank, text)`; sorted by rank (stable), the first 6 kept, each through `fit`. Exact copy
+(`NAME`, `USER`, `N`, `ACCOUNT`, `DEFAULT` substituted; `DETAILS` is `task_command(local, 'work:status')` joined):
 
 | Rank | When | Text |
 |---|---|---|
-| 0 | armed, `keeper == 'stopped'`, pairing not deleted | `Recovery is off until you connect` |
-| 1 | `setup` missing, unmanaged or unknown | `This project is not set up yet` |
-| 1 | `setup` partial | `Setup did not finish; run setup again to complete it` |
-| 1 | one setup PR open | `Setup pull request #N is open; resume setup to finish it` |
+| 0 | armed, `keeper == 'stopped'`, not deleted or missing | `Recovery is off until you connect` |
+| 1 | in a Codespace | `This is the Codespace; task work shows the project's state on your Mac.` |
+| 1 | not set up | `This project is not set up yet` |
+| 1 | partial | `Setup did not finish; run setup again to complete it` |
+| 1 | one setup PR | `Setup pull request #N is open; resume setup to finish it` |
 | 1 | several setup PRs | `N setup pull requests are open; close all but one in GitHub` |
-| 1 | `launch` not complete, for the pairing or unpaired | `Setup of Codespace NAME did not finish validation` |
+| 1 | failed | `Codespace NAME failed on GitHub; see its creation logs` |
+| 1 | launch incomplete | `Setup of Codespace NAME did not finish validation` |
 | 1 | deleted | `Codespace NAME was deleted (confirmed HH:MM)` |
 | 1 | missing | `Codespace NAME is not among ACCOUNT's Codespaces; it may be deleted or under another account` |
-| 1 | failed | `Codespace NAME failed on GitHub; see its creation logs` |
-| 1 | each `problems` entry | the entry, then `; task work:status shows more` |
+| 1 | each `problems` entry, and each action withheld for unsafe text | the entry + `; DETAILS shows more` |
 | 2 | available | `Codespace NAME is available (checked HH:MM)` |
 | 2 | stopped by you | `Codespace NAME is stopped; you stopped it at HH:MM` |
-| 2 | stopped, `LIFETIME` | `Codespace NAME was stopped by GitHub's 12-hour limit at HH:MM` |
-| 2 | stopped, `OTHER` | `Codespace NAME stopped at HH:MM, not by you` |
+| 2 | stopped by the limit | `Codespace NAME was stopped by GitHub's 12-hour limit at HH:MM` |
+| 2 | stopped, not by you | `Codespace NAME stopped at HH:MM, not by you` |
 | 2 | stopped, reason unknown | `Codespace NAME is stopped (checked HH:MM)` |
-| 2 | starting / stopping | `Codespace NAME is starting (checked HH:MM)` / `… is stopping (…)` |
-| 2 | unknown | `Codespace NAME: GitHub did not answer within 2 s` / `…: REASON` / `…: checking GitHub…` |
+| 2 | starting / stopping | `Codespace NAME is starting (checked HH:MM)` / `Codespace NAME is stopping (checked HH:MM)` |
+| 2 | other | `Codespace NAME is in state STATE (checked HH:MM)` |
+| 2 | unknown | `Codespace NAME: GitHub did not answer within 2 s` / `Codespace NAME: REASON` / `Codespace NAME: checking GitHub…` |
 | 2 | unpaired | `No Codespace is paired with this checkout` |
 | 2 | unpaired, spaces ok | `This repository has N Codespaces on GitHub` (`no Codespace`, `1 Codespace`) |
 | 3 | refusals not in `forgotten` | `NAME refused N conversations; forget them to clear the sync warning` (1: `conversation`, `it`) |
-| 4 | `keeper == 'stale'` | `The recovery keeper has not answered for N min; connect to restart it` |
+| 4 | `keeper == 'stale'` | `The recovery keeper has not answered for N min; connect to restart it` (no heartbeat: `has not answered`) |
 | 4 | `keeper == 'unknown'` | `Recovery state is unknown (process check timed out)` |
 | 4 | paired, `worker == 'stopped'` | `Sync is stopped; connect to start it` |
 | 5 | armed, keeper running | `Recovery is armed as USER` + `, on hold until HH:MM` when held |
 | 5 | not armed, paired | `Recovery is not armed` |
-| 6 | generated, installed, upstream ok and differs from `source_ref` | `Generator update available: SHORT → SHORT` |
-| 7 | `behind` on the default branch | `Checkout is N commits behind origin/DEFAULT (fetched HH:MM)` / `(fetch time unknown)` |
+| 6 | generated, installed, upstream ok, differs from `source_ref` | `Generator REF is at SHORT; this project uses SHORT` |
+| 7 | `behind`, on the default branch | `Checkout is N commits behind origin/DEFAULT (local copy from HH:MM)` / `(local copy)` |
 | 7 | `diverged` | `Checkout and origin/DEFAULT have diverged; review before merging` |
 | 8 | `cycle_at` | `Sync last completed HH:MM` |
 
-**Actions.** State actions in this order, deduplicated by `key`, at most 5, then `details`; when fewer than 3 in all,
-`logs` is added before `details`. In a Codespace (`local.in_codespace`): one line, `This is the Codespace; task work
-shows the project's state on your Mac.`, and the single action `stop` (no `details`, no filler; Task 4 shows no menu).
+**Actions**, as `(key, label, argv)`: the situation's own in order, then overlays, deduplicated by key, at most 5,
+then `details`; when fewer than 3 in all, `logs` goes before `details`. In a Codespace only `stop`, nothing added.
 
-| State | Actions, likely first |
+| Situation | Its own actions, likely first |
 |---|---|
-| not set up, partial, or a setup PR open | `setup` (`Set up this project`, or `Resume setup` with a PR) |
-| launch not complete | `resume` (`Resume setup of NAME`: setup `-- --resume NAME`), `creation-logs` (`Show creation logs`: `gh codespace logs -c NAME`) |
-| failed | `creation-logs`, `resume` |
-| deleted, missing | `pair` per other Codespace of this repository from `remote.spaces`, newest `last_used_at` first, at most 3 (`Pair NAME`: `work:cs -- --rebind NAME`), `create` (`Create a Codespace`: setup) |
-| unpaired | `connect` (`Connect`: `work:cs`) when spaces ok and non-empty or unknown, `create` |
-| available | `connect`; then `arm` (`Connect and arm recovery`: `work:cs:armed`) when not armed; `stop` (`Stop the Codespace`: `work:cs:stop`) |
-| stopped (any reason), starting, stopping, unknown | `start` (`Start and connect`: `work:cs`) for stopped, else `connect` |
-| overlays, after the state's own | `forget` per refusal, at most 2 (`Forget AGENT conversation SHORT`: `work:forget -- --agent AGENT --session ID`); `update-checkout` when behind (`Update the checkout`: `git -C ROOT merge --ff-only origin/DEFAULT`); `upgrade` (`Upgrade the generator`) |
-| always last | `details` (`Show details`: `work:status`) |
+| in a Codespace | `stop` |
+| not set up, partial, one setup PR | `setup` (`Set up this project`; with a PR, `Resume setup`) |
+| several setup PRs | none |
+| failed | `creation-logs` (`Show creation logs`: `gh codespace logs -c NAME`), `resume` (`Resume setup of NAME`: setup `-- --resume NAME`) |
+| launch incomplete | `resume`, `creation-logs` |
+| deleted, missing | `pair:NAME` for each other Codespace in `remote.spaces`, newest `last_used_at` first, at most 3 (`Pair NAME`: `work:cs -- --rebind NAME`), `create` (`Create a Codespace`: setup) |
+| unpaired | `connect` (`Connect`: `work:cs`) when spaces ok and non-empty or not ok, then `create` |
+| available | `connect`; `arm` (`Connect and arm recovery`: `work:cs:armed`) when `armed is False`; `stop` (`Stop the Codespace`: `work:cs:stop`) |
+| stopped | `start` (`Start and connect`: `work:cs`) |
+| starting, stopping, other, unknown | `connect` |
+| overlays | `forget:AGENT:ID` per unforgotten refusal, at most 2 (`Forget AGENT conversation ID[:8]`: `work:forget -- --agent AGENT --session ID`); `update-checkout` when behind on the default branch (`Update the checkout`: `git -C ROOT merge --ff-only origin/DEFAULT`); `upgrade` (`Review the generator upgrade`) with the generator line |
+| last | `details` (`Show details`: `work:status`); filler `logs` (`Show recovery and sync logs`: `work:logs`) |
 
-`logs` is `Show recovery and sync logs`: `work:logs`. Recovery off puts `connect` (or `start`) first.
+Recovery off moves `connect` or `start` to the front when the situation offers it; it adds neither.
 
 - [ ] **Step 1: Write the tests** in `tests/test_overview.py`, building `Local` and `Remote` values directly:
 
 ```python
-def test_each_state_has_its_line_and_first_action(self):
-    # one subTest per row of the State table above, plus 'recovery off' -> lines[0] == 'Recovery is off until you connect'
+def test_each_situation_has_its_lines_and_actions(self):
+    # one subTest per Primary situation and per stop reason: exact lines[0] text and exact ordered argv list
+def test_simultaneous_facts_resolve_one_way(self):
+    # exact lines and argv for: recovery off + stopped by you + behind + 1 refusal; launch incomplete + failed;
+    # missing + armed + keeper stopped (no 'Recovery is off', no connect); several setup PRs + available;
+    # unarmed pairing with account unknown and names ok without it -> missing
 def test_frame_is_at_most_six_lines_of_78_cells_and_three_to_six_actions(self):
-    # every combination of: state x armed/unarmed x keeper x refusals(0, 3) x behind x generator update
-def test_untrusted_text_is_sanitized_and_fits(self):
-    # names containing '\x1b[2J', '\n', '‮', 'コードスペース' and an emoji ZWJ sequence: no Cc/Cf char in any line,
-    # cells(line) <= 78, and the action argv keeps the raw validated name (only display text is sanitized)
+    # every combination of situation x armed True/False/None x keeper x refusals(0, 3) x behind x generator differs
+def test_untrusted_text_never_reaches_the_terminal(self):
+    # names with '\x1b[2J', '\n', '‮', 'コードスペース', an emoji ZWJ sequence, and a checkout path with '\n':
+    # no Cc/Cf/Zl/Zp char in any line, item or Next line; cells(line) <= 78; the path's update-checkout action is
+    # withheld with its problem line; a safe long path stays whole in next_lines
 def test_bare_404_or_other_account_is_not_deleted(self):
-    # spaces ok without the pairing but account differs, or account unknown, or spaces failed -> not 'deleted'
+    # names ok without the pairing and account differs or is unknown, names failed, spaces-only absence -> not deleted
 def test_old_owner_stop_does_not_label_a_later_run(self):
-    # owner_stop_at earlier than a recorded start for the pairing -> not 'stopped by you'
+    # owner_stop_at earlier than started_at, last_up_at, or the Space's last_used_at -> not 'stopped by you'
 def test_owner_alias_is_not_assumed_managed(self):
-    # root Taskfile defines its own 'work:cs' outside the managed block -> ('task', 'devcontainer:work:cs')
-    # managed block defines it -> ('task', 'work:cs'); not generated -> ('task', 'work:cs'); and the managed-block
-    # parser agrees with root_tasks.integrate() output for every name in root_tasks.ALIASES
+    # managed None or without 'work:cs' -> ('task', 'devcontainer:work:cs'); with it -> ('task', 'work:cs');
+    # not generated -> ('task', 'work:cs'), setup 'task setup', no upgrade action
+def test_unmapped_codespace_state_is_other(self)    # 'Moved' -> 'Codespace NAME is in state Moved (checked …)'
 def test_forgotten_refusals_are_not_shown(self)
 def test_pending_remote_reads_checking(self):        # view(local, None) -> 'checking GitHub…', never 'unknown'
-def test_next_lines_are_never_truncated(self):       # a 200-character checkout path stays whole in next_lines
 ```
 
 - [ ] **Step 2: Run them; they fail.** Run: `python3 -m unittest tests.test_overview -v`. Expected: exit 1, module missing.
 
-- [ ] **Step 3: Implement** `overview.py` as in Interfaces and the three tables.
+- [ ] **Step 3: Implement** `overview.py` as in Interfaces and the tables.
 
 - [ ] **Step 4: Run the gates.** Run: `task check && task test`. Expected: exit 0.
 
@@ -373,49 +450,63 @@ git commit -m "Turn a project's state into six lines and the actions that fit"
 **Files:**
 - Modify: `devcontainer_setup/project_sync/overview.py` (add `run`)
 - Modify: `devcontainer_setup/project_sync/__main__.py` (`parser` at 25-55: the `work` action group stops being
-  required; `run` at 296: bare `work` dispatches to `overview.run(args.project.resolve())` first, before
-  `discover_project` and `state_dir`, so unreadable state is a line in the frame, not exit 1)
-- Modify: `devcontainer_setup/project_sync/terminal.py` (`installed_gum() -> str | None`; `Gum.__init__(self,
-  binary: str | None = None)`)
+  required; `run` at 295: bare `work` dispatches to `overview.run(args.project.resolve())` first, before
+  `discover_project` and `state_dir`; `main` at 394-402: the validation table below)
+- Modify: `devcontainer_setup/project_sync/terminal.py` (`installed_gum() -> str | None`: `shutil.which('gum')` or the
+  cached binary `gum_binary` would return, never downloading; `Gum.__init__(self, binary: str | None = None)`)
 - Modify: `devcontainer_setup/root_tasks.py` (`ALIASES` and `INTERACTIVE` gain `'work'`; its managed stanza carries
   `desc`), `templates/continuity-tasks.yml`, `Taskfile.yml`, `README.md:46` (command table, first row)
-- Test: `tests/test_work_overview.py` (new), `tests/test_root_tasks.py`, `tests/test_project_sync_cli.py`
+- Test: `tests/test_work_overview.py` (new); `tests/test_root_tasks.py`; `tests/test_project_sync_cli.py`;
+  `tests/test_continuity_integration.py`
 
 **Interfaces:**
-- Consumes: `standing.read` (Task 1), `probe.start`, `probe.Request`, `probe.generator_request` (Task 2),
-  `overview.view`, `overview.next_lines` (Task 3), `forget.forgotten` (Task 5).
+- Consumes: `standing.read` (Task 1); `probe.start`, `probe.Request`, `probe.generator_request` (Task 2);
+  `overview.view`, `overview.next_lines` (Task 3); `forget.forgotten`, `forget.Unreadable` (Task 5).
 - Produces:
   - `overview.run(root: Path, *, env: Mapping[str, str] = os.environ, stdin=sys.stdin, stdout=sys.stdout,
-    deadline: float = 2.0, gum: str | None | object = <installed_gum()>, call=subprocess.call) -> int`:
-    1. `local = standing.read(root, env=env)`; in a Codespace: print `view(local, None)` lines and its
-       `next_lines`, return 0, start no probe.
-    2. Start the probe (`want_prs` and `generator` only when `local.generated`).
-    3. Terminal (`stdin.isatty() and stdout.isatty()`): print `view(local, None).lines`; join; move the cursor up
-       over them (`\x1b[{n}F\x1b[J`) and print the joined view. Otherwise: join, then print the lines.
-    4. No terminal: print a blank line and `next_lines`, return 0. Terminal without Gum (`gum is None`): the same,
-       then `Gum is not installed, so there is no menu; run one of the commands above.`, return 0.
-    5. Gum: `Gum(gum).choose('What next?', [a.item for a in actions] + ['Exit'])`, with no `selected` (the cursor
-       starts on the likely action; a preselected item containing a comma is refused by `Gum.choose`).
-       `Exit` or `Cancelled`: print `Nothing ran.`, return 0. Otherwise print `Running: ` + `command`, return
-       `call(list(argv), cwd=root)`.
-    6. `KeyboardInterrupt` anywhere: `probe.cancel()`, re-raise (`main` prints `Cancelled.`, returns 130).
-  - Bare `work` with any of `--follow`, `--json`, `--port`, `--no-port`, `--rebind`, `--then-signin-all`:
-    `parser.error('task work takes no options; use task work:status -- --json for detail')`.
-  - Root alias stanza for `work` (in the managed block, owner content untouched):
-    `  work:\n    desc: Show where this project stands and what to do next\n    interactive: true\n    cmds:\n
-    - task: devcontainer:work\n        vars: {CLI_ARGS: "{{.CLI_ARGS}}"}\n`. The template and the generator's own
-    `Taskfile.yml` gain `work:` with the same `desc`, `interactive: true`, and `bash .devcontainer/scripts/project-sync.sh
-    work {{.CLI_ARGS}}` / `bash scripts/project-sync.sh work {{.CLI_ARGS}}`.
-- Pinned behavior that changes on purpose: bare `work` was a parser error; the legacy `work` stanza is still retired by
-  its exact text (`LEGACY`) but a managed `work` alias with the new meaning is added back, so
-  `tests/test_root_tasks.py:93` (`assertNotIn('task: devcontainer:work\n', changed)`) becomes an `assertIn` of the new
-  stanza. `test_quoted_custom_work_preserved` (owner's `"work"`) must stay green: an owner `work` keeps its task and gets
-  no managed duplicate.
+    deadline: float = 2.0, gum=DEFAULT, call=subprocess.call) -> int` (`DEFAULT` resolves to
+    `terminal.installed_gum()` at call time; `None` means no Gum):
+    1. `local = standing.read(root, env=env)`. `forgotten = forget.forgotten(local.state)` when `local.state`; on
+       `forget.Unreadable`, add its message as a problem and use `frozenset()`. In a Codespace: print `view(local,
+       None)` lines and `next_lines`, return 0, start no probe.
+    2. Start the probe: `Request(local.repository, local.checkout.default, want_prs=local.generated,
+       generator=probe.generator_request(env) if local.generated else None)`.
+    3. Terminal (`stdin.isatty() and stdout.isatty()`): print `view(local, None).lines`; join; move up over them
+       (`\x1b[{n}F\x1b[J`) and print the joined view. Otherwise: join, then print the lines once (Call 1).
+    4. No terminal: a blank line and `next_lines`, return 0. Terminal without Gum: the same, then `Gum is not
+       installed, so there is no menu; run one of the commands above.`, return 0.
+    5. Gum: `Gum(gum).choose('What next?', [a.item for a in actions] + ['Exit'])`, no `selected` (the cursor starts on
+       the likely action). `Exit`, `Cancelled` or `KeyboardInterrupt` during the choice: print `Nothing ran.`, return
+       0. Otherwise print `Running: ` + `command`, return `call(list(argv), cwd=root)`.
+    6. `KeyboardInterrupt` before the choice: `probe.cancel()`, re-raise (`main` prints `Cancelled.`, returns 130).
+       Every return path has joined or cancelled the probe.
+  - Validation in `main`, before `run`:
+
+    | Arguments | Result |
+    |---|---|
+    | `work` alone | `overview.run` |
+    | `work` with no action and any of `--follow`, `--json`, `--port`, `--no-port`, `--rebind`, `--then-signin-all`, `--agent`, `--session` | `parser.error('task work takes no options; use task work:status -- --json for detail')` |
+    | `--agent` or `--session` without `--forget`; `--forget` without both | `parser.error('--agent and --session go together with task work:forget')` |
+    | `--rebind`, `--then-signin-all` with another action | today's errors (`__main__.py:398-401`) |
+
+  - Root alias stanza for `work` (managed block; owner content untouched): `  work:\n    desc: Show where this project
+    stands and what to do next\n    interactive: true\n    cmds:\n      - task: devcontainer:work\n        vars:
+    {CLI_ARGS: "{{.CLI_ARGS}}"}\n`. The template and the generator's own `Taskfile.yml` gain `work:` with that `desc`,
+    `interactive: true`, and `bash .devcontainer/scripts/project-sync.sh work {{.CLI_ARGS}}` / `bash
+    scripts/project-sync.sh work {{.CLI_ARGS}}`.
+- Pinned behavior that changes on purpose, each edited in this task:
+  - `tests/test_project_sync_cli.py::test_agent_launchers_and_implicit_local_recovery_are_removed` (928-934): bare
+    `work` now exits 0; the removed agent-launch options it checks stay rejected (exit 2).
+  - `tests/test_root_tasks.py::test_native_agent_tasks_retired_from_owned_block_only` (93): the old `work` delegate is
+    still retired by its exact text, but the new managed `work` stanza is present (`assertIn` of the stanza above).
+  - `tests/test_continuity_integration.py::test_notes_and_root_aliases_preserve_existing_project_operations` (69-79):
+    a root `work` task is now expected; every owner task it checks is still preserved.
+  - `test_quoted_custom_work_preserved` stays green unchanged: an owner `"work"` keeps its task, no managed duplicate.
 
 - [ ] **Step 1: Write the tests**
 
 `tests/test_work_overview.py` (fake `gh`/`git` on `PATH` as in Task 2, a temp project and state; counting fakes for
-every mutating path: `subprocess.Popen`/`call` argv log, `terminal.gum_binary`, `Gum.__init__` without a binary):
+`subprocess.Popen`/`call` argv, `terminal.gum_binary` and `Gum.__init__` without a binary):
 
 ```python
 def test_no_terminal_prints_state_and_next_lines_and_exits_0(self):
@@ -423,16 +514,19 @@ def test_no_terminal_prints_state_and_next_lines_and_exits_0(self):
     self.assertEqual(code, 0); self.assertIn('Next: task work:cs', out.getvalue())
     self.assertLessEqual(len(frame_lines(out)), 6)
 def test_printing_starts_downloads_and_signs_in_nothing(self):
-    # every state fixture from Task 3, no terminal: calls log has only 'gh auth token', 'gh api … user',
-    # 'gh api … user/codespaces…', 'gh api … pulls…' and 'git … ls-remote'; gum_binary never called;
+    # every situation fixture from Task 3, no terminal: argv log has only the probe's reads; gum_binary never called;
     # state, checkout and cache trees byte-identical
-def test_deadline_holds_with_a_hung_github(self):       # fake gh sleeps 60 s: returns in < 3 s, line says 2 s
-def test_terminal_redraws_the_first_frame(self):        # output has the pending frame, then '\x1b[3F\x1b[J', then final
+def test_failures_still_print_and_exit_0(self):
+    # unreadable conversation-forget.json, no gh on PATH, no git on PATH, state_dir refusing: frame + Next, exit 0
+def test_deadline_holds_with_a_hung_github(self):       # fake gh sleeps 60 s: returns in < 3 s, 'within 2 s'
+def test_terminal_redraws_the_first_frame(self):        # pending frame, then '\x1b[{n}F\x1b[J', then the final frame
 def test_menu_runs_the_chosen_command_after_printing_it(self):
-    # fake Gum returns actions[1].item -> 'Running: task work:cs:armed' printed, call(['task','work:cs:armed'], cwd=root)
-def test_exit_and_esc_run_nothing(self):                 # 'Exit' and Cancelled -> 'Nothing ran.', 0, call not invoked
+    # fake Gum returns actions[1].item -> 'Running: task work:cs:armed', call(['task', 'work:cs:armed'], cwd=root)
+def test_ctrl_c_or_esc_at_the_menu_runs_nothing(self):
+    # 'Exit', Cancelled, and KeyboardInterrupt raised inside choose -> 'Nothing ran.', 0, call not invoked;
+    # and a real SIGINT to a fake gum child process gives the same
 def test_ctrl_c_during_the_probe_leaves_nothing_running(self):
-    # KeyboardInterrupt raised from the join: probe children gone; main() returns 130 with 'Cancelled.'
+    # KeyboardInterrupt from the join: probe children gone; main() returns 130 with 'Cancelled.'
 def test_inside_a_codespace_names_the_stop_only(self)
 def test_without_gum_prints_next_lines_and_the_reason(self)
 ```
@@ -443,16 +537,16 @@ def test_without_gum_prints_next_lines_and_the_reason(self)
 def test_bare_work_runs_without_a_terminal(self):   # red today: argparse error
     result = self.run_cli('work')
     self.assertEqual(result.returncode, 0); self.assertIn('Next: ', result.stdout)
-def test_bare_work_rejects_options(self):           # run_cli('work', '--json') -> 2, 'task work takes no options'
+def test_bare_work_rejects_options(self):           # each option in the table -> 2, its message
 ```
 
-`tests/test_root_tasks.py`: `test_work_alias_has_a_description` (managed stanza as in Interfaces; `integrate` idempotent;
-`'  work:\n'` present in the template and `Taskfile.yml` with the `desc`), and the edit to line 93 above.
+`tests/test_root_tasks.py`: `test_work_alias_has_a_description` (managed stanza as above; `integrate` idempotent and
+migrates an older managed block; `'  work:\n'` with the `desc` in the template and `Taskfile.yml`), plus the edits above.
 
 - [ ] **Step 2: Run them; the new ones fail.**
 
-Run: `python3 -m unittest tests.test_work_overview tests.test_project_sync_cli tests.test_root_tasks -v`
-Expected: exit 1; every existing test except the one at `test_root_tasks.py:93` passes.
+Run: `python3 -m unittest tests.test_work_overview tests.test_project_sync_cli tests.test_root_tasks tests.test_continuity_integration -v`
+Expected: exit 1; the failures are the new tests and the three pinned tests named above, nothing else.
 
 - [ ] **Step 3: Implement** as in Interfaces. README: a first row `| \`task work\` | Show where this project stands
 and pick the next step from a menu; without a terminal it prints the commands |`.
@@ -476,50 +570,60 @@ git commit -m "Add task work: the project's state in six lines and a menu of nex
 
 **Files:**
 - Create: `devcontainer_setup/project_sync/forget.py`
-- Modify: `devcontainer_setup/project_sync/replication.py` (`capture` at 34-50 gains `exclude`; the outbound call at
-  313 passes `forget.forgotten(state)`)
+- Modify: `devcontainer_setup/project_sync/replication.py` (`capture` at 34-50 gains `exclude`; the outbound
+  `capture(project, store, env=env, relay=True)` at 311, inside the per-direction loop, passes
+  `forget.forgotten(state)`; the loop's `except` at 334-338 keeps a `forget.Unreadable` message as the row error)
 - Modify: `devcontainer_setup/project_sync/__main__.py` (`--forget` action with `--agent`, `--session`; handled before
-  the terminal gate), `devcontainer_setup/root_tasks.py` (`ALIASES` gains `'work:forget'`, not interactive),
+  the terminal gate at 329), `devcontainer_setup/root_tasks.py` (`ALIASES` gains `'work:forget'`, not interactive),
   `templates/continuity-tasks.yml`, `Taskfile.yml`, `README.md` (command table)
 - Test: `tests/test_forget.py` (new), `tests/test_root_tasks.py`
 
 **Interfaces:**
+- Consumes: `standing.refusals(state, project, binding)` and `standing.Refusal` (Task 1).
 - Produces, in `forget.py`:
   - `FILE = 'conversation-forget.json'`: `{"schema": 1, "conversations": [{"agent", "session_id", "codespace",
     "reason", "forgotten_at"}]}`.
+  - `class Unreadable(ValueError)`, message exactly `conversation-forget.json cannot be read; move it aside to send
+    every conversation again`.
   - `forgotten(state: Path) -> frozenset[tuple[str, str]]`: `(agent, session_id)` pairs; empty when the file is
-    missing; `ValueError('conversation-forget.json cannot be read; move it aside to send every conversation again')`
-    when malformed. Project-wide: it holds across later rebinds.
-  - `forget(state: Path, *, agent: str, session_id: str, now=time.time) -> str`. Under its own
-    `conversation-forget.lock` (`state.locked`, blocking; a connected session never holds it): the current
-    `scratch.json` names a Codespace; the worker's cycle for that binding (as Task 1 reads it) lists this pair among
-    `desktop_to_codespace.publication_issues`; else `ValueError(f'{codespace} refused no {agent} conversation
-    {session_id} in the last sync; nothing was forgotten.')`. Appends one record with `state.atomic_write`. Already
-    forgotten: returns the same message without writing. Message: `Forgot {agent} conversation {session_id}. It stays on
-    this Mac and is no longer sent to {codespace}; the next sync clears the warning.`
+    missing; `Unreadable` when malformed. Project-wide: it holds across later rebinds.
+  - `forget(project, state: Path, *, agent: str, session_id: str, now=time.time) -> str`, in order:
+    1. Already in the record: return `{agent} conversation {session_id} was already forgotten on DATE.` (the
+       record's `forgotten_at`), writing nothing.
+    2. Take `workspace-control.lock`, blocking (a connect holds it only while it selects and verifies,
+       `workspace.py:250-318`, and releases it before Herdr).
+    3. Under it: read `scratch.json` (`Pair a Codespace first: run task work:cs` when missing); require
+       `standing.refusals(state, project, binding)` to contain this pair, else `ValueError(f'{codespace} refused no
+       {agent} conversation {session_id} in the last sync; nothing was forgotten.')`; append the record with
+       `state.atomic_write`.
+    4. Return `Forgot {agent} conversation {session_id}. It stays on this Mac and is no longer sent to {codespace};
+       the next sync clears the warning.`
   - `replication.capture(project, store, *, env=None, historical_roots=(), relay=False, exclude=frozenset())`: drops
-    entries and capture issues whose `(agent, session_id)` is in `exclude`, from both the native capture and the
-    relayed entries, before `store.save`. Nothing else changes; relay records, checkpoint objects and native
-    transcripts are not touched.
+    entries and capture issues whose top-level `(agent, session_id)` is in `exclude`, from both the native capture and
+    the relayed entries, before `store.save` (Call 4: another entry's files are untouched). The inbound capture in
+    `rpc.py:58-69` keeps the default. Relay records, checkpoint objects and native transcripts are not touched.
   - CLI: `work --forget --agent AGENT --session ID`; task `work:forget` with `desc: Stop sending a conversation the
     Codespace refused (task work:forget -- --agent claude --session ID)`, running `… work --forget {{.CLI_ARGS}}`.
-- An unreadable forget file fails the outbound capture with that message (the cycle's existing per-direction error
-  path); it never silently sends everything again.
 
-- [ ] **Step 1: Write the tests** in `tests/test_forget.py` (use the fixtures the existing replication tests build a
-  desktop store, relay records and a fake endpoint with):
+- [ ] **Step 1: Write the tests** in `tests/test_forget.py` (the fixtures the existing replication tests use for a
+  desktop store, relay records and a local-Python endpoint):
 
 ```python
 def test_forgotten_conversation_leaves_the_next_outbound_snapshot(self):
-    # one native and one relayed entry refused; forget both; run one cycle against the fake endpoint
+    # one native and one relayed entry refused; forget both; run one cycle
     self.assertNotIn(('claude', native_id), manifest_pairs); self.assertNotIn(('codex', relayed_id), manifest_pairs)
-    self.assertEqual(outbound_row['publication_issues'], [])        # cleared
-    self.assertIn(('claude', other_id), manifest_pairs)              # everything else still sent
-def test_mac_copy_is_byte_identical(self):
-    # hash the native transcript dirs, store relay/ and objects/ before forget and after the next cycle; equal
+    self.assertEqual(outbound_row['publication_issues'], [])        # the warning is cleared
+    self.assertIn(('claude', other_id), manifest_pairs)              # everything else is still sent
+def test_copies_of_the_forgotten_conversation_are_kept(self):
+    # before forget and after the next cycle, equal hashes of: its native transcript files on the Mac, its relay
+    # record and the blobs it names, and the remote side's existing native copy of it
+def test_a_dependent_conversation_still_carries_its_ancestor(self):
+    # child entry depends on the forgotten parent's files: the child's entry and closure still pass preflight
 def test_unknown_conversation_is_refused_and_writes_nothing(self)
-def test_forget_is_idempotent(self)
-def test_unreadable_forget_file_fails_the_outbound_capture(self)
+def test_repeat_after_the_cycle_says_already_forgotten(self)   # after the warning cleared, and after a rebind
+def test_rebind_during_forget_is_rechecked_under_the_lock(self):
+    # the binding changes while forget waits for workspace-control.lock -> refused, nothing written
+def test_unreadable_forget_file_fails_the_outbound_capture_with_its_message(self)
 def test_cli_forget_runs_without_a_terminal(self)   # run_cli('work', '--forget', '--agent', 'claude', '--session', 'x')
 ```
 
@@ -541,12 +645,13 @@ git commit -m "Let task work:forget stop sending a conversation the Codespace re
 
 ## Order and parallelism
 
-Tasks 1, 2 and 5 touch different files (5 and 4 both edit `__main__.py`, `root_tasks.py`, the template, `Taskfile.yml`
-and `README.md`, in different stanzas) and run in parallel from 7ecc53c. Task 3 starts from the merge of 1 and 2.
-Task 4 starts from the merge of 3 and 5. The lead merges each into `feature/task-work-ab` after its own re-gate.
+Wave 1: Tasks 1 and 2 in parallel, both from the final plan commit. Wave 2, from the merge of 1 and 2: Tasks 3 and 5
+in parallel (5 needs only Task 1's `standing.refusals`). Wave 3: Task 4 from the merge of 3 and 5. Tasks 4 and 5 both
+edit `__main__.py`, `root_tasks.py`, the template, `Taskfile.yml` and `README.md`, in different stanzas. The lead
+merges each into `feature/task-work-ab` after its own re-gate.
 
 ## Live check (part of the A+B release gate, not of these tasks)
 
 On innovate with the 2026-10-27 backup runbook: `task work` in a terminal (menu, redraw, a chosen action runs) and
 piped (`Next:` lines, exit 0) for an available armed pairing, after `task work:cs:stop` (stopped by you), and with the
-Mac offline (`GitHub did not answer within 2 s`); no new file in the state dir from the printing alone.
+network off (`GitHub did not answer within 2 s`); no new file in the state dir from the printing alone.

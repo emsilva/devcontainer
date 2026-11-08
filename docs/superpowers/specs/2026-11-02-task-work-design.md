@@ -108,7 +108,8 @@ carries it.
 - "Not set up" means partial setup: metadata without a registry or pairing, or an open setup PR; it offers setup.
 - The first frame comes from local state alone (registry, receipts, keeper and worker records, arming). Remote reads
   (Codespace state, setup PR, upstream tip) run in one bounded probe with a 2-second deadline, shown with their age or
-  as `unknown` when unfinished, and joined before exit (call 7). It never calls today's whole `workspace.status()`,
+  as `unknown` when unfinished, and joined before exit (call 7). Without a terminal there is one frame, printed after
+  the join (stage B plan, Call 1). It never calls today's whole `workspace.status()`,
   whose probes allow up to 30 s each (REPORT §2).
 - The setup PR, the launch receipt, `sourceRef` and the checkout comparison come from setup modules that generated
   projects do not vendor (`render.py:404-406`): the runtime gets small readers of its own, and a test pins them to the
