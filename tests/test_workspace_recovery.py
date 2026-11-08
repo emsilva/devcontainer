@@ -163,7 +163,8 @@ class ExistingCheckoutTests(unittest.TestCase):
                                  root=str(self.root), codespace='space', remote_root=self.original))
             result = {'outcome': 'available', 'posted_at': posted_at, 'posts': 1 if posted_at else 0,
                       'last_state': 'Available', 'status': 200, 'reason': None}
-            with patch('devcontainer_setup.project_sync.codespaces.Codespaces._api',
+            with patch('devcontainer_setup.project_sync.codespaces.Codespaces._api_env', return_value={}), \
+                    patch('devcontainer_setup.project_sync.codespaces.Codespaces._api',
                        return_value={'name': 'space', 'state': 'Shutdown'}), \
                     patch('devcontainer_setup.project_sync.codespaces.Codespaces._matches_repository',
                           return_value=True), \
