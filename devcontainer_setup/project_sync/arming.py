@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import time
 
 from . import lifecycle
 from .state import atomic_write, read_json
@@ -82,6 +83,36 @@ def consent_text(project_name: str, codespace: str, billable_owner: str) -> str:
             f"after GitHub's 12-hour stop (at most {lifecycle.MAX_RESTARTS} times in "
             f'{lifecycle.RESTART_PERIOD // 3600} hours, {lifecycle.MIN_GAP // 60} minutes apart). '
             f'Usage is billed to {billable_owner}. Type arm to confirm.')
+
+
+def carries_over(value: dict, *, project_name: str, gh_user: str, old: str, new_owner: str) -> bool:
+    """Whether the saved consent still authorizes this account, target and billing owner."""
+    if (not value.get('armed') or value.get('codespace') != old or value.get('gh_user') != gh_user
+            or not new_owner or value.get('billable_owner') != new_owner):
+        return False
+    digest = hashlib.sha256(consent_text(project_name, old, new_owner).encode()).hexdigest()
+    return value.get('consent_sha256') == digest
+
+
+def move_consent(state: Path, value: dict, *, project_name: str, new: str, now: float,
+                 ports: list[int] | None = None) -> str:
+    """Archive and carry verified consent; the caller holds workspace-control.lock."""
+    old = value.get('codespace', '')
+    user = value.get('gh_user', '')
+    owner = value.get('billable_owner', '')
+    if not carries_over(value, project_name=project_name, gh_user=user, old=old, new_owner=owner):
+        raise ValueError('Recovery consent cannot be carried; confirm arm for the new Codespace.')
+    date = datetime.fromtimestamp(value['consented_at']).strftime('%Y-%m-%d')
+    moved = dict(value, codespace=new, moved_from=old, moved_at=now,
+                 consent_sha256=hashlib.sha256(consent_text(project_name, new, owner).encode()).hexdigest())
+    if ports is not None:
+        moved['ports'] = sorted(ports)
+    for key in ('owner_stop_at', 'pending_restore'):
+        moved.pop(key, None)
+    atomic_write(Path(state) / 'arming-history' / f'{time.time_ns()}.json',
+                 json.dumps(value, sort_keys=True).encode() + b'\n')
+    write(state, moved)
+    return f'Recovery moved {old} → {new}; consent from {date} kept ({user}, billing {owner}).'
 
 
 def account(env: Mapping) -> str:

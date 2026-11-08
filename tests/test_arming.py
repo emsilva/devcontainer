@@ -1,11 +1,13 @@
 """Arming state: ports, account, consent record and hold times."""
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
 import stat
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from devcontainer_setup.project_sync import arming
 
@@ -115,6 +117,102 @@ class ArmingTests(unittest.TestCase):
     def test_record_owner_stop(self):
         arming.record_owner_stop(self.dir, 55.0)
         self.assertEqual(arming.read(self.dir)['owner_stop_at'], 55.0)
+
+
+class ConsentMoveTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.state = Path(self.temp.name).resolve()
+        self.armed = {'schema': 1, 'armed': True, 'armed_at': 1000.0, 'consented_at': 1000.0,
+                      'gh_user': 'me', 'codespace': 'old-cs', 'billable_owner': 'me',
+                      'ports': [3000], 'hold_until': 5000.0, 'consent_sha256': hashlib.sha256(
+                          arming.consent_text('proj', 'old-cs', 'me').encode()).hexdigest()}
+        arming.write(self.state, self.armed)
+        self.ok = dict(project_name='proj', gh_user='me', old='old-cs', new_owner='me')
+
+    def test_same_account_and_owner_carries_over(self):
+        self.assertTrue(arming.carries_over(self.armed, **self.ok))
+
+    def test_changed_owner_account_policy_or_missing_owner_does_not_carry(self):
+        for change in ({'new_owner': 'org'}, {'gh_user': 'other'}, {'new_owner': ''},
+                       {'old': 'another-cs'}, {'project_name': 'another-project'}):
+            with self.subTest(change=change):
+                self.assertFalse(arming.carries_over(self.armed, **dict(self.ok, **change)))
+        for change in ({'armed': False}, {'consent_sha256': '0' * 64}):
+            with self.subTest(change=change):
+                self.assertFalse(arming.carries_over(dict(self.armed, **change), **self.ok))
+        self.assertFalse(arming.carries_over({}, **self.ok))
+
+    def test_move_keeps_timestamps_hold_and_ports(self):
+        ledger = self.state / 'keeper-ledger.jsonl'
+        ledger.write_bytes(b'{"event": "started", "at": 900.0}\n')
+        before_ledger = ledger.read_bytes()
+        line = arming.move_consent(self.state, self.armed, project_name='proj', new='new-cs', now=2000.0)
+        moved = arming.read(self.state)
+        for key in ('armed_at', 'consented_at', 'ports', 'hold_until', 'gh_user', 'billable_owner'):
+            self.assertEqual(moved[key], self.armed[key])
+        self.assertTrue(moved['armed'])
+        self.assertEqual((moved['codespace'], moved['moved_from'], moved['moved_at']),
+                         ('new-cs', 'old-cs', 2000.0))
+        self.assertEqual(moved['consent_sha256'], hashlib.sha256(
+            arming.consent_text('proj', 'new-cs', 'me').encode()).hexdigest())
+        date = datetime.datetime.fromtimestamp(self.armed['consented_at']).strftime('%Y-%m-%d')
+        self.assertEqual(line, f'Recovery moved old-cs → new-cs; consent from {date} kept (me, billing me).')
+        self.assertEqual(ledger.read_bytes(), before_ledger)
+        self.assertEqual(arming.read(self.state)['schema'], 1)
+        self.assertEqual(self.armed['codespace'], 'old-cs')
+        archives = list((self.state / 'arming-history').glob('*.json'))
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(json.loads(archives[0].read_text()), self.armed)
+        for path in (archives[0], self.state / arming.ARMING):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_move_with_ports_replaces_only_ports(self):
+        arming.move_consent(self.state, self.armed, project_name='proj', new='new-cs',
+                            now=2000.0, ports=[8080, 3000])
+        first = arming.read(self.state)
+        self.assertEqual(first['ports'], [3000, 8080])
+        self.assertEqual(first, dict(self.armed, codespace='new-cs', moved_from='old-cs',
+                                    moved_at=2000.0, ports=[3000, 8080], consent_sha256=hashlib.sha256(
+                                        arming.consent_text('proj', 'new-cs', 'me').encode()).hexdigest()))
+        archived = [json.loads(p.read_text()) for p in (self.state / 'arming-history').glob('*.json')]
+        self.assertEqual(archived, [self.armed])
+        arming.move_consent(self.state, first, project_name='proj', new='next-cs', now=3000.0, ports=[])
+        self.assertEqual(arming.read(self.state)['ports'], [])
+        archived = [json.loads(p.read_text()) for p in (self.state / 'arming-history').glob('*.json')]
+        self.assertCountEqual(archived, [self.armed, first])
+
+    def test_move_retires_owner_stop_and_pending_restore(self):
+        value = dict(self.armed, owner_stop_at=1500.0, pending_restore={'rid': 'r1'}, extra='kept')
+        arming.write(self.state, value)
+        arming.move_consent(self.state, value, project_name='proj', new='new-cs', now=2000.0)
+        moved = arming.read(self.state)
+        self.assertNotIn('owner_stop_at', moved)
+        self.assertNotIn('pending_restore', moved)
+        self.assertEqual(moved['extra'], 'kept')
+        archived = [json.loads(p.read_text()) for p in (self.state / 'arming-history').glob('*.json')]
+        self.assertEqual(archived, [value])
+
+    def test_move_refuses_what_does_not_carry(self):
+        before = (self.state / arming.ARMING).read_bytes()
+        for change in ({'billable_owner': 'org'}, {'armed': False}, {'consent_sha256': '0' * 64},
+                       {'billable_owner': ''}):
+            with self.subTest(change=change):
+                with self.assertRaises(ValueError):
+                    arming.move_consent(self.state, dict(self.armed, **change),
+                                        project_name='proj', new='new-cs', now=2000.0)
+                self.assertEqual((self.state / arming.ARMING).read_bytes(), before)
+                self.assertFalse((self.state / 'arming-history').exists())
+
+    def test_ordinary_connect_still_refuses_a_mismatched_target(self):
+        from devcontainer_setup.project_sync import __main__ as cli
+        from types import SimpleNamespace
+        project = SimpleNamespace(root=self.state / 'proj')
+        with patch.object(arming, 'account', return_value='me'), \
+                patch('devcontainer_setup.project_sync.codespaces.Codespaces.space',
+                      return_value={'name': 'new-cs', 'billable_owner': {'login': 'me'}}):
+            self.assertEqual(cli._consent_on_file(project, self.state), 'the Codespace changed')
 
 
 if __name__ == '__main__':
