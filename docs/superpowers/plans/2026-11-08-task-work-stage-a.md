@@ -223,7 +223,7 @@ def test_request_file_shape(self):                     # keys exactly {schema, k
 already uses:
 
 ```python
-def test_watcher_streams_a_fresh_stop_request(self):        # line has kind 'stop' and age; file gone from stops/
+def test_watcher_streams_a_fresh_stop_request(self):        # line is the request (kind 'stop'); file gone from stops/
 def test_stale_stop_request_is_discarded(self):              # created_at 61 s ago, a future one, a NaN: no stdout line
 def test_signins_only_watcher_leaves_stop_requests(self):    # SIGNINS_ONLY: file stays, stop-listening-v1 not touched
 def test_normal_watcher_advertises_the_stop_capability(self):
