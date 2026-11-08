@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,9 +12,39 @@ from . import scratch, sync_cycle
 from .checkpoint_store import Store
 from .state import atomic_write, discover_project, locked, read_json
 
+PENDING = 'workspace-pending.json'
+
 
 def _write(state, value):
     atomic_write(Path(state) / 'workspace.json', json.dumps(value, sort_keys=True).encode() + b'\n')
+
+
+def _registry_digest(state):
+    try:
+        return hashlib.sha256((Path(state) / 'workspace.json').read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return None
+
+
+def _archive_registry(state, value):
+    atomic_write(state / 'workspace-history' / (str(time.time_ns()) + '.json'),
+                 json.dumps(value, sort_keys=True).encode() + b'\n')
+
+
+def _finish_pending_registry(state):
+    """Publish only the verified successor of the registry the retarget began with."""
+    path = state / PENDING
+    if not path.exists():
+        return
+    pending = read_json(path)
+    binding_path = state / scratch.CONFIG
+    binding = read_json(binding_path) if binding_path.exists() else {}
+    if (binding.get('codespace') == pending['codespace']
+            and _registry_digest(state) == pending['predecessor_sha256']):
+        if (state / 'workspace.json').exists():
+            _archive_registry(state, read_json(state / 'workspace.json'))
+        _write(state, pending['value'])
+    path.unlink()
 
 
 def registry(project, state):
@@ -44,7 +75,7 @@ def _ordinary(root):
             and not any(ord(c) < 32 for c in root))
 
 
-def _choose_pairing(project, state, value, rebind=None):
+def _choose_pairing(project, state, value, rebind=None, expect_owner=None):
     from . import evidence
     from .codespaces import Codespaces, CodespaceNotFound
     from .terminal import Gum
@@ -81,6 +112,10 @@ def _choose_pairing(project, state, value, rebind=None):
         if row.get('name') != name or not service._matches_repository(row):
             raise ValueError(('No Codespace ' + name + ' for this repository; existing binding preserved')
                              if new else 'Paired Codespace repository differs')
+        if expect_owner is not None:
+            owner = (row.get('billable_owner') or {}).get('login')
+            if not owner or owner != expect_owner:
+                raise ValueError(f'{name} changed billing owner since you confirmed; nothing moved.')
         if row.get('state') != 'Available':
             posted = service.start_codespace(name)
             if posted is not None:
@@ -203,10 +238,11 @@ def _remote_herdr(connection):
     return text if text == '' else version_line(text)
 
 
-def remote(project, state, armed=None, rebind=None, before_herdr=None):
+def remote(project, state, armed=None, rebind=None, before_herdr=None, move=None):
     """Connect; run `armed(primary)` then `before_herdr(primary, name)` before Herdr, unlocked."""
     if os.environ.get('CODESPACES') == 'true':
         raise ValueError('Run task work:cs on your Mac to connect the project')
+    from . import keeper, move as recovery_move
     from .herdr import open_remote
     from .ssh_hosts import configure_ssh
     from .transport import CodespaceConnection
@@ -217,6 +253,7 @@ def remote(project, state, armed=None, rebind=None, before_herdr=None):
             locks.enter_context(locked(state / 'signins.lock'))
         except BlockingIOError:
             raise ValueError('Another sign-in is already running for this project.') from None
+        _finish_pending_registry(state)
         value = registry(project, state)
         primary = _project(value['local_root'], project.identity)
         if not _ordinary(str(primary.root)) or primary.root.is_relative_to(state):
@@ -224,7 +261,10 @@ def remote(project, state, armed=None, rebind=None, before_herdr=None):
         _prerequisites()
         print('Connecting Codespace…', flush=True)
         # Selection/verification precedes any controller/binding changes.
-        name, remote_root = _choose_pairing(primary, state, value, rebind=rebind)
+        options = {'expect_owner': move.billable_owner} if move is not None else {}
+        name, remote_root = _choose_pairing(primary, state, value, rebind=rebind, **options)
+        if move is not None and name != move.new:
+            raise ValueError('The selected Codespace changed since you confirmed; nothing moved.')
         if not _ordinary(remote_root):
             raise ValueError('Choose a verified ordinary Codespace checkout')
         binding_path = state / scratch.CONFIG
@@ -256,12 +296,20 @@ def remote(project, state, armed=None, rebind=None, before_herdr=None):
                          verified_local_historical_roots=sorted(set(local_history)),
                          verified_remote_historical_roots=sorted(set(historical)),
                          codespace=name, active_host='codespace')
-        # Retarget first: if it fails, the registry still matches the binding it kept.
+        if move is not None:
+            recovery_move.begin(state, move, now=time.time())
+        # The binding publishes first; its verified registry can finish after a crash.
+        pending = dict(codespace=name, predecessor_sha256=_registry_digest(state), value=updated)
+        atomic_write(state / PENDING, json.dumps(pending, sort_keys=True).encode() + b'\n')
+        if move is not None:
+            keeper.stop(state)
         scratch.retarget(primary.root, state, name, remote_root)
         if updated != value:
-            atomic_write(state / 'workspace-history' / (str(time.time_ns()) + '.json'),
-                         json.dumps(value, sort_keys=True).encode() + b'\n')
+            _archive_registry(state, value)
         _write(state, updated)
+        (state / PENDING).unlink()
+        if move is not None:
+            print(recovery_move.commit(primary, state, now=time.time()))
         print('Starting scratch and conversation synchronization…', flush=True)
         scratch.start(primary.root, state)
         runtime = _ready(primary, state)
