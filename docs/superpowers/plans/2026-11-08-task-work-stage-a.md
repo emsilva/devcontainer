@@ -17,8 +17,8 @@ it; the next `work:cs` finishes a move a crash interrupted, registry included.
 
 **Spec:** `docs/superpowers/specs/2026-11-02-task-work-design.md`, section "A. Smarter commands", its Anti-goals,
 Constraints and "Tests the plan must include" (A list). Builder check: `tmp/codespace-lifecycle/task-work/builder-check/CHECK.md`
-(C1, C3, C6, C7, Q8). Plan check this revision answers: `tmp/codespace-lifecycle/task-work/stage-a/plancheck/CHECK.md`
-(F1-F11). Read the spec and your task before starting.
+(C1, C3, C6, C7, Q8). Plan checks this revision answers: `tmp/codespace-lifecycle/task-work/stage-a/plancheck/CHECK.md`
+(F1-F11) and `tmp/codespace-lifecycle/task-work/stage-a/plancheck2/CHECK.md` (CHECK2, N1-N5). Read the spec and your task before starting.
 
 ## Global Constraints
 
@@ -43,8 +43,8 @@ Constraints and "Tests the plan must include" (A list). Builder check: `tmp/code
 1. **A stop never lands on a Codespace the project moved to.** A rebind between reading the pairing and writing the
    owner stop must not stamp NEW's `arming.json` (CHECK F1; Task 1 test `test_stop_revalidates_the_target_under_the_lock`).
 2. **A late stop request never runs.** One older than 60 seconds is discarded by the remote watcher, and the Mac
-   re-checks its deadline after taking the lock, before any write or POST (Task 2 tests
-   `test_stale_stop_request_is_discarded`, `test_stop_expires_while_waiting_for_the_lock`).
+   checks the request's own expiry after taking the lock, before any write or POST, however long the line waited
+   (Task 2 tests `test_stale_stop_request_is_discarded`, `test_line_delivered_after_expiry_is_refused`).
 3. **Only a stop-capable Mac worker is trusted.** A sign-in-only watcher or an older Mac refreshes `mac-listening`
    but never claims `stops/`; the writer then refuses up front instead of leaving a request a later watcher could
    claim (Task 2 test `test_writer_requires_the_stop_capability`).
@@ -181,13 +181,15 @@ Behavior:
   `Cancelled, but your Mac already took the stop request.`; return 130.
 - **Remote watcher**: creates `stops/` with `requests/` and `claimed/` (0700, same checks). Unless `SIGNINS_ONLY`,
   it touches `stop-listening-v1` with `mac-listening`, and claims each `stops/*.json` by rename into `claimed/`, reads
-  it with the same size and `O_NOFOLLOW` rules, and prints one JSON line `{…request…, "age": <now - created_at>}` only
-  when the shape matches exactly, `created_at` is finite and `0 <= age <= 60`; otherwise one stderr line
+  it with the same size and `O_NOFOLLOW` rules, and prints the request as one JSON line only when the shape matches
+  exactly, `created_at` is finite and `0 <= now - created_at <= 60`; otherwise one stderr line
   `Skipped stale or invalid stop request`. It never touches `.result` files.
 - **Watcher, Mac half**: a stdout line whose JSON has `kind == 'stop'` goes to `_stop_request(value)`, never to
   `parse_request`. It refuses (one worker-log line, an answer `{"ok": false, …}`) when `value['codespace']` is not
-  the connection's Codespace. Otherwise it starts one thread, kept in `self._stopping`, that calls
-  `power.stop(self.state, expected=value['codespace'], until=received_at + WINDOW - value['age'],
+  the connection's Codespace, or when `created_at` is more than 5 seconds ahead of the Mac's clock (fail closed on
+  clock skew). The expiry is the request's own, `until = value['created_at'] + WINDOW` on the Mac's clock, so time
+  the line spent buffered or waiting counts against it (CHECK2 N2). Otherwise it starts one thread, kept in
+  `self._stopping`, that calls `power.stop(self.state, expected=value['codespace'], until=until,
   halted=self._halt.is_set)`; a second request while `self._stopping` is alive is answered
   `{"ok": false, "message": "A stop is already in progress."}`. The thread logs `Stop requested from the Codespace:
   <message or error>` (never a URL or token), then, unless halted, writes the answer with
@@ -228,6 +230,8 @@ def test_normal_watcher_advertises_the_stop_capability(self):
 def test_stop_request_goes_to_power_not_links(self):         # handle() never; power.stop called with expected and until
 def test_stop_request_for_another_codespace_is_refused(self): # power.stop never called; answer ok false
 def test_stop_expires_while_waiting_for_the_lock(self):       # lock held past until: no owner stop, no POST
+def test_line_delivered_after_expiry_is_refused(self):        # created_at 100 s before dispatch: no owner stop, no POST
+def test_request_from_the_future_is_refused(self):            # created_at 10 s ahead of the Mac clock
 def test_second_stop_while_one_runs_is_answered_busy(self):
 def test_watcher_stop_joins_the_stop_handler(self):           # handler waiting on the lock ends on halt, no write,
                                                               # and Watcher.stop returns only after it
@@ -286,7 +290,9 @@ git commit -m "Let an agent inside the Codespace stop it through the Mac worker"
     `armed_at`, `consented_at`, `gh_user`, `billable_owner`, `hold_until`. Returns the move line. Takes no lock (the
     caller holds `workspace-control.lock`); does not touch the restart ledger.
 
-- [ ] **Step 1: Write the failing tests** in `tests/test_arming.py`. Fixture in `setUp`: `self.state = Path(self.dir)`;
+- [ ] **Step 1: Write the failing tests** in `tests/test_arming.py`, in a new class `ConsentMoveTests` with its own
+`setUp` (the existing `ArmingTests` fixture stays an empty directory: `test_read_defaults_when_missing` relies on it).
+Fixture: a temporary directory as `self.state`;
 `self.armed = {'schema': 1, 'armed': True, 'armed_at': 1000.0, 'consented_at': 1000.0, 'gh_user': 'me',
 'codespace': 'old-cs', 'billable_owner': 'me', 'ports': [3000], 'hold_until': 5000.0, 'consent_sha256':
 sha256(arming.consent_text('proj', 'old-cs', 'me'))}`, written with `arming.write`; `self.ok = dict(project_name='proj',
@@ -330,8 +336,8 @@ def test_ordinary_connect_still_refuses_a_mismatched_target(self):
 - [ ] **Step 2: Run them and see them fail**
 
 Run: `python3 -m unittest tests.test_arming -v`
-Expected: exit 1, `AttributeError` on `carries_over`; `test_ordinary_connect_still_refuses_a_mismatched_target`
-passes already (it is a guard).
+Expected: exit 1, `AttributeError` on `carries_over`; `test_ordinary_connect_still_refuses_a_mismatched_target` and
+every existing `ArmingTests` test pass.
 
 - [ ] **Step 3: Implement** `carries_over` and `move_consent` as in Interfaces.
 
@@ -359,12 +365,14 @@ git commit -m "Carry recovery consent to a new Codespace when account and billin
 **Interfaces:**
 - Consumes: `arming.carries_over`, `arming.move_consent` (Task 3); `keeper.stop`; `scratch.retarget`.
 - Produces, in `workspace.py` (for every rebind, armed or not; CHECK F2):
-  - `PENDING = 'workspace-pending.json'`: `{"codespace": NEW, "predecessor_sha256": <sha256 of workspace.json bytes>,
-    "value": <the registry remote() is about to write>}`, written just before `scratch.retarget` and removed after
-    the registry is written. At the start of `remote()`, under its lock and before `_choose_pairing`: when it exists,
-    the binding names its Codespace and `workspace.json` still has the predecessor hash, archive the current registry
-    to `workspace-history/` and write `value`, as `remote()` does; in every case remove the file and re-read the
-    registry.
+  - `PENDING = 'workspace-pending.json'`: `{"codespace": NEW, "predecessor_sha256": <sha256 of workspace.json bytes,
+    or null when there is no workspace.json>, "value": <the registry remote() is about to write>}`, written just
+    before `scratch.retarget` and removed after the registry is written. A binding without `workspace.json` is a valid
+    state (`registry()` returns a default without writing it, `scratch.configure` writes only the binding; CHECK2 N1).
+    At the start of `remote()`, under its lock and before `_choose_pairing`: when it exists, the binding names its
+    Codespace and `workspace.json` still matches the predecessor (same hash, or still absent for null), archive the
+    current registry to `workspace-history/` when there is one and write `value`, as `remote()` does; in every case
+    remove the file and re-read the registry.
   - `_choose_pairing(project, state, value, rebind=None, expect_owner=None)`: when `expect_owner` is given, right
     after the GET and the repository check and before any start or root discovery, raise
     `ValueError(f'{name} changed billing owner since you confirmed; nothing moved.')` unless the row's
@@ -396,9 +404,11 @@ git commit -m "Carry recovery consent to a new Codespace when account and billin
     when the ports differ from the saved ones, else without `ports`. Fresh: `arming.arm(...)` for NEW with the intent's
     account, owner and ports, after checking the recomputed consent text's sha256 equals the intent's. Removes
     `INTENT`; returns the line to print (the move line, or `Armed as ACCOUNT for NEW; ports …`).
-  - `finish_pending(project, state) -> None`: takes `workspace-control.lock` itself. No intent: nothing. Replays
-    `commit` and prints its line only when the binding names the intent's NEW **and** `arming.json`'s sha256 equals
-    the intent's `arming_sha256` (nothing changed it since the move began: no disarm, hold or port edit, CHECK F3).
+  - `finish_pending(project, state) -> None`: takes `workspace-control.lock` itself. No intent: nothing. In order:
+    `arming.json` already names NEW with the intent's `consent_sha256` (the consent write landed, the intent unlink
+    did not; CHECK2 N3): remove the intent and write nothing, whatever the owner changed since. Else replays `commit`
+    and prints its line only when the binding names the intent's NEW **and** `arming.json`'s sha256 equals the
+    intent's `arming_sha256` (nothing changed it since the move began: no disarm, hold or port edit, CHECK F3).
     Binding names OLD: remove the intent, print `The move to NEW did not finish; recovery stays on OLD.` Binding names
     NEW but arming changed: remove the intent, print `The move to NEW was interrupted and recovery settings changed
     since; run task work:cs:armed to arm NEW.` Anything else: remove the intent.
@@ -410,9 +420,12 @@ git commit -m "Carry recovery consent to a new Codespace when account and billin
 
 - [ ] **Step 1: Write the failing tests** in `tests/test_recovery_move.py`. Fixture: a project and state as
 `tests/test_workspace_recovery.py` builds them, a binding naming `old-cs`, the Task 3 `self.armed` consent, and mocks
-for `arming.account` ('me'), the NEW GET (owner 'me'), `_prerequisites`, `CodespaceConnection`, `_verify_roots`,
+for `arming.account` ('me'), `Codespaces._api_env` (a fixture env), the NEW GET (owner 'me'),
+`keeper.foreign_processes` (`[]`), `_prerequisites`, `CodespaceConnection`, `_verify_roots`,
 `_remote_herdr`, `Codespaces.roots`, `scratch.start`, `_ready`, `configure_ssh`, `end_proxies_elsewhere`,
-`open_remote`, `keeper.start`, `keeper.wait_ready`; record call order in one list.
+`open_remote`, `keeper.start`, `keeper.wait_ready`; record call order in one list. `setUp` also patches
+`subprocess.run` and `subprocess.Popen` to raise `AssertionError('unmocked subprocess')`, so a missed seam fails here
+instead of reaching `gh`, `ps` or SSH.
 
 ```python
 def test_same_account_move_carries_consent_with_one_line(self):
@@ -433,7 +446,12 @@ def test_arming_changed_after_deciding_refuses(self):         # arming.json rewr
 def test_crash_after_retarget_is_finished_by_plain_connect(self):
     # retarget raises after writing the binding: next plain connect (no --rebind) writes the PENDING registry,
     # commits consent without a prompt, and starts the keeper for new-cs
-def test_crash_after_consent_is_finished(self):              # registry pending, consent done: registry written, no second move
+def test_crash_after_registry_before_consent_is_finished(self):  # no pending file, arming old: consent replayed once
+def test_crash_after_consent_before_intent_unlink(self):      # arming names new-cs with the intent's digest: intent
+                                                              # removed, arming bytes unchanged, no prompt; also with a
+                                                              # later disarm of new-cs, which stays disarmed
+def test_unarmed_rebind_without_a_registry_file(self):        # binding only, no workspace.json: rebind works, and a
+                                                              # crash after retarget replays the pending registry
 def test_crash_before_retarget_keeps_old(self):              # intent present, binding old-cs: intent removed, arming unchanged
 def test_replay_after_disarm_does_not_rearm(self):            # crash after retarget, then work:disarm: plain connect leaves
                                                               # armed false, carry and fresh modes both
