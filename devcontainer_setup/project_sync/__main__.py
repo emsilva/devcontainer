@@ -214,49 +214,22 @@ def _wait_stopping(api, now, sleep):
 
 
 def _owner_power(project, state, *, restart, api=None, now=time.time, sleep=time.sleep):
-    """Spec 6.8 work:cs:stop and work:cs:restart, with the owner present.
+    """Spec 6.8 work:cs:stop and the terminal-only work:cs:restart.
 
     The owner stop is recorded before the stop request, so the keeper reads the stop as
     OWNER and never restarts it. A restart then starts the Codespace outside the budget
     (D6) and, for an armed project, hands restore and resume to the keeper.
     """
-    from . import arming, evidence, keeper, lifecycle
+    from . import arming, evidence, keeper, lifecycle, power
     from .codespaces import start_error
-    from .state import locked, read_json
-    if os.environ.get('CODESPACES') == 'true':
-        verb = 'restart' if restart else 'stop'
-        raise ValueError(f'Run task work:cs:{verb} on your Mac to {verb} the Codespace')
-    for name in ('GH_TOKEN', 'GITHUB_TOKEN'):
-        if os.environ.get(name):
-            raise ValueError(f'Unset {name} before stopping or restarting the Codespace; it must use a real gh account.')
-    try:
-        codespace = read_json(state / scratch.CONFIG)['codespace']
-    except FileNotFoundError:
-        raise ValueError('Pair a Codespace first: run task work:cs') from None
-    value = arming.read(state)
-    armed = bool(value.get('armed'))
-    if armed and value.get('codespace') != codespace:
-        raise ValueError('The paired Codespace is not the armed one; run task work:cs:armed')
-    # The armed account, as the keeper uses; otherwise the active gh account, as work:cs.
-    api = api or lifecycle.LifecycleAPI(codespace, value.get('gh_user') if armed else None)
-    with locked(state / 'workspace-control.lock', blocking=True):
-        stopped_at = now()
-        arming.record_owner_stop(state, stopped_at)
-    status = api.post_stop()
-    # The record stays on every failure (R33): a refused stop during GitHub's own stop would
-    # otherwise let the keeper restart a Codespace you asked to keep stopped.
-    if status == 404 and api.confirm_deleted() is True:
-        raise ValueError(f'{codespace} no longer exists on GitHub; there is nothing to stop.')
-    if 400 <= status < 500:
-        raise ValueError(f'GitHub refused the stop request (HTTP {status}); it is recorded as your stop, so the '
-                         'keeper will not restart it. Check task work:status.')
-    if not 200 <= status < 300:
-        raise ValueError(f'The stop request did not complete (HTTP {status}); it may still take effect, and the '
-                         'keeper treats it as your stop. Inspect task work:status, then retry.')
+    from .state import locked
+    if restart and os.environ.get('CODESPACES') == 'true':
+        raise ValueError('Run task work:cs:restart on your Mac to restart the Codespace')
+    stopped = power.stop(state, api=api, now=now, sleep=sleep)
     if not restart:
-        print(f'Stopping {codespace}; it stays stopped until task work:cs' + (':armed' if armed else '')
-              + ' starts it again.')
+        print(stopped.message)
         return 0
+    codespace, armed, api, stopped_at = stopped.codespace, stopped.armed, stopped.api, stopped.stopped_at
     _wait_stopping(api, now, sleep)
     rid = lifecycle.owner_rid(now())
     # No ledger and no gate: the owner's restart is outside the budget (D6).
@@ -352,6 +325,8 @@ def run(args):
             return _arming_edit(args, state)
         if args.logs:
             return _logs(state, args.follow)
+        if args.codespace_stop:
+            return _owner_power(project, state, restart=False)
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise ValueError('Work entrypoints require a terminal; use task work:status for scripts')
         if args.signin:
@@ -370,8 +345,8 @@ def run(args):
         if args.armed:
             return workspace.remote(project, state, armed=lambda primary: _armed(primary, state, args),
                                     rebind=args.rebind)
-        if args.codespace_stop or args.codespace_restart:
-            return _owner_power(project, state, restart=args.codespace_restart)
+        if args.codespace_restart:
+            return _owner_power(project, state, restart=True)
         if args.codespace:
             from . import arming, signins
             armed = arming.read(state).get('armed')

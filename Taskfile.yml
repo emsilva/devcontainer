@@ -38,7 +38,6 @@ tasks:
       - bash scripts/project-sync.sh work --hold {{.CLI_ARGS}}
   work:cs:stop:
     desc: Stop this project Codespace and keep it stopped
-    interactive: true
     cmds:
       - bash scripts/project-sync.sh work --codespace-stop {{.CLI_ARGS}}
   work:cs:restart:
