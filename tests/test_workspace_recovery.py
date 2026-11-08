@@ -165,6 +165,7 @@ class ExistingCheckoutTests(unittest.TestCase):
                       'last_state': 'Available', 'status': 200, 'reason': None}
             with patch('devcontainer_setup.project_sync.codespaces.Codespaces._api',
                        return_value={'name': 'space', 'state': 'Shutdown'}), \
+                    patch('devcontainer_setup.project_sync.codespaces.Codespaces._api_env', return_value={}), \
                     patch('devcontainer_setup.project_sync.codespaces.Codespaces._matches_repository',
                           return_value=True), \
                     patch('devcontainer_setup.project_sync.codespaces.Codespaces.roots',
