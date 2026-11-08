@@ -105,8 +105,9 @@ tools confirmed signed out. To connect and sign in before Herdr opens, run
 sign-ins when the worker is disconnected. See [sign-ins](docs/project-continuity.md#sign-ins).
 
 `task work:cs` always reconnects the paired Codespace. After setup replaces it, move
-sync to the new one with `task work:cs -- --rebind <codespace>` (or
-`task work:cs:armed -- --rebind <codespace>`); setup prints the exact command. The
+sync and recovery to the new one with `task work:cs -- --rebind <codespace>`;
+setup prints the exact command. Recovery consent is kept when the GitHub account
+and billing owner match; otherwise it asks you to type `arm` for the new Codespace. The
 old binding is paused and kept, not deleted. Herdr moves too: its connection to the
 old Codespace ends, and when the new one lacks the Herdr version your Mac runs, it
 asks to install it there. If you keep another version that Herdr accepts, it does not

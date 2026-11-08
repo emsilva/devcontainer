@@ -367,6 +367,19 @@ def run(args):
                 print(signins.NOT_CONNECTED)
                 return 1
             return signins.run(project.root, state, name)
+        if args.codespace or args.armed:
+            from . import move
+            move.finish_pending(project, state)
+            if args.rebind is not None:
+                decision = move.decide(project, state, args.rebind, ask=input,
+                                       add_ports=args.port, remove_ports=args.no_port)
+                if decision is not None:
+                    options = {'move': decision}
+                    if args.then_signin_all:
+                        from . import signins
+                        options['before_herdr'] = lambda primary, name: signins.run(primary.root, state, name)
+                    return workspace.remote(project, state, rebind=args.rebind,
+                                            armed=lambda primary: _resume_recovery(primary, state), **options)
         if args.armed:
             return workspace.remote(project, state, armed=lambda primary: _armed(primary, state, args),
                                     rebind=args.rebind)
@@ -375,10 +388,6 @@ def run(args):
         if args.codespace:
             from . import arming, signins
             armed = arming.read(state).get('armed')
-            if args.rebind is not None and armed:
-                # Moving only the sync would leave automatic restart on the old Codespace.
-                raise ValueError('This project is armed; move it with task work:cs:armed -- --rebind '
-                                 + args.rebind + ' so restart moves too')
             options = {}
             if args.then_signin_all:
                 options['before_herdr'] = lambda primary, name: signins.run(primary.root, state, name)
