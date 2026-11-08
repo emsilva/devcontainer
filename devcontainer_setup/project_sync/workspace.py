@@ -242,7 +242,7 @@ def remote(project, state, armed=None, rebind=None, before_herdr=None, move=None
     """Connect; run `armed(primary)` then `before_herdr(primary, name)` before Herdr, unlocked."""
     if os.environ.get('CODESPACES') == 'true':
         raise ValueError('Run task work:cs on your Mac to connect the project')
-    from . import keeper, move as recovery_move
+    from . import arming, keeper, move as recovery_move
     from .herdr import open_remote
     from .ssh_hosts import configure_ssh
     from .transport import CodespaceConnection
@@ -254,6 +254,8 @@ def remote(project, state, armed=None, rebind=None, before_herdr=None, move=None
         except BlockingIOError:
             raise ValueError('Another sign-in is already running for this project.') from None
         _finish_pending_registry(state)
+        if move is not None:
+            recovery_move.check_arming(state, move)
         value = registry(project, state)
         primary = _project(value['local_root'], project.identity)
         if not _ordinary(str(primary.root)) or primary.root.is_relative_to(state):
@@ -297,6 +299,8 @@ def remote(project, state, armed=None, rebind=None, before_herdr=None, move=None
                          verified_remote_historical_roots=sorted(set(historical)),
                          codespace=name, active_host='codespace')
         if move is not None:
+            if arming.account(os.environ) != move.gh_user:
+                raise ValueError('The gh account changed since you confirmed; nothing moved. Run the command again.')
             recovery_move.begin(state, move, now=time.time())
         # The binding publishes first; its verified registry can finish after a crash.
         pending = dict(codespace=name, predecessor_sha256=_registry_digest(state), value=updated)

@@ -75,11 +75,16 @@ def decide(project, state: Path, new: str, *, ask=input, add_ports=(), remove_po
                     tuple(arming.resolve_ports(current.get('ports', []), add_ports, remove_ports)))
 
 
+def check_arming(state: Path, decision: Decision) -> None:
+    """Check the authorized predecessor under the caller's workspace lock."""
+    if _digest(Path(state) / arming.ARMING) != decision.arming_sha256:
+        raise ValueError(CHANGED)
+
+
 def begin(state: Path, decision: Decision, now: float) -> None:
     """Publish the authorized predecessor under the caller's workspace lock."""
     state = Path(state)
-    if _digest(state / arming.ARMING) != decision.arming_sha256:
-        raise ValueError(CHANGED)
+    check_arming(state, decision)
     atomic_write(state / INTENT, json.dumps(dict(asdict(decision), at=now), sort_keys=True).encode() + b'\n')
 
 

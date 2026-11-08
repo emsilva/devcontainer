@@ -214,6 +214,7 @@ class RecoveryMoveTests(unittest.TestCase):
                 self.retarget.assert_not_called()
 
     def test_arming_changed_after_deciding_refuses(self):
+        self.row['state'] = 'Shutdown'
         def edit(*_args, **_kwargs):
             arming.write(self.state, dict(self.armed, hold_until=10000.0))
             return [self.new_root]
@@ -223,6 +224,56 @@ class RecoveryMoveTests(unittest.TestCase):
         self.stop.assert_not_called()
         self.retarget.assert_not_called()
         self.assertFalse((self.state / self.move.INTENT).exists())
+
+    def test_arming_changed_after_deciding_refuses_before_any_start(self):
+        self.row['state'] = 'Shutdown'
+        real_decide = self.move.decide
+        for change in ({'armed': False}, {'hold_until': 10000.0}):
+            with self.subTest(change=change):
+                arming.write(self.state, self.armed)
+                before = self.snapshot()
+
+                def edit_after_deciding(*args, **kwargs):
+                    decision = real_decide(*args, **kwargs)
+                    arming.write(self.state, dict(self.armed, **change))
+                    before[arming.ARMING] = (self.state / arming.ARMING).read_bytes()
+                    return decision
+
+                with patch.object(self.move, 'decide', side_effect=edit_after_deciding):
+                    self.assertEqual(self.connect('--rebind', 'new-cs'), 1)
+                self.assertIn(self.move.CHANGED, self.err.getvalue())
+                self.start_codespace.assert_not_called()
+                self.evidence.assert_not_called()
+                self.roots.assert_not_called()
+                self.begin.assert_not_called()
+                self.stop.assert_not_called()
+                self.retarget.assert_not_called()
+                self.start.assert_not_called()
+                self.assertEqual(self.snapshot(), before)
+                self.assertFalse((self.state / self.move.INTENT).exists())
+                self.assertFalse((self.state / workspace.PENDING).exists())
+
+    def test_account_switch_during_validation_moves_nothing(self):
+        before = self.snapshot()
+        account = arming.account
+
+        def switch_during_roots(*_args, **_kwargs):
+            account.return_value = 'other'
+            return [self.new_root]
+
+        self.roots.side_effect = switch_during_roots
+        self.assertEqual(self.connect('--rebind', 'new-cs'), 1)
+        self.assertIn('The gh account changed since you confirmed; nothing moved. Run the command again.',
+                      self.err.getvalue())
+        self.begin.assert_not_called()
+        self.stop.assert_not_called()
+        self.retarget.assert_not_called()
+        self.start.assert_not_called()
+        self.consent.assert_not_called()
+        self.fresh.assert_not_called()
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse((self.state / self.move.INTENT).exists())
+        self.assertFalse((self.state / workspace.PENDING).exists())
 
     def test_crash_after_retarget_is_finished_by_plain_connect(self):
         original_registry = read_json(self.state / 'workspace.json')
