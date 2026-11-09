@@ -502,7 +502,7 @@ def repository(path, candidates):
             count = scalar(git(path, 'rev-list', '--walk-reflogs', '--count', 'refs/stash'))
             if not count.isdecimal():
                 raise Incomplete()
-            row['stashes'] = int(count)
+            row['stashes'] = max(1, int(count))
         origin = git(path, 'config', '--get', 'remote.origin.url', absent=(1,))
         if origin is not None:
             try:

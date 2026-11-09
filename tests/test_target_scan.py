@@ -159,6 +159,13 @@ class TargetScanTests(unittest.TestCase):
         self.assertTrue(scan.repositories[0].ok)
         self.assertEqual([tree.path for tree in scan.repositories[0].worktrees], [str(root)])
 
+    def test_stash_without_a_reflog_still_counts(self):
+        root = self.repo('project')
+        (root / 'tracked').write_text('stashed work')
+        self.git(root, 'stash', 'push', '-qm', 'Saved')
+        (root / '.git/logs/refs/stash').unlink()
+        self.assertEqual(self.scan().repositories[0].stashes, 1)
+
     def test_edits_hidden_by_index_flags_count_once_and_absent_sparse_files_pass(self):
         root = self.repo('project')
         for name in ('skip', 'assume', 'absent', 'unchanged'):
