@@ -728,6 +728,60 @@ class ProjectSyncCLITests(unittest.TestCase):
                                '--project', str(self.root), *args], env=self.env,
                               capture_output=True, text=True)
 
+    def offline_overview(self):
+        from tests.test_work_overview import offline_environment
+        self.env = offline_environment(Path(self.temp.name).resolve() / 'overview', self.root)
+        self.env['XDG_STATE_HOME'] = str(self.state)
+
+    def test_bare_work_runs_without_a_terminal(self):
+        self.offline_overview()
+        result = self.run_cli('work')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Next: ', result.stdout)
+        self.assertNotIn('\x1b', result.stdout)
+        self.assertFalse(self.state.exists())
+
+    def test_bare_work_rejects_options(self):
+        self.offline_overview()
+        for options in (('--follow',), ('--json',), ('--port', '4000'), ('--no-port', '4000'),
+                        ('--rebind', 'other-cs'), ('--then-signin-all',)):
+            with self.subTest(options=options):
+                result = self.run_cli('work', *options)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('task work takes no options; use task work:status -- --json for detail', result.stderr)
+                self.assertFalse(self.state.exists())
+        for options, message in ((('--status', '--rebind', 'other-cs'),
+                                  '--rebind works only with task work:cs or task work:cs:armed'),
+                                 (('--status', '--then-signin-all'),
+                                  '--then-signin-all works only with task work:cs'),
+                                 (('--armed', '--then-signin-all'),
+                                  '--then-signin-all works only with task work:cs')):
+            with self.subTest(options=options):
+                result = self.run_cli('work', *options)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(message, result.stderr)
+
+    def test_forget_options_take_precedence_over_bare_work(self):
+        self.offline_overview()
+        for options in (('--agent', 'claude'), ('--session', 'session-1'),
+                        ('--agent', 'claude', '--session', 'session-1'),
+                        ('--json', '--agent', 'claude'), ('--status', '--session', 'session-1'),
+                        ('--forget',), ('--forget', '--agent', 'claude'), ('--forget', '--session', 'session-1')):
+            with self.subTest(options=options):
+                result = self.run_cli('work', *options)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('--agent and --session go together with task work:forget', result.stderr)
+                self.assertFalse(self.state.exists())
+
+    def test_bare_work_bypasses_discovery_and_state_selection(self):
+        from unittest.mock import patch
+        from devcontainer_setup.project_sync import __main__ as cli, overview
+        with patch.object(cli, 'discover_project', side_effect=AssertionError('not the overview reader')), \
+                patch.object(cli, 'state_dir', side_effect=AssertionError('not the overview reader')), \
+                patch.object(overview, 'run', create=True, return_value=0) as run:
+            self.assertEqual(cli.main(['--project', str(self.root), 'work']), 0)
+        run.assert_called_once_with(self.root.resolve())
+
     def test_codespace_stop_runs_without_a_terminal(self):
         for name in ('CODESPACES', 'GH_TOKEN', 'GITHUB_TOKEN'):
             self.env.pop(name, None)
@@ -926,7 +980,12 @@ class ProjectSyncCLITests(unittest.TestCase):
         self.assertIn('invalid choice', result.stderr)
 
     def test_agent_launchers_and_implicit_local_recovery_are_removed(self):
-        for args in (('work',), ('work', '--agent', 'codex'),
+        self.offline_overview()
+        result = self.run_cli('work')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Next: ', result.stdout)
+        self.assertFalse(self.state.exists())
+        for args in (('work', '--agent', 'codex'),
                      ('work', '--agent', 'claude', '--resume')):
             with self.subTest(args=args):
                 result = self.run_cli(*args)

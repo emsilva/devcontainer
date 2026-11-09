@@ -1,17 +1,24 @@
 """Turn immutable project facts into bounded lines and explicit, safe argv actions."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from datetime import datetime
+import os
+from pathlib import Path
 import shlex
+import subprocess
+import sys
 import time
 import unicodedata
 
+from . import forget, probe, standing, terminal
 from .probe import Remote, Space
 from .standing import Local
 
 
 _UNSAFE = frozenset(('Cc', 'Cf', 'Zl', 'Zp'))
+DEFAULT = object()
 
 
 def cells(text: str) -> int:
@@ -313,3 +320,60 @@ def view(local: Local, remote: Remote | None, *,
     actions.append(details)
     lines = tuple(fit(text) for _, text in sorted(facts, key=lambda fact: fact[0])[:6])
     return View(lines, tuple(actions))
+
+
+def run(root: Path, *, env: Mapping[str, str] = os.environ, stdin=sys.stdin, stdout=sys.stdout,
+        deadline: float = 2.0, gum=DEFAULT, call=subprocess.call) -> int:
+    """Print without changing state; only an explicit menu choice runs a command."""
+    handle = None
+    try:
+        local = standing.read(root, env=env)
+        forgotten = frozenset()
+        if local.state is not None:
+            try:
+                forgotten = forget.forgotten(local.state)
+            except forget.Unreadable as error:
+                local = replace(local, problems=(*local.problems, str(error)))
+        if local.in_codespace:
+            frame = view(local, None, forgotten=forgotten)
+            print(*frame.lines, sep='\n', file=stdout, flush=True)
+            print('', *next_lines(frame), sep='\n', file=stdout, flush=True)
+            return 0
+
+        request = probe.Request(local.repository, local.checkout.default, want_prs=local.generated,
+                                generator=probe.generator_request(env) if local.generated else None)
+        handle = probe.start(request, env=env, deadline=deadline)
+        interactive = stdin.isatty() and stdout.isatty()
+        if interactive:
+            initial = view(local, None, forgotten=forgotten)
+            print(*initial.lines, sep='\n', file=stdout, flush=True)
+        remote = handle.join()
+        frame = view(local, remote, forgotten=forgotten)
+        if interactive:
+            stdout.write(f'\x1b[{len(initial.lines)}F\x1b[J')
+        print(*frame.lines, sep='\n', file=stdout, flush=True)
+
+        if not interactive:
+            print('', *next_lines(frame), sep='\n', file=stdout, flush=True)
+            return 0
+        if gum is DEFAULT:
+            gum = terminal.installed_gum()
+        if gum is None:
+            print('', *next_lines(frame), sep='\n', file=stdout)
+            print('Gum is not installed, so there is no menu; run one of the commands above.',
+                  file=stdout, flush=True)
+            return 0
+        try:
+            choice = terminal.Gum(gum).choose('What next?', [action.item for action in frame.actions] + ['Exit'])
+        except (terminal.Cancelled, KeyboardInterrupt):
+            choice = 'Exit'
+        if choice == 'Exit':
+            print('Nothing ran.', file=stdout, flush=True)
+            return 0
+        action = next(action for action in frame.actions if action.item == choice)
+        print('Running: ' + action.command, file=stdout, flush=True)
+        return call(list(action.argv), cwd=root)
+    finally:
+        # join and cancel both reap owned children; cancel is also safe after join.
+        if handle is not None:
+            handle.cancel()

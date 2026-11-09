@@ -260,18 +260,14 @@ for line in sys.stdin:
         self.assertIn(('claude', self.sid), self.forget.forgotten(self.store.state))
 
     def test_cli_agent_and_session_belong_only_to_forget(self):
-        for args, message in ((['work', '--status', '--agent', 'claude'], '--agent and --session work only with --forget'),
-                              (['work', '--status', '--session', 'x'], '--agent and --session work only with --forget'),
-                              (['work', '--forget'], '--forget requires --agent and --session'),
-                              (['work', '--forget', '--agent', 'claude'], '--forget requires --agent and --session'),
-                              (['work', '--forget', '--session', 'x'], '--forget requires --agent and --session')):
+        for args in (['work', '--status', '--agent', 'claude'], ['work', '--status', '--session', 'x'],
+                     ['work', '--forget'], ['work', '--forget', '--agent', 'claude'],
+                     ['work', '--forget', '--session', 'x']):
             with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()) as error, \
                     self.assertRaises(SystemExit) as exit_code:
                 cli.main(args)
             self.assertEqual(exit_code.exception.code, 2)
-            self.assertIn(message, error.getvalue())
-        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            cli.main(['work'])  # Task 4 owns relaxing the required action group.
+            self.assertIn('--agent and --session go together with task work:forget', error.getvalue())
 
     def test_exclusion_drops_native_and_relay_issues_by_top_level_pair_only(self):
         pair = ('claude', 'refused')

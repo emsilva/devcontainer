@@ -1,3 +1,8 @@
+  work:
+    desc: Show where this project stands and what to do next
+    interactive: true
+    cmds:
+      - bash .devcontainer/scripts/project-sync.sh work {{.CLI_ARGS}}
   work:cs:
     desc: Connect Codespace Herdr and sync scratch and project conversations
     interactive: true

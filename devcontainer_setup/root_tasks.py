@@ -3,10 +3,10 @@ import hashlib
 import re
 from .taskfile_mapping import mapping
 
-ALIASES = ('work:cs', 'work:signin', 'work:signin:all', 'work:disconnect', 'work:status', 'work:stop', 'work:forget',
+ALIASES = ('work', 'work:cs', 'work:signin', 'work:signin:all', 'work:disconnect', 'work:status', 'work:stop', 'work:forget',
            'work:cs:armed', 'work:disarm', 'work:hold', 'work:cs:stop', 'work:cs:restart', 'work:logs',
            'scratch:configure', 'scratch:start', 'scratch:stop', 'scratch:status', 'scratch:logs', 'scratch:backup')
-INTERACTIVE = ('work:cs', 'work:signin', 'work:signin:all', 'work:cs:armed', 'work:cs:restart')
+INTERACTIVE = ('work', 'work:cs', 'work:signin', 'work:signin:all', 'work:cs:armed', 'work:cs:restart')
 LEGACY = ('work', 'work:codex', 'work:claude', 'work:codex:cs', 'work:claude:cs',
           'agent:codex', 'agent:claude', 'agent:sessions', 'agent:handoff', 'agent:recover',
           'scratch:configure', 'scratch:start', 'scratch:stop', 'scratch:status', 'scratch:logs', 'scratch:backup')
@@ -45,6 +45,7 @@ def integrate(text, enabled=True):
         if alias in existing:
             continue
         additions += (indent + alias + ':\n'
+                      + (indent + '  desc: Show where this project stands and what to do next\n' if alias == 'work' else '')
                       + (indent + '  interactive: true\n' if alias in INTERACTIVE else '')
                       + indent + '  cmds:\n' + indent + f'    - task: devcontainer:{alias}\n'
                       + indent + '      vars: {CLI_ARGS: "{{.CLI_ARGS}}"}\n')

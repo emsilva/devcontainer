@@ -5,6 +5,31 @@ from devcontainer_setup.root_tasks import integrate
 
 
 class RootTasksTests(unittest.TestCase):
+    def test_work_alias_has_a_description(self):
+        from pathlib import Path
+        from devcontainer_setup.root_tasks import ALIASES, INTERACTIVE
+        source = Path(__file__).resolve().parents[1]
+        stanza = ('  work:\n    desc: Show where this project stands and what to do next\n'
+                  '    interactive: true\n    cmds:\n      - task: devcontainer:work\n'
+                  '        vars: {CLI_ARGS: "{{.CLI_ARGS}}"}\n')
+        root = integrate("version: '3'\ntasks:\n  owner:\n    cmds: [echo preserved]\n")
+        self.assertIn(stanza, root)
+        self.assertIn('work', ALIASES)
+        self.assertIn('work', INTERACTIVE)
+        self.assertEqual(integrate(root), root)
+        self.assertIn('  owner:\n    cmds: [echo preserved]\n', root)
+        old = '  work:cs:\n    cmds:\n      - task: devcontainer:work:cs\n'
+        old += '        vars: {CLI_ARGS: "{{.CLI_ARGS}}"}\n'
+        previous = ('tasks:\n  # devcontainer-setup:work-tasks begin sha256='
+                    + hashlib.sha256(old.encode()).hexdigest() + '\n' + old
+                    + '  # devcontainer-setup:work-tasks end\n')
+        self.assertIn(stanza, integrate(previous))
+        for path, script in ((source / 'Taskfile.yml', 'scripts/project-sync.sh'),
+                             (source / 'templates/continuity-tasks.yml', '.devcontainer/scripts/project-sync.sh')):
+            text = path.read_text()
+            self.assertIn('  work:\n    desc: Show where this project stands and what to do next\n'
+                          '    interactive: true\n    cmds:\n      - bash ' + script + ' work {{.CLI_ARGS}}\n', text)
+
     def test_work_forget_renders_description_and_noninteractive_root_alias(self):
         import tempfile
         from pathlib import Path
@@ -112,7 +137,9 @@ class RootTasksTests(unittest.TestCase):
         original = 'version: "3"\ntasks:\n' + owned + custom
         changed = integrate(original)
         self.assertIn(custom, changed)
-        self.assertNotIn('task: devcontainer:work\n', changed)
+        self.assertIn('  work:\n    desc: Show where this project stands and what to do next\n'
+                      '    interactive: true\n    cmds:\n      - task: devcontainer:work\n'
+                      '        vars: {CLI_ARGS: "{{.CLI_ARGS}}"}\n', changed)
         self.assertNotIn('task: devcontainer:work:codex\n', changed)
         self.assertNotIn('task: devcontainer:work:claude\n', changed)
         self.assertIn('task: devcontainer:work:cs\n', changed)

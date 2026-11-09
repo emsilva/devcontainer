@@ -27,7 +27,7 @@ def parser():
     result.add_argument('--project', type=Path, default=Path.cwd())
     groups = result.add_subparsers(dest='group', required=True)
     work = groups.add_parser('work', help='Manage the Codespace connection; run codex or claude directly')
-    action = work.add_mutually_exclusive_group(required=True)
+    action = work.add_mutually_exclusive_group()
     action.add_argument('--codespace', action='store_true')
     action.add_argument('--signin', action='store_true', help='Finish queued browser sign-ins on the Mac')
     action.add_argument('--signin-all', action='store_true', help='Sign in to every tool on the paired Codespace')
@@ -295,7 +295,16 @@ def _logs(state, follow):
     return 0
 
 
+def _has_work_action(args):
+    return any((args.codespace, args.signin, args.signin_all, args.disconnect, args.status, args.stop,
+                args.armed, args.disarm, args.hold is not None, args.codespace_stop,
+                args.codespace_restart, args.logs, args.forget))
+
+
 def run(args):
+    if args.group == 'work' and not _has_work_action(args):
+        from . import overview
+        return overview.run(args.project.resolve())
     project = discover_project(args.project.resolve())
     state = state_dir(project)
     if args.group == 'work':
@@ -403,14 +412,16 @@ def main(argv=None):
         commands = parser()
         args = commands.parse_args(argv)
         if args.group == 'work':
-            if (args.agent is not None or args.session is not None) and not args.forget:
-                commands.error('--agent and --session work only with --forget')
-            if args.forget and (args.agent is None or args.session is None):
-                commands.error('--forget requires --agent and --session')
-        if getattr(args, 'rebind', None) is not None and not (args.codespace or args.armed):
-            commands.error('--rebind works only with task work:cs or task work:cs:armed')
-        if getattr(args, 'then_signin_all', False) and not args.codespace:
-            commands.error('--then-signin-all works only with task work:cs')
+            if (((args.agent is not None or args.session is not None) and not args.forget)
+                    or (args.forget and (args.agent is None or args.session is None))):
+                commands.error('--agent and --session go together with task work:forget')
+            if not _has_work_action(args) and any((args.follow, args.json, args.port, args.no_port,
+                                                 args.rebind is not None, args.then_signin_all)):
+                commands.error('task work takes no options; use task work:status -- --json for detail')
+            if args.rebind is not None and not (args.codespace or args.armed):
+                commands.error('--rebind works only with task work:cs or task work:cs:armed')
+            if args.then_signin_all and not args.codespace:
+                commands.error('--then-signin-all works only with task work:cs')
         return run(args)
     except (OSError, ValueError) as error:
         print(str(error), file=sys.stderr)

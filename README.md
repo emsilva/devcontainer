@@ -41,6 +41,7 @@ small helpers, and a Taskfile include. Personal preferences live in
 
 | Command | Action |
 |---|---|
+| `task work` | Show where this project stands and pick the next step from a menu; without a terminal it prints the commands |
 | `codex` / `claude` / `opencode` / `grok` | Start a native agent in the current checkout |
 | `codex resume` / `claude --resume` | Choose a native conversation |
 | `task work:cs` | Connect Codespace Herdr and sync scratch and project conversations |

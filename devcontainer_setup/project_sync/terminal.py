@@ -25,6 +25,15 @@ def cache_home() -> Path:
     return Path(configured) if configured and Path(configured).is_absolute() else Path.home() / '.cache'
 
 
+def installed_gum() -> str | None:
+    """Locate a usable binary without creating a cache or downloading anything."""
+    installed = shutil.which('gum')
+    if installed:
+        return installed
+    cached = cache_home() / 'devcontainer-setup' / 'tools' / 'gum' / GUM_VERSION / 'gum'
+    return str(cached) if cached.is_file() and os.access(cached, os.X_OK) else None
+
+
 def gum_binary() -> str:
     installed = shutil.which('gum')
     if installed:
@@ -66,8 +75,8 @@ class Cancelled(Exception):
 
 
 class Gum:
-    def __init__(self):
-        self.binary = gum_binary()
+    def __init__(self, binary: str | None = None):
+        self.binary = gum_binary() if binary is None else binary
 
     def _run(self, args: list[str]) -> str:
         result = subprocess.run([self.binary, *args], stdout=subprocess.PIPE, text=True)
