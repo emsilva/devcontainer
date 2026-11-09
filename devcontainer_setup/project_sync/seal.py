@@ -100,11 +100,15 @@ def _decode(state, codespace, value):
     return Seal(**record)
 
 
-def write(state, store, scan, *, identity, repository, gh_user, remote_root, operation,
+def write(state, store, scan, *, evidence, identity, repository, gh_user, remote_root, operation,
           cycle_id, snapshot_id, now) -> Path:
     """Refuse a seal unless this scan compared exactly the loaded snapshot map."""
-    from .verdict import cutoffs
+    from .verdict import Evidence, cutoffs
     try:
+        if (not isinstance(evidence, Evidence) or evidence.scan is not scan or evidence.sync_running is not True
+                or evidence.conflicts or evidence.mac_scratch is None
+                or not set(scan.scratch) <= set(evidence.mac_scratch)):
+            raise ValueError('Final-flush scratch has not reached this Mac')
         if Path(store.state) != Path(state):
             raise ValueError('Final-flush store differs')
         manifest = store.load(snapshot_id)

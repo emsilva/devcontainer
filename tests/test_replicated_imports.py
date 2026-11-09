@@ -219,7 +219,8 @@ class ReplicatedImportTests(unittest.TestCase):
         self.assertEqual(again.verdict, verdict.UNSAFE)
         self.assertEqual(target_scan.fingerprint(scan), target_scan.fingerprint(repeated))
         with self.assertRaises(ValueError):
-            seal.write(self.desktop_store.state, self.desktop_store, scan, identity=self.project.identity,
+            evidence = verdict.Evidence(scan, True, (), scan.scratch, (), True, None, None, (), None, ())
+            seal.write(self.desktop_store.state, self.desktop_store, scan, evidence=evidence, identity=self.project.identity,
                        repository='example/imports', gh_user='octo', remote_root=str(self.codespace_root),
                        operation='replace', cycle_id='cycle', snapshot_id=inbound['snapshot_id'], now=scan.at)
         for store in (self.desktop_store, self.codespace_store):
