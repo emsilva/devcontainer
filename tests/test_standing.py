@@ -72,6 +72,10 @@ class StandingTests(unittest.TestCase):
         return path
 
     def read(self, **kwargs):
+        # These tests check what is read, not the deadline: test_subprocesses_are_bounded_and_read_only
+        # and test_process_check_timeout_is_unknown pin that. The default 1 s per Git call can run out
+        # on a loaded machine, which turns a checkout relation into 'unknown'.
+        kwargs.setdefault('timeout', 30.0)
         return self.standing.read(self.root, env=self.env, **kwargs)
 
     def live_keeper(self, **extra):
@@ -337,7 +341,7 @@ class StandingTests(unittest.TestCase):
                 record.update(changes)
                 path.write_text(json.dumps(record))
                 with patch.dict(os.environ, env), patch.object(Path, 'home', return_value=home):
-                    local = self.standing.read(self.root, env=env)
+                    local = self.standing.read(self.root, env=env, timeout=30.0)
                     history = setup._launch_history(self.root, 'release/main')
                 self.assertEqual(None if local.launch is None else local.launch.complete, complete)
                 self.assertEqual(bool(local.launch and local.launch.complete), bool(history))

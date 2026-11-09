@@ -113,10 +113,10 @@ class WorkOverviewTests(unittest.TestCase):
         self.env = offline_environment(self.base / 'fixture', self.root)
         for key in ('HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME'):
             Path(self.env[key]).mkdir()
-        self.local = standing.read(self.root, env=self.env)
+        self.local = standing.read(self.root, env=self.env, timeout=30.0)
         self.local.state.mkdir(parents=True, mode=0o700)
         state.atomic_write(self.local.state / 'scratch.json', b'{"codespace":"paired-cs"}\n')
-        self.local = standing.read(self.root, env=self.env)
+        self.local = standing.read(self.root, env=self.env, timeout=30.0)
         self.out = Stream()
         self.call = Mock(side_effect=AssertionError('printing must never execute an action'))
         guard = patch.object(terminal, 'gum_binary', side_effect=AssertionError('no Gum download'))
