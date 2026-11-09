@@ -14,6 +14,7 @@ import time
 @dataclass(frozen=True)
 class Limits:
     entries: int = 200_000
+    ignored_entries: int = 200_000
     repositories: int = 64
     worktrees: int = 256
     files: int = 100_000
@@ -242,7 +243,7 @@ def scan(connection, codespace: str, remote_root: str, *,
         _text(codespace)
         for path in (remote_root, workspaces, proc):
             _path(path, absolute=True)
-        for name in ('entries', 'repositories', 'worktrees', 'files', 'hashed_bytes', 'output'):
+        for name in ('entries', 'ignored_entries', 'repositories', 'worktrees', 'files', 'hashed_bytes', 'output'):
             _integer(getattr(limits, name))
         if type(limits.seconds) not in (float, int) or not math.isfinite(limits.seconds) or limits.seconds < 0:
             raise ValueError('Invalid time limit')
@@ -305,7 +306,7 @@ for name in ('state', 'scratch_tree', 'sessions'):
 state, scratch_tree, sessions = package.state, package.scratch_tree, package.sessions
 limits = request['limits']
 deadline = time.monotonic() + limits['seconds']
-usage = dict(entries=0, repositories=0, worktrees=0, files=0, hashed_bytes=0)
+usage = dict(entries=0, ignored_entries=0, repositories=0, worktrees=0, files=0, hashed_bytes=0)
 cutoffs = {(agent, name): value for agent, name, value in (request['cutoffs'] or [])}
 cutoff_record = {agent + '/' + name: [value['size'], value['sha256'], value['own']]
                  for (agent, name), value in cutoffs.items()}
@@ -514,17 +515,17 @@ def repository(path, candidates):
 def git_inventory():
     groups = {}
     ignored = set()
-    stack = [Path(request['workspaces'])]
+    stack = [(Path(request['workspaces']), False)]
     try:
-        safe_directory(stack[0])
+        safe_directory(stack[0][0])
         while stack:
             clock()
-            directory = stack.pop()
+            directory, ignored_only = stack.pop()
             safe_directory(directory)
             children = []
             with os.scandir(directory) as entries:
                 for child in entries:
-                    spend('entries')
+                    spend('ignored_entries' if ignored_only else 'entries')
                     children.append(child)
             by_name = {child.name: child for child in children}
             marker = by_name.get('.git')
@@ -535,6 +536,7 @@ def git_inventory():
                 continue
             candidate = marker is not None or bare
             if candidate:
+                ignored_only = False  # A discovered repository owns its own ignore rules.
                 try:
                     common = scalar(git(directory, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
                     if not Path(common).is_absolute():
@@ -550,10 +552,11 @@ def git_inventory():
                 if bare:
                     continue
             for child in sorted(children, key=lambda child: child.name, reverse=True):
-                if child.name == '.git' or str(Path(child.path)) in ignored:
+                hidden = ignored_only or str(Path(child.path)) in ignored
+                if child.name == '.git' or (hidden and child.name in ('node_modules', '.venv', '__pycache__')):
                     continue
                 if child.is_dir(follow_symlinks=False):
-                    stack.append(Path(child.path))
+                    stack.append((Path(child.path), hidden))
     except (OSError, ValueError, Incomplete):
         problem('git')
     for common, candidates in groups.items():

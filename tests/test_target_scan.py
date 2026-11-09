@@ -92,18 +92,22 @@ class TargetScanTests(unittest.TestCase):
 
     def test_every_repository_and_worktree_under_workspaces_is_found(self):
         self.api
+        from devcontainer_setup.project_sync import notes
         root = self.repo('project')
-        (root / '.gitignore').write_text('node_modules/\n')
+        (root / '.gitignore').write_text('node_modules/\ntmp/\n')
+        (root / '.scratch').mkdir()
+        (root / '.scratch/.gitignore').write_bytes(notes._IGNORE)
+        (root / '.scratch/README.md').write_bytes(notes._README)
         self.git(root, 'add', '.'); self.git(root, 'commit', '-qm', 'Ignore dependencies')
         linked = self.ws / 'linked'; self.git(root, 'worktree', 'add', '-qb', 'linked', str(linked))
         (linked / 'new').write_text('untracked')
-        expected = {'project', 'project/nested', '.devcontainer-work/old', 'project/.scratch/repo', '.cache/manual-project', 'bare'}
+        expected = {'project', 'project/nested', '.devcontainer-work/old', 'project/.scratch/repo',
+                    'project/tmp/clone', 'project/sub/deep-ignored/hidden', '.cache/manual-project', 'bare'}
         for name in expected - {'project', 'bare'}:
             self.repo(name)
         self.repo('bare', bare=True); self.repo('project/node_modules/hidden')
         with (root / '.gitignore').open('a') as stream:
             stream.write('sub/deep-ignored/\n')
-        self.repo('project/sub/deep-ignored/hidden')
         (root / 'sub/visible.txt').write_text('not ignored')
         (self.ws / '.cache/manual-project/dirty').write_text('local work')
         self.git(root, 'add', '.'); self.git(root, 'commit', '-qm', 'Track nested repositories')
@@ -120,6 +124,20 @@ class TargetScanTests(unittest.TestCase):
         self.assertTrue(next(row for row in result.repositories if row.path.endswith('/bare')).bare)
         self.assertEqual(len(self.connection.calls), 1)
         self.assertEqual(self.connection.calls[0][2], self.api.LIMITS.seconds + 30)
+        self.assertTrue(result.scratch_complete)
+        self.assertEqual([path for path, _ in result.scratch], ['repo/tracked'])
+
+    def test_ignored_repository_search_has_its_own_entry_budget(self):
+        root = self.repo('project')
+        (root / '.gitignore').write_text('tmp/\n')
+        hidden = root / 'tmp'
+        hidden.mkdir()
+        for name in ('one', 'two', 'three'):
+            (hidden / name).write_text('ignored')
+        result = self.scan(limits=replace(self.api.LIMITS, ignored_entries=2))
+        self.assertFalse(result.git_complete)
+        self.assertIn('could not read every repository under /workspaces', result.problems)
+        self.assertTrue(self.scan(limits=replace(self.api.LIMITS, entries=8)).git_complete)
 
     def test_stash_and_detached_head(self):
         self.api
