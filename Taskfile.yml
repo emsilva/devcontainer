@@ -23,6 +23,10 @@ tasks:
     desc: Stop this project scratch and conversation sync worker
     cmds:
       - bash scripts/project-sync.sh work --stop {{.CLI_ARGS}}
+  work:forget:
+    desc: Stop sending a conversation the Codespace refused (task work:forget -- --agent claude --session ID)
+    cmds:
+      - bash scripts/project-sync.sh work --forget {{.CLI_ARGS}}
   work:cs:armed:
     desc: Connect the Codespace and arm automatic restart after the 12-hour stop
     interactive: true

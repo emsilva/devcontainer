@@ -40,6 +40,9 @@ def parser():
     action.add_argument('--codespace-stop', action='store_true', help='Stop the Codespace and keep it stopped')
     action.add_argument('--codespace-restart', action='store_true', help='Restart the Codespace now')
     action.add_argument('--logs', action='store_true', help='Show recent keeper and worker logs')
+    action.add_argument('--forget', action='store_true', help='Stop sending a conversation the Codespace refused')
+    work.add_argument('--agent', metavar='AGENT')
+    work.add_argument('--session', metavar='ID')
     work.add_argument('--follow', action='store_true')
     work.add_argument('--port', type=_port, action='append', default=[], help=argparse.SUPPRESS)
     work.add_argument('--no-port', type=_port, action='append', default=[], help=argparse.SUPPRESS)
@@ -297,6 +300,10 @@ def run(args):
     state = state_dir(project)
     if args.group == 'work':
         from . import workspace
+        if args.forget:
+            from .forget import forget
+            print(forget(project, state, agent=args.agent, session_id=args.session))
+            return 0
         if args.status:
             value = workspace.status(project, state)
             if args.json:
@@ -395,6 +402,11 @@ def main(argv=None):
     try:
         commands = parser()
         args = commands.parse_args(argv)
+        if args.group == 'work':
+            if (args.agent is not None or args.session is not None) and not args.forget:
+                commands.error('--agent and --session work only with --forget')
+            if args.forget and (args.agent is None or args.session is None):
+                commands.error('--forget requires --agent and --session')
         if getattr(args, 'rebind', None) is not None and not (args.codespace or args.armed):
             commands.error('--rebind works only with task work:cs or task work:cs:armed')
         if getattr(args, 'then_signin_all', False) and not args.codespace:
