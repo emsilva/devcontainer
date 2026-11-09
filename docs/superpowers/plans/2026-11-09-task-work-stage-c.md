@@ -25,7 +25,8 @@ calls 12-13. Source inventory at b4a8f6c:
 `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-c/inventory/INVENTORY.md` (INV §n). Plan
 check this revision answers: `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-c/plancheck/CHECK.md`
 (F1-F21), and the second check `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-c/plancheck2/CHECK.md`
-(CHECK2 N1-N13). Line numbers are at b4a8f6c.
+(CHECK2 N1-N13), and the third, `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-c/plancheck3/CHECK.md`
+(CHECK3 M1-M10). Line numbers are at b4a8f6c.
 
 ## Global Constraints
 
@@ -77,9 +78,11 @@ check this revision answers: `/Users/mannu/code/devcontainer/tmp/codespace-lifec
    digest differs, and no unfinished turn follows a cutoff (F3). Codex roots are `sessions/` and `archived_sessions/`
    (`sessions.py:221-239`, CHECK2 N2). Tails: Codex keeps trailing metadata inside the cutoff
    (`conversations.py:233-237`), so under the bracket any byte after it is a turn the capture left out; Claude counts a
-   `user` record (except `isMeta: true` and slash-command wrappers whose text starts `<command-name>` or
-   `<local-command-`), an `assistant` record, or a final line without a newline; other record types are metadata
-   (CHECK2 N11). An interrupted turn (Esc) therefore blocks until it is resumed and finishes. The owner's "Not
+   `user` record, an `assistant` record, or a final line without a newline; other record types are metadata
+   (CHECK2 N11). A `user` record is metadata only when `isMeta` is `true`, or when its `message.content` (a string, or
+   a list whose items are all `{"type": "text", "text": str}`, joined) starts with `<command-message>`,
+   `<command-name>` or `<local-command-` (CHECK3 M7); any other content, including tool results and interruption
+   markers, counts, and so does a shape the rule cannot decode. An interrupted turn (Esc) therefore blocks until it is resumed and finishes. The owner's "Not
    checked" list stays exactly the three items of ruling 29.
 4. **`Kept on this Mac only` is a notice, not an exception** (F9). The outbound direction carries the Mac's own
    conversations to the Codespace; its refusals and forgotten conversations already sit on the Mac, and the inbound
@@ -157,7 +160,7 @@ Type delete to delete it.
   detached head is shown as `HEAD`.
 - Git UNKNOWN: `could not read every repository under /workspaces`, or items `PATH: BRANCH: REASON` with REASON one
   of `GitHub could not be read from this Mac`, `this Mac has no checkout of OWNER/REPO to compare`,
-  `not a GitHub repository`, and `PATH: its origin cannot be read`.
+  `not a GitHub repository`, `this Mac's checkout is shallow or partial`, and `PATH: its origin cannot be read`.
 - Scratch: UNSAFE `N files differ from this Mac's copy (…)`, `N conflicts (…)` (paired), `N files changed or added
   since the final flush (…)` (sealed); UNKNOWN `sync is not running; run CMD, then check again` (CMD = `work:cs`),
   `could not read .scratch on NAME`, `moved with --rebind, so no final flush was recorded`.
@@ -241,7 +244,8 @@ Type delete to delete it.
     `scratch: tuple[tuple[str, str], ...]` (relative path → sha256), `scratch_complete: bool`,
     `sessions: tuple[tuple[str, str], ...]` (`codex/<path under CODEX_HOME/sessions>` or
     `claude/<path under the Claude home's projects>` → sha256), `sessions_complete: bool`,
-    `checked: tuple[tuple[str, str], ...]` ((agent, basename) of every `cutoffs` key found on the Codespace),
+    `cutoffs_sha256: str | None`, `checked: tuple[tuple[str, str], ...]` ((agent, basename) of every `cutoffs` key
+    found on the Codespace),
     `mismatched: tuple[tuple[str, str], ...]` (found, but its first `size` bytes differ from the digest or it is
     shorter), `tails: tuple[tuple[str, str], ...]` (own files with an unfinished turn); all three empty without
     `cutoffs`,
@@ -257,6 +261,9 @@ Type delete to delete it.
     gives every part `complete=False` and one problem.
   - `fingerprint(scan: Scan) -> str | None`: sha256 hex of `json.dumps(…, sort_keys=True, separators=(',', ':'))` of
     `repositories`, `scratch`, `sessions` and `agents`; None unless all four `*_complete` are true.
+  - `cutoffs_digest(cutoffs) -> str`: sha256 hex of the canonical JSON of the cutoffs map (keys `agent/basename`,
+    values `[size, sha256, own]`); `scan` stores it in `Scan.cutoffs_sha256` (None without cutoffs), so a record made
+    from the scan can prove which manifest it was compared with (CHECK3 M1).
 - Bootstrap (F17): the payload carries the sources of `state.py`, `scratch_tree.py` and `sessions.py`. The program
   builds an in-memory package (`types.ModuleType('_psync')` with `__path__ = []`, registered in `sys.modules`), then
   creates `_psync.state`, `_psync.scratch_tree`, `_psync.sessions` in that order, each with `__package__ = '_psync'`,
@@ -309,9 +316,11 @@ def test_prefix_digests_are_compared(self):   # equal -> checked; a changed byte
                                               # a file shorter than size -> mismatched; a dependency file -> no tail read
 def test_unfinished_turns_after_the_cutoff(self):
     # codex (sessions/ and archived_sessions/): bytes after the cutoff -> tail;
-    # claude after end_turn: system, last-prompt, cost-state, an isMeta user record, a '<command-name>' user record ->
-    # no tail; a prompt user record, an interruption marker user record, an assistant record, a partial line -> tail;
-    # no cutoffs -> checked, mismatched and tails all ()
+    # claude after end_turn: system, last-prompt, cost-state, an isMeta user record, '<command-message>',
+    # '<command-name>' and '<local-command-' wrappers as a string and as a list of text blocks -> no tail; a prompt
+    # user record (string or list), an interruption marker (list), a tool result, an undecodable content shape, an
+    # assistant record, a partial line -> tail; no cutoffs -> checked, mismatched, tails all () and cutoffs_sha256 None
+def test_cutoffs_digest_is_recorded(self):   # same map -> same digest; one changed sha256 -> a different digest
 def test_agents_match_any_argv_basename(self):
     # 'node /usr/lib/bin/claude', '/usr/bin/codex exec', 'herdr server' -> claude 1, codex 1, herdr 1
 def test_the_scan_itself_is_not_an_agent(self)
@@ -345,9 +354,14 @@ def test_scan_changes_nothing(self):  # every file and ref under workspaces and 
   - `prove(project, claims: Sequence[Claim], *, timeout: float = 60) -> tuple[Proof, ...]`, one Proof per claim, in
     order. `CHECK_NAMESPACE = 'refs/project-sync-check/heads/'`.
 - Rules:
-  - Common environment for every Git call: the inherited environment without any `GIT_*` variable, then
-    `GIT_TERMINAL_PROMPT=0`, `GIT_NO_REPLACE_OBJECTS=1`, `GIT_GRAFT_FILE=/dev/null` (a local graft can otherwise turn
-    an unpushed commit into a contained one, CHECK2 N3), `LC_ALL=C`; stderr discarded; `timeout`. A shallow
+  - Common environment for every Git call (CHECK3 M6): the inherited environment minus `GIT_DIR`, `GIT_WORK_TREE`,
+    `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_INDEX_VERSION`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`,
+    `GIT_QUARANTINE_PATH`, `GIT_NAMESPACE`, `GIT_SHALLOW_FILE`, `GIT_REPLACE_REF_BASE`, `GIT_GRAFT_FILE`, `GIT_CONFIG`,
+    `GIT_CEILING_DIRECTORIES`, `GIT_DISCOVERY_ACROSS_FILESYSTEM`, `GIT_CURL_VERBOSE` and every `GIT_TRACE*` (the
+    owner's authentication and configuration variables, such as `GIT_SSH_COMMAND`, `GIT_ASKPASS`, `GIT_CONFIG_COUNT`,
+    stay), then `GIT_TERMINAL_PROMPT=0`, `GIT_NO_REPLACE_OBJECTS=1`, `GIT_GRAFT_FILE=/dev/null` (a local graft can
+    otherwise turn an unpushed commit into a contained one, CHECK2 N3), `GIT_OPTIONAL_LOCKS=0`, `GIT_NO_LAZY_FETCH=1`,
+    `LC_ALL=C`; no preserved value is logged; stderr discarded; `timeout`. A shallow
     (`rev-parse --is-shallow-repository` prints `true`) or partial (`config --get remote.origin.promisor` or
     `extensions.partialClone` set) Mac checkout cannot prove ancestry: every ref of those claims is unknown
     (`this Mac's checkout is shallow or partial`).
@@ -384,6 +398,8 @@ def test_owner_refs_tags_and_fetch_head_are_untouched(self):
     # with remote.origin.fetch set, fetch.pruneTags true and a stale local tag: refs/remotes/*, refs/tags/*, branches,
     # HEAD, index and FETCH_HEAD byte-identical afterwards; nothing left under refs/project-sync-check/
 def test_failed_fetch_is_unknown_not_unpushed(self)
+def test_owner_authentication_variables_are_kept(self):   # GIT_SSH_COMMAND and GIT_CONFIG_COUNT entries pointing at
+                                                          # fixture stubs reach the fetch; GIT_DIR and GIT_TRACE do not
 def test_a_local_graft_proves_nothing(self):   # an unrelated local-only commit grafted onto a fetched head -> unpushed,
                                                # also with an inherited GIT_GRAFT_FILE pointing at that graft
 def test_shallow_or_partial_checkout_is_unknown(self)
@@ -422,10 +438,11 @@ def test_detached_head_is_proved_as_HEAD(self)
     `sealed_at: float`, `cycle_id: str`, `snapshot_id: str` (64-hex), `scratch: tuple[tuple[str, str], ...]`,
     `sessions: tuple[tuple[str, str], ...]`.
   - `write(state, store, scan, *, identity, repository, gh_user, remote_root, operation, cycle_id, snapshot_id, now)
-    -> Path`: loads `snapshot_id` from `store` (`Store.load`, which verifies its blobs) and refuses (`ValueError`)
-    unless the scan's `fingerprint` is not None, its `checked` equals the keys `verdict.cutoffs(manifest)` gives for the
-    entry files present on the Codespace (`checked` ⊆ those keys and every own key of a session in `scan.sessions` is
-    in `checked`), `mismatched` and `tails` are empty (CHECK2 N1); writes `STATE/retired/<codespace>.json`
+    -> Path`: loads `snapshot_id` from `store` (`Store.load`, which verifies its blobs) and, with `K =
+    verdict.cutoffs(manifest)` and `F` the (agent, basename) of every `scan.sessions` key, refuses (`ValueError`)
+    unless the scan's fingerprint is not None, `scan.cutoffs_sha256 == target_scan.cutoffs_digest(K)`,
+    `set(scan.checked) == set(K) & F`, and `mismatched` and `tails` are empty (CHECK2 N1, CHECK3 M1); writes
+    `STATE/retired/<codespace>.json`
     (`{"schema": 1, …}`) with `state.atomic_write`, replacing an older seal for the same name.
   - `read(state, codespace) -> Seal | None`: None when absent; `ValueError('The final-flush record for NAME cannot be
     read')` when malformed or naming another identity.
@@ -531,8 +548,10 @@ def test_cycle_scope_matches_status(self):   # status() before and after the ext
 **Files:**
 - Modify: `devcontainer_setup/project_sync/ssh_hosts.py` (add `remove`), `devcontainer_setup/project_sync/herdr.py`
   (provenance and the lock in `open_remote`, add `remove_profile`), `devcontainer_setup/project_sync/workspace.py`
-  (add `retire`), `devcontainer_setup/project_sync/scratch.py` (add `terminate_retired`),
-  `devcontainer_setup/project_sync/restore.py` (add `end_target_proxies`)
+  (add `retire`; pass `expected_codespace` at `:347`), `devcontainer_setup/project_sync/scratch.py` (add
+  `terminate_retired`; `start` re-reads the binding under its lock), `devcontainer_setup/project_sync/keeper.py`
+  (`start` re-reads the binding under its lock), `devcontainer_setup/project_sync/restore.py` (add
+  `end_target_proxies`; exact `_served`)
 - Test: `tests/test_ssh_hosts.py`, `tests/test_herdr.py`, `tests/test_scratch_sync.py`, `tests/test_restore.py`,
   `tests/test_retire.py` (new)
 
@@ -548,15 +567,25 @@ def test_cycle_scope_matches_status(self):   # status() before and after the ext
     receipt. A differing block or include: `the SSH alias was edited; remove it by hand`, with zero writes.
   - `herdr.open_remote` (`herdr.py:182-242`) adds `created` to the receipt: `True` when this call ran `machine add`
     for the saved id (the no-match and replacement branches), `False` when it adopted an existing match, and the
-    previous value when the saved id is unchanged; a legacy receipt is never promoted. It also takes
+    previous value when the saved id is unchanged; a legacy receipt is never promoted. It gains a keyword
+    `expected_codespace: str`, which `workspace.remote:347` passes as its selected `name` (CHECK3 M3), and takes
     `workspace-control.lock` (blocking) around reading the binding, `configure_ssh`, the catalog match or `machine
     add`, and the receipt write, refusing with `ValueError('No Codespace is paired; run task work:cs')` when
-    `scratch.json` is absent or names a Codespace other than the one it read first; it releases the lock before
-    `prepared` and before opening Herdr (CHECK2 N5). Its only caller, `workspace.remote:347`, already released the lock.
+    `scratch.json` is absent, or `ValueError('The project moved to another Codespace meanwhile; run task work:cs')`
+    when it names another Codespace, another identity or another remote root; it releases the lock before `prepared`
+    and before opening Herdr (CHECK2 N5). Its only production caller already released the lock. Ten existing tests in
+    `tests/test_herdr.py::HerdrTests` call it without a binding (CHECK3 M9): seed a matching `scratch.json` in each
+    and pass `expected_codespace`, keeping their assertions, and change
+    `test_a_missing_binding_never_counts_as_a_replaced_codespace` to expect the refusal with zero writes.
   - `restore.end_target_proxies(codespace: str, state: Path, *, wait: float = 120, run=subprocess.run,
     now=time.time, sleep=time.sleep) -> str` (`'ended'` | `'absent'`): this project's Herdr proxies serving
-    `codespace` (`_proxies`, whose argv check proves each is this package's proxy for this state); SIGTERM them, then
-    poll `_proxies` every 2 s until none serves `codespace`. `ps` unreadable: `ValueError('the process list cannot be
+    `codespace` (`_proxies`); for each, `state.process_identity(pid)` is read again just before SIGTERM and must equal
+    the identity read when it was listed (else it is skipped as gone); then poll `_proxies` every 2 s until none
+    serves `codespace`. Origin fix in `restore._served` (CHECK3 M2), used by every caller: a command serves Codespace
+    `C` only when it ends with exactly `" -I -B -c " + BOOTSTRAP + " " + C + " " + str(state)`, where `BOOTSTRAP` is
+    the bootstrap string `ssh_hosts._proxy_command` builds for this package and `C` is a valid Codespace name; the
+    executable before it is not compared (the Python path may have moved). Another project's proxy whose state path
+    ends with this one, or a stray command with the marker, no longer matches. `ps` unreadable: `ValueError('the process list cannot be
     read')`; survivors after `wait`: `ValueError('a Herdr connection to NAME is still open')` (CHECK2 N6).
   - `herdr.remove_profile(project, state: Path) -> str` (`'removed'` | `'kept'` | `'absent'`): no receipt → `'absent'`.
     Herdr not installed or its catalog unreadable → `ValueError('Herdr could not be read')`, receipt kept. The catalog
@@ -567,17 +596,24 @@ def test_cycle_scope_matches_status(self):   # status() before and after the ext
   - `workspace.retire(project, state: Path, codespace: str, *, held: bool = False) -> Path` under
     `workspace-control.lock` (taken by `retire` itself unless `held=True`, when the caller already holds it: the lock
     is not reentrant, `state.py:281-302`), with an intent
-    file `STATE/retire-intent.json` (`{"schema": 1, "codespace", "archive", "binding_sha256", "registry_sha256",
-    "session_sha256"}`) (F12). Refuses while `scratch.status(state)['running']` or `keeper.status(state)` shows a live
-    keeper (`stop the keeper and sync worker first`), and refuses to start unless `scratch.json` names `codespace`.
+    file `STATE/retire-intent.json` (`{"schema": 1, "codespace", "archive", "binding_sha256", "session_sha256",
+    "registry_sha256", "registry_after_sha256"}`, written with the rewritten registry already computed) (F12). From
+    its liveness check to its last unlink it also holds `keeper-control.lock`, then `scratch-control.lock`, and
+    `scratch.start` and `keeper.start` re-read `scratch.json` under their own lock and refuse when it is absent
+    (CHECK3 M8; the builder confirms no existing path takes those two locks in the other order, and reports it).
+    Refuses while `scratch.status(state)['running']` or `keeper.status(state)` shows a live keeper (`stop the keeper
+    and sync worker first`), and refuses to start unless `scratch.json` names `codespace`.
     Steps: write the intent; copy `scratch.json`, `scratch-session.json` (if any) and `workspace.json` into the new
     `retired-bindings/<time_ns>-<8 hex>/` with `deleted.json` (`{"schema": 1, "codespace", "deleted_at"}`); rewrite
-    `workspace.json` in place (it is never unlinked) only while its sha256 equals the intent's, keeping every key
+    `workspace.json` in place (it is never unlinked) when its sha256 is `registry_sha256`, keeping every key
     except `codespace`, `remote_root`, `remote_active_root` and `verified_remote_historical_roots`, with
     `verified_historical_roots` set to `verified_local_historical_roots`, `active_host='local'` and
-    `local_active_root` the checkout (F13); unlink exactly `scratch-session.json` and then `scratch.json`, each only
-    while its sha256 equals the intent's; remove the intent. A replay with the intent present finishes the remaining
-    steps under the same equality checks, so a newer pairing's files are never touched. A call with no intent and no
+    `local_active_root` the checkout (F13); unlink exactly `scratch-session.json` and then `scratch.json`, each when
+    its sha256 is the intent's; remove the intent. A replay with the intent present first checks every artifact
+    against its allowed states (CHECK3 M4): archive files equal to the intent's digests; `workspace.json` at
+    `registry_sha256` (rewrite it) or `registry_after_sha256` (done); `scratch-session.json` and `scratch.json` at their
+    digest (unlink) or absent (done). Any other state refuses (`the pairing changed since the delete began`) before
+    touching anything, so a newer pairing's files are never touched. A call with no intent and no
     `scratch.json` naming `codespace` returns the newest archive whose `deleted.json` names it (the retirement already
     finished, CHECK2 N4), else raises `no pairing for NAME to retire`. Returns the archive.
   - `scratch.terminate_retired(state: Path, receipt: dict) -> str` (`'terminated'` | `'absent'`), under
@@ -605,8 +641,11 @@ def test_only_a_created_profile_is_removed(self)
 def test_unreadable_herdr_keeps_the_receipt(self)
 def test_a_connect_resumed_after_retirement_writes_nothing(self):  # binding gone when open_remote takes the lock:
                                                                     # no SSH alias, no machine add, no receipt
+def test_a_connect_resumed_after_a_rebind_writes_nothing(self):    # binding names NEW, expected_codespace is OLD
 # tests/test_restore.py
 def test_end_target_proxies_ends_and_waits_for_only_that_codespace(self)
+def test_another_projects_proxy_with_a_suffix_state_path_is_not_ours(self)   # CHECK3 M2's two counterexamples
+def test_a_reused_pid_is_not_signalled(self)
 def test_a_surviving_or_unlisted_proxy_keeps_the_step_pending(self)
 # tests/test_retire.py
 def test_retire_archives_then_clears_the_pairing_and_keeps_local_history(self):
@@ -615,6 +654,8 @@ def test_retire_archives_then_clears_the_pairing_and_keeps_local_history(self):
 def test_retire_refuses_another_codespace_or_a_running_worker(self)
 def test_retire_replays_after_each_step(self)        # crash after the intent, each copy, the registry, each unlink
 def test_finished_retire_is_found_again(self)        # intent removed, caller crashed: returns that archive
+def test_retire_replay_accepts_its_own_successor_states(self)  # crash after the rewrite, after each unlink
+def test_a_start_during_retirement_waits_and_then_refuses(self)
 def test_replay_never_touches_a_newer_pairing(self)  # crash, then a new scratch.json for another Codespace, replay
 # tests/test_scratch_sync.py
 def test_terminate_retired_ends_only_that_session(self)      # fake _mutagen; the live session is untouched
@@ -672,16 +713,19 @@ def test_actual_terminate_of_a_paused_retired_session(self)  # gated like the ot
   1. Refuse inside a Codespace (`CODESPACES == 'true'`) and with `GH_TOKEN`/`GITHUB_TOKEN` set (`refused`). Take
      `STATE/delete.lock` non-blocking for the whole run.
   2. `account = arming.account(env)`; `target = verdict.resolve(...)`; `journal` = `STATE/deletions/<name>.json` if
-     any. A paired, armed target whose `gh_user` differs, or a sealed one whose `seal.gh_user` differs, is refused.
-     Journal `cleaned` → `was deleted at` (`cleaned`), exit 0.
+     any. A journal whose `account` or `repository` differs from now is refused (`NAME's delete was started as LOGIN
+     for REPO; …`). A paired, armed target whose `gh_user` differs, or a sealed one whose `seal.gh_user` differs, is
+     refused. Journal `cleaned` → `was deleted at` (`cleaned`), exit 0. Journal `deleted`: `--start` is refused
+     (`NAME was deleted`); otherwise go to step 5 with no API call (CHECK3 M5).
   3. `api = api_factory(name, gh_user=account)`; `reading = api.read()`. Not `ok` → unreachable `GitHub did not
-     answer` (no further step). A valid reading whose `repository` differs from the project's (case-insensitive) →
-     refused, exit 1.
+     answer` (no further step). `Deleted` (confirmed; a 404 body has no repository) → step 5, identity from the
+     journal or the target's own records. Any other valid reading whose `repository` differs from the project's
+     (case-insensitive) → refused, exit 1.
   4. `--start` (call 10, CHECK2 N7): needs a terminal and a sealed or moved target in `Shutdown`; `api.post_start()`,
      poll `read()` every 5 s up to 10 minutes for `Available`, print `Started NAME. Check it: CMD`, exit 0. Paired:
      refused with the `work:cs:restart` copy, no POST. Any other state: its unreachable line, exit 1.
-  5. Journal `deleted`, or `reading.state == 'Deleted'` (confirmed) with anything kept for it locally (a journal past
-     `confirmed`, a paired binding, an archived session): not authorized → `cleanup is not finished`
+  5. Journal `deleted`, or `reading.state == 'Deleted'` (confirmed) with anything kept for it locally (a journal at
+     `confirmed` or later, a paired binding, an archived session): not authorized → `cleanup is not finished`
      (`cleanup-pending`), exit 1; authorized with a journal at `confirmed` or later → step 9; authorized without one →
      the `still keeps` line and a typed `delete` (EOF or another word: `Nothing was deleted.`, exit 1), then a journal
      at `deleted` with the kind `resolve` gives now, then step 9. Confirmed deleted with nothing kept → `NAME is
@@ -763,6 +807,7 @@ def test_start_is_its_own_operation(self):
     # state other than Shutdown, or a journal at deleted -> no POST (CHECK2 N7)
 def test_never_paired_target_is_not_connected(self)    # connect not called; four UNKNOWN 'pair it first'
 def test_another_repository_is_refused_before_any_check(self)
+def test_a_deleted_journal_resumes_without_an_api_call_and_checks_its_own_account(self)   # CHECK3 M5
 def test_inside_a_codespace_or_with_an_env_token_refuses(self)
 def test_cleanup_failure_is_pending_and_independent_steps_still_run(self)
 def test_paired_cleanup_order_and_disarm_line(self)    # Herdr connections ended after the pairing is retired
