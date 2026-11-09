@@ -161,11 +161,12 @@ class Probe:
             self._cleanup()
             raise
 
-    def _set(self, key, observation):
+    def _set(self, key, observation, *, only_unknown=False):
         keys = ('account', 'names', 'spaces', 'setup_prs') if key == 'token' else (
             ('names', 'spaces') if key == 'names' else (key,))
         for name in keys:
-            self._observations[name] = observation
+            if not only_unknown or self._observations[name].status == 'unknown':
+                self._observations[name] = observation
 
     def _spawn(self, key, args, env, **kwargs):
         if self._clock() >= self._end:
@@ -290,25 +291,33 @@ class Probe:
 
     @staticmethod
     def _kill(child):
-        # Darwin returns EPERM for a group containing only an unreaped zombie.
-        # Reap the leader first, but still signal its group for any descendants.
+        # Darwin can return EPERM while a killed leader is still exiting.
+        # Briefly reap and retry, still signalling the group for descendants.
         child.process.poll()
-        try:
-            os.killpg(child.process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            child.process.poll()
+        retry_until = time.monotonic() + 0.1
+        while True:
             try:
                 os.killpg(child.process.pid, signal.SIGKILL)
+                return
             except ProcessLookupError:
-                pass
+                return
+            except PermissionError:
+                if child.process.returncode is not None:
+                    return  # A reaped leader's EPERM group contains only zombies.
+                remaining = retry_until - time.monotonic()
+                if remaining <= 0:
+                    raise
+                try:
+                    child.process.wait(timeout=min(0.01, remaining))
+                except subprocess.TimeoutExpired:
+                    pass
 
     def _stop(self, child):
         try:
             self._kill(child)
         except OSError:
-            self._set(child.key, _failed(f'request failed; child {child.process.pid} could not be signalled'))
+            self._set(child.key, _failed(f'request failed; child {child.process.pid} could not be signalled'),
+                      only_unknown=True)
 
     def _cleanup(self):
         for child in self._children:
@@ -317,7 +326,8 @@ class Probe:
             try:
                 child.process.wait(timeout=1)
             except subprocess.TimeoutExpired:
-                self._set(child.key, _failed(f'request failed; child {child.process.pid} was not reaped'))
+                self._set(child.key, _failed(f'request failed; child {child.process.pid} was not reaped'),
+                          only_unknown=True)
             for stream in (child.process.stdout, child.process.stderr):
                 if stream is not None:
                     stream.close()

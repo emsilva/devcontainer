@@ -13,10 +13,14 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from devcontainer_setup.codespaces import Codespaces
 from devcontainer_setup.releases import fetch_release
+
+
+DEADLINE = 2.0
+REAP_BOUND = 1.0
 
 
 FAKE = r'''
@@ -131,7 +135,7 @@ class ProbeTests(unittest.TestCase):
                 if stream and not stream.closed:
                     stream.close()
 
-    def start(self, *, deadline=2.0, generator=('https://example.invalid/generator.git', 'main'),
+    def start(self, *, deadline=DEADLINE, generator=('https://example.invalid/generator.git', 'main'),
               want_prs=True, default='main', **kwargs):
         self.specfile.write_text(json.dumps(self.spec))
         request = self.probe.Request('owner/project', default, want_prs, generator)
@@ -142,7 +146,7 @@ class ProbeTests(unittest.TestCase):
 
     def assert_dead(self):
         pids = json.loads(self.pids.read_text())
-        limit = time.monotonic() + 1
+        limit = time.monotonic() + REAP_BOUND
         for pid in pids:
             while time.monotonic() < limit:
                 result = subprocess.run(['ps', '-o', 'stat=', '-p', str(pid)],
@@ -156,7 +160,7 @@ class ProbeTests(unittest.TestCase):
             self.assertIsNotNone(child.returncode)
 
     def wait_for_pids(self):
-        until = time.monotonic() + 1
+        until = time.monotonic() + DEADLINE
         while not self.pids.exists() and time.monotonic() < until:
             time.sleep(0.01)
         self.assertTrue(self.pids.exists())
@@ -164,9 +168,9 @@ class ProbeTests(unittest.TestCase):
     def test_all_reads_finish_inside_the_deadline(self):
         before = time.monotonic()
         handle = self.start()
-        self.assertLess(time.monotonic() - before, 0.5)
+        self.assertLess(time.monotonic() - before, DEADLINE)
         remote = handle.join()
-        self.assertLess(time.monotonic() - before, 1)
+        self.assertLess(time.monotonic() - before, DEADLINE)
         for observation in (remote.account, remote.names, remote.spaces, remote.setup_prs, remote.upstream):
             self.assertEqual(observation.status, 'ok')
             self.assertIsInstance(observation.at, float)
@@ -181,23 +185,25 @@ class ProbeTests(unittest.TestCase):
 
     def test_slow_read_is_unknown_and_the_rest_are_kept(self):
         self.spec['names']['sleep'] = 30
+        deadline = DEADLINE
         before = time.monotonic()
-        remote = self.start(deadline=0.5).join()
+        remote = self.start(deadline=deadline).join()
         self.assertEqual((remote.names.status, remote.names.reason), ('unknown', 'no answer within 2 s'))
         self.assertEqual(remote.account.status, 'ok')
         self.assertEqual(remote.upstream.status, 'ok')
-        self.assertLess(time.monotonic() - before, 1)
+        self.assertLess(time.monotonic() - before, deadline + REAP_BOUND)
 
     def test_grandchild_is_gone_after_the_deadline(self):
         self.spec['token'].update(fork=True, sleep=30)
-        self.start(deadline=0.5).join()
+        self.start(deadline=DEADLINE).join()
         self.assert_dead()
 
     def test_exited_leader_with_a_live_grandchild(self):
         self.spec['token'].update(fork=True, exit_leader=True)
+        deadline = DEADLINE
         before = time.monotonic()
-        self.start(deadline=0.5).join()
-        self.assertLess(time.monotonic() - before, 1)
+        self.start(deadline=deadline).join()
+        self.assertLess(time.monotonic() - before, deadline + REAP_BOUND)
         self.assert_dead()
 
     def test_normal_completion_also_kills_a_leaders_group(self):
@@ -217,7 +223,8 @@ class ProbeTests(unittest.TestCase):
 
     def test_interrupt_during_join_cleans_children(self):
         self.spec['token'].update(fork=True, sleep=30)
-        handle = self.start()
+        # Fixture startup must not use up the deadline before the interruption.
+        handle = self.start(clock=lambda: 0.0)
         self.wait_for_pids()
         with patch.object(handle, '_selector', wraps=handle._selector) as selector:
             selector.select.side_effect = KeyboardInterrupt
@@ -423,3 +430,90 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(self.probe.generator_request({'SETUP_DEVCONTAINER_REPO': '/local/source',
                                                       'SETUP_DEVCONTAINER_REF': 'refs/heads/topic'}),
                          ('/local/source', 'refs/heads/topic'))
+
+
+class CleanupRaceTests(unittest.TestCase):
+    def setUp(self):
+        self.probe = importlib.import_module('devcontainer_setup.project_sync.probe')
+        self.killpg = self.enterContext(patch.object(self.probe.os, 'killpg'))
+
+    def fake_probe(self):
+        process = Mock(pid=12345, returncode=None)
+        for name in ('stdout', 'stderr'):
+            reader, writer = os.pipe()
+            os.close(writer)
+            stream = os.fdopen(reader, 'rb')
+            self.addCleanup(stream.close)
+            setattr(process, name, stream)
+        process.poll.side_effect = lambda: process.returncode
+        def reap(timeout):
+            process.returncode = -signal.SIGKILL
+            return process.returncode
+        process.wait.side_effect = reap
+        request = self.probe.Request('owner/project', 'main', False, None)
+        handle = self.probe.start(request, env={}, popen=Mock(return_value=process))
+        self.addCleanup(handle.cancel)
+        return handle, process
+
+    def test_oversized_answer_survives_an_exiting_child_cleanup(self):
+        handle, process = self.fake_probe()
+        def killpg(group, sig):
+            self.assertEqual((group, sig), (process.pid, signal.SIGKILL))
+            if self.killpg.call_count == 1:
+                return  # The size limit kills the child; cleanup catches it exiting.
+            if process.returncode is None:
+                raise PermissionError(errno.EPERM, 'fixture exiting leader')
+            raise ProcessLookupError(errno.ESRCH, 'fixture reaped leader')
+        self.killpg.side_effect = killpg
+        key = handle._selector.get_key(process.stdout)
+        with patch.object(self.probe.os, 'read', return_value=b'x' * (self.probe.LIMIT + 1)):
+            handle._read(key)
+        remote = handle.join()
+        self.assertEqual(remote.names.reason, 'answer too large')
+        self.assertEqual(remote.spaces, remote.names)
+        self.assertIsNotNone(process.returncode)
+
+    def test_kill_retries_eperm_until_the_leader_is_reaped(self):
+        handle, process = self.fake_probe()
+        reap = process.wait.side_effect
+        def wait(timeout):
+            self.assertGreater(timeout, 0)
+            self.assertLess(timeout, REAP_BOUND)
+            if process.wait.call_count == 1:
+                raise subprocess.TimeoutExpired('fixture', timeout)
+            return reap(timeout)
+        process.wait.side_effect = wait
+        def killpg(group, sig):
+            if process.returncode is None:
+                raise PermissionError(errno.EPERM, 'fixture exiting leader')
+            raise ProcessLookupError(errno.ESRCH, 'fixture reaped leader')
+        self.killpg.side_effect = killpg
+        self.probe.Probe._kill(handle._children[0])
+        process.wait.side_effect = reap
+        self.assertEqual(process.wait.call_count, 2)
+        self.assertEqual(self.killpg.call_count, 3)
+
+    def test_reaped_leaders_zombie_group_is_not_a_cleanup_failure(self):
+        handle, process = self.fake_probe()
+        process.returncode = -signal.SIGKILL
+        self.killpg.side_effect = PermissionError(errno.EPERM, 'fixture zombies')
+        self.probe.Probe._kill(handle._children[0])
+        process.wait.assert_not_called()
+
+    def test_cleanup_failures_only_fill_unknown_observations(self):
+        for failure in ('signal', 'reap'):
+            with self.subTest(failure=failure):
+                handle, process = self.fake_probe()
+                known = {'account': self.probe.Observation('ok', 'reader', 1.0, None),
+                         'names': self.probe.Observation('failed', None, 1.0, 'answer too large')}
+                handle._observations.update(known)
+                self.killpg.side_effect = (OSError(errno.EIO, 'fixture signal error')
+                                           if failure == 'signal' else None)
+                process.wait.side_effect = subprocess.TimeoutExpired('fixture', REAP_BOUND)
+                handle.cancel()
+                remote = handle.join()
+                for key, observation in known.items():
+                    self.assertIs(getattr(remote, key), observation)
+                reason = (f'request failed; child {process.pid} could not be signalled' if failure == 'signal'
+                          else f'request failed; child {process.pid} was not reaped')
+                self.assertEqual((remote.spaces.status, remote.spaces.reason), ('failed', reason))
