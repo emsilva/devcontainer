@@ -136,6 +136,12 @@ check this revision answers: `/Users/mannu/code/devcontainer/tmp/codespace-lifec
     stat-dirty but unchanged LFS file reads changed (raw content against the pointer blob): that blocks a delete it
     need not, never passes one it should not. Evidence:
     `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-c/verify/scan-filter-probe.log`.
+17. **A repository inside a directory Git ignores is still a repository** (stage C review, 2026-11-09). Ruling 29
+    lets files Git ignores pass; a clone in an ignored `tmp/` or a repository inside `.scratch/` (generated projects
+    ignore all of `.scratch`) holds commits, not ignored files, and spec C asks for every repository under
+    `/workspaces`. So the walk enters ignored directories to look for repositories (Task 7 R2). It blocks a delete
+    it might not need to (a throwaway clone with unpushed commits), never passes one it should not. Evidence:
+    `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-c/review-fable/REVIEW.md` P1-2.
 
 ## Copy (exact strings, used by Tasks 3, 5 and 6)
 
@@ -903,6 +909,69 @@ def test_the_current_pairing_is_never_offered_for_delete(self)
 - [ ] **Step 4: Run the gates.** Run: `task check && task test`. Expected: exit 0.
 - [ ] **Step 5: Commit** — `git add -A templates Taskfile.yml devcontainer_setup README.md docs tests && git commit -m
   "Add task work:cs:delete, offer it for a replaced Codespace, and document the safe order"`
+
+### Task 7: Fixes from the stage C review (Fable 5.2 at 5133a32)
+
+The review `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-c/review-fable/REVIEW.md` (sha256
+87a2e96d7a48…) found three false-SAFE cases and more; the lead re-ran every reproduction
+(`/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-c/verify/fable-review-5133a32.verification.md`).
+The review is evidence; this task is what to build. Its reproduction scripts (`review-fable/repro/`) may be turned
+into suite tests.
+
+**Files:** `target_scan.py`, `conversations.py` (capture), `verdict.py` (`_manifest_files` only), `seal.py`,
+`restore.py`, `herdr.py`, `workspace.py` (`retire`), and their tests. **Frozen** (Task 5 builds on them in
+parallel): the fields of `Scan`, `Evidence`, `Category`, `Verdict`, and the signatures of `verdict.resolve`,
+`judge`, `unreachable`, `claims`, `cutoffs`, `sessions_by_file`, `lines`, `as_json`. Only `seal.write` may change
+(nothing calls it yet). Task 5 and 6 files are not touched.
+
+One commit per item, in this order, each with a test shown failing first:
+
+- **R1 (P1-1). An unfinished turn on any conversation file blocks, imported or not.** A Claude or Codex file on the
+  Codespace that the Mac imported and the Codespace then resumed, with bytes after its last completed turn, reads
+  History UNSAFE `a turn that never finished`, naming it, and `seal.write` refuses. Capture records the completed
+  prefix (`size`, `sha256`) of every in-scope conversation file in the inbound manifest, unchanged imports included,
+  and `verdict._manifest_files` reads those rows as own cutoffs. Mixed versions (spec Constraints): the new rows go
+  where `replication.validate_manifest` and every other manifest reader at 5133a32 ignore them, a manifest without
+  them reads as today, and they add no blob references; the report names each reader checked. Tests: Claude and
+  Codex, real cycles as in `review-fable/repro/repro_import_tail.py`. Message: `Check the tail of every
+  conversation file, including one imported from the Mac`.
+- **R2 (P1-2, call 17). Repositories inside ignored directories are found.** The walk enters directories Git
+  ignores to look for repository markers only, skipping `node_modules`, `.venv` and `__pycache__`, under an entry
+  budget of its own (over it: Git incomplete, fixed problem text). The `.git` internals of a repository found inside
+  `.scratch` are not scratch files (Mutagen's `--ignore-vcs`, `scratch.py:743`). Rebuild
+  `test_every_repository_and_worktree_under_workspaces_is_found`'s `.scratch` repository in the generated layout
+  (`.scratch/.gitignore` from `notes._IGNORE`), plus a clone in an ignored `tmp/`. Message: `Find repositories
+  inside directories Git ignores`.
+- **R3 (P1-3). Changes `git status` hides are counted.** Each index entry flagged skip-worktree or assume-unchanged
+  (`git ls-files -v`) whose file exists and whose content (`git hash-object`, never `-w`, filters off as call 16)
+  differs from the index counts one change; a file that does not exist does not (sparse checkouts). An operation in
+  progress (`rebase-merge`, `rebase-apply`, `MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, any `*AUTOSTASH`)
+  counts one change. Tests: the review's S3 and S4. Message: `Count edits Git status hides and work left in a
+  stopped rebase or merge`.
+- **R4 (P2-1). The final flush proves scratch reached the Mac.** `seal.write` takes a required keyword `evidence`
+  (the paired `verdict.Evidence` whose `scan` is the scan being sealed) and refuses unless `sync_running`, no
+  `conflicts`, and every `scan.scratch` pair is in `mac_scratch`. Update "Left for stage D" to say so. Tests in
+  `test_seal.py`. Message: `Seal a final flush only when scratch reached the Mac`.
+- **R5 (P2-2). A repeated basename blocks only where it matters.** A repeated (agent, basename) makes conversations
+  incomplete only when that key is in the cutoffs map; the review's S1 (two `relay/<date>/checklist.json`) reads
+  complete. Message: `Let repeated file names outside the compared conversations pass the scan`.
+- **R6 (P2-3). A proxy is recognized from any copy of the package.** `restore._served` matches the bootstrap's
+  shape with the package path free, keeps the exact ` NAME STATE` ending, and still rejects CHECK3 M2's
+  counterexamples (existing tests). Test: two copies of the package at two paths, one state dir. Message:
+  `Recognize this project's Herdr proxy whichever checkout started it`.
+- **R7 (P2-5).** `test_scan_changes_nothing` makes a tracked file stat-dirty first; show it failing with
+  `GIT_OPTIONAL_LOCKS=0` removed, then restore. Message: `Make the scan's no-write test fail on an index refresh`.
+- **R8 (P3s).** A prunable linked worktree (directory gone) is skipped, not unreadable (S5); `refs/stash` that
+  resolves counts at least one stash without a reflog (S6); a commit held only by a local tag is claimed (S7);
+  `herdr.open_remote` runs `herdr machine add` outside `workspace-control.lock`, then re-reads the binding under the
+  lock before its receipt write (existing refusals keep their tests); a `retire-intent.json` left by a crash with a
+  newer pairing is resolved or reported with a fixed reason, never blocks every later retire; if a safe resolution
+  is not clear, report it instead of guessing. One commit each.
+
+Not here: P2-4 (rescan after the next cycle when the Mac published between the scans) and binding a paired scan to
+the manifest's `cutoffs_digest` in `Evidence` go to Task 5, which builds `gather`.
+
+Gates once, at the final commit: `task check && task test`, exit 0.
 
 ## Existing guards that must stay green (plan check, "Existing tests affected")
 
