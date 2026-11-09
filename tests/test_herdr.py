@@ -228,6 +228,87 @@ request_path = "request.wav"
                                   '--remote-session', 'project-' + 'a' * 24])
         self.assertEqual(len(calls), 1)
 
+    def test_machine_add_runs_without_the_workspace_lock(self):
+        self.pair('space')
+        machine = dict(id='new', target='alias', session=herdr._session(self.project), enabled=True)
+        def call(args, **kwargs):
+            self.assertEqual(args[:3], ['herdr', 'machine', 'add'])
+            with herdr.locked(self.state / 'workspace-control.lock'):
+                pass
+            return 0
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr, '_matching_machines', side_effect=[[], [machine]]), \
+                mock.patch.object(herdr.subprocess, 'call', side_effect=call), \
+                mock.patch.object(herdr, '_workspace'):
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote', expected_codespace='space'), 0)
+        self.assertEqual(read_json(self.state / 'herdr-machine.json')['machine_id'], 'new')
+
+    def test_a_rebind_during_machine_add_preserves_the_new_receipt(self):
+        self.pair('space')
+        receipt = self.state / 'herdr-machine.json'
+        newer = dict(machine_id='newer', codespace='new-space')
+        def call(args, **kwargs):
+            self.assertEqual(args[:3], ['herdr', 'machine', 'add'])
+            self.pair('new-space')
+            receipt.write_text(json.dumps(newer))
+            return 0
+        machine = dict(id='stale', target='alias', session=herdr._session(self.project), enabled=True)
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr, '_matching_machines', side_effect=[[], [machine]]), \
+                mock.patch.object(herdr.subprocess, 'call', side_effect=call), \
+                mock.patch.object(herdr, '_workspace') as opened:
+            with self.assertRaisesRegex(ValueError, 'The project moved to another Codespace meanwhile'):
+                herdr.open_remote(self.project, self.state, '/remote', expected_codespace='space')
+        self.assertEqual(read_json(receipt), newer)
+        opened.assert_not_called()
+
+    def test_concurrent_connects_create_only_one_owned_profile(self):
+        self.pair('space')
+        entered, resume, second_started = threading.Event(), threading.Event(), threading.Event()
+        second_catalog = threading.Event()
+        profiles, errors = [], []
+        def catalog(*args):
+            if threading.current_thread().name == 'second-connect':
+                second_catalog.set()
+            return list(profiles)
+        def call(args, **kwargs):
+            self.assertEqual(args[:3], ['herdr', 'machine', 'add'])
+            if not entered.is_set():
+                entered.set()
+                if not resume.wait(10):
+                    raise RuntimeError('fixture setup timed out')
+            profiles.append(dict(id='profile-' + str(len(profiles)), target='alias',
+                                 session=herdr._session(self.project), enabled=True))
+            return 0
+        def connect(second=False):
+            if second:
+                second_started.set()
+            try:
+                herdr.open_remote(self.project, self.state, '/remote', expected_codespace='space')
+            except BaseException as error:
+                errors.append(error)
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr, '_matching_machines', side_effect=catalog), \
+                mock.patch.object(herdr.subprocess, 'call', side_effect=call), \
+                mock.patch.object(herdr, '_workspace'):
+            first = threading.Thread(target=connect)
+            second = threading.Thread(target=connect, args=(True,), name='second-connect')
+            first.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                second.start()
+                self.assertTrue(second_started.wait(5))
+                second_catalog.wait(.2)
+            finally:
+                resume.set()
+                first.join(10)
+                if second.ident is not None:
+                    second.join(10)
+            self.assertFalse(first.is_alive() or second.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(profiles), 1)
+        self.assertEqual(read_json(self.state / 'herdr-machine.json')['machine_id'], profiles[0]['id'])
+
     def pair(self, codespace, remote_root='/remote'):
         from devcontainer_setup.project_sync.state import atomic_write
         self.codespace = codespace
