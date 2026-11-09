@@ -1,7 +1,7 @@
 """Owner stops shared by the headless CLI and the Mac worker."""
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
 import json
@@ -86,8 +86,9 @@ class Stopped:
 
 
 def stop(state: Path, *, expected: str | None = None, until: float | None = None,
-         halted=lambda: False, api=None, now=time.time, sleep=time.sleep) -> Stopped:
-    """Record the owner's stop against the locked pairing, then POST outside the lock."""
+         halted=lambda: False, after_record: Callable[[Stopped], None] | None = None,
+         api=None, now=time.time, sleep=time.sleep) -> Stopped:
+    """Record the owner's stop, notify the requester, then POST outside the lock."""
     if os.environ.get('CODESPACES') == 'true':
         raise ValueError('Run task work:cs:stop on your Mac to stop the Codespace')
     for name in ('GH_TOKEN', 'GITHUB_TOKEN'):
@@ -129,6 +130,10 @@ def stop(state: Path, *, expected: str | None = None, until: float | None = None
 
     # Use the account and target captured in the same transaction as the owner stop.
     api = api or lifecycle.LifecycleAPI(codespace, value.get('gh_user') if armed else None)
+    message = f'Stopping {codespace}; it stays stopped until task work:cs starts it again.'
+    result = Stopped(codespace, armed, api, stopped_at, message)
+    if after_record is not None:
+        after_record(result)
     status = api.post_stop()
     # R33: keep the owner stop on every failure, including an ambiguous 404.
     if status == 404 and api.confirm_deleted() is True:
@@ -139,6 +144,4 @@ def stop(state: Path, *, expected: str | None = None, until: float | None = None
     if not 200 <= status < 300:
         raise ValueError(f'The stop request did not complete (HTTP {status}); it may still take effect, and the '
                          'keeper treats it as your stop. Inspect task work:status, then retry.')
-    message = (f'Stopping {codespace}; it stays stopped until task work:cs' + (':armed' if armed else '')
-               + ' starts it again.')
-    return Stopped(codespace, armed, api, stopped_at, message)
+    return result

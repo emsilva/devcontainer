@@ -674,6 +674,84 @@ class StopWatcherTests(unittest.TestCase):
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         return json.loads(path.read_bytes())
 
+    def disconnect_on_post(self, status=202):
+        self.posted, self.delivered, self.stop_events = False, [], []
+
+        def write(source, payload, *, timeout):
+            if self.posted:
+                raise OSError('fixture Codespace shut down after the stop POST')
+            value = json.loads(payload)
+            if value['ok']:
+                record = self.arming.read(self.state)
+                self.assertEqual(record['owner_stop_codespace'], 'fixture')
+                self.assertIsInstance(record['owner_stop_at'], (int, float))
+                from devcontainer_setup.project_sync.state import locked
+                with locked(self.state / 'workspace-control.lock'):
+                    pass
+            result = subprocess.run([sys.executable, '-I', '-B', '-c', source], input=payload,
+                                    env=dict(os.environ, HOME=str(self.state)), capture_output=True, timeout=4)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            path = self.state / '.local/state/devcontainer-links/stops' / (value['id'] + '.result')
+            self.delivered.append(json.loads(path.read_bytes()))
+            self.stop_events.append('answer')
+            return result.stdout
+
+        def post():
+            self.posted = True
+            self.stop_events.append('post')
+            return status
+
+        self.connection.python.side_effect = write
+        self.fake.post_stop.side_effect = post
+
+    def test_stop_answer_survives_codespace_shutdown_on_post(self):
+        self.disconnect_on_post()
+        self.watcher._stop_request(self.packet())
+        self.join_handler()
+        self.fake.post_stop.assert_called_once_with()
+        self.connection.python.assert_called_once()
+        self.assertEqual(self.stop_events, ['answer', 'post'])
+        self.assertEqual(self.delivered, [{'ok': True, 'message':
+                         'Stopping fixture; it stays stopped until task work:cs starts it again.'}])
+
+    def test_unpaired_stop_is_refused_then_paired_retry_answers_before_post(self):
+        from devcontainer_setup.project_sync.state import atomic_write
+        (self.state / 'scratch.json').unlink()
+        before = (self.state / self.arming.ARMING).read_bytes()
+        self.disconnect_on_post()
+        self.watcher._stop_request(self.packet())
+        self.join_handler()
+        self.fake.post_stop.assert_not_called()
+        self.connection.python.assert_called_once()
+        self.assertEqual(self.delivered, [{'ok': False, 'message': 'Pair a Codespace first: run task work:cs'}])
+        self.assertEqual((self.state / self.arming.ARMING).read_bytes(), before)
+        atomic_write(self.state / 'scratch.json', json.dumps({'codespace': 'fixture'}).encode())
+        self.watcher._stop_request(self.packet(id='100-2-abcdef01'))
+        self.join_handler()
+        self.assertEqual(self.stop_events, ['answer', 'answer', 'post'])
+        self.assertEqual([answer['ok'] for answer in self.delivered], [False, True])
+        self.fake.post_stop.assert_called_once_with()
+        self.assertEqual(self.connection.python.call_count, 2)
+
+    def test_post_failure_is_logged_after_one_success_answer(self):
+        for status, reason in ((403, 'GitHub refused the stop request (HTTP 403)'),
+                               (503, 'The stop request did not complete (HTTP 503)')):
+            with self.subTest(status=status):
+                self.connection.python.reset_mock()
+                self.fake.post_stop.reset_mock()
+                self.log.info.reset_mock()
+                self.disconnect_on_post(status)
+                self.watcher._stop_request(self.packet())
+                self.join_handler()
+                self.assertEqual(self.stop_events, ['answer', 'post'])
+                self.assertEqual(len(self.delivered), 1)
+                self.assertTrue(self.delivered[0]['ok'])
+                self.connection.python.assert_called_once()
+                self.fake.post_stop.assert_called_once_with()
+                self.assertIn(reason, str(self.log.info.call_args_list))
+                self.assertNotIn('Could not write', str(self.log.info.call_args_list))
+                self.assertIn('owner_stop_at', self.arming.read(self.state))
+
     def test_stop_request_goes_to_power_not_links(self):
         value = self.packet()
         child = subprocess.Popen([sys.executable, '-I', '-B', '-c',
@@ -683,11 +761,12 @@ class StopWatcherTests(unittest.TestCase):
         self.addCleanup(lambda: child.poll() is None and child.kill())
         with mock.patch.object(links.subprocess, 'Popen', return_value=child), \
                 mock.patch.object(links, 'handle') as handle, \
-                mock.patch.object(self.power, 'stop', return_value=mock.Mock(message='Stopped.')) as stop:
+                mock.patch.object(self.power, 'stop', side_effect=lambda *args, **kwargs:
+                                  kwargs['after_record'](mock.Mock(message='Stopped.'))) as stop:
             self.watcher._serve()
             self.join_handler()
             stop.assert_called_once_with(self.state, expected='fixture', until=value['created_at'] + 60,
-                                         halted=self.watcher._halt.is_set)
+                                         halted=self.watcher._halt.is_set, after_record=mock.ANY)
             handle.assert_not_called()
         self.assertEqual(self.answer(), {'ok': True, 'message': 'Stopped.'})
 
@@ -732,7 +811,7 @@ class StopWatcherTests(unittest.TestCase):
             entered.set()
             if not release.wait(4):
                 raise ValueError('fixture handler not released')
-            return mock.Mock(message='Stopped.')
+            kwargs['after_record'](mock.Mock(message='Stopped.'))
         with mock.patch.object(self.power, 'stop', side_effect=stopping) as stop:
             try:
                 self.watcher._stop_request(self.packet(created_at=time.time()))
@@ -767,10 +846,10 @@ class StopWatcherTests(unittest.TestCase):
 
     def test_failed_answer_is_logged_without_raising_or_leaking(self):
         self.connection.python.side_effect = ValueError('https://private.example/?token=PRIVATE-FIXTURE')
-        with mock.patch.object(self.power, 'stop', return_value=mock.Mock(message='Stopped.')):
-            self.watcher._stop_request(self.packet(created_at=time.time()))
-            self.join_handler()
+        self.watcher._stop_request(self.packet(created_at=time.time()))
+        self.join_handler()
         self.assertTrue(self.connection.python.called)
+        self.fake.post_stop.assert_called_once_with()
         self.assertNotIn('PRIVATE-FIXTURE', str(self.log.info.call_args_list))
         self.assertIn('answer', str(self.log.info.call_args_list).lower())
 

@@ -565,17 +565,26 @@ class Watcher(threading.Thread):
             return
 
         def stopping():
+            answer_attempted = False
+
+            def recorded(result):
+                nonlocal answer_attempted
+                answer_attempted = True
+                self._stop_answer(value, True, result.message)
+
             try:
-                result = power.stop(self.state, expected=value['codespace'],
-                                    until=value['created_at'] + power.WINDOW, halted=self._halt.is_set)
-                ok, message = True, result.message
+                power.stop(self.state, expected=value['codespace'],
+                           until=value['created_at'] + power.WINDOW, halted=self._halt.is_set,
+                           after_record=recorded)
             except Exception as error:
-                ok = False
                 message = (str(error) if isinstance(error, ValueError) else
                            'The stop could not finish; check task work:status on your Mac.')
                 if '://' in message or any(ord(char) < 32 for char in message):
                     message = 'The stop could not finish; check task work:status on your Mac.'
-            self._stop_answer(value, ok, message)
+                if answer_attempted:
+                    self.logger.info('Stop requested from the Codespace: %s', message)
+                else:
+                    self._stop_answer(value, False, message)
 
         self._stopping = threading.Thread(target=stopping, name='codespace-stop', daemon=False)
         self._stopping.start()

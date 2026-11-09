@@ -221,7 +221,7 @@ class PowerTests(unittest.TestCase):
         self.assertIs(result.api, self.fake)
         self.assertEqual(result.stopped_at, self.clock)
         self.assertEqual(result.message,
-                         'Stopping old-cs; it stays stopped until task work:cs:armed starts it again.')
+                         'Stopping old-cs; it stays stopped until task work:cs starts it again.')
         with self.assertRaises(AttributeError):
             result.codespace = 'new-cs'
 
