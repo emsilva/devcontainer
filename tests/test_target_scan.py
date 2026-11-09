@@ -425,6 +425,9 @@ class TargetScanTests(unittest.TestCase):
     def test_scan_changes_nothing(self):
         self.api
         self.repo('project'); self.session('codex', 'sessions/one.jsonl')
+        tracked = self.root / 'tracked'
+        info = tracked.stat()
+        os.utime(tracked, ns=(info.st_atime_ns, info.st_mtime_ns + 2_000_000_000))
         (self.root / '.scratch').mkdir(); (self.root / '.scratch/note').write_text('note')
         def snapshot():
             return {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
