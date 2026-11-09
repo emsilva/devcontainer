@@ -187,10 +187,26 @@ class TargetScanTests(unittest.TestCase):
         prefix = b'{"type":"assistant","message":{"stop_reason":"end_turn"}}\n'
         metadata = [{'type': kind} for kind in ('system', 'last-prompt', 'cost-state')]
         metadata += [{'type': 'user', 'isMeta': True},
-                     {'type': 'user', 'message': {'content': '<command-name>/help</command-name>'}},
-                     {'type': 'user', 'message': {'content': '<local-command-stdout>ok'}}]
+                     {'type': 'user', 'isMeta': True, 'message': {'content': {'unknown': True}}}]
+        for wrapper in ('<command-message>help</command-message>', '<command-name>/help</command-name>',
+                        '<local-command-stdout>ok'):
+            for content in (wrapper, [{'type': 'text', 'text': wrapper[:5]},
+                                      {'type': 'text', 'text': wrapper[5:]}]):
+                metadata.append({'type': 'user', 'message': {'content': content}})
         active = [{'type': 'user', 'message': {'content': 'prompt'}},
+                  {'type': 'user', 'message': {'content': [{'type': 'text', 'text': 'prompt'}]}},
                   {'type': 'user', 'message': {'content': '[Request interrupted by user]'}},
+                  {'type': 'user', 'message': {'content': [{'type': 'text', 'text': '[Request interrupted by user]'}]}},
+                  {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'content': 'result'}]}},
+                  {'type': 'user', 'message': {'content': [{'type': 'text', 'text': '<command-name>/help'},
+                                                         {'type': 'tool_result', 'content': 'result'}]}},
+                  {'type': 'user', 'message': {'content': [{'type': 'text', 'text': '<command-name>/help'},
+                                                         {'type': 'text', 'text': 42}]}},
+                  {'type': 'user', 'message': {'content': [{'type': 'text', 'text': '<command-name>/help'}, None]}},
+                  {'type': 'user', 'message': {'content': {'text': '<command-name>/help'}}},
+                  {'type': 'user', 'message': {'content': []}},
+                  {'type': 'user', 'message': None},
+                  {'type': 'user', 'isMeta': 1},
                   {'type': 'assistant'}]
         cutoffs = {}; tails = []
         for index, row in enumerate(metadata + active):
@@ -208,6 +224,54 @@ class TargetScanTests(unittest.TestCase):
         self.assertEqual(result.tails, tuple(sorted(tails)))
         result = self.scan()
         self.assertEqual((result.checked, result.mismatched, result.tails), ((), (), ()))
+        self.assertIsNone(result.cutoffs_sha256)
+
+    def test_cutoffs_digest_is_recorded(self):
+        self.assertIn('cutoffs_sha256', self.api.Scan.__dataclass_fields__,
+                      'Scan does not bind the cutoff map it compared')
+        prefix = b'{}\n'
+        self.session('codex', 'sessions/own.jsonl', prefix)
+        cutoffs = {('codex', 'own.jsonl'): self.cutoff(prefix),
+                   ('claude', 'dependency.jsonl'): self.cutoff(prefix, own=False)}
+        canonical = {'codex/own.jsonl': [len(prefix), hashlib.sha256(prefix).hexdigest(), True],
+                     'claude/dependency.jsonl': [len(prefix), hashlib.sha256(prefix).hexdigest(), False]}
+        expected = hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        self.assertEqual(self.api.cutoffs_digest(cutoffs), expected)
+        self.assertEqual(self.api.cutoffs_digest(dict(reversed(list(cutoffs.items())))), expected)
+        result = self.scan(cutoffs=cutoffs)
+        self.assertTrue(result.sessions_complete)
+        self.assertEqual(result.cutoffs_sha256, expected)
+        self.assertEqual(json.loads(self.connection.raw)['cutoffs_sha256'], expected)
+        self.assertEqual(result.checked, (('codex', 'own.jsonl'),))
+        for field, value in (('sha256', '0' * 64), ('size', len(prefix) + 1), ('own', False)):
+            changed = dict(cutoffs)
+            changed[('codex', 'own.jsonl')] = replace(cutoffs[('codex', 'own.jsonl')], **{field: value})
+            with self.subTest(field=field):
+                self.assertNotEqual(self.api.cutoffs_digest(changed), expected)
+                self.assertEqual(self.scan(cutoffs=changed).cutoffs_sha256, self.api.cutoffs_digest(changed))
+        empty = self.scan(cutoffs={})
+        self.assertEqual(empty.cutoffs_sha256, hashlib.sha256(b'{}').hexdigest())
+        self.assertEqual(empty.cutoffs_sha256, self.api.cutoffs_digest({}))
+        self.assertIsNone(self.scan(cutoffs=None).cutoffs_sha256)
+        self.scan(cutoffs=cutoffs)
+        compared = json.loads(self.connection.raw)
+        remote_python = self.connection.python
+        for value in (None, True, 1, '', '0' * 63, 'A' * 64, '0' * 64):
+            with self.subTest(response_digest=value):
+                self.connection.python = lambda *args, value=value, **kwargs: json.dumps(
+                    dict(compared, cutoffs_sha256=value)).encode()
+                refused = self.scan(cutoffs=cutoffs)
+                self.assertIsNone(self.api.fingerprint(refused))
+                self.assertIsNone(refused.cutoffs_sha256)
+        # The receipt must describe the map consumed remotely, not a host-side stamp.
+        def different_map(code, payload=b'', **kwargs):
+            request = json.loads(payload)
+            request['cutoffs'][0][2]['sha256'] = '1' * 64
+            return remote_python(code, payload=json.dumps(request).encode(), **kwargs)
+        self.connection.python = different_map
+        refused = self.scan(cutoffs=cutoffs)
+        self.assertIsNone(self.api.fingerprint(refused))
+        self.assertIsNone(refused.cutoffs_sha256)
 
     def test_agents_match_any_argv_basename(self):
         self.api
@@ -254,6 +318,7 @@ class TargetScanTests(unittest.TestCase):
         root = self.repo('project'); baseline = self.scan(); digest = self.api.fingerprint(baseline)
         self.assertEqual(digest, self.api.fingerprint(self.scan()))
         self.assertEqual(digest, self.api.fingerprint(replace(baseline, at=999, tails=(('codex', 'tail'),))))
+        self.assertEqual(digest, self.api.fingerprint(replace(baseline, cutoffs_sha256='0' * 64)))
         for field in ('git_complete', 'scratch_complete', 'sessions_complete', 'agents_complete'):
             self.assertIsNone(self.api.fingerprint(replace(baseline, **{field: False})))
         for action in ('edit', 'branch', 'stash', 'agent'):
@@ -415,6 +480,8 @@ class TargetScanTests(unittest.TestCase):
         self.repo('project'); valid = json.loads(self.scan() and self.connection.raw)
         variants = [None, {}, dict(valid, git_complete=1), dict(valid, at=float('nan')),
                     dict(valid, agents=[['codex', True]]), dict(valid, unexpected='data')]
+        variants += [dict(valid, cutoffs_sha256=value) for value in (True, 1, '', '0' * 63, 'G' * 64, '0' * 64)]
+        variants += [{key: value for key, value in valid.items() if key != 'cutoffs_sha256'}]
         row = valid['repositories'][0]
         variants += [dict(valid, repositories=[dict(row, path='bad\npath')]),
                      dict(valid, repositories=[dict(row, branches=[['main', 'bad']])]),

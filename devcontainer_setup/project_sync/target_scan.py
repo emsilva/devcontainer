@@ -56,6 +56,7 @@ class Scan:
     scratch_complete: bool
     sessions: tuple[tuple[str, str], ...]
     sessions_complete: bool
+    cutoffs_sha256: str | None
     checked: tuple[tuple[str, str], ...]
     mismatched: tuple[tuple[str, str], ...]
     tails: tuple[tuple[str, str], ...]
@@ -69,6 +70,13 @@ class Cutoff:
     size: int
     sha256: str
     own: bool
+
+
+def cutoffs_digest(cutoffs: Mapping[tuple[str, str], Cutoff]) -> str:
+    """Bind the entire comparison map, including missing and dependency files."""
+    record = {agent + '/' + name: [value.size, value.sha256, value.own]
+              for (agent, name), value in cutoffs.items()}
+    return hashlib.sha256(json.dumps(record, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
 _AGENTS = ('claude', 'codex', 'grok', 'opencode', 'herdr')
@@ -133,7 +141,7 @@ def _pairs(value, first, second):
     return tuple(result)
 
 
-def _decode(raw, codespace, at, cutoffs, limits):
+def _decode(raw, codespace, at, cutoffs, cutoffs_sha256, limits):
     if not isinstance(raw, (bytes, str)) or len(raw if isinstance(raw, bytes) else raw.encode()) > limits.output:
         raise ValueError('Inventory output limit')
     def unique(pairs):
@@ -146,6 +154,9 @@ def _decode(raw, codespace, at, cutoffs, limits):
     obj = _object(json.loads(raw, object_pairs_hook=unique), Scan)
     if obj['codespace'] != codespace or type(obj['at']) not in (float, int) or not math.isfinite(obj['at']):
         raise ValueError('Invalid inventory target or time')
+    compared = None if obj['cutoffs_sha256'] is None else _hex(obj['cutoffs_sha256'], 64)
+    if compared != cutoffs_sha256:
+        raise ValueError('Invalid inventory cutoff digest')
     repositories = []
     worktree_count = 0
     from .state import _identity
@@ -213,12 +224,12 @@ def _decode(raw, codespace, at, cutoffs, limits):
     if any(value not in allowed for value in problems) or len(set(problems)) != len(problems):
         raise ValueError('Invalid inventory problem')
     return Scan(codespace, at, tuple(repositories), _boolean(obj['git_complete']), scratch,
-                _boolean(obj['scratch_complete']), sessions, _boolean(obj['sessions_complete']), checked,
+                _boolean(obj['scratch_complete']), sessions, _boolean(obj['sessions_complete']), compared, checked,
                 mismatched, tails, agents, _boolean(obj['agents_complete']), problems)
 
 
 def _failed(codespace, at, problem):
-    return Scan(codespace, at, (), False, (), False, (), False, (), (), (),
+    return Scan(codespace, at, (), False, (), False, (), False, None, (), (), (),
                 tuple(sorted((name, 0) for name in _AGENTS)), False, (problem,))
 
 
@@ -235,21 +246,24 @@ def scan(connection, codespace: str, remote_root: str, *,
             _integer(getattr(limits, name))
         if type(limits.seconds) not in (float, int) or not math.isfinite(limits.seconds) or limits.seconds < 0:
             raise ValueError('Invalid time limit')
+        supplied_cutoffs = cutoffs is not None
         cutoffs = {} if cutoffs is None else dict(cutoffs)
         for (agent, name), cutoff in cutoffs.items():
             if agent not in ('codex', 'claude') or '/' in _path(name):
                 raise ValueError('Invalid cutoff key')
             _integer(cutoff.size); _hex(cutoff.sha256, 64); _boolean(cutoff.own)
+        cutoffs_sha256 = cutoffs_digest(cutoffs) if supplied_cutoffs else None
         base = Path(__file__).parent
         payload = dict(codespace=codespace, remote_root=remote_root, workspaces=workspaces, proc=proc,
                        at=at, limits=asdict(limits),
-                       cutoffs=[[agent, name, asdict(value)] for (agent, name), value in sorted(cutoffs.items())],
+                       cutoffs=([[agent, name, asdict(value)] for (agent, name), value in sorted(cutoffs.items())]
+                                if supplied_cutoffs else None),
                        sources={name: (base / (name + '.py')).read_text() for name in ('state', 'scratch_tree', 'sessions')})
         raw = connection.python(_PROGRAM, payload=json.dumps(payload).encode(), timeout=limits.seconds + 30)
     except (ValueError, OSError, TypeError, AttributeError):
         return _failed(codespace, now(), _PROBLEMS[0])
     try:
-        decoded = _decode(raw, codespace, at, cutoffs, limits)
+        decoded = _decode(raw, codespace, at, cutoffs, cutoffs_sha256, limits)
         return replace(decoded, at=now())
     except (ValueError, TypeError, KeyError, OverflowError, RecursionError, UnicodeError):
         return _failed(codespace, now(), _PROBLEMS[1])
@@ -292,10 +306,14 @@ state, scratch_tree, sessions = package.state, package.scratch_tree, package.ses
 limits = request['limits']
 deadline = time.monotonic() + limits['seconds']
 usage = dict(entries=0, repositories=0, worktrees=0, files=0, hashed_bytes=0)
-cutoffs = {(agent, name): value for agent, name, value in request['cutoffs']}
+cutoffs = {(agent, name): value for agent, name, value in (request['cutoffs'] or [])}
+cutoff_record = {agent + '/' + name: [value['size'], value['sha256'], value['own']]
+                 for (agent, name), value in cutoffs.items()}
+cutoffs_sha256 = (None if request['cutoffs'] is None else
+                  hashlib.sha256(json.dumps(cutoff_record, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
 result = dict(codespace=request['codespace'], at=request['at'], repositories=[], git_complete=True,
               scratch=[], scratch_complete=True, sessions=[], sessions_complete=True,
-              checked=[], mismatched=[], tails=[], agents=[], agents_complete=True, problems=[])
+              cutoffs_sha256=cutoffs_sha256, checked=[], mismatched=[], tails=[], agents=[], agents_complete=True, problems=[])
 
 class Incomplete(Exception):
     pass
@@ -556,9 +574,11 @@ def claude_tail(data):
             message = row.get('message', {})
             content = message.get('content', '') if isinstance(message, dict) else ''
             if isinstance(content, list):
-                content = ''.join(item.get('text', '') for item in content
-                                  if isinstance(item, dict) and item.get('type') == 'text' and isinstance(item.get('text'), str))
-            if not isinstance(content, str) or not content.startswith(('<command-name>', '<local-command-')):
+                if not all(isinstance(item, dict) and item.get('type') == 'text' and isinstance(item.get('text'), str)
+                           for item in content):
+                    return True
+                content = ''.join(item['text'] for item in content)
+            if not isinstance(content, str) or not content.startswith(('<command-message>', '<command-name>', '<local-command-')):
                 return True
     return False
 
