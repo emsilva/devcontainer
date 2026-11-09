@@ -16,6 +16,97 @@ from unittest.mock import Mock, patch
 
 
 class ScratchTests(unittest.TestCase):
+    def retired_fixture(self):
+        receipt = dict(name='scratch-' + 'a' * 48, identifier='sync_old', nonce='a' * 48,
+                       established=True, binding={'codespace': 'cs-old'})
+        live = dict(name='scratch-' + 'b' * 48, identifier='sync_live', nonce='b' * 48,
+                    established=True, binding={'codespace': 'cs-new'})
+        self.module._write(self.state / self.module.SESSION, live)
+        self.module._write(self.state / self.module.CONFIG, live['binding'])
+        rows = [dict(name=receipt['name'], identifier='sync_old'), dict(name=live['name'], identifier='sync_live')]
+        calls = []
+        def mutagen(binary, state, *args):
+            calls.append(args)
+            if args[:2] == ('sync', 'list'):
+                return json.dumps(rows)
+            if args[:2] == ('sync', 'terminate'):
+                rows[:] = [row for row in rows if row['identifier'] != args[2]]
+            return ''
+        return receipt, rows, calls, mutagen
+
+    def test_terminate_retired_ends_only_that_session(self):
+        receipt, rows, calls, mutagen = self.retired_fixture()
+        before = {p.name: p.read_bytes() for p in self.state.glob('*.json')}
+        with patch.object(self.module, 'install_mutagen', return_value=Path('/fixture/mutagen')) as install, \
+                patch.object(self.module, '_mutagen', side_effect=mutagen), \
+                patch.object(self.module, 'status', return_value={'running': True}):
+            self.assertEqual(self.module.terminate_retired(self.state, receipt), 'terminated')
+        install.assert_called_once_with(self.state, allow_download=False)
+        self.assertEqual([row['identifier'] for row in rows], ['sync_live'])
+        self.assertIn(('sync', 'terminate', 'sync_old'), calls)
+        self.assertNotIn(('daemon', 'stop'), calls)
+        self.assertEqual({p.name: p.read_bytes() for p in self.state.glob('*.json')}, before)
+
+    def test_terminate_retired_is_idempotent(self):
+        receipt, rows, calls, mutagen = self.retired_fixture()
+        with patch.object(self.module, 'install_mutagen', return_value=Path('/fixture/mutagen')), \
+                patch.object(self.module, '_mutagen', side_effect=mutagen), \
+                patch.object(self.module, 'status', return_value={'running': False}):
+            self.assertEqual(self.module.terminate_retired(self.state, receipt), 'terminated')
+            self.assertEqual(self.module.terminate_retired(self.state, receipt), 'absent')
+        self.assertEqual(calls.count(('sync', 'terminate', 'sync_old')), 1)
+        self.assertEqual(calls.count(('daemon', 'stop')), 2)
+
+    def test_terminate_refuses_the_live_session(self):
+        receipt, _, _, _ = self.retired_fixture()
+        for live in (dict(receipt), dict(receipt, identifier='sync_other')):
+            with self.subTest(live=live):
+                self.module._write(self.state / self.module.SESSION, live)
+                with patch.object(self.module, 'install_mutagen') as install:
+                    with self.assertRaisesRegex(ValueError, 'that sync session is in use'):
+                        self.module.terminate_retired(self.state, receipt)
+                install.assert_not_called()
+
+    def test_retired_inventory_requires_exact_identity_and_valid_full_catalog(self):
+        receipt, _, _, _ = self.retired_fixture()
+        matching = dict(name=receipt['name'], identifier=receipt['identifier'])
+        for inventory in ('not json', '{}', '[null]', json.dumps([matching, matching]),
+                          json.dumps([dict(matching, identifier='sync_other')]), json.dumps([dict(name='broken')])):
+            with self.subTest(inventory=inventory), patch.object(self.module, '_mutagen', return_value=inventory):
+                with self.assertRaises(ValueError):
+                    self.module._retired_session(Path('/fixture/mutagen'), self.state, receipt)
+
+    @unittest.skipUnless(os.environ.get('CI') or os.environ.get('MUTAGEN_TEST_BINARY'),
+                         'set MUTAGEN_TEST_BINARY for real retired-session termination gate')
+    def test_actual_terminate_of_a_paused_retired_session(self):
+        binary = Path(os.environ['MUTAGEN_TEST_BINARY']).resolve()
+        temporary_root = '/private/tmp' if Path('/private/tmp').is_dir() else '/tmp'
+        with tempfile.TemporaryDirectory(prefix='retire-', dir=temporary_root) as temporary:
+            private = Path(temporary).resolve()
+            alpha, beta = private / 'alpha', private / 'beta'
+            alpha.mkdir(); beta.mkdir()
+            name = 'scratch-' + 'a' * 48
+            created = False
+            try:
+                self.module._mutagen(binary, private, 'sync', 'create', str(alpha), str(beta), '--name=' + name,
+                                     '--mode=two-way-safe', '--no-global-configuration')
+                created = True
+                info = json.loads(self.module._mutagen(binary, private, 'sync', 'list', '--template={{json .}}'))[0]
+                self.module._mutagen(binary, private, 'sync', 'pause', info['identifier'])
+                receipt = dict(name=name, identifier=info['identifier'], established=True, nonce='a' * 48, binding={})
+                with patch.object(self.module, 'install_mutagen', return_value=binary):
+                    self.assertEqual(self.module.terminate_retired(private, receipt), 'terminated')
+                    self.assertEqual(self.module.terminate_retired(private, receipt), 'absent')
+                self.assertEqual(json.loads(self.module._mutagen(binary, private, 'sync', 'list', '--template={{json .}}')), [])
+            finally:
+                try:
+                    if created:
+                        remaining = json.loads(self.module._mutagen(binary, private, 'sync', 'list', '--template={{json .}}'))
+                        if any(row.get('name') == name for row in remaining):
+                            self.module._mutagen(binary, private, 'sync', 'terminate', name)
+                finally:
+                    self.module._mutagen(binary, private, 'daemon', 'stop')
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

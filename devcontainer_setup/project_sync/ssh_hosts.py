@@ -280,3 +280,50 @@ def configure_ssh(project, state: Path) -> str:
 def refresh_ssh(state: Path) -> None:
     """Refresh an already installed alias after the worker reconnects."""
     _configure(Path(state), None)
+
+
+def remove(state: Path) -> str:
+    """Remove only the exact receipted alias; an interrupted removal can resume."""
+    state = Path(state)
+    config, include, receipt_path = _paths(state)
+    reason = 'the SSH alias was edited; remove it by hand'
+    _directory(config)
+    with locked(config.parent / '.devcontainer-setup.lock', blocking=True):
+        if (state / 'herdr-ssh.pending.json').exists() or (state / 'herdr-ssh.pending.json').is_symlink():
+            raise ValueError('SSH setup did not finish')
+        receipt_data, _ = _version(receipt_path, private=True)
+        original, mode = _version(config)
+        owned, _ = _version(include, private=True)
+        if receipt_data is None:
+            if owned is not None or str(include).encode() in (original or b''):
+                raise ValueError(reason)
+            return 'absent'
+        try:
+            receipt = json.loads(receipt_data)
+            project_id = receipt['project_id']
+            if not isinstance(project_id, str) or not re.fullmatch('[0-9a-f]{24}', project_id):
+                raise ValueError
+            context = _context(project_id, config, include)
+            if any(receipt.get(key) != value for key, value in context.items()):
+                raise ValueError
+            block = _block(context['alias'], include)
+            marker = f'devcontainer-setup:{context["alias"]}'.encode()
+            present = (original or b'').count(block)
+            if (present not in (0, 1) or (original or b'').count(marker) != present * 2
+                    or (present and owned is None)
+                    or (owned is not None and _digest(owned) != receipt.get('sha256'))):
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            raise ValueError(reason) from None
+        # Preflight every artifact before the first write. The receipt stays
+        # until both earlier steps finish and is the authority for replay.
+        if present:
+            atomic_write(config, original.replace(block, b'', 1), mode=mode)
+        for path in (include, receipt_path):
+            with _parent(path, private=True) as (parent, name):
+                try:
+                    os.unlink(name, dir_fd=parent)
+                except FileNotFoundError:
+                    pass
+                os.fsync(parent)
+        return 'removed'

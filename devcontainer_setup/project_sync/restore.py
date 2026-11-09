@@ -14,6 +14,8 @@ import signal
 import subprocess
 import time
 
+from . import ssh_hosts, state as project_state
+
 SENTENCE = ('Codespace restarted, we are back. You need to bring the services that you require up and '
             'continue with the work')
 READY = ('idle', 'done')  # Herdr's states for an agent ready for input
@@ -26,11 +28,16 @@ _AGENT = re.compile(r'[a-z][a-z0-9_-]{0,31}')
 
 def _served(command, state):
     """The Codespace a herdr_stdio command line serves for this state dir, or None for any other process."""
-    suffix = f' {state}'
-    if not isinstance(command, str) or 'herdr_stdio' not in command:
+    if not isinstance(command, str):
         return None
-    command = command.rstrip()
-    return command[:-len(suffix)].rsplit(' ', 1)[-1] if command.endswith(suffix) else None
+    # ps prints argv without shell quoting. Compare the producer's complete
+    # argument suffix, including its bootstrap, while allowing Python to move.
+    import shlex
+    args = shlex.split(ssh_hosts._proxy_command(Path(state), 'placeholder'))
+    prefix = ' ' + ' '.join(args[1:-2]) + ' '
+    match = re.search(re.escape(prefix) + r'([A-Za-z0-9][A-Za-z0-9-]{0,99}) '
+                      + re.escape(str(state)) + r'\Z', command)
+    return match[1] if match else None
 
 
 def is_proxy(command, codespace: str, state) -> bool:
@@ -78,6 +85,32 @@ def _terminate(pids):
             continue
         ended.append(pid)
     return ended
+
+
+def end_target_proxies(codespace: str, state: Path, *, wait: float = 120, run=subprocess.run,
+                       now=time.time, sleep=time.sleep) -> str:
+    """Signal this target's owned proxies and wait for their disappearance."""
+    found = _proxies(state, run)
+    if found is None:
+        raise ValueError('the process list cannot be read')
+    pids = [pid for pid, _, served in found if served == codespace]
+    if not pids:
+        return 'absent'
+    identities = {pid: project_state.process_identity(pid) for pid in pids}
+    for pid, identity in identities.items():
+        if (_served(identity, state) == codespace
+                and project_state.process_identity(pid) == identity):
+            _terminate([pid])
+    deadline = now() + wait
+    while True:
+        found = _proxies(state, run)
+        if found is None:
+            raise ValueError('the process list cannot be read')
+        if not any(served == codespace for _, _, served in found):
+            return 'ended'
+        if now() >= deadline:
+            raise ValueError('a Herdr connection to ' + codespace + ' is still open')
+        sleep(min(2, max(0, deadline - now())))
 
 
 def stale_proxies(codespace: str, state: Path, before: float, *, run=subprocess.run, now=time.time) -> list[int]:

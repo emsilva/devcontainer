@@ -9,7 +9,7 @@ import subprocess
 import time as clock
 
 from .ssh_hosts import configure_ssh
-from .state import atomic_write, read_json
+from .state import atomic_write, locked, read_json
 
 
 class _NotRunning(ValueError):
@@ -164,6 +164,39 @@ def disconnect_remote(project) -> int:
     return 0
 
 
+def remove_profile(project, state: Path) -> str:
+    """Remove a setup-created catalog row, confirmed by its exact opaque ID."""
+    receipt_path = Path(state) / 'herdr-machine.json'
+    try:
+        receipt = read_json(receipt_path)
+    except FileNotFoundError:
+        return 'absent'
+    alias, session = 'devcontainer-' + project.project_id, _session(project)
+    try:
+        matches = _matching_machines(alias, session)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        raise ValueError('Herdr could not be read') from None
+    machine_id = receipt.get('machine_id')
+    if not any(row['id'] == machine_id for row in matches):
+        result = 'absent'
+    elif receipt.get('created') is not True:
+        result = 'kept'
+    else:
+        try:
+            removed = subprocess.run(['herdr', 'machine', 'remove', machine_id],
+                                     capture_output=True, timeout=90, stdin=subprocess.DEVNULL)
+            if removed.returncode:
+                raise ValueError
+            matches = _matching_machines(alias, session)
+            if any(row['id'] == machine_id for row in matches):
+                raise ValueError
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            raise ValueError('Herdr did not remove the profile') from None
+        result = 'removed'
+    receipt_path.unlink()
+    return result
+
+
 def version_line(text):
     """`herdr --version` output when it is one 'herdr …' line, otherwise None."""
     text = text.strip()
@@ -179,67 +212,82 @@ def _local_version():
     return version_line(result.stdout) if result.returncode == 0 else None
 
 
-def open_remote(project, state: Path, remote_root: str, remote_herdr: str | None = None, prepared=None) -> int:
+def open_remote(project, state: Path, remote_root: str, remote_herdr: str | None = None, prepared=None, *,
+                expected_codespace: str) -> int:
     """Connect the project's saved machine and open local Herdr when needed.
 
     `prepared`, when given, runs once after the machine receipt is saved and
     before the workspace opens. It is not called on an early return.
     """
     state = Path(state)
-    alias, session = configure_ssh(project, state), _session(project)
-    receipt_path = state / 'herdr-machine.json'
-    try:
-        receipt = read_json(receipt_path)
-    except FileNotFoundError:
-        receipt = {}
-    binding = state / 'scratch.json'
-    codespace = read_json(binding).get('codespace') if binding.exists() else None
-    matches = _matching_machines(alias, session)
-    # Only setup installs the Herdr this Mac runs on a Codespace (it asks first),
-    # saving a fresh profile. A Codespace with none, or another version, gets
-    # one. When that was not read, a profile saved for another Codespace counts
-    # as lacking it.
-    previous, versions = receipt.get('codespace'), receipt.get('herdr_versions')
-    pair = None
-    if remote_herdr is None:
-        lacking = None not in (previous, codespace) and previous != codespace
-    else:
-        local = _local_version() if remote_herdr else None
-        pair = [local, remote_herdr]
-        lacking = not remote_herdr or (local is not None and remote_herdr != local)
-        if lacking and remote_herdr and pair == versions:
-            # Setup already ran for this pair and kept the remote, which Herdr
-            # accepts as compatible; asking again on every connection would loop.
-            print(f'Herdr on this Codespace is {remote_herdr}; this Mac runs {local}. Keeping the profile setup saved.')
-            lacking = False
-    replaced = {row['id'] for row in matches} if lacking else set()
-    if not matches or replaced:
-        if pair is not None:
-            versions = pair  # An unread probe settles nothing, so it erases nothing.
-        result = subprocess.call(['herdr', 'machine', 'add', alias, '--label', project.root.name + ' (Codespace)',
-                                  '--remote-session', session])
-        if result:
-            return result
-        found = _matching_machines(alias, session)
-        matches = [row for row in found if row['id'] not in replaced]
-        if not matches:
-            raise ValueError('Herdr setup did not save the expected project machine'
-                             + ('; existing profile kept' if replaced else ''))
-        for row in found:
-            if row['id'] in replaced:
-                result = subprocess.call(['herdr', 'machine', 'remove', row['id']])
-                if result:
-                    return result
-    machine = next((row for row in matches if row.get('id') == receipt.get('machine_id')), matches[0])
-    machine_id = machine.get('id')
-    if not machine.get('enabled'):
-        result = subprocess.call(['herdr', 'machine', 'enable', machine_id])
-        if result:
-            return result
-    saved = {'machine_id': machine_id, 'alias': alias, 'session': session, 'codespace': codespace}
-    if versions:
-        saved['herdr_versions'] = versions
-    atomic_write(receipt_path, json.dumps(saved).encode() + b'\n')
+    with locked(state / 'workspace-control.lock', blocking=True):
+        try:
+            binding = read_json(state / 'scratch.json')
+        except FileNotFoundError:
+            raise ValueError('No Codespace is paired; run task work:cs') from None
+        if (binding.get('codespace') != expected_codespace or binding.get('identity') != project.identity
+                or binding.get('remote_root') != remote_root):
+            raise ValueError('The project moved to another Codespace meanwhile; run task work:cs')
+        alias, session = configure_ssh(project, state), _session(project)
+        receipt_path = state / 'herdr-machine.json'
+        try:
+            receipt = read_json(receipt_path)
+        except FileNotFoundError:
+            receipt = {}
+        codespace = binding['codespace']
+        matches = _matching_machines(alias, session)
+        # Only setup installs the Herdr this Mac runs on a Codespace (it asks first),
+        # saving a fresh profile. A Codespace with none, or another version, gets
+        # one. When that was not read, a profile saved for another Codespace counts
+        # as lacking it.
+        previous, versions = receipt.get('codespace'), receipt.get('herdr_versions')
+        pair = None
+        if remote_herdr is None:
+            lacking = None not in (previous, codespace) and previous != codespace
+        else:
+            local = _local_version() if remote_herdr else None
+            pair = [local, remote_herdr]
+            lacking = not remote_herdr or (local is not None and remote_herdr != local)
+            if lacking and remote_herdr and pair == versions:
+                # Setup already ran for this pair and kept the remote, which Herdr
+                # accepts as compatible; asking again on every connection would loop.
+                print(f'Herdr on this Codespace is {remote_herdr}; this Mac runs {local}. Keeping the profile setup saved.')
+                lacking = False
+        replaced = {row['id'] for row in matches} if lacking else set()
+        added = not matches or bool(replaced)
+        if added:
+            if pair is not None:
+                versions = pair  # An unread probe settles nothing, so it erases nothing.
+            result = subprocess.call(['herdr', 'machine', 'add', alias, '--label', project.root.name + ' (Codespace)',
+                                      '--remote-session', session])
+            if result:
+                return result
+            found = _matching_machines(alias, session)
+            matches = [row for row in found if row['id'] not in replaced]
+            if not matches:
+                raise ValueError('Herdr setup did not save the expected project machine'
+                                 + ('; existing profile kept' if replaced else ''))
+            for row in found:
+                if row['id'] in replaced:
+                    result = subprocess.call(['herdr', 'machine', 'remove', row['id']])
+                    if result:
+                        return result
+        machine = next((row for row in matches if row.get('id') == receipt.get('machine_id')), matches[0])
+        machine_id = machine.get('id')
+        if not machine.get('enabled'):
+            result = subprocess.call(['herdr', 'machine', 'enable', machine_id])
+            if result:
+                return result
+        saved = {'machine_id': machine_id, 'alias': alias, 'session': session, 'codespace': codespace}
+        if added:
+            saved['created'] = True
+        elif machine_id != receipt.get('machine_id'):
+            saved['created'] = False
+        elif 'created' in receipt:
+            saved['created'] = receipt['created']
+        if versions:
+            saved['herdr_versions'] = versions
+        atomic_write(receipt_path, json.dumps(saved).encode() + b'\n')
     # After the receipt, before the workspace: the caller can install resume
     # hooks on the Codespace this machine just saved. Every return above skips it.
     if prepared is not None:

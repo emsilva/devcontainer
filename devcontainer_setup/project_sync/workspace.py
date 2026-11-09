@@ -6,11 +6,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import secrets
 import time
 
 from . import scratch, sync_cycle
 from .checkpoint_store import Store
-from .state import atomic_write, discover_project, locked, read_json
+from .state import _parent, _regular, atomic_write, discover_project, locked, read_json
 
 PENDING = 'workspace-pending.json'
 
@@ -60,6 +62,122 @@ def registry(project, state):
     if str(project.root) not in allowed:
         raise ValueError('Another checkout already owns this project pairing; use its task work:cs entrypoint')
     return value
+
+
+def _retire_bytes(path):
+    try:
+        with _parent(path, private=True) as (parent, name):
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            with os.fdopen(fd, 'rb') as source:
+                _regular(source.fileno(), allow_unlinked=True)
+                return source.read()
+    except FileNotFoundError:
+        return None
+
+
+def _retire_digest(data):
+    return hashlib.sha256(data).hexdigest() if data is not None else None
+
+
+def _retired_registry(project, data):
+    value = json.loads(data)
+    if (not isinstance(value, dict) or value.get('schema') != 1 or value.get('project_id') != project.project_id
+            or value.get('identity') != project.identity or value.get('local_root') != str(project.root)):
+        raise ValueError('the pairing changed since the delete began')
+    for key in ('codespace', 'remote_root', 'remote_active_root', 'verified_remote_historical_roots'):
+        value.pop(key, None)
+    value.update(verified_historical_roots=value.get('verified_local_historical_roots', []),
+                 active_host='local', local_active_root=str(project.root))
+    return json.dumps(value, sort_keys=True).encode() + b'\n'
+
+
+def retire(project, state: Path, codespace: str, *, held: bool = False) -> Path:
+    """Archive a stopped pairing, replaying only its exact before/after versions."""
+    from . import keeper
+    state = Path(state)
+    reason = 'the pairing changed since the delete began'
+    intent_path = state / 'retire-intent.json'
+    with ExitStack() as locks:
+        if not held:
+            locks.enter_context(locked(state / 'workspace-control.lock', blocking=True))
+        # Direct starters hold their respective lock and reread the binding.
+        # Keep both until the last unlink, so none can republish a retired pair.
+        locks.enter_context(locked(state / 'keeper-control.lock', blocking=True))
+        locks.enter_context(locked(state / 'scratch-control.lock', blocking=True))
+        if scratch.status(state).get('running') or keeper.status(state).get('running'):
+            raise ValueError('stop the keeper and sync worker first')
+        binding = _retire_bytes(state / scratch.CONFIG)
+        session = _retire_bytes(state / scratch.SESSION)
+        current_registry = _retire_bytes(state / 'workspace.json')
+        try:
+            intent = read_json(intent_path)
+        except FileNotFoundError:
+            intent = None
+        if intent is None:
+            if binding is None or json.loads(binding).get('codespace') != codespace:
+                for archive in sorted((state / 'retired-bindings').glob('*'), reverse=True):
+                    marker = _retire_bytes(archive / 'deleted.json')
+                    if marker is not None:
+                        value = json.loads(marker)
+                        if value.get('schema') == 1 and value.get('codespace') == codespace:
+                            return archive
+                raise ValueError('no pairing for ' + codespace + ' to retire')
+            if json.loads(binding).get('identity') != project.identity or current_registry is None:
+                raise ValueError(reason)
+            after = _retired_registry(project, current_registry)
+            archive = state / 'retired-bindings' / (str(time.time_ns()) + '-' + secrets.token_hex(4))
+            intent = dict(schema=1, codespace=codespace, archive=str(archive),
+                          binding_sha256=_retire_digest(binding), session_sha256=_retire_digest(session),
+                          registry_sha256=_retire_digest(current_registry), registry_after_sha256=_retire_digest(after))
+            atomic_write(intent_path, json.dumps(intent, sort_keys=True).encode() + b'\n')
+        try:
+            archive = Path(intent['archive'])
+            if (intent.get('schema') != 1 or intent.get('codespace') != codespace
+                    or archive.parent != state / 'retired-bindings'
+                    or not re.fullmatch(r'[0-9]+-[0-9a-f]{8}', archive.name)):
+                raise ValueError(reason)
+            expected = {scratch.CONFIG: intent['binding_sha256'], scratch.SESSION: intent['session_sha256'],
+                        'workspace.json': intent['registry_sha256']}
+            for name, digest in expected.items():
+                if (digest is None and name != scratch.SESSION) or (digest is not None and
+                        (not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest))):
+                    raise ValueError(reason)
+            sources = {scratch.CONFIG: binding, scratch.SESSION: session, 'workspace.json': current_registry}
+            copies = {name: _retire_bytes(archive / name) for name in expected}
+            # Validate the whole transaction before resuming any copy/write/unlink.
+            for name, digest in expected.items():
+                copy, source = copies[name], sources[name]
+                if copy is not None and _retire_digest(copy) != digest:
+                    raise ValueError(reason)
+                allowed = {digest, intent['registry_after_sha256']} if name == 'workspace.json' else {digest, None}
+                if _retire_digest(source) not in allowed:
+                    raise ValueError(reason)
+                if copy is None and _retire_digest(source) != digest:
+                    raise ValueError(reason)
+            original_registry = copies['workspace.json'] or current_registry
+            after = _retired_registry(project, original_registry)
+            if _retire_digest(after) != intent['registry_after_sha256']:
+                raise ValueError(reason)
+            marker = _retire_bytes(archive / 'deleted.json')
+            if marker is not None:
+                value = json.loads(marker)
+                if value.get('schema') != 1 or value.get('codespace') != codespace or not isinstance(value.get('deleted_at'), (float, int)):
+                    raise ValueError(reason)
+        except (KeyError, TypeError, ValueError, OSError):
+            raise ValueError(reason) from None
+        for name, data in sources.items():
+            if copies[name] is None and data is not None:
+                atomic_write(archive / name, data)
+        if marker is None:
+            atomic_write(archive / 'deleted.json', json.dumps(dict(schema=1, codespace=codespace,
+                         deleted_at=time.time()), sort_keys=True).encode() + b'\n')
+        if _retire_digest(current_registry) == intent['registry_sha256']:
+            atomic_write(state / 'workspace.json', after)
+        for name in (scratch.SESSION, scratch.CONFIG):
+            if sources[name] is not None:
+                (state / name).unlink()
+        intent_path.unlink()
+        return archive
 
 
 def _project(root, identity):
@@ -344,7 +462,8 @@ def remote(project, state, armed=None, rebind=None, before_herdr=None, move=None
         agent_hooks.ensure_on(name, state, remote_root)
         env_files.ensure_on(name, state, primary.root, remote_root)
 
-    return open_remote(primary, state, remote_root, remote_herdr=remote_herdr, prepared=prepared)
+    return open_remote(primary, state, remote_root, remote_herdr=remote_herdr, prepared=prepared,
+                       expected_codespace=name)
 
 
 def status(project, state):
