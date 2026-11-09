@@ -88,6 +88,8 @@ def gather(project, state, target, connection, *, now=time.time, sleep=time.slee
             sleep(min(2, deadline - now()))
         mac = _mac_scratch(synced_root)
         scan = target_scan.scan(connection, target.name, target.remote_root, cutoffs=cutoffs, now=now)
+        if cutoffs is not None and scan.cutoffs_sha256 != target_scan.cutoffs_digest(cutoffs):
+            cycle = None
         first_fingerprint = target_scan.fingerprint(first)
         steady = first_fingerprint is not None and first_fingerprint == target_scan.fingerprint(scan)
     elif target.kind == 'sealed':

@@ -72,7 +72,7 @@ class DeletionTests(unittest.TestCase):
         self.bind()
         self.api = FakeAPI()
         self.scan = target_scan.Scan('space', self.clock, (), True, (), True, (), True,
-                                    None, (), (), (), (), True, ())
+                                    target_scan.cutoffs_digest({}), (), (), (), (), True, ())
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.mocks = {}
@@ -210,6 +210,22 @@ class DeletionTests(unittest.TestCase):
         self.assertEqual(json.loads(output)['categories'][1]['verdict'], 'safe')
         self.mocks['scratch.inspect_sync'].assert_called_with(synced_root, self.state)
         self.assertEqual(self.mutations(), [])
+
+    def test_a_paired_scan_must_compare_the_bracketing_manifests_cutoffs(self):
+        self.api.states = ['Available']
+        expected = 'Unknown: sync has not finished a cycle since the check began; check again in a minute'
+        for digest in (None, 'f' * 64):
+            with self.subTest(digest=digest):
+                self.mocks['target_scan.scan'].return_value = replace(self.scan, cutoffs_sha256=digest)
+                code, output, _ = self.run_delete(check=True, as_json=True)
+                result = json.loads(output)
+                self.assertEqual(code, 1, output)
+                self.assertFalse(result['deletable'])
+                self.assertEqual(result['categories'][2]['verdict'], 'unknown')
+                self.assertEqual(result['categories'][2]['text'], expected)
+                self.assertEqual(self.mutations(), [])
+        self.mocks['target_scan.scan'].return_value = self.scan
+        self.assertEqual(self.run_delete(check=True, as_json=True)[0], 0)
 
     def test_check_json_prints_one_object_for_every_outcome(self):
         for states, outcome in [(('Available',), 'checked'), (('Shutdown',), 'unreachable'),
