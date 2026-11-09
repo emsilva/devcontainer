@@ -14,6 +14,12 @@ CHECK_NAMESPACE = 'refs/project-sync-check/heads/'
 _UNREADABLE = 'GitHub could not be read from this Mac'
 _INCOMPLETE = "this Mac's checkout is shallow or partial"
 _OID = re.compile(r'[0-9a-f]{40}')
+_ENV_DENYLIST = frozenset((
+    'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_INDEX_VERSION',
+    'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_QUARANTINE_PATH',
+    'GIT_NAMESPACE', 'GIT_SHALLOW_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_GRAFT_FILE', 'GIT_CONFIG',
+    'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM', 'GIT_CURL_VERBOSE',
+))
 
 
 @dataclass(frozen=True)
@@ -35,9 +41,10 @@ class Proof:
 class _Git:
     def __init__(self, timeout):
         self.timeout = timeout
-        self.env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+        self.env = {key: value for key, value in os.environ.items()
+                    if key not in _ENV_DENYLIST and not key.startswith('GIT_TRACE')}
         self.env.update(GIT_TERMINAL_PROMPT='0', GIT_NO_REPLACE_OBJECTS='1',
-                        GIT_GRAFT_FILE='/dev/null', LC_ALL='C')
+                        GIT_GRAFT_FILE='/dev/null', GIT_OPTIONAL_LOCKS='0', GIT_NO_LAZY_FETCH='1', LC_ALL='C')
 
     def run(self, cwd, *args, input=None):
         try:

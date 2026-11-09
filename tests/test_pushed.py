@@ -30,6 +30,15 @@ class PushedTests(unittest.TestCase):
             self.git(self.base, 'clone', '-q', str(self.origin), str(root))
             self.configure(root)
         self.project = Project(self.mac, str(self.origin), 'github.com/example/project', 'a' * 24)
+        # Proofs retain owner settings, so supply only fixture Git configuration.
+        # Even a configured URL rewrite must not let a fixture use a network protocol.
+        values = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+        values.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
+                      GIT_CONFIG_COUNT='2', GIT_CONFIG_KEY_0='protocol.allow', GIT_CONFIG_VALUE_0='never',
+                      GIT_CONFIG_KEY_1='protocol.file.allow', GIT_CONFIG_VALUE_1='always')
+        environment = patch.dict(os.environ, values, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def git(self, root, *args, input=None, env=None):
         values = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
@@ -39,7 +48,7 @@ class PushedTests(unittest.TestCase):
             values.update(env)
         return subprocess.run(['git', '-C', str(root), *args], input=input,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                              check=True, timeout=10, env=values).stdout.strip()
+                              check=True, timeout=60, env=values).stdout.strip()
 
     def configure(self, root):
         for key, value in (('user.name', 'Fixture'), ('user.email', 'fixture@example.invalid'),
@@ -228,15 +237,16 @@ class PushedTests(unittest.TestCase):
             return run(args, **kwargs)
 
         overrides = dict(GIT_DIR=str(self.remote / '.git'), GIT_WORK_TREE=str(self.remote),
-                         GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='remote.origin.url',
-                         GIT_CONFIG_VALUE_0=str(self.base / 'absent.git'),
                          GIT_GRAFT_FILE=str(self.base / 'absent-graft'), GIT_NO_REPLACE_OBJECTS='0')
         with patch.dict(os.environ, overrides), patch.object(self.pushed.subprocess, 'run', side_effect=record):
             self.assertEqual(self.proof().pushed, 1)
         for _, kwargs in calls:
-            values = {key: value for key, value in kwargs['env'].items() if key.startswith('GIT_')}
-            self.assertEqual(values, dict(GIT_TERMINAL_PROMPT='0', GIT_NO_REPLACE_OBJECTS='1',
-                                          GIT_GRAFT_FILE='/dev/null'))
+            values = kwargs['env']
+            self.assertFalse('GIT_DIR' in values, 'GIT_DIR')
+            self.assertFalse('GIT_WORK_TREE' in values, 'GIT_WORK_TREE')
+            for key, value in dict(GIT_TERMINAL_PROMPT='0', GIT_NO_REPLACE_OBJECTS='1',
+                                   GIT_GRAFT_FILE='/dev/null').items():
+                self.assertTrue(values.get(key) == value, key)
             self.assertEqual(kwargs['env']['LC_ALL'], 'C')
         args = next(args for args, _ in calls if 'fetch' in args)
         self.assertIn('credential.interactive=never', args)
@@ -244,6 +254,65 @@ class PushedTests(unittest.TestCase):
         self.assertIn('gc.auto=0', args)
         self.assertNotIn('credential.helper=', args)
         self.assertEqual(self.git(self.mac, 'config', '--get', 'credential.interactive'), 'always')
+
+    def test_owner_authentication_variables_are_kept(self):
+        ssh = self.base / 'fixture-ssh'
+        askpass = self.base / 'fixture-askpass'
+        helper = self.base / 'fixture-helper'
+        for stub in (ssh, askpass, helper):
+            stub.write_text('#!/bin/sh\nexit 0\n')
+            stub.chmod(0o700)
+        kept = dict(GIT_SSH_COMMAND=str(ssh), GIT_SSH=str(ssh), GIT_ASKPASS=str(askpass),
+                    GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='credential.helper', GIT_CONFIG_VALUE_0=str(helper),
+                    GIT_CONFIG_GLOBAL=str(self.base / 'fixture-global'),
+                    GIT_CONFIG_SYSTEM=str(self.base / 'fixture-system'), GIT_CONFIG_NOSYSTEM='1',
+                    SSH_ASKPASS=str(askpass))
+        dropped = ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_INDEX_VERSION',
+                   'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_QUARANTINE_PATH',
+                   'GIT_NAMESPACE', 'GIT_SHALLOW_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_CONFIG',
+                   'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM', 'GIT_CURL_VERBOSE',
+                   'GIT_TRACE', 'GIT_TRACE_PACKET', 'GIT_TRACE2_EVENT', 'GIT_TRACE_FUTURE')
+        forced = dict(GIT_TERMINAL_PROMPT='0', GIT_NO_REPLACE_OBJECTS='1', GIT_GRAFT_FILE='/dev/null',
+                      GIT_OPTIONAL_LOCKS='0', GIT_NO_LAZY_FETCH='1', LC_ALL='C')
+        env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+        env.update(kept)
+        env.update(dict.fromkeys(dropped, 'fixture-layout-or-trace'))
+        env.update(dict.fromkeys(forced, 'fixture-override'))
+        calls = []
+
+        def check_environment(values):
+            # Assertion messages contain key names only, never a preserved value.
+            for key, value in kept.items():
+                self.assertTrue(values.get(key) == value, key)
+            for key in dropped:
+                self.assertFalse(key in values, key)
+            for key, value in forced.items():
+                self.assertTrue(values.get(key) == value, key)
+
+        def fixture_git(args, **kwargs):
+            calls.append((args, kwargs))
+            if 'fetch' in args:
+                check_environment(kwargs['env'])
+            if 'rev-parse' in args:
+                output = 'false\n'
+            elif 'config' in args:
+                return subprocess.CompletedProcess(args, 1, '')
+            elif 'cat-file' in args:
+                output = self.initial + ' commit 123\n'
+            elif '--contains' in args:
+                output = self.pushed.CHECK_NAMESPACE + 'main\n'
+            else:
+                output = ''
+            return subprocess.CompletedProcess(args, 0, output)
+
+        with patch.dict(os.environ, env, clear=True), patch.object(self.pushed.subprocess, 'run',
+                                                                  side_effect=fixture_git):
+            proof = self.proof()
+        self.assertEqual((proof.pushed, proof.unpushed, proof.unknown), (1, (), ()))
+        self.assertEqual(sum('fetch' in args for args, _ in calls), 1)
+        for _, kwargs in calls:
+            check_environment(kwargs['env'])
+            self.assertEqual(kwargs['stderr'], subprocess.DEVNULL)
 
     def test_replacement_objects_prove_nothing(self):
         tree = self.git(self.mac, 'rev-parse', 'HEAD^{tree}')
