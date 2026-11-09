@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import shlex
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -147,6 +148,16 @@ class TargetScanTests(unittest.TestCase):
         row = self.scan().repositories[0]
         self.assertEqual(row.stashes, 1)
         self.assertEqual((row.worktrees[0].branch, row.worktrees[0].head), (None, oid))
+
+    def test_prunable_linked_worktree_is_skipped(self):
+        root = self.repo('project')
+        linked = self.ws / 'linked'
+        self.git(root, 'worktree', 'add', '-qb', 'linked', str(linked))
+        shutil.rmtree(linked)
+        scan = self.scan()
+        self.assertTrue(scan.git_complete)
+        self.assertTrue(scan.repositories[0].ok)
+        self.assertEqual([tree.path for tree in scan.repositories[0].worktrees], [str(root)])
 
     def test_edits_hidden_by_index_flags_count_once_and_absent_sparse_files_pass(self):
         root = self.repo('project')
@@ -679,6 +690,29 @@ class TargetScanTests(unittest.TestCase):
         result = self.scan(limits=self.api.Limits(seconds=0))
         self.assertIsNone(self.api.fingerprint(result))
         self.assertIsNone(self.api.fingerprint(self.scan(limits=self.api.Limits(output=100))))
+
+    def test_prunable_detached_head_is_still_claimed(self):
+        from devcontainer_setup.project_sync import verdict
+        root = self.repo('project')
+        linked = self.ws / 'linked'
+        self.git(root, 'worktree', 'add', '-q', '--detach', str(linked))
+        (linked / 'tracked').write_text('detached work')
+        self.git(linked, 'commit', '-qam', 'Detached work')
+        head = self.git(linked, 'rev-parse', 'HEAD')
+        shutil.rmtree(linked)
+        scan = self.scan()
+        self.assertTrue(scan.repositories[0].ok)
+        self.assertIn(head, [oid for claim in verdict.claims(scan) for _, oid in claim.refs])
+
+    def test_prunable_worktree_that_still_exists_is_not_skipped(self):
+        root = self.repo('project')
+        linked = self.ws / 'linked'
+        self.git(root, 'worktree', 'add', '-qb', 'linked', str(linked))
+        (linked / 'only-here').write_text('local work')
+        (linked / '.git').unlink()
+        self.assertIn('prunable', self.git(root, 'worktree', 'list', '--porcelain'))
+        self.assertFalse(self.scan().repositories[0].ok)
+
 
 
 if __name__ == '__main__':

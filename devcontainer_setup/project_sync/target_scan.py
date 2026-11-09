@@ -512,20 +512,38 @@ def repository(path, candidates):
                 result['problems'].append(row['path'] + ': its origin cannot be read')
         listing = git(path, 'worktree', 'list', '--porcelain', '-z').split(b'\0')
         paths = set(candidates if not row['bare'] else ())
-        current = None
-        bare = False
+        current = listed_head = None
+        bare = prunable = False
         for field in listing + [b'']:
             if field.startswith(b'worktree '):
-                current, bare = path_text(field[9:].decode()), False
+                current, bare, prunable = path_text(field[9:].decode()), False, False
+            elif field.startswith(b'HEAD '):
+                listed_head = oid(field[5:].decode())
             elif field == b'bare':
                 bare = True
+            elif field == b'prunable' or field.startswith(b'prunable '):
+                prunable = True
             elif not field:
                 if current is not None and not bare:
-                    paths.add(current)
-                current, bare = None, False
+                    missing = False
+                    try:
+                        Path(current).lstat()
+                    except FileNotFoundError:
+                        missing = True
+                    if prunable and missing:
+                        # The directory is gone, but a detached commit can still
+                        # exist only in this worktree's HEAD in the common store.
+                        if listed_head is not None and listed_head not in {head for _, head in branches}:
+                            spend('worktrees')
+                            row['worktrees'].append(dict(path=current, head=listed_head, branch=None,
+                                                         changes=0, changed=[], ok=True))
+                    else:
+                        paths.add(current)
+                current, listed_head, bare, prunable = None, None, False, False
         for target in sorted(paths):
             spend('worktrees')
             row['worktrees'].append(worktree(target))
+        row['worktrees'].sort(key=lambda tree: tree['path'])
         row['ok'] = row['ok'] and all(tree['ok'] for tree in row['worktrees'])
     except Budget:
         row['ok'] = False
