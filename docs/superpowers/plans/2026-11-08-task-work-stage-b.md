@@ -686,4 +686,10 @@ merges each into `feature/task-work-ab` after its own re-gate.
 
 On innovate with the 2026-10-27 backup runbook: `task work` in a terminal (menu, redraw, a chosen action runs) and
 piped (`Next:` lines, exit 0) for an available armed pairing, after `task work:cs:stop` (stopped by you), and with the
-network off (`GitHub did not answer within 2 s`); no new file in the state dir from the printing alone.
+network off (bounded, exit 0); no new file in the state dir from the printing alone.
+
+**Correction after the 2026-11-09 run.** With the network off, an armed pairing never shows `GitHub did not answer
+within 2 s`: when GitHub does not answer, the view falls back to the keeper's last reading, `(as of HH:MM)`
+(`overview._pair`; `standing.read` takes it whenever `keeper-runtime.json` names the pairing), and an owner stop prints
+from local facts. The "did not answer" reason appears only with no keeper reading. The run met every other line of
+this check; it found the in-Codespace stop's answer arriving after the Codespace went down, fixed in a228b33.
