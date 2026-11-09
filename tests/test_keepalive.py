@@ -16,7 +16,7 @@ from urllib.request import urlopen
 
 from devcontainer_setup.project_sync import arming, keepalive, keeper
 from devcontainer_setup.project_sync.lifecycle import Reading
-from devcontainer_setup.project_sync.state import atomic_write, process_identity, read_json
+from devcontainer_setup.project_sync.state import atomic_write, read_json
 
 try:
     from process_fixtures import keepalive_decoy
@@ -410,7 +410,10 @@ class KeeperDrivesTests(Fakes):
         self.assertTrue(records[0]['pid'])
         self.assertEqual(records[1:], records[:1] * 2)
         self.assertEqual(len(self.children), 1)
-        self.assertEqual(records[0]['process_identity'], process_identity(records[0]['pid']))
+        # The record pins the live child by the keeper's own rule: same start time, argv naming the Codespace.
+        # Not exact equality: the fake gh is a Python script, and Homebrew's python3 re-execs itself just after
+        # launch, which changes the ps command but not the start time. The real child is the native gh.
+        self.assertTrue(keepalive._ours(records[0]['pid'], records[0]['process_identity'], 'cs-1'))
 
     def supervise(self, readings, *, popen=None, rest):
         """Run the keeper's supervise in this process against `readings`; return its last runtime."""
