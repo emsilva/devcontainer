@@ -187,6 +187,30 @@ class DeletionTests(unittest.TestCase):
         self.assertEqual(self.mutations(), [])
         self.assertFalse((self.state / 'deletions').exists())
 
+    def test_scratch_uses_the_synchronized_binding_root(self):
+        synced_root = self.base / 'primary'
+        (synced_root / '.scratch').mkdir(parents=True)
+        data = b'synchronized copy\n'
+        (synced_root / '.scratch/note.txt').write_bytes(data)
+        (self.root / '.scratch/note.txt').write_bytes(b'other checkout\n')
+        binding = read_json(self.state / 'scratch.json')
+        self.write(self.state / 'scratch.json', dict(binding, root=str(synced_root)))
+        registry = read_json(self.state / 'workspace.json')
+        self.write(self.state / 'workspace.json', dict(registry, local_root=str(synced_root),
+                                                      local_active_root=str(self.root)))
+        self.mocks['target_scan.scan'].return_value = replace(self.scan,
+            scratch=(('note.txt', hashlib.sha256(data).hexdigest()),))
+        original = self.current_cycle
+        def current_cycle(*args):
+            cycle, current = original(*args)
+            return dict(cycle, local_root=str(synced_root)), current
+        with patch.object(self, 'current_cycle', side_effect=current_cycle):
+            code, output, _ = self.run_delete(check=True, as_json=True)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(json.loads(output)['categories'][1]['verdict'], 'safe')
+        self.mocks['scratch.inspect_sync'].assert_called_with(synced_root, self.state)
+        self.assertEqual(self.mutations(), [])
+
     def test_check_json_prints_one_object_for_every_outcome(self):
         for states, outcome in [(('Available',), 'checked'), (('Shutdown',), 'unreachable'),
                                 (('Queued',), 'unreachable'), ((None,), 'unreachable'),

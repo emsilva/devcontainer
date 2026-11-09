@@ -60,6 +60,7 @@ def gather(project, state, target, connection, *, now=time.time, sleep=time.slee
     binding = _optional(state / scratch.CONFIG)
     kept = verdict.kept_conversations(state, project, binding)
     if target.kind == 'paired':
+        synced_root = Path(binding.get('root', project.root))
         cutoffs = None
         deadline = finished + 6 * 60
         while True:
@@ -67,7 +68,7 @@ def gather(project, state, target, connection, *, now=time.time, sleep=time.slee
                 registry = workspace.registry(project, state)
                 runtime = scratch.status(state)
                 running = bool(runtime.get('running'))
-                sync = scratch.inspect_sync(Path(binding.get('root', project.root)), state) if running else runtime
+                sync = scratch.inspect_sync(synced_root, state) if running else runtime
                 conflicts = tuple(sync.get('conflicts', ()))
                 observed, current = workspace.cycle_scope(project, registry, runtime, sync)
                 started, completed = observed.get('started_at'), observed.get('completed_at')
@@ -85,7 +86,7 @@ def gather(project, state, target, connection, *, now=time.time, sleep=time.slee
             if not running or now() >= deadline:
                 break
             sleep(min(2, deadline - now()))
-        mac = _mac_scratch(project.root)
+        mac = _mac_scratch(synced_root)
         scan = target_scan.scan(connection, target.name, target.remote_root, cutoffs=cutoffs, now=now)
         first_fingerprint = target_scan.fingerprint(first)
         steady = first_fingerprint is not None and first_fingerprint == target_scan.fingerprint(scan)
