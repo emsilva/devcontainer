@@ -113,6 +113,40 @@ def retire(project, state: Path, codespace: str, *, held: bool = False) -> Path:
             intent = read_json(intent_path)
         except FileNotFoundError:
             intent = None
+        if intent is not None and binding is not None and current_registry is not None:
+            try:
+                newer, registry = json.loads(binding), json.loads(current_registry)
+                superseded = (isinstance(intent, dict) and isinstance(newer, dict) and isinstance(registry, dict)
+                    and isinstance(newer.get('codespace'), str)
+                    and re.fullmatch('[A-Za-z0-9][A-Za-z0-9-]{0,99}', newer['codespace'])
+                    and newer['codespace'] != intent.get('codespace')
+                    and newer.get('identity') == project.identity and newer.get('root') == str(project.root)
+                    and registry.get('codespace') == newer['codespace']
+                    and registry.get('remote_root') == newer.get('remote_root'))
+                if superseded:
+                    _retired_registry(project, current_registry)
+                    archive = Path(intent['archive'])
+                    if (intent.get('schema') != 1 or not isinstance(intent.get('codespace'), str)
+                            or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9-]{0,99}', intent['codespace'])
+                            or archive.parent != state / 'retired-bindings'
+                            or not re.fullmatch(r'[0-9]+-[0-9a-f]{8}', archive.name)):
+                        raise ValueError(reason)
+                    for key in ('binding_sha256', 'session_sha256', 'registry_sha256', 'registry_after_sha256'):
+                        digest = intent[key]
+                        if not (digest is None and key == 'session_sha256') and (
+                                not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest)):
+                            raise ValueError(reason)
+                    destination = archive / 'superseded-retire-intent.json'
+                    original, saved = _retire_bytes(intent_path), _retire_bytes(destination)
+                    if saved is not None and saved != original:
+                        raise ValueError(reason)
+                    atomic_write(destination, original)
+                    intent_path.unlink()
+                    intent = None
+            except (KeyError, TypeError, ValueError):
+                raise ValueError(reason) from None
+            if superseded and codespace != newer['codespace']:
+                raise ValueError('retirement was superseded by a newer pairing')
         if intent is None:
             if binding is None or json.loads(binding).get('codespace') != codespace:
                 for archive in sorted((state / 'retired-bindings').glob('*'), reverse=True):

@@ -173,6 +173,10 @@ class PublicationTests(NativeFixture):
         self.assertEqual(source.read_bytes(), original)
         state = self.root / 'publication-state'
         captured = self.api.capture_conversations(self.project, self.store, state=state, env=env)
+        observed = captured.pop('completed_files')
+        self.assertEqual([(row['agent'], row['session_id']) for row in observed],
+                         [('claude', imported['session_id'])])
+        self.assertTrue(observed[0]['files'])
         self.assertEqual(captured, dict(schema=1, entries=[], issues=[]))
         self.assertTrue((state / 'conversation-origins.json').exists(), 'Capture must record an empty origin list for imports')
         self.assertEqual(json.loads((state / 'conversation-origins.json').read_bytes()),
@@ -851,6 +855,10 @@ class PublicationTests(NativeFixture):
                 self.assertTrue(all(row.get('cwd')==str(root) for row in rows))
                 self.assertEqual([row['message'] for row in rows],[row['message'] for row in map(json.loads,originals[claude].splitlines())])
         captured=self.api.capture_conversations(project,self.store,state=self.root/'cross-state',env=env)
+        observed = captured.pop('completed_files')
+        self.assertEqual(sorted((row['agent'], row['session_id']) for row in observed),
+                         sorted((row['agent'], row['session_id']) for row in result['imported']))
+        self.assertTrue(all(row['files'] for row in observed))
         self.assertEqual(captured,dict(schema=1,entries=[],issues=[]))
         for path,original in originals.items():self.assertEqual(path.read_bytes(),original)
 

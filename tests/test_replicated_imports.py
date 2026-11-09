@@ -9,12 +9,13 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from devcontainer_setup.project_sync import conversations, replication, rpc, sessions
+from devcontainer_setup.project_sync import conversations, replication, rpc, seal, sessions, target_scan, verdict, workspace
 from devcontainer_setup.project_sync.checkpoint_store import Store
 from devcontainer_setup.project_sync.state import discover_project, state_dir
 
 from store_fixtures import assert_every_object_referenced
 from test_native_checkpoints import lines
+from test_target_scan import LocalConnection
 
 CYCLES = 3
 
@@ -174,6 +175,62 @@ class ReplicatedImportTests(unittest.TestCase):
         self.desktop_codex(web_search=True)
         # Publication completes in its first cycle, so later cycles never resume the fork again.
         self.assertEqual([(step['receipts'], step['resumes']) for step in self.run_cycles()], [(['complete'], 1)] * CYCLES)
+
+    def check_imported_tail(self, agent):
+        getattr(self, 'desktop_' + agent)()
+        def cycle():
+            return replication.sync_project_data(self.connection, self.project, self.desktop_store.state,
+                                                  str(self.codespace_root), env=self.desktop_env)
+        cycle()
+        proc = self.base / 'proc'
+        proc.mkdir()
+        def check():
+            result = cycle()
+            inbound = result['directions']['codespace_to_desktop']
+            manifest = self.desktop_store.load(inbound['snapshot_id'])
+            receipt, _ = workspace._conversation_receipt(self.project, self.desktop_store.state)
+            scan = target_scan.scan(LocalConnection(Path(self.codespace_env['HOME']), proc), 'fixture-cs',
+                str(self.codespace_root), cutoffs=verdict.cutoffs(manifest),
+                workspaces=str(self.base / 'workspaces'), proc=str(proc))
+            evidence = verdict.Evidence(scan, True, (), (), (), True, result, receipt,
+                                        verdict.sessions_by_file(manifest), None, ())
+            target = verdict.Target('fixture-cs', 'paired', str(self.codespace_root), None, None)
+            return verdict._history(target, evidence, scan.at), scan, inbound
+        history, before, _ = check()
+        self.assertEqual(history.verdict, verdict.SAFE)
+        home = Path(self.codespace_env['CLAUDE_CONFIG_DIR' if agent == 'claude' else 'CODEX_HOME'])
+        path = next(home.rglob('*.jsonl'))
+        rows = [json.loads(line) for line in path.read_bytes().splitlines()]
+        if agent == 'claude':
+            row = dict(type='user', uuid=str(uuid.uuid4()), sessionId=rows[-1]['sessionId'],
+                       cwd=str(self.codespace_root), version=rows[-1]['version'],
+                       message=dict(role='user', content='unfinished work'))
+        else:
+            row = dict(type='event_msg', ordinal=len(rows),
+                       payload=dict(type='task_started', turn_id=str(uuid.uuid4())))
+        with path.open('ab') as out:
+            out.write(lines([row]))
+        history, scan, inbound = check()
+        self.assertEqual(history.verdict, verdict.UNSAFE)
+        self.assertIn('a turn that never finished', history.text)
+        self.assertEqual(scan.tails, ((agent, path.name),))
+        self.assertNotEqual(target_scan.fingerprint(before), target_scan.fingerprint(scan))
+        again, repeated, _ = check()
+        self.assertEqual(again.verdict, verdict.UNSAFE)
+        self.assertEqual(target_scan.fingerprint(scan), target_scan.fingerprint(repeated))
+        with self.assertRaises(ValueError):
+            evidence = verdict.Evidence(scan, True, (), scan.scratch, (), True, None, None, (), None, ())
+            seal.write(self.desktop_store.state, self.desktop_store, scan, evidence=evidence, identity=self.project.identity,
+                       repository='example/imports', gh_user='octo', remote_root=str(self.codespace_root),
+                       operation='replace', cycle_id='cycle', snapshot_id=inbound['snapshot_id'], now=scan.at)
+        for store in (self.desktop_store, self.codespace_store):
+            assert_every_object_referenced(self, store)
+
+    def test_unfinished_turn_on_an_imported_claude_conversation(self):
+        self.check_imported_tail('claude')
+
+    def test_unfinished_turn_on_an_imported_codex_conversation(self):
+        self.check_imported_tail('codex')
 
 
 if __name__ == '__main__':

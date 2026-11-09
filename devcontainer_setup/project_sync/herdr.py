@@ -220,74 +220,86 @@ def open_remote(project, state: Path, remote_root: str, remote_herdr: str | None
     before the workspace opens. It is not called on an early return.
     """
     state = Path(state)
-    with locked(state / 'workspace-control.lock', blocking=True):
-        try:
-            binding = read_json(state / 'scratch.json')
-        except FileNotFoundError:
-            raise ValueError('No Codespace is paired; run task work:cs') from None
-        if (binding.get('codespace') != expected_codespace or binding.get('identity') != project.identity
-                or binding.get('remote_root') != remote_root):
-            raise ValueError('The project moved to another Codespace meanwhile; run task work:cs')
-        alias, session = configure_ssh(project, state), _session(project)
-        receipt_path = state / 'herdr-machine.json'
-        try:
-            receipt = read_json(receipt_path)
-        except FileNotFoundError:
-            receipt = {}
-        codespace = binding['codespace']
-        matches = _matching_machines(alias, session)
-        # Only setup installs the Herdr this Mac runs on a Codespace (it asks first),
-        # saving a fresh profile. A Codespace with none, or another version, gets
-        # one. When that was not read, a profile saved for another Codespace counts
-        # as lacking it.
-        previous, versions = receipt.get('codespace'), receipt.get('herdr_versions')
-        pair = None
-        if remote_herdr is None:
-            lacking = None not in (previous, codespace) and previous != codespace
-        else:
-            local = _local_version() if remote_herdr else None
-            pair = [local, remote_herdr]
-            lacking = not remote_herdr or (local is not None and remote_herdr != local)
-            if lacking and remote_herdr and pair == versions:
-                # Setup already ran for this pair and kept the remote, which Herdr
-                # accepts as compatible; asking again on every connection would loop.
-                print(f'Herdr on this Codespace is {remote_herdr}; this Mac runs {local}. Keeping the profile setup saved.')
-                lacking = False
-        replaced = {row['id'] for row in matches} if lacking else set()
-        added = not matches or bool(replaced)
+    # Serialize native setup and its receipt without blocking owner power actions.
+    with locked(state / 'herdr-setup.lock', blocking=True):
+        with locked(state / 'workspace-control.lock', blocking=True):
+            try:
+                binding = read_json(state / 'scratch.json')
+            except FileNotFoundError:
+                raise ValueError('No Codespace is paired; run task work:cs') from None
+            if (binding.get('codespace') != expected_codespace or binding.get('identity') != project.identity
+                    or binding.get('remote_root') != remote_root):
+                raise ValueError('The project moved to another Codespace meanwhile; run task work:cs')
+            alias, session = configure_ssh(project, state), _session(project)
+            receipt_path = state / 'herdr-machine.json'
+            try:
+                receipt = read_json(receipt_path)
+            except FileNotFoundError:
+                receipt = {}
+            codespace = binding['codespace']
+            matches = _matching_machines(alias, session)
+            # Only setup installs the Herdr this Mac runs on a Codespace (it asks first),
+            # saving a fresh profile. A Codespace with none, or another version, gets
+            # one. When that was not read, a profile saved for another Codespace counts
+            # as lacking it.
+            previous, versions = receipt.get('codespace'), receipt.get('herdr_versions')
+            pair = None
+            if remote_herdr is None:
+                lacking = None not in (previous, codespace) and previous != codespace
+            else:
+                local = _local_version() if remote_herdr else None
+                pair = [local, remote_herdr]
+                lacking = not remote_herdr or (local is not None and remote_herdr != local)
+                if lacking and remote_herdr and pair == versions:
+                    # Setup already ran for this pair and kept the remote, which Herdr
+                    # accepts as compatible; asking again on every connection would loop.
+                    print(f'Herdr on this Codespace is {remote_herdr}; this Mac runs {local}. Keeping the profile setup saved.')
+                    lacking = False
+            replaced = {row['id'] for row in matches} if lacking else set()
+            added = not matches or bool(replaced)
         if added:
             if pair is not None:
                 versions = pair  # An unread probe settles nothing, so it erases nothing.
+            # Native setup can ask in the terminal. Owner stop and disarm must remain
+            # available while it waits; the binding is checked again before writes.
             result = subprocess.call(['herdr', 'machine', 'add', alias, '--label', project.root.name + ' (Codespace)',
                                       '--remote-session', session])
             if result:
                 return result
-            found = _matching_machines(alias, session)
-            matches = [row for row in found if row['id'] not in replaced]
-            if not matches:
-                raise ValueError('Herdr setup did not save the expected project machine'
-                                 + ('; existing profile kept' if replaced else ''))
-            for row in found:
-                if row['id'] in replaced:
-                    result = subprocess.call(['herdr', 'machine', 'remove', row['id']])
-                    if result:
-                        return result
-        machine = next((row for row in matches if row.get('id') == receipt.get('machine_id')), matches[0])
-        machine_id = machine.get('id')
-        if not machine.get('enabled'):
-            result = subprocess.call(['herdr', 'machine', 'enable', machine_id])
-            if result:
-                return result
-        saved = {'machine_id': machine_id, 'alias': alias, 'session': session, 'codespace': codespace}
-        if added:
-            saved['created'] = True
-        elif machine_id != receipt.get('machine_id'):
-            saved['created'] = False
-        elif 'created' in receipt:
-            saved['created'] = receipt['created']
-        if versions:
-            saved['herdr_versions'] = versions
-        atomic_write(receipt_path, json.dumps(saved).encode() + b'\n')
+        with locked(state / 'workspace-control.lock', blocking=True):
+            try:
+                current = read_json(state / 'scratch.json')
+            except FileNotFoundError:
+                raise ValueError('No Codespace is paired; run task work:cs') from None
+            if current != binding:
+                raise ValueError('The project moved to another Codespace meanwhile; run task work:cs')
+            if added:
+                found = _matching_machines(alias, session)
+                matches = [row for row in found if row['id'] not in replaced]
+                if not matches:
+                    raise ValueError('Herdr setup did not save the expected project machine'
+                                     + ('; existing profile kept' if replaced else ''))
+                for row in found:
+                    if row['id'] in replaced:
+                        result = subprocess.call(['herdr', 'machine', 'remove', row['id']])
+                        if result:
+                            return result
+            machine = next((row for row in matches if row.get('id') == receipt.get('machine_id')), matches[0])
+            machine_id = machine.get('id')
+            if not machine.get('enabled'):
+                result = subprocess.call(['herdr', 'machine', 'enable', machine_id])
+                if result:
+                    return result
+            saved = {'machine_id': machine_id, 'alias': alias, 'session': session, 'codespace': codespace}
+            if added:
+                saved['created'] = True
+            elif machine_id != receipt.get('machine_id'):
+                saved['created'] = False
+            elif 'created' in receipt:
+                saved['created'] = receipt['created']
+            if versions:
+                saved['herdr_versions'] = versions
+            atomic_write(receipt_path, json.dumps(saved).encode() + b'\n')
     # After the receipt, before the workspace: the caller can install resume
     # hooks on the Codespace this machine just saved. Every return above skips it.
     if prepared is not None:

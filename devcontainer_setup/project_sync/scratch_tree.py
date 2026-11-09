@@ -6,7 +6,7 @@ import stat
 # Leading slashes anchor tracked markers at the scratch root. Other names are
 # transient at every depth; prune them before inspecting any excluded links.
 MUTAGEN_IGNORES = ('/.gitignore', '/README.md', '.DS_Store', '__pycache__',
-                   '.venv', 'node_modules', '.cache', '.project-sync', '.handoff', '.mutagen')
+                   '.venv', 'node_modules', '.cache', '.project-sync', '.handoff', '.mutagen', '.git')
 
 
 def eligible(relative, *, backup=False):

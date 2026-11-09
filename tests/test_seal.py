@@ -7,7 +7,7 @@ import stat
 import tempfile
 import unittest
 
-from devcontainer_setup.project_sync import target_scan
+from devcontainer_setup.project_sync import target_scan, verdict
 from devcontainer_setup.project_sync.checkpoint_store import Store
 from devcontainer_setup.project_sync.state import atomic_write
 from tests.test_verdict import DIGEST, IDENTITY, NAME, NOW, example_scan, manifest
@@ -27,7 +27,27 @@ class SealTests(unittest.TestCase):
                             snapshot_id=self.snapshot, now=NOW)
 
     def write(self, scan=None, **options):
-        return self.seal.write(self.state, self.store, scan or example_scan(), **dict(self.options, **options))
+        scan = scan or example_scan()
+        arguments = dict(self.options, evidence=self.evidence(scan))
+        arguments.update(options)
+        return self.seal.write(self.state, self.store, scan, **arguments)
+
+    def evidence(self, base_scan=None, **updates):
+        scan = base_scan or example_scan()
+        return replace(verdict.Evidence(scan, True, (), scan.scratch, (), True, None, None, (), None, ()), **updates)
+
+    def test_scratch_must_have_reached_the_mac_before_sealing(self):
+        scan = example_scan()
+        for changes in (dict(sync_running=False), dict(conflicts=('note.txt',)), dict(mac_scratch=None),
+                        dict(mac_scratch=()), dict(mac_scratch=(('note.txt', 'c' * 64),)),
+                        dict(scan=replace(scan, at=scan.at + 1))):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                self.write(scan, evidence=self.evidence(scan, **changes))
+        self.assertFalse((self.state / 'retired' / 'space.json').exists())
+
+    def test_evidence_is_required_for_a_final_flush(self):
+        with self.assertRaises(TypeError):
+            self.seal.write(self.state, self.store, example_scan(), **self.options)
 
     def test_write_then_read_round_trips(self):
         path = self.write()

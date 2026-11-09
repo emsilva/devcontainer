@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -93,6 +94,20 @@ class FakeHerdr:
 
 
 class ProxyTests(unittest.TestCase):
+    def test_proxy_is_recognized_from_two_package_copies_for_one_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            commands = []
+            for name in ('copy-one', 'copy-two'):
+                package = base / name / 'devcontainer_setup/project_sync'
+                shutil.copytree(Path(ssh_hosts.__file__).parent, package, ignore=shutil.ignore_patterns('__pycache__'))
+                with patch.object(ssh_hosts, '__file__', str(package / 'ssh_hosts.py')):
+                    commands.append(' '.join(shlex.split(ssh_hosts._proxy_command(Path(STATE), 'cs-old'))))
+            self.assertNotEqual(commands[0], commands[1])
+            for command in commands:
+                with self.subTest(command=command):
+                    self.assertEqual(restore._served(command, Path(STATE)), 'cs-old')
+
     def test_end_target_proxies_ends_and_waits_for_only_that_codespace(self):
         clock, killed, reads = Clock(), [], []
         ours = f'101 00:20 {PROXY} cs-old {STATE}'

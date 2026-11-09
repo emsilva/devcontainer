@@ -14,6 +14,7 @@ import time
 @dataclass(frozen=True)
 class Limits:
     entries: int = 200_000
+    ignored_entries: int = 200_000
     repositories: int = 64
     worktrees: int = 256
     files: int = 100_000
@@ -242,7 +243,7 @@ def scan(connection, codespace: str, remote_root: str, *,
         _text(codespace)
         for path in (remote_root, workspaces, proc):
             _path(path, absolute=True)
-        for name in ('entries', 'repositories', 'worktrees', 'files', 'hashed_bytes', 'output'):
+        for name in ('entries', 'ignored_entries', 'repositories', 'worktrees', 'files', 'hashed_bytes', 'output'):
             _integer(getattr(limits, name))
         if type(limits.seconds) not in (float, int) or not math.isfinite(limits.seconds) or limits.seconds < 0:
             raise ValueError('Invalid time limit')
@@ -305,7 +306,7 @@ for name in ('state', 'scratch_tree', 'sessions'):
 state, scratch_tree, sessions = package.state, package.scratch_tree, package.sessions
 limits = request['limits']
 deadline = time.monotonic() + limits['seconds']
-usage = dict(entries=0, repositories=0, worktrees=0, files=0, hashed_bytes=0)
+usage = dict(entries=0, ignored_entries=0, repositories=0, worktrees=0, files=0, hashed_bytes=0)
 cutoffs = {(agent, name): value for agent, name, value in (request['cutoffs'] or [])}
 cutoff_record = {agent + '/' + name: [value['size'], value['sha256'], value['own']]
                  for (agent, name), value in cutoffs.items()}
@@ -445,7 +446,32 @@ def worktree(path):
                 raise Incomplete()
             changed.append(path_text(record[3:].decode('utf-8')))
             index += 2 if b'R' in record[:2] or b'C' in record[:2] else 1
-        row['changes'], row['changed'] = len(changed), sorted(changed)[:20]
+        changed = set(changed)
+        for record in git(path, 'ls-files', '-v', '--stage', '-z').split(b'\0'):
+            if not record or not (record[:1] == b'S' or record[:1].islower()):
+                continue
+            metadata, name = record.split(b'\t', 1)
+            indexed = oid(metadata.decode().split()[2])
+            name = path_text(name.decode('utf-8'))
+            target = Path(path) / name
+            try:
+                info = target.lstat()
+            except FileNotFoundError:
+                continue  # Sparse checkouts intentionally leave these files absent.
+            if stat.S_ISDIR(info.st_mode):
+                continue  # Gitlinks are checked as repositories, not file content.
+            if not stat.S_ISREG(info.st_mode):
+                raise Incomplete()
+            safe_directory(target.parent)
+            actual = oid(scalar(git(path, *filters, 'hash-object', '--no-filters', '--', name)))
+            if actual != indexed:
+                changed.add(name)
+        git_dir = Path(scalar(git(path, 'rev-parse', '--path-format=absolute', '--git-dir')))
+        safe_directory(git_dir)
+        operations = {'rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD'}
+        with os.scandir(git_dir) as markers:
+            in_progress = any(item.name in operations or item.name.endswith('AUTOSTASH') for item in markers)
+        row['changes'], row['changed'] = len(changed) + int(in_progress), sorted(changed)[:20]
         branch = git(path, 'symbolic-ref', '-q', '--short', 'HEAD', absent=(1,))
         row['branch'] = None if branch is None else scalar(branch)
         head = git(path, 'rev-parse', '-q', '--verify', 'HEAD', absent=(1,))
@@ -470,13 +496,21 @@ def repository(path, candidates):
         for line in git(path, 'for-each-ref', '--format=%(refname:short) %(objectname)', 'refs/heads').decode().splitlines():
             name, head = line.split(' ', 1)
             branches.append([text(name), oid(head)])
+        for name in git(path, 'for-each-ref', '--format=%(refname)', 'refs/tags').decode().splitlines():
+            text(name)
+            commit = git(path, 'rev-parse', '-q', '--verify', name + '^{commit}', absent=(1,))
+            if commit is None:
+                continue  # Tags can name trees or blobs, which contain no commits.
+            head = oid(scalar(commit))
+            if not git(path, 'for-each-ref', '--format=%(refname)', '--contains=' + head, 'refs/heads').strip():
+                branches.append([name, head])
         row['branches'] = sorted(branches)
         stash = git(path, 'rev-parse', '-q', '--verify', 'refs/stash', absent=(1,))
         if stash is not None:
             count = scalar(git(path, 'rev-list', '--walk-reflogs', '--count', 'refs/stash'))
             if not count.isdecimal():
                 raise Incomplete()
-            row['stashes'] = int(count)
+            row['stashes'] = max(1, int(count))
         origin = git(path, 'config', '--get', 'remote.origin.url', absent=(1,))
         if origin is not None:
             try:
@@ -486,20 +520,38 @@ def repository(path, candidates):
                 result['problems'].append(row['path'] + ': its origin cannot be read')
         listing = git(path, 'worktree', 'list', '--porcelain', '-z').split(b'\0')
         paths = set(candidates if not row['bare'] else ())
-        current = None
-        bare = False
+        current = listed_head = None
+        bare = prunable = False
         for field in listing + [b'']:
             if field.startswith(b'worktree '):
-                current, bare = path_text(field[9:].decode()), False
+                current, bare, prunable = path_text(field[9:].decode()), False, False
+            elif field.startswith(b'HEAD '):
+                listed_head = oid(field[5:].decode())
             elif field == b'bare':
                 bare = True
+            elif field == b'prunable' or field.startswith(b'prunable '):
+                prunable = True
             elif not field:
                 if current is not None and not bare:
-                    paths.add(current)
-                current, bare = None, False
+                    missing = False
+                    try:
+                        Path(current).lstat()
+                    except FileNotFoundError:
+                        missing = True
+                    if prunable and missing:
+                        # The directory is gone, but a detached commit can still
+                        # exist only in this worktree's HEAD in the common store.
+                        if listed_head is not None and listed_head not in {head for _, head in branches}:
+                            spend('worktrees')
+                            row['worktrees'].append(dict(path=current, head=listed_head, branch=None,
+                                                         changes=0, changed=[], ok=True))
+                    else:
+                        paths.add(current)
+                current, listed_head, bare, prunable = None, None, False, False
         for target in sorted(paths):
             spend('worktrees')
             row['worktrees'].append(worktree(target))
+        row['worktrees'].sort(key=lambda tree: tree['path'])
         row['ok'] = row['ok'] and all(tree['ok'] for tree in row['worktrees'])
     except Budget:
         row['ok'] = False
@@ -514,17 +566,17 @@ def repository(path, candidates):
 def git_inventory():
     groups = {}
     ignored = set()
-    stack = [Path(request['workspaces'])]
+    stack = [(Path(request['workspaces']), False)]
     try:
-        safe_directory(stack[0])
+        safe_directory(stack[0][0])
         while stack:
             clock()
-            directory = stack.pop()
+            directory, ignored_only = stack.pop()
             safe_directory(directory)
             children = []
             with os.scandir(directory) as entries:
                 for child in entries:
-                    spend('entries')
+                    spend('ignored_entries' if ignored_only else 'entries')
                     children.append(child)
             by_name = {child.name: child for child in children}
             marker = by_name.get('.git')
@@ -535,6 +587,7 @@ def git_inventory():
                 continue
             candidate = marker is not None or bare
             if candidate:
+                ignored_only = False  # A discovered repository owns its own ignore rules.
                 try:
                     common = scalar(git(directory, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
                     if not Path(common).is_absolute():
@@ -550,10 +603,11 @@ def git_inventory():
                 if bare:
                     continue
             for child in sorted(children, key=lambda child: child.name, reverse=True):
-                if child.name == '.git' or str(Path(child.path)) in ignored:
+                hidden = ignored_only or str(Path(child.path)) in ignored
+                if child.name == '.git' or (hidden and child.name in ('node_modules', '.venv', '__pycache__')):
                     continue
                 if child.is_dir(follow_symlinks=False):
-                    stack.append(Path(child.path))
+                    stack.append((Path(child.path), hidden))
     except (OSError, ValueError, Incomplete):
         problem('git')
     for common, candidates in groups.items():
@@ -670,7 +724,7 @@ def session_inventory():
                             stack.append(Path(child.path))
                         elif stat.S_ISREG(mode):
                             key = (agent, child.name)
-                            if key in seen:
+                            if key in seen and key in cutoffs:
                                 problem('sessions')
                             seen.add(key)
                             cutoff = cutoffs.get(key)

@@ -1008,8 +1008,10 @@ Gates once, at the final commit: `task check && task test`, exit 0.
 
 - Step 3 seals OLD: with OLD still paired and its agents ended, `deletion.gather` for OLD; when the evidence is
   steady, has no tails, and the bracketing cycle's inbound row is complete with nothing pending and no capture
-  issues, `seal.write(...)` with that cycle's id, its inbound snapshot id and the replace operation id. Otherwise the
-  replace stops before the move and says why.
+  issues, `seal.write(..., evidence=evidence)` with that cycle's id, its inbound snapshot id and the replace
+  operation id. The required paired `verdict.Evidence` must name the very scan being sealed, have `sync_running`,
+  no conflicts, and every `scan.scratch` pair in `mac_scratch`. Otherwise the replace stops before the move and says
+  why.
 - `Store.collect` keeps every manifest a seal names, and its blobs (INV §5, `checkpoint_store.py:287-323`), with a
   test; a C+D release dependency.
 - A NEW that the replace journal names may be connected with its host key accepted (`accept_new=True`), so its check

@@ -467,12 +467,17 @@ def _started_here(project, state, agent, sid, env):
 def capture_conversations(project, store, *, state=None, env=None, historical_roots=()):
     """Observe ordinary project sessions without a native process or writer lock."""
     scopes = _scopes(project, state, historical_roots)
-    result = dict(schema=SCHEMA, entries=[], issues=[])
+    result = dict(schema=SCHEMA, entries=[], issues=[], completed_files=[])
     origins = dict(claude=set(), codex=set())
     imported = _created_imports(project, state)
     def issue(agent, sid, error):
         result['issues'].append(dict(agent=agent, session_id=sid, reason=sessions.display_text(str(error), 400)))
     def keep(retained, entry):
+        # Prefix observations are not publications or blob references. Include
+        # imports too: their next, unfinished turn must not disappear from a check.
+        result['completed_files'].append(dict(agent=entry['agent'], session_id=entry['session_id'],
+            files=[{key: item[key] for key in ('path', 'session_id', 'size', 'sha256')}
+                   for item in entry['files']]))
         # Decide before any put: no manifest would reference an unchanged import's
         # blobs, and the store never deletes. Its retained bytes are still in hand.
         if _unchanged_import(project, retained, state, entry):

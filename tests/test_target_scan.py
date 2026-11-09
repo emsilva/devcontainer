@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import shlex
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -92,18 +93,22 @@ class TargetScanTests(unittest.TestCase):
 
     def test_every_repository_and_worktree_under_workspaces_is_found(self):
         self.api
+        from devcontainer_setup.project_sync import notes
         root = self.repo('project')
-        (root / '.gitignore').write_text('node_modules/\n')
+        (root / '.gitignore').write_text('node_modules/\ntmp/\n')
+        (root / '.scratch').mkdir()
+        (root / '.scratch/.gitignore').write_bytes(notes._IGNORE)
+        (root / '.scratch/README.md').write_bytes(notes._README)
         self.git(root, 'add', '.'); self.git(root, 'commit', '-qm', 'Ignore dependencies')
         linked = self.ws / 'linked'; self.git(root, 'worktree', 'add', '-qb', 'linked', str(linked))
         (linked / 'new').write_text('untracked')
-        expected = {'project', 'project/nested', '.devcontainer-work/old', 'project/.scratch/repo', '.cache/manual-project', 'bare'}
+        expected = {'project', 'project/nested', '.devcontainer-work/old', 'project/.scratch/repo',
+                    'project/tmp/clone', 'project/sub/deep-ignored/hidden', '.cache/manual-project', 'bare'}
         for name in expected - {'project', 'bare'}:
             self.repo(name)
         self.repo('bare', bare=True); self.repo('project/node_modules/hidden')
         with (root / '.gitignore').open('a') as stream:
             stream.write('sub/deep-ignored/\n')
-        self.repo('project/sub/deep-ignored/hidden')
         (root / 'sub/visible.txt').write_text('not ignored')
         (self.ws / '.cache/manual-project/dirty').write_text('local work')
         self.git(root, 'add', '.'); self.git(root, 'commit', '-qm', 'Track nested repositories')
@@ -120,6 +125,20 @@ class TargetScanTests(unittest.TestCase):
         self.assertTrue(next(row for row in result.repositories if row.path.endswith('/bare')).bare)
         self.assertEqual(len(self.connection.calls), 1)
         self.assertEqual(self.connection.calls[0][2], self.api.LIMITS.seconds + 30)
+        self.assertTrue(result.scratch_complete)
+        self.assertEqual([path for path, _ in result.scratch], ['repo/tracked'])
+
+    def test_ignored_repository_search_has_its_own_entry_budget(self):
+        root = self.repo('project')
+        (root / '.gitignore').write_text('tmp/\n')
+        hidden = root / 'tmp'
+        hidden.mkdir()
+        for name in ('one', 'two', 'three'):
+            (hidden / name).write_text('ignored')
+        result = self.scan(limits=replace(self.api.LIMITS, ignored_entries=2))
+        self.assertFalse(result.git_complete)
+        self.assertIn('could not read every repository under /workspaces', result.problems)
+        self.assertTrue(self.scan(limits=replace(self.api.LIMITS, entries=8)).git_complete)
 
     def test_stash_and_detached_head(self):
         self.api
@@ -129,6 +148,88 @@ class TargetScanTests(unittest.TestCase):
         row = self.scan().repositories[0]
         self.assertEqual(row.stashes, 1)
         self.assertEqual((row.worktrees[0].branch, row.worktrees[0].head), (None, oid))
+
+    def test_prunable_linked_worktree_is_skipped(self):
+        root = self.repo('project')
+        linked = self.ws / 'linked'
+        self.git(root, 'worktree', 'add', '-qb', 'linked', str(linked))
+        shutil.rmtree(linked)
+        scan = self.scan()
+        self.assertTrue(scan.git_complete)
+        self.assertTrue(scan.repositories[0].ok)
+        self.assertEqual([tree.path for tree in scan.repositories[0].worktrees], [str(root)])
+
+    def test_stash_without_a_reflog_still_counts(self):
+        root = self.repo('project')
+        (root / 'tracked').write_text('stashed work')
+        self.git(root, 'stash', 'push', '-qm', 'Saved')
+        (root / '.git/logs/refs/stash').unlink()
+        self.assertEqual(self.scan().repositories[0].stashes, 1)
+
+    def test_commits_held_only_by_local_tags_are_claimed(self):
+        from devcontainer_setup.project_sync import verdict
+        root = self.repo('project')
+        branch = self.git(root, 'branch', '--show-current')
+        self.git(root, 'tag', 'on-main')
+        self.git(root, 'checkout', '-q', '--detach')
+        (root / 'tracked').write_text('tagged work')
+        self.git(root, 'commit', '-qam', 'Tag only')
+        commit = self.git(root, 'rev-parse', 'HEAD')
+        self.git(root, 'tag', 'keep-lightweight')
+        self.git(root, 'tag', '-am', 'Annotated', 'keep-annotated')
+        self.git(root, 'tag', 'tree-only', 'HEAD^{tree}')
+        self.git(root, 'checkout', '-q', branch)
+        scan = self.scan()
+        self.assertTrue(scan.repositories[0].ok)
+        refs = verdict.claims(scan)[0].refs
+        self.assertIn(commit, [head for _, head in refs])
+        self.assertIn(('refs/tags/keep-annotated', commit), refs)
+        self.assertIn(('refs/tags/keep-lightweight', commit), refs)
+        self.assertNotIn('refs/tags/tree-only', [name for name, _ in refs])
+        self.assertNotIn('refs/tags/on-main', [name for name, _ in refs])
+
+    def test_edits_hidden_by_index_flags_count_once_and_absent_sparse_files_pass(self):
+        root = self.repo('project')
+        for name in ('skip', 'assume', 'absent', 'unchanged'):
+            (root / name).write_text('base')
+        self.git(root, 'add', '.')
+        self.git(root, 'commit', '-qm', 'Index flags')
+        self.git(root, 'update-index', '--skip-worktree', 'skip', 'absent', 'unchanged')
+        self.git(root, 'update-index', '--assume-unchanged', 'assume')
+        for name in ('skip', 'assume', 'tracked'):
+            (root / name).write_text('only here')
+        (root / 'absent').unlink()
+        row = self.scan().repositories[0].worktrees[0]
+        self.assertTrue(row.ok)
+        self.assertEqual((row.changes, row.changed), (3, ('assume', 'skip', 'tracked')))
+
+    def test_stopped_rebase_with_autostash_is_a_change(self):
+        root = self.repo('project')
+        (root / 'second').write_text('second')
+        self.git(root, 'add', '.')
+        self.git(root, 'commit', '-qm', 'Second')
+        (root / 'tracked').write_text('only in the autostash')
+        env = dict(self.connection.env, GIT_SEQUENCE_EDITOR="sed -i.bak -e '1s/^pick/edit/'")
+        subprocess.run(['git', '-C', str(root), 'rebase', '-q', '-i', '--autostash', 'HEAD~1'],
+                       env=env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.assertTrue((root / '.git/rebase-merge/autostash').exists())
+        row = self.scan().repositories[0].worktrees[0]
+        self.assertTrue(row.ok)
+        self.assertEqual(row.changes, 1)
+
+    def test_each_operation_in_progress_is_a_change(self):
+        root = self.repo('project')
+        for name in ('rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD',
+                     'MERGE_AUTOSTASH', 'REBASE_AUTOSTASH', 'CUSTOM_AUTOSTASH'):
+            with self.subTest(name=name):
+                marker = root / '.git' / name
+                marker.mkdir() if name.startswith('rebase-') else marker.write_text(self.git(root, 'rev-parse', 'HEAD') + '\n')
+                try:
+                    row = self.scan().repositories[0].worktrees[0]
+                    self.assertTrue(row.ok)
+                    self.assertEqual(row.changes, 1)
+                finally:
+                    marker.rmdir() if marker.is_dir() else marker.unlink()
 
     def test_origin_with_credentials_is_unreadable_and_never_leaves(self):
         self.api
@@ -364,6 +465,9 @@ class TargetScanTests(unittest.TestCase):
     def test_scan_changes_nothing(self):
         self.api
         self.repo('project'); self.session('codex', 'sessions/one.jsonl')
+        tracked = self.root / 'tracked'
+        info = tracked.stat()
+        os.utime(tracked, ns=(info.st_atime_ns, info.st_mtime_ns + 2_000_000_000))
         (self.root / '.scratch').mkdir(); (self.root / '.scratch/note').write_text('note')
         def snapshot():
             return {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -580,10 +684,19 @@ class TargetScanTests(unittest.TestCase):
     def test_duplicate_session_basename_or_symlink_is_incomplete(self):
         self.api
         self.session('codex', 'sessions/a/same'); self.session('codex', 'archived_sessions/same')
-        self.assertFalse(self.scan().sessions_complete)
+        self.assertFalse(self.scan(cutoffs={('codex', 'same'): self.cutoff(b'{}\n')}).sessions_complete)
         (self.home / '.codex/archived_sessions/same').unlink()
         (self.home / '.codex/archived_sessions/link').symlink_to(self.home)
         self.assertFalse(self.scan().sessions_complete)
+
+    def test_repeated_basenames_outside_the_cutoffs_are_complete(self):
+        self.session('claude', 'project/relay/20261101/checklist.json')
+        self.session('claude', 'project/relay/20261102/checklist.json')
+        for cutoffs in (None, {}):
+            with self.subTest(cutoffs=cutoffs):
+                scan = self.scan(cutoffs=cutoffs)
+                self.assertTrue(scan.sessions_complete)
+                self.assertIsNotNone(self.api.fingerprint(scan))
 
     def test_rename_status_counts_one_change_and_unborn_head_is_none(self):
         self.api
@@ -606,6 +719,29 @@ class TargetScanTests(unittest.TestCase):
         result = self.scan(limits=self.api.Limits(seconds=0))
         self.assertIsNone(self.api.fingerprint(result))
         self.assertIsNone(self.api.fingerprint(self.scan(limits=self.api.Limits(output=100))))
+
+    def test_prunable_detached_head_is_still_claimed(self):
+        from devcontainer_setup.project_sync import verdict
+        root = self.repo('project')
+        linked = self.ws / 'linked'
+        self.git(root, 'worktree', 'add', '-q', '--detach', str(linked))
+        (linked / 'tracked').write_text('detached work')
+        self.git(linked, 'commit', '-qam', 'Detached work')
+        head = self.git(linked, 'rev-parse', 'HEAD')
+        shutil.rmtree(linked)
+        scan = self.scan()
+        self.assertTrue(scan.repositories[0].ok)
+        self.assertIn(head, [oid for claim in verdict.claims(scan) for _, oid in claim.refs])
+
+    def test_prunable_worktree_that_still_exists_is_not_skipped(self):
+        root = self.repo('project')
+        linked = self.ws / 'linked'
+        self.git(root, 'worktree', 'add', '-qb', 'linked', str(linked))
+        (linked / 'only-here').write_text('local work')
+        (linked / '.git').unlink()
+        self.assertIn('prunable', self.git(root, 'worktree', 'list', '--porcelain'))
+        self.assertFalse(self.scan().repositories[0].ok)
+
 
 
 if __name__ == '__main__':
