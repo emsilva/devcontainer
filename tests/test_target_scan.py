@@ -641,10 +641,19 @@ class TargetScanTests(unittest.TestCase):
     def test_duplicate_session_basename_or_symlink_is_incomplete(self):
         self.api
         self.session('codex', 'sessions/a/same'); self.session('codex', 'archived_sessions/same')
-        self.assertFalse(self.scan().sessions_complete)
+        self.assertFalse(self.scan(cutoffs={('codex', 'same'): self.cutoff(b'{}\n')}).sessions_complete)
         (self.home / '.codex/archived_sessions/same').unlink()
         (self.home / '.codex/archived_sessions/link').symlink_to(self.home)
         self.assertFalse(self.scan().sessions_complete)
+
+    def test_repeated_basenames_outside_the_cutoffs_are_complete(self):
+        self.session('claude', 'project/relay/20261101/checklist.json')
+        self.session('claude', 'project/relay/20261102/checklist.json')
+        for cutoffs in (None, {}):
+            with self.subTest(cutoffs=cutoffs):
+                scan = self.scan(cutoffs=cutoffs)
+                self.assertTrue(scan.sessions_complete)
+                self.assertIsNotNone(self.api.fingerprint(scan))
 
     def test_rename_status_counts_one_change_and_unborn_head_is_none(self):
         self.api

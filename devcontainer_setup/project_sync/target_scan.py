@@ -698,7 +698,7 @@ def session_inventory():
                             stack.append(Path(child.path))
                         elif stat.S_ISREG(mode):
                             key = (agent, child.name)
-                            if key in seen:
+                            if key in seen and key in cutoffs:
                                 problem('sessions')
                             seen.add(key)
                             cutoff = cutoffs.get(key)
