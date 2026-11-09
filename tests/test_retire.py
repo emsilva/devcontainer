@@ -200,3 +200,29 @@ class RetireTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'the pairing changed since the delete began'):
                     workspace.retire(self.project, self.state, 'cs-old')
                 self.assertEqual(self.snapshot(), before)
+
+    def test_superseded_intent_is_archived_without_blocking_the_next_retire(self):
+        initial = self.state
+        for boundary in (1, 4, 6, 8):
+            with self.subTest(boundary=boundary):
+                self.state = initial / ('superseded-' + str(boundary))
+                self.reset()
+                self.crash_after(boundary)
+                intent = (self.state / 'retire-intent.json').read_bytes()
+                new_binding = dict(self.binding, codespace='cs-new', remote_root='/workspaces/new')
+                new_registry = dict(self.registry, codespace='cs-new', remote_root='/workspaces/new',
+                                    remote_active_root='/workspaces/new')
+                for name, value in (('scratch.json', new_binding), ('workspace.json', new_registry),
+                                    ('scratch-session.json', dict(name='new-session'))):
+                    state.atomic_write(self.state / name, json.dumps(value).encode() + b'\n')
+                before = {name: (self.state / name).read_bytes() for name in
+                          ('scratch.json', 'workspace.json', 'scratch-session.json', 'arming.json')}
+                with self.assertRaisesRegex(ValueError, 'retirement was superseded by a newer pairing'):
+                    workspace.retire(self.project, self.state, 'cs-old')
+                self.assertFalse((self.state / 'retire-intent.json').exists())
+                archived = next((self.state / 'retired-bindings').glob('*/superseded-retire-intent.json'))
+                self.assertEqual(archived.read_bytes(), intent)
+                self.assertEqual({name: (self.state / name).read_bytes() for name in before}, before)
+                archive = workspace.retire(self.project, self.state, 'cs-new')
+                self.assertEqual(state.read_json(archive / 'deleted.json')['codespace'], 'cs-new')
+                self.assertFalse((self.state / 'scratch.json').exists())
