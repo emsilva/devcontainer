@@ -507,7 +507,9 @@ def test_current_cycle_matches_status(self):   # same fixtures as test_replicati
     `machine_id` and `created is True` → `herdr machine remove <id>`, re-read and confirm it is gone (else
     `ValueError('Herdr did not remove the profile')`), then drop the receipt → `'removed'`. `created` missing or false
     → receipt dropped, profile kept → `'kept'`. No such row → receipt dropped → `'absent'`.
-  - `workspace.retire(project, state: Path, codespace: str) -> Path` under `workspace-control.lock`, with an intent
+  - `workspace.retire(project, state: Path, codespace: str, *, held: bool = False) -> Path` under
+    `workspace-control.lock` (taken by `retire` itself unless `held=True`, when the caller already holds it: the lock
+    is not reentrant, `state.py:281-302`), with an intent
     file `STATE/retire-intent.json` (`{"schema": 1, "codespace", "archive", "binding_sha256", "registry_sha256",
     "session_sha256"}`) (F12). Refuses while `scratch.status(state)['running']` or `keeper.status(state)` shows a live
     keeper (`stop the keeper and sync worker first`), and refuses to start unless `scratch.json` names `codespace`.
@@ -628,7 +630,8 @@ def test_actual_terminate_of_a_paused_retired_session(self)  # gated like the ot
      5 s up to 2 minutes for `True` → journal `deleted`, else `does not show NAME as gone yet`, exit 1.
   9. Cleanup (call 14). Paired: under `workspace-control.lock` (blocking), if `scratch.json` names another Codespace,
      the project-wide steps are recorded `moved` and the moved line is printed; otherwise each step not yet `done`, in
-     order: `keeper.stop`, `scratch.stop`, `workspace.retire` (its archive path goes into the journal), the disarm
+     order: `keeper.stop`, `scratch.stop`, `workspace.retire(..., held=True)` (its archive path goes into the
+     journal), the disarm
      (only when armed: merge `armed=False` as `__main__._arming_edit` does, without retaking the lock, and print the
      `Recovery is off` line), `ssh_hosts.remove`, `herdr.remove_profile` (`'kept'` prints the kept line), then, outside
      that lock, `scratch.terminate_retired` with the archive's `scratch-session.json`. Sealed and moved: only
