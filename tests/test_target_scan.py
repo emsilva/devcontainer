@@ -166,6 +166,28 @@ class TargetScanTests(unittest.TestCase):
         (root / '.git/logs/refs/stash').unlink()
         self.assertEqual(self.scan().repositories[0].stashes, 1)
 
+    def test_commits_held_only_by_local_tags_are_claimed(self):
+        from devcontainer_setup.project_sync import verdict
+        root = self.repo('project')
+        branch = self.git(root, 'branch', '--show-current')
+        self.git(root, 'tag', 'on-main')
+        self.git(root, 'checkout', '-q', '--detach')
+        (root / 'tracked').write_text('tagged work')
+        self.git(root, 'commit', '-qam', 'Tag only')
+        commit = self.git(root, 'rev-parse', 'HEAD')
+        self.git(root, 'tag', 'keep-lightweight')
+        self.git(root, 'tag', '-am', 'Annotated', 'keep-annotated')
+        self.git(root, 'tag', 'tree-only', 'HEAD^{tree}')
+        self.git(root, 'checkout', '-q', branch)
+        scan = self.scan()
+        self.assertTrue(scan.repositories[0].ok)
+        refs = verdict.claims(scan)[0].refs
+        self.assertIn(commit, [head for _, head in refs])
+        self.assertIn(('refs/tags/keep-annotated', commit), refs)
+        self.assertIn(('refs/tags/keep-lightweight', commit), refs)
+        self.assertNotIn('refs/tags/tree-only', [name for name, _ in refs])
+        self.assertNotIn('refs/tags/on-main', [name for name, _ in refs])
+
     def test_edits_hidden_by_index_flags_count_once_and_absent_sparse_files_pass(self):
         root = self.repo('project')
         for name in ('skip', 'assume', 'absent', 'unchanged'):
