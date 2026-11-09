@@ -175,6 +175,7 @@ def start(root: Path, state: Path) -> dict:
     if current.get('running') and (current.get('checkpoint_version') != sync_cycle.SCHEMA or current.get('runtime_id') != runtime_id):
         stop(state)
     with locked(state / 'scratch-control.lock', blocking=True):
+        _config(root, state)  # Retirement may have removed it while this start waited.
         current = status(state)
         if current['running']:
             if current.get('checkpoint_version') == sync_cycle.SCHEMA and current.get('runtime_id') == runtime_id:
@@ -230,6 +231,50 @@ def _session_info(binary, state, receipt, *, persist=True):
     if persist:
         _write(Path(state) / SESSION, receipt)
     return info
+
+
+def _retired_session(binary, state, receipt) -> dict | None:
+    """Read a complete catalog; unlike a live baseline, absence is replayable."""
+    try:
+        entries = json.loads(_mutagen(binary, state, 'sync', 'list', '--template={{json .}}'))
+        if not isinstance(entries, list) or any(
+                not isinstance(entry, dict) or not isinstance(entry.get('name'), str) or not entry['name']
+                or not isinstance(entry.get('identifier'), str) or not entry['identifier'].startswith('sync_')
+                for entry in entries):
+            raise ValueError
+        if (not isinstance(receipt.get('name'), str) or not receipt['name']
+                or not isinstance(receipt.get('identifier'), str) or not receipt['identifier'].startswith('sync_')):
+            raise ValueError
+        matches = [entry for entry in entries if entry['name'] == receipt['name']]
+        if len(matches) > 1 or (matches and matches[0]['identifier'] != receipt['identifier']):
+            raise ValueError
+    except (TypeError, KeyError, ValueError):
+        raise ValueError('the retired sync session could not be identified') from None
+    return matches[0] if matches else None
+
+
+def terminate_retired(state: Path, receipt: dict) -> str:
+    """Terminate only an archived session; keep the active pairing's baseline."""
+    state = Path(state)
+    with locked(state / 'scratch-control.lock', blocking=True):
+        live = _saved_session(state)
+        if live and (live['name'] == receipt.get('name') or (live.get('identifier') is not None
+                     and live['identifier'] == receipt.get('identifier'))):
+            raise ValueError('that sync session is in use')
+        try:
+            binary = install_mutagen(state, allow_download=False)
+        except ValueError as error:
+            if 'not installed' in str(error):
+                raise ValueError('Mutagen is not installed') from None
+            raise
+        info = _retired_session(binary, state, receipt)
+        if info is not None:
+            _mutagen(binary, state, 'sync', 'terminate', info['identifier'])
+            if _retired_session(binary, state, receipt) is not None:
+                raise ValueError('Mutagen did not terminate the sync session')
+        if not status(state).get('running'):
+            _mutagen(binary, state, 'daemon', 'stop')
+        return 'terminated' if info is not None else 'absent'
 
 
 def _reconciliation(info):

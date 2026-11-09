@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -10,7 +11,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from devcontainer_setup.project_sync import arming, evidence, keeper, lifecycle, restore
+from devcontainer_setup.project_sync import arming, evidence, keeper, lifecycle, restore, ssh_hosts
 from devcontainer_setup.project_sync.lifecycle import Reading
 from devcontainer_setup.project_sync.state import atomic_write, process_identity, read_json
 
@@ -1412,8 +1413,7 @@ class ForeignProcessTests(unittest.TestCase):
             state = Path(tmp).resolve()
             child, record = keepalive_decoy(self, state)
             atomic_write(state / keeper.RUNTIME, json.dumps({'keepalive': record}).encode())
-            proxy = ("/usr/bin/python3 -I -B -c import sys;from devcontainer_setup.project_sync.transport import "
-                     "herdr_stdio;raise SystemExit(herdr_stdio(sys.argv[1],sys.argv[2])) cs-1 ")
+            proxy = ' '.join(shlex.split(ssh_hosts._proxy_command(state, 'cs-1'))[:-1]) + ' '
             listing = '\n'.join([
                 '  101     1 gh codespace ports forward 2222:50123 -c cs-1',
                 f'  150     1 {proxy}{state}',

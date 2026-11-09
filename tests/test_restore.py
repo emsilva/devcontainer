@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -9,12 +10,10 @@ import time
 import unittest
 from unittest.mock import patch
 
-from devcontainer_setup.project_sync import restore
+from devcontainer_setup.project_sync import restore, ssh_hosts, state as project_state
 
 STATE = '/Users/me/.local/state/devcontainer-setup/projects/0123456789abcdef01234567'
-PROXY = ("/usr/bin/python3 -I -B -c import sys;sys.path.insert(0,'/repo');from "
-         'devcontainer_setup.project_sync.transport import herdr_stdio;'
-         'raise SystemExit(herdr_stdio(sys.argv[1],sys.argv[2]))')
+PROXY = ' '.join(shlex.split(ssh_hosts._proxy_command(Path(STATE), 'cs-1'))[:-2])
 
 
 def etime(seconds):
@@ -94,6 +93,62 @@ class FakeHerdr:
 
 
 class ProxyTests(unittest.TestCase):
+    def test_end_target_proxies_ends_and_waits_for_only_that_codespace(self):
+        clock, killed, reads = Clock(), [], []
+        ours = f'101 00:20 {PROXY} cs-old {STATE}'
+        others = [f'102 00:20 {PROXY} cs-new {STATE}', f'103 00:20 {PROXY} cs-old {STATE}-other']
+        def run(args, **kwargs):
+            reads.append(clock.t)
+            return listed(([ours] if len(reads) < 3 else []) + others)(args, **kwargs)
+        with patch.object(project_state, 'process_identity', return_value=f'start {PROXY} cs-old {STATE}'), \
+                patch.object(restore.os, 'kill', side_effect=lambda pid, sig: killed.append(pid)):
+            self.assertEqual(restore.end_target_proxies('cs-old', Path(STATE), run=run,
+                             now=clock.now, sleep=clock.sleep), 'ended')
+            self.assertEqual(restore.end_target_proxies('cs-old', Path(STATE), run=listed(others)), 'absent')
+        self.assertEqual(killed, [101])
+        self.assertGreaterEqual(len(reads), 3)
+        self.assertGreater(clock.t, reads[0])
+
+    def test_another_projects_proxy_with_a_suffix_state_path_is_not_ours(self):
+        other = Path('/different project ' + STATE)
+        canonical = ' '.join(shlex.split(ssh_hosts._proxy_command(other, 'cs-old')))
+        stray = f'/usr/bin/herdr --label herdr_stdio cs-old {STATE}'
+        for command in (canonical, stray, f'{PROXY} invalid/name {STATE}', f'{PROXY} cs-old {STATE} extra'):
+            with self.subTest(command=command):
+                self.assertIsNone(restore._served(command, Path(STATE)))
+        self.assertEqual(restore._served(f'/moved/python -I -B -c ' + PROXY.split(' -c ', 1)[1]
+                         + f' cs-old {STATE}', Path(STATE)), 'cs-old')
+
+    def test_a_reused_pid_is_not_signalled(self):
+        with patch.object(project_state, 'process_identity',
+                          side_effect=[f'start {PROXY} cs-old {STATE}', 'reused']) as identity, \
+                patch.object(restore.os, 'kill') as kill:
+            replies = iter([[f'101 00:20 {PROXY} cs-old {STATE}'], []])
+            self.assertEqual(restore.end_target_proxies('cs-old', Path(STATE),
+                             run=lambda *a, **k: listed(next(replies))(*a, **k)), 'ended')
+        kill.assert_not_called()
+        self.assertEqual(identity.call_count, 2)
+
+    def test_a_pid_reused_before_its_first_identity_read_is_not_signalled(self):
+        replies = iter([[f'101 00:20 {PROXY} cs-old {STATE}'], []])
+        with patch.object(project_state, 'process_identity', return_value='start /unrelated/program'), \
+                patch.object(restore.os, 'kill') as kill:
+            self.assertEqual(restore.end_target_proxies('cs-old', Path(STATE),
+                             run=lambda *a, **k: listed(next(replies))(*a, **k)), 'ended')
+        kill.assert_not_called()
+
+    def test_a_surviving_or_unlisted_proxy_keeps_the_step_pending(self):
+        clock = Clock()
+        with patch.object(project_state, 'process_identity', return_value=f'start {PROXY} cs-old {STATE}'), patch.object(restore.os, 'kill'):
+            with self.assertRaisesRegex(ValueError, 'a Herdr connection to cs-old is still open'):
+                restore.end_target_proxies('cs-old', Path(STATE), wait=4, now=clock.now, sleep=clock.sleep,
+                                          run=listed([f'101 00:20 {PROXY} cs-old {STATE}']))
+        for failure in (subprocess.CompletedProcess([], 1, '', ''), OSError('ps unavailable')):
+            with patch.object(restore.subprocess, 'run', side_effect=failure if isinstance(failure, Exception) else None,
+                              return_value=failure) as run:
+                with self.assertRaisesRegex(ValueError, 'the process list cannot be read'):
+                    restore.end_target_proxies('cs-old', Path(STATE), run=run)
+
     def test_stale_proxies_match_only_this_codespace_and_older(self):
         # Start times come from elapsed time (R35): no local-time parse a DST fall-back hour could misdate.
         now, before = 1_000_000.0, 1_000_000.0 - 600

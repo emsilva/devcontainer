@@ -70,6 +70,12 @@ def start(root: Path, state: Path) -> dict:
         raise ValueError('This project is not armed; run task work:cs:armed')
     wanted = {'runtime_id': runtime_id(), 'codespace': value['codespace'], 'gh_user': value['gh_user']}
     with locked(state / 'keeper-control.lock', blocking=True):
+        try:
+            binding = read_json(state / CONFIG)
+        except FileNotFoundError:
+            raise ValueError('No Codespace is paired; run task work:cs') from None
+        if binding.get('codespace') != value['codespace']:
+            raise ValueError('The project moved to another Codespace meanwhile; run task work:cs')
         current = status(state)
         if current['running']:
             age = current.get('heartbeat_age')

@@ -5,6 +5,7 @@ from pathlib import Path
 import stat
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -13,6 +14,93 @@ from devcontainer_setup.project_sync import ssh_hosts
 
 
 class SSHHostsTests(unittest.TestCase):
+    def test_remove_keeps_every_other_byte_and_the_mode(self):
+        ssh_hosts.configure_ssh(self.project, self.state)
+        self.assertEqual(ssh_hosts.remove(self.state), 'removed')
+        self.assertEqual(self.config.read_bytes(), self.original)
+        self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o644)
+        self.assertFalse((self.state / 'herdr-ssh-config').exists())
+        self.assertFalse((self.state / 'herdr-ssh.json').exists())
+        self.assertEqual(ssh_hosts.remove(self.state), 'absent')
+        ssh_hosts.refresh_ssh(self.state)
+        self.assertEqual(self.config.read_bytes(), self.original)
+
+    def test_remove_replays_after_a_crash_between_steps(self):
+        for failed in ('herdr-ssh-config', 'herdr-ssh.json'):
+            with self.subTest(failed=failed):
+                ssh_hosts.configure_ssh(self.project, self.state)
+                unlink = ssh_hosts.os.unlink
+                def interrupted(name, *args, **kwargs):
+                    if name == failed:
+                        raise OSError('fixture crash')
+                    return unlink(name, *args, **kwargs)
+                with mock.patch.object(ssh_hosts.os, 'unlink', side_effect=interrupted):
+                    with self.assertRaisesRegex(OSError, 'fixture crash'):
+                        ssh_hosts.remove(self.state)
+                self.assertEqual(self.config.read_bytes(), self.original)
+                self.assertEqual(ssh_hosts.remove(self.state), 'removed')
+                self.assertEqual(ssh_hosts.remove(self.state), 'absent')
+
+    def test_edited_block_or_include_is_refused_with_zero_writes(self):
+        ssh_hosts.configure_ssh(self.project, self.state)
+        include = self.state / 'herdr-ssh-config'
+        originals = {p: p.read_bytes() for p in (self.config, include, self.state / 'herdr-ssh.json')}
+        for target in (self.config, include):
+            for mode in ('edit', 'duplicate', 'symlink'):
+                with self.subTest(target=target.name, mode=mode):
+                    if mode == 'symlink':
+                        target.unlink()
+                        target.symlink_to(self.home / 'missing-owner-file')
+                    elif mode == 'duplicate':
+                        target.write_bytes(originals[target] * 2)
+                    else:
+                        target.write_bytes(originals[target].replace(b'Host ', b'Host edited-', 1))
+                    before = {p: (os.readlink(p) if p.is_symlink() else p.read_bytes()) for p in originals}
+                    with self.assertRaises((ValueError, OSError)):
+                        ssh_hosts.remove(self.state)
+                    self.assertEqual({p: (os.readlink(p) if p.is_symlink() else p.read_bytes()) for p in originals}, before)
+                    target.unlink()
+                    target.write_bytes(originals[target])
+                    target.chmod(0o644 if target == self.config else 0o600)
+
+    def test_remove_waits_for_a_concurrent_configure(self):
+        ssh_hosts.configure_ssh(self.project, self.state)
+        started, finished, errors = threading.Event(), threading.Event(), []
+        def remove():
+            started.set()
+            try:
+                ssh_hosts.remove(self.state)
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                finished.set()
+        with ssh_hosts.locked(self.config.parent / '.devcontainer-setup.lock', blocking=True):
+            thread = threading.Thread(target=remove)
+            thread.start()
+            self.assertTrue(started.wait(2))
+            blocked = not finished.wait(.1)
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(blocked)
+        self.assertEqual(self.config.read_bytes(), self.original)
+
+    def test_remove_keeps_another_projects_block(self):
+        other_state = self.state.parent / ('b' * 24)
+        other_block = ssh_hosts._block('devcontainer-' + 'b' * 24, other_state / 'herdr-ssh-config')
+        self.config.write_bytes(other_block + self.original)
+        ssh_hosts.configure_ssh(self.project, self.state)
+        self.assertEqual(ssh_hosts.remove(self.state), 'removed')
+        self.assertEqual(self.config.read_bytes(), other_block + self.original)
+
+    def test_remove_refuses_an_unfinished_setup(self):
+        ssh_hosts.configure_ssh(self.project, self.state)
+        atomic_write(self.state / 'herdr-ssh.pending.json', b'{}\n')
+        before = self.config.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'SSH setup did not finish'):
+            ssh_hosts.remove(self.state)
+        self.assertEqual(self.config.read_bytes(), before)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
