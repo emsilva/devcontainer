@@ -140,6 +140,31 @@ class DeletionTests(unittest.TestCase):
                     local_root=str(self.root), remote_root=REMOTE,
                     directions=dict(codespace_to_desktop=inbound)), True
 
+    def scripted_brackets(self, scans, *, publication='imported', retry_cycle=True):
+        observations = []
+        original = self.current_cycle
+        self.api.states = ['Available']
+        def scan(*args, **kwargs):
+            self.advance(3)
+            result = scans[len(observations)]
+            observations.append(dict(finished=self.clock, cutoffs=kwargs.get('cutoffs')))
+            return replace(result, at=self.clock)
+        def cycle(*args):
+            value, current = original(*args)
+            retry = len(observations) >= 3
+            outbound = sync_cycle.direction()
+            entries = [dict(agent='claude', source_session_id='session', session_id='session')]
+            outbound.update(outcome='complete', publication=dict(imported=entries if publication == 'imported' else [],
+                             unchanged=entries if publication == 'unchanged' else [], issues=[]))
+            outbound['counts'].update(captured=1, available=1)
+            value['directions']['desktop_to_codespace'] = outbound
+            value['cycle_id'] = 'bracket-2' if retry else 'bracket-1'
+            if retry and not retry_cycle:
+                value['started_at'] = 0
+            return value, current
+        self.mocks['target_scan.scan'].side_effect = scan
+        return patch.object(self, 'current_cycle', side_effect=cycle), observations
+
     def advance(self, seconds):
         self.clock += seconds
 
@@ -226,6 +251,59 @@ class DeletionTests(unittest.TestCase):
                 self.assertEqual(self.mutations(), [])
         self.mocks['target_scan.scan'].return_value = self.scan
         self.assertEqual(self.run_delete(check=True, as_json=True)[0], 0)
+
+    def test_a_mac_publish_between_scans_gets_one_fresh_bracket(self):
+        published = replace(self.scan, sessions=(('claude/projects/project/session.jsonl', 'b' * 64),))
+        for publication in ('imported', 'unchanged', 'none'):
+            with self.subTest(publication=publication):
+                cycle, scans = self.scripted_brackets([self.scan, published, published, published],
+                                                       publication=publication)
+                with cycle:
+                    code, output, _ = self.run_delete(check=True, as_json=True)
+                result = json.loads(output)
+                if publication == 'imported':
+                    self.assertEqual(code, 0, output)
+                    self.assertTrue(result['deletable'])
+                    self.assertEqual(len(scans), 4)
+                    self.assertEqual([row['cutoffs'] for row in scans], [None, {}, None, {}])
+                    latest = read_json(self.state / self.d.scratch.RUNTIME)['conversations']
+                    self.assertEqual(latest['cycle_id'], 'bracket-2')
+                    self.assertGreater(latest['started_at'], scans[2]['finished'])
+                else:
+                    self.assertEqual(code, 1, output)
+                    self.assertEqual(len(scans), 2)
+                self.assertEqual(self.mutations(), [])
+
+    def test_a_codespace_change_during_the_retry_still_voids_the_check(self):
+        published = replace(self.scan, sessions=(('claude/projects/project/session.jsonl', 'b' * 64),))
+        changed = replace(published, scratch=(('new.txt', 'c' * 64),))
+        cycle, scans = self.scripted_brackets([self.scan, published, published, changed])
+        with cycle:
+            code, output, _ = self.run_delete(check=True, as_json=True)
+        result = json.loads(output)
+        self.assertEqual(code, 1, output)
+        self.assertEqual(len(scans), 4, 'even another outbound publish permits no third bracket')
+        self.assertTrue(all(row['verdict'] == 'unknown' and 'changed while it was being checked' in row['text']
+                            for row in result['categories']))
+        self.assertFalse(result['deletable'])
+        self.assertEqual(self.mutations(), [])
+
+    def test_the_retry_shares_the_original_cycle_deadline(self):
+        published = replace(self.scan, sessions=(('claude/projects/project/session.jsonl', 'b' * 64),))
+        cycle, scans = self.scripted_brackets([self.scan, published, published, published], retry_cycle=False)
+        waits = []
+        def sleep(seconds):
+            waits.append(seconds)
+            self.advance(350 if len(waits) == 1 else seconds)
+        target = self.d.verdict.resolve(self.project, self.state, None)
+        with cycle:
+            evidence = self.d.gather(self.project, self.state, target, object(), now=lambda: self.clock, sleep=sleep)
+        self.assertEqual(len(scans), 4)
+        self.assertTrue(evidence.steady)
+        self.assertIsNone(evidence.cycle)
+        self.assertLessEqual(self.clock, scans[0]['finished'] + 360 + 3)
+        self.assertEqual(self.d.verdict.judge(target, evidence, now=self.clock)[2].verdict, 'unknown')
+        self.assertEqual(self.mutations(), [])
 
     def test_check_json_prints_one_object_for_every_outcome(self):
         for states, outcome in [(('Available',), 'checked'), (('Shutdown',), 'unreachable'),

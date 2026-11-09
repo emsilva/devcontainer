@@ -61,37 +61,48 @@ def gather(project, state, target, connection, *, now=time.time, sleep=time.slee
     kept = verdict.kept_conversations(state, project, binding)
     if target.kind == 'paired':
         synced_root = Path(binding.get('root', project.root))
-        cutoffs = None
         deadline = finished + 6 * 60
-        while True:
-            try:
-                registry = workspace.registry(project, state)
-                runtime = scratch.status(state)
-                running = bool(runtime.get('running'))
-                sync = scratch.inspect_sync(synced_root, state) if running else runtime
-                conflicts = tuple(sync.get('conflicts', ()))
-                observed, current = workspace.cycle_scope(project, registry, runtime, sync)
-                started, completed = observed.get('started_at'), observed.get('completed_at')
-                if (current and type(started) in (int, float) and started > finished
-                        and type(completed) in (int, float)):
-                    cycle = observed
-                    receipt, conversations = workspace._conversation_receipt(project, state)
-                    if receipt is not None:
-                        manifest = {'conversations': conversations}
-                        cutoffs, sessions = verdict.cutoffs(manifest), verdict.sessions_by_file(manifest)
+        for attempt in range(2):
+            if attempt:
+                first = target_scan.scan(connection, target.name, target.remote_root, now=now)
+                finished = now()
+            cycle, receipt, sessions, cutoffs = None, None, (), None
+            while True:
+                try:
+                    registry = workspace.registry(project, state)
+                    runtime = scratch.status(state)
+                    running = bool(runtime.get('running'))
+                    sync = scratch.inspect_sync(synced_root, state) if running else runtime
+                    conflicts = tuple(sync.get('conflicts', ()))
+                    observed, current = workspace.cycle_scope(project, registry, runtime, sync)
+                    started, completed = observed.get('started_at'), observed.get('completed_at')
+                    if (current and type(started) in (int, float) and started > finished
+                            and type(completed) in (int, float)):
+                        cycle = observed
+                        receipt, conversations = workspace._conversation_receipt(project, state)
+                        if receipt is not None:
+                            manifest = {'conversations': conversations}
+                            cutoffs, sessions = verdict.cutoffs(manifest), verdict.sessions_by_file(manifest)
+                        break
+                except (OSError, ValueError, KeyError, TypeError):
+                    receipt = None
                     break
-            except (OSError, ValueError, KeyError, TypeError):
-                receipt = None
+                if not running or now() >= deadline:
+                    break
+                sleep(min(2, max(0, deadline - now())))
+            mac = _mac_scratch(synced_root)
+            scan = target_scan.scan(connection, target.name, target.remote_root, cutoffs=cutoffs, now=now)
+            if cutoffs is not None and scan.cutoffs_sha256 != target_scan.cutoffs_digest(cutoffs):
+                cycle = None
+            first_fingerprint = target_scan.fingerprint(first)
+            steady = first_fingerprint is not None and first_fingerprint == target_scan.fingerprint(scan)
+            if steady or attempt:
                 break
-            if not running or now() >= deadline:
+            outbound = (cycle or {}).get('directions', {}).get('desktop_to_codespace', {})
+            publication = outbound.get('publication')
+            if (not isinstance(publication, dict) or not isinstance(publication.get('imported'), list)
+                    or not publication['imported'] or now() >= deadline):
                 break
-            sleep(min(2, deadline - now()))
-        mac = _mac_scratch(synced_root)
-        scan = target_scan.scan(connection, target.name, target.remote_root, cutoffs=cutoffs, now=now)
-        if cutoffs is not None and scan.cutoffs_sha256 != target_scan.cutoffs_digest(cutoffs):
-            cycle = None
-        first_fingerprint = target_scan.fingerprint(first)
-        steady = first_fingerprint is not None and first_fingerprint == target_scan.fingerprint(scan)
     elif target.kind == 'sealed':
         try:
             manifest = Store(state).load(target.seal.snapshot_id)
