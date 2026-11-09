@@ -57,7 +57,11 @@ if answer.get('fork'):
             os.close(1); os.close(2)
         time.sleep(60)
         os._exit(0)
-    pathlib.Path(os.environ['PROBE_PIDS']).write_text(json.dumps([os.getpid(), child]))
+    # Publish atomically: the test waits for the file to exist, and write_text creates it empty first.
+    target = pathlib.Path(os.environ['PROBE_PIDS'])
+    partial = target.with_name(target.name + '.partial')
+    partial.write_text(json.dumps([os.getpid(), child]))
+    os.replace(partial, target)
     if answer.get('exit_leader'):
         sys.exit(0)
 time.sleep(answer.get('sleep', 0))
