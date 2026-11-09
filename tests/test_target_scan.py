@@ -367,33 +367,82 @@ class TargetScanTests(unittest.TestCase):
         self.git(parent, 'add', '.'); self.git(parent, 'commit', '-qm', 'Add submodule')
         return parent, child
 
-    def test_clean_filters_are_refused_without_execution(self):
+    def test_used_clean_filters_never_run(self):
         self.api
         root = self.repo('project'); marker = self.filtered(root)
+        self.git(root, 'config', 'filter.fixture.required', 'true')
         result = self.scan()
         self.assertFalse(marker.exists(), 'scan executed a clean helper')
         self.assertTrue(result.git_complete)
-        self.assertFalse(result.repositories[0].ok)
+        self.assertTrue(result.repositories[0].ok)
+        self.assertEqual(result.repositories[0].worktrees[0].changes, 0)
+        self.assertNotIn(b'touch ', self.connection.raw)
+        (root / 'tracked').write_text('changed')
+        result = self.scan()
+        self.assertFalse(marker.exists(), 'scan executed a clean helper for changed bytes')
+        self.assertTrue(result.repositories[0].ok)
+        self.assertEqual(result.repositories[0].worktrees[0].changes, 1)
         self.assertNotIn(b'touch ', self.connection.raw)
 
-    def test_process_filters_are_refused_without_execution(self):
+    def test_used_process_filters_never_run(self):
         self.api
         root = self.repo('project'); marker = self.filtered(root, 'process')
+        # Process drivers take precedence over clean, as git-lfs configures them.
+        self.git(root, 'config', 'filter.fixture.clean', 'touch ' + shlex.quote(str(marker)) + '; cat')
+        self.git(root, 'config', 'filter.fixture.required', 'true')
         result = self.scan()
         self.assertFalse(marker.exists(), 'scan executed a process helper')
         self.assertTrue(result.git_complete)
-        self.assertFalse(result.repositories[0].ok)
+        self.assertTrue(result.repositories[0].ok)
+        self.assertEqual(result.repositories[0].worktrees[0].changes, 0)
+        self.assertNotIn(b'touch ', self.connection.raw)
+        (root / 'tracked').write_text('changed')
+        result = self.scan()
+        self.assertFalse(marker.exists(), 'scan executed a process helper for changed bytes')
+        self.assertTrue(result.repositories[0].ok)
+        self.assertEqual(result.repositories[0].worktrees[0].changes, 1)
         self.assertNotIn(b'touch ', self.connection.raw)
 
-    def test_unused_global_filter_still_withholds_clean_proof(self):
+    def test_an_unused_global_filter_never_runs_and_proves_clean(self):
         self.api
         self.repo('project')
         marker = self.home / 'unused-filter-marker'
-        (self.home / '.gitconfig').write_text('[filter "unused"]\n clean = touch ' + str(marker) + '; cat\n')
+        config = self.home / '.gitconfig'
+        self.connection.env['GIT_CONFIG_GLOBAL'] = str(config)
+        self.git(self.root, 'config', '--global', 'filter.unused.clean',
+                 'touch ' + shlex.quote(str(marker)) + '; cat')
+        self.git(self.root, 'config', '--global', 'filter.unused.process',
+                 'touch ' + shlex.quote(str(marker)) + '; exit 1')
         result = self.scan()
         self.assertFalse(marker.exists())
-        self.assertFalse(result.repositories[0].ok)
+        self.assertTrue(result.git_complete)
+        self.assertTrue(result.repositories[0].ok)
+        self.assertEqual(result.repositories[0].worktrees[0].changes, 0)
         self.assertNotIn(b'touch ', self.connection.raw)
+
+    def test_a_filter_name_with_an_equals_sign_is_refused(self):
+        self.api
+        root = self.repo('project')
+        (root / '.gitattributes').write_text('tracked filter=fixture\n')
+        self.git(root, 'add', '.gitattributes'); self.git(root, 'commit', '-qm', 'Configure attribute')
+        marker = self.home / 'injected-filter-marker'
+        injected = 'fixture.clean=touch ' + shlex.quote(str(marker)) + ' #'
+        for name in (injected, '', 'tab\tcontrol', 'delete\x7fcontrol', 'c1\x85control'):
+            with self.subTest(driver=name):
+                key = 'filter.' + name + '.clean'
+                self.git(root, 'config', key, 'unused synthetic helper')
+                try:
+                    info = (root / 'tracked').stat()
+                    os.utime(root / 'tracked', ns=(info.st_atime_ns, info.st_mtime_ns + 2_000_000_000))
+                    result = self.scan()
+                    self.assertFalse(marker.exists(), 'scan executed an injected filter helper')
+                    self.assertTrue(result.git_complete)
+                    self.assertFalse(result.repositories[0].worktrees[0].ok)
+                    self.assertFalse(result.repositories[0].ok)
+                    self.assertNotIn(b'touch ', self.connection.raw)
+                finally:
+                    self.git(root, 'config', '--unset', key)
+                    marker.unlink(missing_ok=True)
 
     def test_nested_repository_filter_is_not_executed_by_parent_status(self):
         self.api
@@ -408,7 +457,7 @@ class TargetScanTests(unittest.TestCase):
         self.assertFalse(marker.exists(), 'parent status executed a nested helper')
         rows = {row.path: row for row in result.repositories}
         self.assertTrue(rows[str(parent)].ok)
-        self.assertFalse(rows[str(child)].ok)
+        self.assertTrue(rows[str(child)].ok)
 
     def test_submodule_filter_is_not_executed_by_parent_status(self):
         self.api
@@ -421,7 +470,7 @@ class TargetScanTests(unittest.TestCase):
         self.assertFalse(marker.exists(), 'parent status executed a submodule helper')
         rows = {row.path: row for row in result.repositories}
         self.assertTrue(rows[str(parent)].ok)
-        self.assertFalse(rows[str(child)].ok)
+        self.assertTrue(rows[str(child)].ok)
 
     def test_submodule_dirt_and_changed_head_are_still_found(self):
         self.api

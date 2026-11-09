@@ -418,14 +418,24 @@ def worktree(path):
     row = dict(path=path_text(path), head=None, branch=None, changes=0, changed=[], ok=True)
     try:
         safe_directory(Path(path))
-        # Status can invoke content-conversion helpers. Read key names only and
-        # withhold proof rather than executing or silently bypassing a filter.
-        if git(path, 'config', '--name-only', '--get-regexp',
-               r'^filter\..*\.(clean|process)$', absent=(1,)) is not None:
-            raise Incomplete()
+        # Status can invoke content-conversion helpers. Read names only and
+        # disable both conversion commands, including mandatory drivers.
+        keys = git(path, 'config', '-z', '--name-only', '--get-regexp',
+                   r'^filter\..*\.(clean|process)$', absent=(1,))
+        drivers = set()
+        for key in (keys or b'').split(b'\0'):
+            if key:
+                driver = text(key.decode('utf-8')[len('filter.'):].rsplit('.', 1)[0])
+                if '=' in driver:
+                    raise Incomplete()
+                drivers.add(driver)
+        filters = []
+        for driver in sorted(drivers):
+            for setting in ('clean=', 'process=', 'required=false'):
+                filters.extend(('-c', 'filter.' + driver + '.' + setting))
         # Each nested repository is checked separately; parent status must not
         # recurse into a child's configured filters. Gitlink HEAD changes remain.
-        data = git(path, 'status', '--porcelain=v1', '-z', '--untracked-files=all',
+        data = git(path, *filters, 'status', '--porcelain=v1', '-z', '--untracked-files=all',
                    '--ignore-submodules=dirty').split(b'\0')
         index = 0
         changed = []
