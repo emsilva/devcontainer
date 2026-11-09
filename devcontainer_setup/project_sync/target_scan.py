@@ -598,6 +598,7 @@ def hashed(path, cutoff=None, agent=None):
     digest, prefix = hashlib.sha256(), hashlib.sha256()
     remaining = cutoff['size'] if cutoff else 0
     tail = bytearray()
+    tail_present = tail_overflow = False
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
     fd = os.open(path, flags)
     with os.fdopen(fd, 'rb') as stream:
@@ -615,12 +616,16 @@ def hashed(path, cutoff=None, agent=None):
             if take:
                 prefix.update(data[:take]); remaining -= take
             if cutoff and cutoff['own'] and len(data) > take:
-                tail.extend(data[take:])
+                tail_present = True
+                if agent == 'claude':
+                    room = limits['output'] - len(tail)
+                    tail_overflow = tail_overflow or len(data) - take > room
+                    tail.extend(data[take:take + room])
         after = os.fstat(stream.fileno())
         if (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
             raise Incomplete()
     mismatch = cutoff is not None and (remaining != 0 or prefix.hexdigest() != cutoff['sha256'])
-    unfinished = bool(tail) and (agent == 'codex' or claude_tail(tail))
+    unfinished = tail_present and (agent == 'codex' or tail_overflow or claude_tail(tail))
     return digest.hexdigest(), mismatch, unfinished
 
 

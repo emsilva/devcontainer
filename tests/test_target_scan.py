@@ -226,6 +226,32 @@ class TargetScanTests(unittest.TestCase):
         self.assertEqual((result.checked, result.mismatched, result.tails), ((), (), ()))
         self.assertIsNone(result.cutoffs_sha256)
 
+    def test_a_claude_tail_longer_than_the_bound_is_unfinished(self):
+        self.api
+        limits = self.api.Limits(output=4096)
+        prefix = b'{"type":"assistant","message":{"stop_reason":"end_turn"}}\n'
+        tail = json.dumps({'type': 'system', 'padding': 'x' * 6000}).encode() + b'\n'
+        self.assertGreater(len(tail), limits.output)
+        data = prefix + tail
+        self.session('claude', 'project/large.jsonl', data)
+        self.session('claude', 'project/dependency.jsonl', data)
+        self.session('codex', 'sessions/large.jsonl', data)
+        cutoffs = {('claude', 'large.jsonl'): self.cutoff(prefix),
+                   ('claude', 'dependency.jsonl'): self.cutoff(prefix, own=False),
+                   ('codex', 'large.jsonl'): self.cutoff(prefix)}
+        result = self.scan(cutoffs=cutoffs, limits=limits)
+        self.assertTrue(result.sessions_complete)
+        self.assertIsNotNone(self.api.fingerprint(result))
+        self.assertEqual(result.checked, tuple(sorted(cutoffs)))
+        self.assertEqual(result.mismatched, ())
+        self.assertEqual(result.cutoffs_sha256, self.api.cutoffs_digest(cutoffs))
+        self.assertEqual(result.tails, (('claude', 'large.jsonl'), ('codex', 'large.jsonl')))
+        digest = hashlib.sha256(data).hexdigest()
+        self.assertEqual(result.sessions, (('claude/project/dependency.jsonl', digest),
+                                           ('claude/project/large.jsonl', digest),
+                                           ('codex/sessions/large.jsonl', digest)))
+        self.assertLessEqual(len(self.connection.raw), limits.output)
+
     def test_cutoffs_digest_is_recorded(self):
         self.assertIn('cutoffs_sha256', self.api.Scan.__dataclass_fields__,
                       'Scan does not bind the cutoff map it compared')
