@@ -50,6 +50,11 @@ def parser():
     work.add_argument('--rebind', metavar='CODESPACE',
                       help='Move scratch and conversation sync to another Codespace of this repository')
     work.add_argument('--then-signin-all', action='store_true', help='Sign in to every tool before Herdr opens')
+    delete = groups.add_parser('delete', help='Check a Codespace before a typed delete')
+    delete.add_argument('--codespace', metavar='NAME')
+    delete.add_argument('--check', action='store_true')
+    delete.add_argument('--json', action='store_true')
+    delete.add_argument('--start', action='store_true')
     sync = groups.add_parser('scratch', help='Advanced scratch synchronization controls').add_subparsers(dest='action', required=True)
     configure = sync.add_parser('configure')
     configure.add_argument('--codespace', required=True)
@@ -307,6 +312,10 @@ def run(args):
         return overview.run(args.project.resolve())
     project = discover_project(args.project.resolve())
     state = state_dir(project)
+    if args.group == 'delete':
+        from . import deletion
+        return deletion.run(project, state, codespace=args.codespace, check=args.check,
+                            as_json=args.json, start=args.start)
     if args.group == 'work':
         from . import workspace
         if args.forget:
@@ -411,6 +420,11 @@ def main(argv=None):
     try:
         commands = parser()
         args = commands.parse_args(argv)
+        if args.group == 'delete':
+            if args.json and not args.check:
+                commands.error('--json needs --check')
+            if args.start and (not args.codespace or args.check or args.json):
+                commands.error('--start needs --codespace and cannot accompany --check or --json')
         if args.group == 'work':
             if (((args.agent is not None or args.session is not None) and not args.forget)
                     or (args.forget and (args.agent is None or args.session is None))):

@@ -15,6 +15,26 @@ from devcontainer_setup.project_sync.__main__ import parser
 SOURCE = Path(__file__).resolve().parents[1]
 
 
+class DeleteCLITests(unittest.TestCase):
+    def test_delete_subcommand_options(self):
+        from unittest.mock import patch
+        from devcontainer_setup.project_sync import __main__ as cli
+        with contextlib.redirect_stderr(io.StringIO()):
+            for options in (['--json'], ['--start', '--check', '--codespace', 'space'], ['--start']):
+                with self.subTest(options=options), self.assertRaises(SystemExit) as caught:
+                    cli.main(['delete', *options])
+                self.assertEqual(caught.exception.code, 2)
+        self.assertIn('delete', parser()._subparsers._group_actions[0].choices, 'delete subcommand is missing')
+        args = parser().parse_args(['delete', '--check', '--json'])
+        with patch.object(cli, 'discover_project') as project, patch.object(cli, 'state_dir') as state, \
+                patch('devcontainer_setup.project_sync.deletion.run', return_value=0) as run, \
+                patch('sys.stdin.isatty', return_value=False), patch('sys.stdout.isatty', return_value=False):
+            self.assertEqual(cli.run(args), 0)
+        run.assert_called_once_with(project.return_value, state.return_value, codespace=None,
+                                    check=True, as_json=True, start=False)
+        self.assertTrue(parser().parse_args(['work', '--codespace']).codespace)
+
+
 class ArmFlowTests(unittest.TestCase):
     def setUp(self):
         from unittest import mock

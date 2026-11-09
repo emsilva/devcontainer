@@ -487,6 +487,26 @@ def _utc(day, clock):
     return datetime.fromisoformat(f'2026-10-{day:02d}T{clock}+00:00').timestamp()
 
 
+class DeleteAPITests(unittest.TestCase):
+    def test_delete_sends_one_DELETE_to_the_named_route(self):
+        calls = []
+        api = lifecycle.LifecycleAPI('space', upstream=lambda *args: calls.append(args) or (204, b''),
+                                     token_reader=lambda: 'fixture')
+        self.assertTrue(hasattr(api, 'delete'), 'DELETE route is missing')
+        self.assertEqual(api.delete(), 204)
+        self.assertEqual([(method, url) for method, url, _ in calls],
+                         [('DELETE', 'https://api.github.com/user/codespaces/space')])
+
+    def test_reading_carries_the_repository(self):
+        body = dict(name='space', state='Available', repository=dict(full_name='example/project'))
+        api = lifecycle.LifecycleAPI('space', upstream=lambda *args: (200, json.dumps(body).encode()),
+                                     token_reader=lambda: 'fixture')
+        self.assertEqual(getattr(api.read(), 'repository', None), 'example/project')
+        for repository in (None, {}, {'full_name': 7}, {'full_name': 'example/project\nprivate'}):
+            body['repository'] = repository
+            self.assertIsNone(api.read().repository)
+
+
 class ClassifyTests(unittest.TestCase):
     def test_measured_lifetime_stops_classify_as_lifetime(self):
         for anchor, down in (((21, '01:37:32'), (21, '13:37:44')),

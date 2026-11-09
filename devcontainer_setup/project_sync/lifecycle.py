@@ -7,6 +7,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import re
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener
@@ -44,6 +45,7 @@ class Reading:
     pending: bool | None
     last_used_at: float | None
     http: int = 0
+    repository: str | None = None
 
 
 def parse_time(value):
@@ -121,7 +123,7 @@ def _request(method, url, token):
 
 
 class LifecycleAPI:
-    """Direct-HTTPS client for four routes: GET state/list, POST start, POST stop."""
+    """Direct-HTTPS client for five routes: GET state/list, POST start/stop, DELETE."""
 
     def __init__(self, name, gh_user=None, *, upstream=None, token_reader=None):
         self.name, self._gh_user = _name(name), gh_user
@@ -186,8 +188,12 @@ class LifecycleAPI:
         if not isinstance(obj, dict) or obj.get('name') != self.name or not isinstance(obj.get('state'), str):
             return bad
         pending = obj.get('pending_operation')
+        repository = obj.get('repository')
+        repository = repository.get('full_name') if isinstance(repository, dict) else None
+        if not isinstance(repository, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
+            repository = None
         return Reading(at, True, obj['state'], pending if isinstance(pending, bool) else None,
-                       parse_time(obj.get('last_used_at')), status)
+                       parse_time(obj.get('last_used_at')), status, repository)
 
     def confirm_deleted(self) -> bool | None:
         status, body = self._call('GET', inventory=True, token=self._token)
@@ -198,6 +204,9 @@ class LifecycleAPI:
 
     def post_stop(self):
         return self._call('POST', '/stop')[0]
+
+    def delete(self) -> int:
+        return self._call('DELETE')[0]
 
 
 def classify(*, last_up_at, first_down_at, anchors, owner_stop_at):
