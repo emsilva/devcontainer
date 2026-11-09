@@ -130,6 +130,12 @@ check this revision answers: `/Users/mannu/code/devcontainer/tmp/codespace-lifec
     ended.
 15. **No paginated inventory.** `confirm_deleted` stays single-page; an account with 100 or more Codespaces reads
     "not confirmed" and the rerun says so (YAGNI).
+16. **Filter drivers are switched off, not refused** (Task 1 build, 2026-11-09). The owner's dotfiles set a global
+    git-lfs `clean`/`process` filter and the image installs git-lfs, so refusing any configured filter would make every
+    worktree unprovable. With filters off, `status` never runs a helper; a changed file still reads changed, and a
+    stat-dirty but unchanged LFS file reads changed (raw content against the pointer blob): that blocks a delete it
+    need not, never passes one it should not. Evidence:
+    `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-c/verify/scan-filter-probe.log`.
 
 ## Copy (exact strings, used by Tasks 3, 5 and 6)
 
@@ -281,6 +287,13 @@ Type delete to delete it.
     `status --porcelain=v1 -z --untracked-files=all`, `symbolic-ref -q --short HEAD`, `rev-parse -q --verify HEAD`.
     Every Git call: `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`, `GIT_NO_REPLACE_OBJECTS=1`, `LC_ALL=C`, timeout
     15 s; a failure marks only that repository `ok=False`.
+  - Filter drivers (call 16): `status` runs configured `clean`/`process` filters on stat-dirty files, and a filter can
+    write (git-lfs stores objects). Before each worktree's `status`, read the driver names with
+    `git config -z --name-only --get-regexp '^filter\..*\.(clean|process)$'` (exit 1 = none), strip `filter.` and the
+    trailing `.clean`/`.process`, and pass `-c filter.N.clean= -c filter.N.process= -c filter.N.required=false` for
+    each name to that `status`. A name that is empty or contains `=` or a control character marks the worktree
+    `ok=False` (spliced into `-c`, `=` would assign a command). No filter ever runs; an unused driver (a global git-lfs
+    setup) costs nothing.
   - Scratch: `scratch_tree.entries(<remote_root>/.scratch)`; hash each regular file. Missing `.scratch` = empty map,
     complete. An error from `entries` (symlink, special file, case collision) = incomplete.
   - Conversations: walk `sessions.native_home('codex')` `sessions/` and `archived_sessions/`, and
