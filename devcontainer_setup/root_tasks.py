@@ -4,9 +4,9 @@ import re
 from .taskfile_mapping import mapping
 
 ALIASES = ('work', 'work:cs', 'work:signin', 'work:signin:all', 'work:disconnect', 'work:status', 'work:stop', 'work:forget',
-           'work:cs:armed', 'work:disarm', 'work:hold', 'work:cs:stop', 'work:cs:restart', 'work:logs',
+           'work:cs:armed', 'work:disarm', 'work:hold', 'work:cs:stop', 'work:cs:restart', 'work:cs:delete', 'work:logs',
            'scratch:configure', 'scratch:start', 'scratch:stop', 'scratch:status', 'scratch:logs', 'scratch:backup')
-INTERACTIVE = ('work', 'work:cs', 'work:signin', 'work:signin:all', 'work:cs:armed', 'work:cs:restart')
+INTERACTIVE = ('work', 'work:cs', 'work:signin', 'work:signin:all', 'work:cs:armed', 'work:cs:restart', 'work:cs:delete')
 LEGACY = ('work', 'work:codex', 'work:claude', 'work:codex:cs', 'work:claude:cs',
           'agent:codex', 'agent:claude', 'agent:sessions', 'agent:handoff', 'agent:recover',
           'scratch:configure', 'scratch:start', 'scratch:stop', 'scratch:status', 'scratch:logs', 'scratch:backup')

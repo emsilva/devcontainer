@@ -54,6 +54,11 @@ tasks:
     interactive: true
     cmds:
       - bash scripts/project-sync.sh work --codespace-restart {{.CLI_ARGS}}
+  work:cs:delete:
+    desc: Check a Codespace, then delete it after you type delete (-- --check --json only checks)
+    interactive: true
+    cmds:
+      - bash scripts/project-sync.sh delete {{.CLI_ARGS}}
   work:logs:
     desc: Show recent keeper and sync worker logs (task work:logs -- --follow)
     cmds:

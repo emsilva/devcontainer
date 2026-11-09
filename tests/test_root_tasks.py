@@ -5,6 +5,59 @@ from devcontainer_setup.root_tasks import integrate
 
 
 class RootTasksTests(unittest.TestCase):
+    def test_work_cs_delete_renders_description_interactive_and_root_alias(self):
+        import tempfile
+        from pathlib import Path
+        from devcontainer_setup.render import render
+        from devcontainer_setup.root_tasks import ALIASES, INTERACTIVE
+        source = Path(__file__).resolve().parents[1]
+        self.assertIn('work:cs:delete', ALIASES)
+        self.assertEqual(ALIASES[ALIASES.index('work:cs:restart') + 1], 'work:cs:delete')
+        self.assertIn('work:cs:delete', INTERACTIVE)
+        with tempfile.TemporaryDirectory() as directory:
+            files = render(Path(directory), source, {'continuity': True, 'ssh': True}, 'a' * 40)
+        root = integrate("version: '3'\ntasks:\n")
+        for text in (root, files['.devcontainer/Taskfile.yml'].decode(), (source / 'Taskfile.yml').read_text()):
+            stanza = re.split(r'\n(?=  \S)', text.split('  work:cs:delete:\n', 1)[1], maxsplit=1)[0]
+            self.assertIn('interactive: true', stanza)
+            if text == root:
+                self.assertIn('task: devcontainer:work:cs:delete', stanza)
+            else:
+                self.assertIn('desc: Check a Codespace, then delete it after you type delete '
+                              '(-- --check --json only checks)', stanza)
+                self.assertIn('project-sync.sh delete {{.CLI_ARGS}}', stanza)
+        self.assertEqual(integrate(root), root)
+        custom = '  work:cs:delete:\n    cmds: [echo owner-delete]\n'
+        self.assertIn(custom, integrate("version: '3'\ntasks:\n" + custom))
+
+    def test_work_cs_delete_dispatches_in_both_taskfiles(self):
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        from devcontainer_setup.render import render
+        source = Path(__file__).resolve().parents[1]
+        for generated in (True, False):
+            with self.subTest(generated=generated), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                if generated:
+                    files = render(root, source, {'continuity': True, 'ssh': True}, 'a' * 40)
+                    included = root / '.devcontainer/Taskfile.yml'
+                    included.parent.mkdir()
+                    included.write_bytes(files['.devcontainer/Taskfile.yml'])
+                    text = integrate("version: '3'\nincludes:\n  devcontainer: .devcontainer/Taskfile.yml\ntasks:\n")
+                    script = root / '.devcontainer/scripts/project-sync.sh'
+                else:
+                    text = (source / 'Taskfile.yml').read_text()
+                    script = root / 'scripts/project-sync.sh'
+                (root / 'Taskfile.yml').write_text(text)
+                script.parent.mkdir(parents=True, exist_ok=True)
+                # The real task runner reaches only this local stub, never real project state.
+                script.write_text('printf "%s\\n" "$@" > dispatch-args\n')
+                result = subprocess.run(['task', 'work:cs:delete', '--', '--check', '--json'],
+                                        cwd=root, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((root / 'dispatch-args').read_text().splitlines(), ['delete', '--check', '--json'])
+
     def test_work_alias_has_a_description(self):
         from pathlib import Path
         from devcontainer_setup.root_tasks import ALIASES, INTERACTIVE

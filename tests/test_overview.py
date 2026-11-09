@@ -57,6 +57,77 @@ class OverviewTests(unittest.TestCase):
             self.assertEqual(shlex.split(action.command), list(action.argv))
             self.assertEqual(action.item, f'{self.overview.fit(action.label)}  ({action.command})')
 
+    def retirement_local(self, **kwargs):
+        self.assertTrue(hasattr(self.local, 'retired'), 'Local needs retired facts')
+        self.assertTrue(hasattr(self.local, 'cleanup'), 'Local needs cleanup facts')
+        return replace(self.local, **kwargs)
+
+    def test_cleanup_pending_comes_first_or_after_recovery(self):
+        local = self.retirement_local(cleanup=('oldest-cs', 'later-cs'))
+        for recovery, state in product((False, True), ('Available', 'Shutdown')):
+            current = replace(local, armed=recovery, keeper='stopped' if recovery else 'running')
+            frame = self.frame(current, self.remote_state(state))
+            index = 1 if recovery else 0
+            self.assertEqual(frame.actions[index].label, 'Finish cleaning up after oldest-cs')
+            self.assertEqual(frame.actions[index].argv,
+                             ('task', 'devcontainer:work:cs:delete', '--', '--codespace', 'oldest-cs'))
+            if recovery:
+                self.assertIn(frame.actions[0].key, ('connect', 'start'))
+            self.assertIn('Cleanup after deleting oldest-cs is not finished.', frame.lines)
+            self.assertFalse(any('later-cs' in action.argv for action in frame.actions))
+            self.assertGreaterEqual(len(frame.actions), 3)
+            self.assertLessEqual(len(frame.actions), 6)
+
+    def test_the_oldest_listed_seal_is_offered_even_when_an_older_one_is_unlisted(self):
+        local = self.retirement_local(retired=('unlisted-cs', 'listed-cs', 'later-cs'))
+        remote = replace(self.remote, spaces=self.ok((*self.remote.spaces.value,
+                         Space('later-cs', 'Shutdown', None), Space('listed-cs', 'Available', None))))
+        for setup in ('installed', 'missing'):
+            with self.subTest(setup=setup):
+                frame = self.frame(replace(local, setup=setup), remote)
+                self.assertEqual(frame.actions[-2].label, 'Check and delete listed-cs')
+                self.assertEqual(frame.actions[-2].argv,
+                                 ('task', 'devcontainer:work:cs:delete', '--', '--codespace', 'listed-cs'))
+                self.assertFalse(any('unlisted-cs' in line and 'deleted' in line for line in frame.lines))
+
+    def test_listed_sealed_retired_codespace_takes_the_last_slot(self):
+        local = self.retirement_local(
+            retired=('old-cs',), cleanup=('cleanup-cs', 'later-cleanup-cs'),
+            checkout=replace(self.local.checkout, relation='behind', behind=2),
+            refusals=tuple(Refusal('codex', f'session-{n}', 'refused') for n in range(2)))
+        remote = replace(self.remote, names=self.ok(frozenset()), upstream=self.ok('b' * 40),
+                         spaces=self.ok(tuple(Space(name, 'Available', None)
+                                              for name in ('one-cs', 'two-cs', 'three-cs', 'old-cs'))))
+        frame = self.frame(local, remote)
+        self.assertEqual(frame.actions[0].label, 'Finish cleaning up after cleanup-cs')
+        self.assertEqual(frame.actions[-2].label, 'Check and delete old-cs')
+        self.assertEqual(frame.actions[-1].key, 'details')
+        self.assertEqual(len(frame.actions), 6)
+        self.assertLessEqual(len(frame.lines), 6)
+        self.assertTrue(all(self.overview.cells(line) <= 78 for line in frame.lines))
+
+    def test_unlisted_or_unsealed_retired_offers_nothing(self):
+        listed = replace(self.remote, spaces=self.ok((*self.remote.spaces.value,
+                                                      Space('unsealed-cs', 'Available', None))))
+        for retired, remote in ((('unlisted-cs',), self.remote), ((), listed),
+                                (('old-cs',), self.unavailable())):
+            local = self.retirement_local(retired=retired)
+            frame = self.frame(local, remote)
+            self.assertFalse(any(action.argv[1].endswith('work:cs:delete') for action in frame.actions))
+            self.assertFalse(any('delete' in action.label.lower() for action in frame.actions))
+
+    def test_the_current_pairing_is_never_offered_for_delete(self):
+        local = self.retirement_local(retired=('paired-cs', 'old-cs'))
+        remote = replace(self.remote, spaces=self.ok((*self.remote.spaces.value, Space('old-cs', 'Available', None))))
+        for generated in (False, True):
+            current = replace(local, generated=generated, managed=frozenset(('work:cs:delete',)))
+            frame = self.frame(current, remote)
+            deletes = [action for action in frame.actions if action.label.startswith('Check and delete')]
+            self.assertEqual([action.argv for action in deletes],
+                             [('task', 'work:cs:delete', '--', '--codespace', 'old-cs')])
+            inside = self.frame(replace(current, in_codespace=True, cleanup=('old-cs',)), remote)
+            self.assertEqual([action.key for action in inside.actions], ['stop'])
+
     def test_each_situation_has_its_lines_and_actions(self):
         fallback = self.argv('work:logs', 'work:status')
         setup = [('task', 'devcontainer:setup')]

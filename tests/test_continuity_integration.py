@@ -74,7 +74,7 @@ class ContinuityIntegrationTests(unittest.TestCase):
                          'scratch:status', 'scratch:logs', 'scratch:backup',
                          'work', 'work:cs', 'work:signin', 'work:signin:all', 'work:disconnect', 'work:status', 'work:stop',
                          'work:cs:armed', 'work:disarm', 'work:hold', 'work:cs:stop',
-                         'work:cs:restart', 'work:logs'} <= names,
+                         'work:cs:restart', 'work:cs:delete', 'work:logs'} <= names,
                         sorted(names))
         self.assertFalse({'work:codex', 'work:claude'} & names)
         result = subprocess.run(['task', 'test'], cwd=self.root, capture_output=True, text=True)

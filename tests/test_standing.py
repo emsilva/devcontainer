@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -102,6 +103,67 @@ class StandingTests(unittest.TestCase):
         # Include Git's index and refs, state and cache; reading may not change any bytes.
         return {str(p.relative_to(self.base)): hashlib.sha256(p.read_bytes()).hexdigest()
                 for p in self.base.rglob('*') if p.is_file()}
+
+    def retired(self, name, at):
+        self.write('retired/' + name + '.json', dict(
+            schema=1, codespace=name, identity=self.project.identity, repository='example/project',
+            gh_user='fixture', remote_root='/workspaces/project', operation='fixture-replace',
+            sealed_at=at, cycle_id='fixture-cycle', snapshot_id='a' * 64, scratch=[], sessions=[]))
+
+    def deletion(self, name, phase, at):
+        self.write('deletions/' + name + '.json', dict(
+            schema=1, codespace=name, kind='sealed', account='fixture', repository='example/project',
+            fingerprint='b' * 64, phase=phase, at={phase: at}, archive=None, cleanup={}))
+
+    def test_retired_and_cleanup_facts(self):
+        local = self.read()
+        self.assertTrue(hasattr(local, 'retired'), 'Local needs retired facts')
+        self.assertEqual((local.retired, local.cleanup), ((), ()))
+        self.bind()
+        # Creation order and name order differ from chronological order.
+        self.retired('earlier-cs', 20)
+        self.retired('oldest-cs', 10)
+        self.retired('cleaned-cs', 5)
+        self.deletion('cleaned-cs', 'cleaned', 40)
+        self.deletion('earlier-cs', 'deleted', 30)
+        self.deletion('unsealed-cs', 'deleted', 25)
+        self.deletion('unfinished-cs', 'confirmed', 1)
+        before = self.snapshot()
+        local = self.read()
+        self.assertEqual(local.retired, ('oldest-cs', 'earlier-cs'))
+        self.assertEqual(local.cleanup, ('unsealed-cs', 'earlier-cs'))
+        self.assertEqual(local.problems, ())
+        self.assertEqual(self.snapshot(), before)
+
+    def test_unreadable_retirement_files_each_add_one_problem(self):
+        self.retired('valid-cs', 10)
+        self.deletion('valid-cs', 'deleted', 20)
+        for name in ('retired/broken-cs.json', 'deletions/broken-cs.json'):
+            state.atomic_write(self.state / name, b'{')
+        self.write('retired/malformed-cs.json', {})
+        self.write('deletions/malformed-cs.json', dict(schema=1, codespace='other-cs', phase='deleted', at={}))
+        self.deletion('overflow-cs', 'deleted', 10 ** 400)
+        before = self.snapshot()
+        local = self.read()
+        self.assertEqual(set(local.problems), {
+            kind + '/' + name + '.json cannot be read'
+            for kind, name in (('retired', 'broken-cs'), ('retired', 'malformed-cs'),
+                               ('deletions', 'broken-cs'), ('deletions', 'malformed-cs'),
+                               ('deletions', 'overflow-cs'))})
+        self.assertEqual((local.retired, local.cleanup), (('valid-cs',), ('valid-cs',)))
+        self.assertEqual(self.snapshot(), before)
+
+    def test_retirement_facts_do_not_depend_on_import_order(self):
+        # Sync starts with replication; the printer often starts with standing.
+        # A fresh interpreter prevents earlier tests from hiding a dependency cycle.
+        result = subprocess.run([
+            sys.executable, '-I', '-B', '-c',
+            'import sys; sys.path.insert(0, sys.argv[1]); '
+            'from devcontainer_setup.project_sync import replication, standing; '
+            'assert callable(replication.validate_manifest) and callable(standing.read)',
+            str(Path(__file__).resolve().parents[1])],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_reading_creates_and_changes_nothing(self):
         before = self.snapshot()

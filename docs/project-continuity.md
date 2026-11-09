@@ -32,6 +32,7 @@ create checkouts. Uncommitted code stays on the host where it was edited.
 | `task work:disarm` | Stop this project's keeper and its keep-alive; sync continues |
 | `task work:cs:stop` | Record your stop, then stop the Codespace, from your Mac or through its connected Mac worker |
 | `task work:cs:restart` | Stop and start the Codespace now, outside the restart budget |
+| `task work:cs:delete [-- --codespace NAME]` | Check the named Codespace (the pairing by default), then delete only after a typed `delete` |
 | `task work:logs` | Show the last keeper and worker log lines, merged by time |
 
 Run the connection tasks on your Mac. Inside Herdr, connection returns to your
@@ -145,6 +146,48 @@ A replacement Codespace receives the conversations its predecessors delivered to
 the Mac, including ones the Mac did not publish locally. A conversation is never
 copied back to the Codespace it started on. Later sync cycles retry delivery
 without creating duplicate imports.
+
+## Checked deletion
+
+Replace first, then check the old Codespace with
+`task work:cs:delete -- --codespace NAME`. Run it on your Mac: it verifies the
+repository and GitHub account, checks the Codespace and prints a verdict for
+Git, Scratch, History and Agents. Every category must be safe. Type `delete`
+in the terminal to authorize deletion; the command checks everything again
+before recording the stop, waiting for Shutdown and deleting it. It confirms
+deletion with GitHub's inventory before cleaning up.
+
+Git covers every repository and linked worktree under `/workspaces`: changes,
+untracked files, stashes and commits that have not reached GitHub. Scratch and
+Codex/Claude conversations must have reached this Mac; an unfinished turn blocks
+deletion. A retired Codespace is compared with the final flush recorded when it
+was replaced. Running Claude, Codex, Grok or OpenCode agents also block deletion.
+Conversations kept on this Mac that the replacement refused are named in the
+verdict and do not block it.
+
+The verdict lists what is not checked: files Git ignores, home-folder data
+outside sync, and Grok and OpenCode conversations. Nothing exports those files.
+For agents or a headless terminal, run
+`task work:cs:delete -- --codespace NAME --check --json`; it only checks and
+makes no changes. Without `--codespace NAME`, it checks the current pairing.
+
+A stopped or unreachable Codespace reads Unknown. Start a retired one explicitly
+with `task work:cs:delete -- --codespace NAME --start`, then run the check again;
+use `task work:cs:restart` for the current pairing. The check never starts one
+silently. A Codespace moved with `--rebind` has no final-flush record and cannot
+be deleted this way.
+
+Deleting the current pairing turns recovery off, stops its keeper, sync worker
+and forwards, archives the binding, and removes its owned SSH alias and Herdr
+profile. An adopted Herdr profile is kept. Deleting a retired Codespace leaves
+the new pairing and its recovery alone. Either path ends the deleted
+Codespace's paused sync session, while retaining scratch payloads, conversation
+checkpoints, relay records and the restart ledger. If cleanup is interrupted,
+rerun the same delete command in a terminal to finish it. `task work` offers
+one pending cleanup and the oldest listed retired Codespace with a final-flush
+record; it never offers deletion of the current pairing.
+
+## Conversation availability
 
 Native Codex can hide automated `exec` sessions and histories containing only
 inherited turns from its default resume picker. Such imports are reported as
