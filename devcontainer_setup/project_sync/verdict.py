@@ -149,10 +149,12 @@ def _manifest_files(manifest):
     """One mapping for prefix checks and their display identities, own or inherited."""
     result = {}
     try:
-        entries = manifest['conversations']['entries']
-        if not isinstance(entries, list):
+        conversations = manifest['conversations']
+        entries = conversations['entries']
+        completed = conversations.get('completed_files', [])
+        if not isinstance(entries, list) or not isinstance(completed, list):
             raise ValueError()
-        for entry in entries:
+        for entry in [*entries, *completed]:
             agent, owner = entry['agent'], entry['session_id']
             if agent not in ('codex', 'claude') or not isinstance(owner, str) or not owner:
                 raise ValueError()
