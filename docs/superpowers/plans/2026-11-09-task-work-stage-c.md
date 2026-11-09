@@ -965,3 +965,7 @@ Not safe, the typed delete of OLD (NEW's `arming.json` and keeper unchanged), th
 paired target (a turn written just before the check waits for a later cycle; stop recorded; cleanup removes the
 clone's SSH alias and Herdr profile and nothing else). It also confirms on a real Codespace what offline tests cannot:
 `/proc` readability, the Git options the scan uses, and `pending_operation` being present in the API body.
+Before the delete steps, `--check --json` on a real Codespace must show Git complete: any directory under
+`/workspaces` the Codespace user cannot read (a volume's `lost+found`, a root-only `.codespaces` folder) makes the
+whole Git part incomplete by design, so it would block every delete. If one appears, the lead decides an explicit,
+named exception before release; it is not widened in code ahead of that evidence.
