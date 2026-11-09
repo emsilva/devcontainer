@@ -148,6 +148,49 @@ class TargetScanTests(unittest.TestCase):
         self.assertEqual(row.stashes, 1)
         self.assertEqual((row.worktrees[0].branch, row.worktrees[0].head), (None, oid))
 
+    def test_edits_hidden_by_index_flags_count_once_and_absent_sparse_files_pass(self):
+        root = self.repo('project')
+        for name in ('skip', 'assume', 'absent', 'unchanged'):
+            (root / name).write_text('base')
+        self.git(root, 'add', '.')
+        self.git(root, 'commit', '-qm', 'Index flags')
+        self.git(root, 'update-index', '--skip-worktree', 'skip', 'absent', 'unchanged')
+        self.git(root, 'update-index', '--assume-unchanged', 'assume')
+        for name in ('skip', 'assume', 'tracked'):
+            (root / name).write_text('only here')
+        (root / 'absent').unlink()
+        row = self.scan().repositories[0].worktrees[0]
+        self.assertTrue(row.ok)
+        self.assertEqual((row.changes, row.changed), (3, ('assume', 'skip', 'tracked')))
+
+    def test_stopped_rebase_with_autostash_is_a_change(self):
+        root = self.repo('project')
+        (root / 'second').write_text('second')
+        self.git(root, 'add', '.')
+        self.git(root, 'commit', '-qm', 'Second')
+        (root / 'tracked').write_text('only in the autostash')
+        env = dict(self.connection.env, GIT_SEQUENCE_EDITOR="sed -i.bak -e '1s/^pick/edit/'")
+        subprocess.run(['git', '-C', str(root), 'rebase', '-q', '-i', '--autostash', 'HEAD~1'],
+                       env=env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.assertTrue((root / '.git/rebase-merge/autostash').exists())
+        row = self.scan().repositories[0].worktrees[0]
+        self.assertTrue(row.ok)
+        self.assertEqual(row.changes, 1)
+
+    def test_each_operation_in_progress_is_a_change(self):
+        root = self.repo('project')
+        for name in ('rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD',
+                     'MERGE_AUTOSTASH', 'REBASE_AUTOSTASH', 'CUSTOM_AUTOSTASH'):
+            with self.subTest(name=name):
+                marker = root / '.git' / name
+                marker.mkdir() if name.startswith('rebase-') else marker.write_text(self.git(root, 'rev-parse', 'HEAD') + '\n')
+                try:
+                    row = self.scan().repositories[0].worktrees[0]
+                    self.assertTrue(row.ok)
+                    self.assertEqual(row.changes, 1)
+                finally:
+                    marker.rmdir() if marker.is_dir() else marker.unlink()
+
     def test_origin_with_credentials_is_unreadable_and_never_leaves(self):
         self.api
         from devcontainer_setup.project_sync.state import _identity

@@ -446,7 +446,32 @@ def worktree(path):
                 raise Incomplete()
             changed.append(path_text(record[3:].decode('utf-8')))
             index += 2 if b'R' in record[:2] or b'C' in record[:2] else 1
-        row['changes'], row['changed'] = len(changed), sorted(changed)[:20]
+        changed = set(changed)
+        for record in git(path, 'ls-files', '-v', '--stage', '-z').split(b'\0'):
+            if not record or not (record[:1] == b'S' or record[:1].islower()):
+                continue
+            metadata, name = record.split(b'\t', 1)
+            indexed = oid(metadata.decode().split()[2])
+            name = path_text(name.decode('utf-8'))
+            target = Path(path) / name
+            try:
+                info = target.lstat()
+            except FileNotFoundError:
+                continue  # Sparse checkouts intentionally leave these files absent.
+            if stat.S_ISDIR(info.st_mode):
+                continue  # Gitlinks are checked as repositories, not file content.
+            if not stat.S_ISREG(info.st_mode):
+                raise Incomplete()
+            safe_directory(target.parent)
+            actual = oid(scalar(git(path, *filters, 'hash-object', '--no-filters', '--', name)))
+            if actual != indexed:
+                changed.add(name)
+        git_dir = Path(scalar(git(path, 'rev-parse', '--path-format=absolute', '--git-dir')))
+        safe_directory(git_dir)
+        operations = {'rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD'}
+        with os.scandir(git_dir) as markers:
+            in_progress = any(item.name in operations or item.name.endswith('AUTOSTASH') for item in markers)
+        row['changes'], row['changed'] = len(changed) + int(in_progress), sorted(changed)[:20]
         branch = git(path, 'symbolic-ref', '-q', '--short', 'HEAD', absent=(1,))
         row['branch'] = None if branch is None else scalar(branch)
         head = git(path, 'rev-parse', '-q', '--verify', 'HEAD', absent=(1,))
