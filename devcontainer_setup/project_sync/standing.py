@@ -65,6 +65,8 @@ class Local:
     worker: str = 'stopped'
     cycle_at: float | None = None
     refusals: tuple[Refusal, ...] = ()
+    retired: tuple[str, ...] = ()
+    cleanup: tuple[str, ...] = ()
     launch: Launch | None = None
     checkout: Checkout = Checkout()
     problems: tuple[str, ...] = ()
@@ -349,12 +351,52 @@ def _process(runtime, state, reader, timeout, *, flag, module):
         return 'unknown'
 
 
+def _retirement_facts(state, reader):
+    """Read seals and delete journals without importing the deletion coordinator."""
+    # seal validates through replication, which reaches standing via forget on import.
+    from . import seal
+    retired = ()
+    try:
+        retired = seal.names(state)
+        # names() deliberately skips bad seals; expose each unreadable record here.
+        for path in sorted((state / 'retired').glob('*.json')):
+            if path.stem not in retired:
+                reader.problem('retired/' + path.name + ' cannot be read')
+    except (OSError, ValueError):
+        reader.problem('retired cannot be read')
+    journals, pending = {}, []
+    phases = ('confirmed', 'stop-recorded', 'stop-requested', 'shutdown', 'delete-requested', 'deleted', 'cleaned')
+    try:
+        paths = sorted((state / 'deletions').glob('*.json'))
+    except OSError:
+        reader.problem('deletions cannot be read')
+        paths = []
+    for path in paths:
+        try:
+            record = project_state.read_json(path)
+            name, phase = path.stem, record.get('phase')
+            at = _number(_object(record.get('at')).get(phase)) if isinstance(phase, str) else None
+            if (not _NAME.fullmatch(name) or type(record.get('schema')) is not int or record['schema'] != 1
+                    or record.get('codespace') != name or phase not in phases or at is None
+                    or not isinstance(record.get('cleanup'), dict)):
+                raise ValueError('Invalid delete journal')
+            journals[name] = phase
+            if phase == 'deleted':
+                pending.append((at, name))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, TypeError, OverflowError):
+            reader.problem('deletions/' + path.name + ' cannot be read')
+    return dict(retired=tuple(name for name in retired if journals.get(name) != 'cleaned'),
+                cleanup=tuple(name for _, name in sorted(pending)))
+
+
 def _state_facts(state, project, reader, timeout):
     binding = reader.json(state / scratch.CONFIG, private=True)
     pairing = (binding or {}).get('codespace')
     if not isinstance(pairing, str) or not _NAME.fullmatch(pairing):
         pairing = None
-    values = dict(pairing=pairing)
+    values = dict(pairing=pairing, **_retirement_facts(state, reader))
     arming = reader.json(state / 'arming.json', private=True, missing={'schema': 1, 'armed': False})
     if arming is None or arming.get('schema') != 1 or type(arming.get('armed')) is not bool:
         reader.problem('arming.json cannot be read')

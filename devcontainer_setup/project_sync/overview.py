@@ -302,6 +302,19 @@ def view(local: Local, remote: Remote | None, *,
     if local.cycle_at is not None:
         line(8, 'Sync last completed ' + _when(local.cycle_at, now))
 
+    if local.cleanup:
+        target = local.cleanup[0]
+        cleanup = Action('cleanup:' + target, f'Finish cleaning up after {target}',
+                         task_command(local, 'work:cs:delete', '--', '--codespace', target))
+        position = 1 if recovery_off and candidates and candidates[0].key in ('connect', 'start') else 0
+        candidates.insert(position, cleanup)
+        line(0, f'Cleanup after deleting {target} is not finished.')
+    listed = {space.name for space in spaces or ()}
+    retired = next((target for target in local.retired if target != name and target in listed), None)
+    delete_key = 'delete:' + retired if retired is not None else None
+    if retired is not None:
+        action(delete_key, f'Check and delete {retired}', 'work:cs:delete', '--', '--codespace', retired)
+
     details = Action('details', 'Show details', task_command(local, 'work:status'))
     more = details.command + ' shows more'
     for problem in local.problems:
@@ -312,11 +325,15 @@ def view(local: Local, remote: Remote | None, *,
             line(1, f'Action {candidate.key} withheld for unsafe text; {more}')
         else:
             unique.setdefault(candidate.key, candidate)
-    actions = list(unique.values())[:5]
+    # Reserve the last candidate slot so overlays cannot hide a listed retired target.
+    delete = unique.pop(delete_key, None)
+    actions = list(unique.values())[:4 if delete is not None else 5]
     if recovery_off:
         actions.sort(key=lambda candidate: candidate.key not in ('connect', 'start'))
-    if len(actions) < 3:
+    if len(actions) + (delete is not None) < 3:
         actions.append(Action('logs', 'Show recovery and sync logs', task_command(local, 'work:logs')))
+    if delete is not None:
+        actions.append(delete)
     actions.append(details)
     lines = tuple(fit(text) for _, text in sorted(facts, key=lambda fact: fact[0])[:6])
     return View(lines, tuple(actions))

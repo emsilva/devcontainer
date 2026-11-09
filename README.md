@@ -115,8 +115,11 @@ old Codespace ends, and when the new one lacks the Herdr version your Mac runs, 
 asks to install it there. If you keep another version that Herdr accepts, it does not
 ask again for that pair.
 
-A Codespace can be deleted at any time, so keep anything you would need again in
-`.scratch/`: working files in `.scratch/tmp/` and shared notes in `.scratch/memory/`.
+Replace a Codespace first, then run `task work:cs:delete -- --codespace <old-codespace>`.
+It checks the old Codespace and deletes only after you type `delete` in a terminal.
+See [checked deletion](docs/project-continuity.md#checked-deletion) for its scope.
+Keep anything you would need again in `.scratch/`: working files in `.scratch/tmp/`
+and shared notes in `.scratch/memory/`.
 Leave regenerable output such as screenshots and builds in `tmp/`, because scratch
 sync copies everything it holds. Project instructions tell agents the same,
 including agents working in Git worktrees. Scratch sync runs automatically in both directions; conflicts are preserved for
