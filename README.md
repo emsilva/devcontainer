@@ -49,6 +49,7 @@ small helpers, and a Taskfile include. Personal preferences live in
 | `task work:disconnect` | Disconnect this project's Codespace from the local Herdr UI |
 | `task work:status` / `task work:stop` | Read offline sync summary / stop this project’s worker and its keeper |
 | `task work:status -- --json` | Inspect cycle, receipt and publication detail |
+| `task work:forget -- --agent claude --session ID` | Stop sending a refused conversation on its own; keep every stored copy |
 | `task work:cs:armed` | Connect as `work:cs`, then arm restart after GitHub's 12-hour stop |
 | `task work:hold -- 09:30` / `-- off` | Hold restarts and resume prompts until a local time / end the hold |
 | `task work:disarm` | Stop this project's keeper and its keep-alive; sync continues |

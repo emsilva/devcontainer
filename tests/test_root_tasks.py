@@ -5,6 +5,28 @@ from devcontainer_setup.root_tasks import integrate
 
 
 class RootTasksTests(unittest.TestCase):
+    def test_work_forget_renders_description_and_noninteractive_root_alias(self):
+        import tempfile
+        from pathlib import Path
+        from devcontainer_setup.render import render
+        from devcontainer_setup.root_tasks import ALIASES, INTERACTIVE
+        source = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            files = render(Path(directory), source, {'continuity': True, 'ssh': True}, 'a' * 40)
+        self.assertIn('work:forget', ALIASES)
+        self.assertNotIn('work:forget', INTERACTIVE)
+        root = integrate("version: '3'\ntasks:\n")
+        for text in (root, files['.devcontainer/Taskfile.yml'].decode(), (source / 'Taskfile.yml').read_text()):
+            stanza = re.split(r'\n(?=  \S)', text.split('  work:forget:\n', 1)[1], maxsplit=1)[0]
+            self.assertNotIn('interactive:', stanza)
+            if text == root:
+                self.assertIn('task: devcontainer:work:forget', stanza)
+            else:
+                self.assertIn('desc: Stop sending a conversation the Codespace refused', stanza)
+                self.assertIn('work --forget {{.CLI_ARGS}}', stanza)
+        self.assertIn('.devcontainer/scripts/project_sync/forget.py', files)
+        self.assertEqual(integrate(root), root)
+
     def test_work_signin_all_renders_description_interactive_and_root_alias(self):
         import tempfile
         from pathlib import Path

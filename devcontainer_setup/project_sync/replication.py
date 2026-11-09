@@ -7,6 +7,7 @@ import json
 import time
 from pathlib import Path
 
+from . import forget
 from .checkpoint_store import Store
 from .state import atomic_write, read_json
 from .rpc import BATCH_BYTES, BATCH_ITEMS, SINGLE_BYTES, _decode, _digests
@@ -31,7 +32,7 @@ def references(value):
             yield from references(item)
 
 
-def capture(project, store, *, env=None, historical_roots=(), relay=False):
+def capture(project, store, *, env=None, historical_roots=(), relay=False, exclude=frozenset()):
     conversations = capture_conversations(project, store, state=store.state, env=env, historical_roots=historical_roots)
     if relay:
         relayed, issues = store.relay_entries()
@@ -45,6 +46,9 @@ def capture(project, store, *, env=None, historical_roots=(), relay=False):
                 entries.append(entry)
                 seen.add(key)
         conversations = dict(conversations, entries=entries, issues=[*conversations['issues'], *issues])
+    conversations = dict(conversations, **{
+        field: [row for row in conversations[field] if (row.get('agent'), row.get('session_id')) not in exclude]
+        for field in ('entries', 'issues')})
     return store.save(dict(schema=2,
         project=dict(identity=project.identity, project_id=project.project_id, root=str(project.root)),
         conversations=conversations,
@@ -308,7 +312,7 @@ def sync_project_data(connection, project, state, remote_root, *, env=None, hist
         try:
             row['stage'] = 'capture'
             with sync_cycle.stage(cycle, name + ':capture', progress):
-                snapshot = (capture(project, store, env=env, relay=True) if outbound else
+                snapshot = (capture(project, store, env=env, relay=True, exclude=forget.forgotten(state)) if outbound else
                             endpoint.call('capture', historical_roots=list(historical_roots))['snapshot_id'])
                 row['snapshot_id'] = snapshot
                 manifest = source.load(snapshot)
@@ -334,7 +338,8 @@ def sync_project_data(connection, project, state, remote_root, *, env=None, hist
         except (OSError, ValueError, KeyError, TypeError) as error:
             # Keep any completed receipt and continue the opposite direction.
             # Never expose arbitrary remote process output or request bodies.
-            row.update(outcome='failed', error=('Conversation stage timed out' if isinstance(error, TimeoutError)
+            row.update(outcome='failed', error=(str(error) if isinstance(error, forget.Unreadable)
+                                               else 'Conversation stage timed out' if isinstance(error, TimeoutError)
                                                else 'Conversation ' + row['stage'] + ' failed; previous receipts preserved'))
         sync_cycle.emit(cycle, progress)
     if any(row['error'] for row in cycle['directions'].values()):
