@@ -466,6 +466,16 @@ def remote(project, state, armed=None, rebind=None, before_herdr=None, move=None
                        expected_codespace=name)
 
 
+def cycle_scope(project, value: dict, runtime: dict, sync: dict) -> tuple[dict, bool]:
+    """Scope an already-read cycle exactly as status does, without new reads."""
+    cycle = runtime.get('conversations', {})
+    current = (_current_worker(runtime) and sync.get('phase') == 'synchronized'
+               and cycle.get('project_id') == project.project_id and cycle.get('identity') == project.identity
+               and cycle.get('local_root') == value['local_root']
+               and (not value.get('remote_root') or cycle.get('remote_root') == value['remote_root']))
+    return cycle, current
+
+
 def status(project, state):
     value = registry(project, state)
     latest, _ = _conversation_receipt(project, state)
@@ -475,11 +485,7 @@ def status(project, state):
         sync = scratch.inspect_sync(Path(binding.get('root', value['local_root'])), state) if runtime.get('running') else runtime
     except (OSError, ValueError) as error:
         sync = dict(running=runtime.get('running', False), issue=str(error))
-    cycle = runtime.get('conversations', {})
-    current = (_current_worker(runtime) and sync.get('phase') == 'synchronized'
-               and cycle.get('project_id') == project.project_id and cycle.get('identity') == project.identity
-               and cycle.get('local_root') == value['local_root']
-               and (not value.get('remote_root') or cycle.get('remote_root') == value['remote_root']))
+    cycle, current = cycle_scope(project, value, runtime, sync)
     history = sync_cycle.summary(cycle, current=current, local_receipt=latest)
     history['retained_receipts'] = dict(runtime.get('retained_receipts', {}), codespace_to_desktop=latest)
     from . import agent_hooks, env_files
