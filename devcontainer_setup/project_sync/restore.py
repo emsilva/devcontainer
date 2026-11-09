@@ -30,12 +30,13 @@ def _served(command, state):
     """The Codespace a herdr_stdio command line serves for this state dir, or None for any other process."""
     if not isinstance(command, str):
         return None
-    # ps prints argv without shell quoting. Compare the producer's complete
-    # argument suffix, including its bootstrap, while allowing Python to move.
-    import shlex
-    args = shlex.split(ssh_hosts._proxy_command(Path(state), 'placeholder'))
-    prefix = ' ' + ' '.join(args[1:-2]) + ' '
-    match = re.search(re.escape(prefix) + r'([A-Za-z0-9][A-Za-z0-9-]{0,99}) '
+    # ps drops shell quoting. The bootstrap contains a Python string literal
+    # naming its package copy; another checkout must recognize that copy too.
+    literal = r'''(?:'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")'''
+    prefix = (re.escape(' -I -B -c import sys;sys.path.insert(0,') + literal
+              + re.escape(');from ' + ssh_hosts.__package__ + '.transport import herdr_stdio;'
+                          'raise SystemExit(herdr_stdio(sys.argv[1],sys.argv[2])) '))
+    match = re.search(prefix + r'([A-Za-z0-9][A-Za-z0-9-]{0,99}) '
                       + re.escape(str(state)) + r'\Z', command)
     return match[1] if match else None
 
