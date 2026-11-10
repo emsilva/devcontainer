@@ -760,6 +760,18 @@ class ReplacementTests(unittest.TestCase):
         self.assertIn('old-space is kept; task work offers its delete.', self.output.getvalue())
         self.assertIn('Connect with task work:cs.', self.output.getvalue())
 
+    def test_deleted_old_with_cleanup_pending_is_not_reported_as_kept(self):
+        def deleted(argv):
+            if 'delete' in argv:
+                self.save('deletions/old-space.json', {'phase': 'deleted'})
+                return subprocess.CompletedProcess(argv, 1)
+            return None
+        self.runner_hook = deleted
+        self.assertEqual(self.run_replace(), 0)
+        self.assertEqual(self.archives()[-1]['ended'], 'completed')
+        self.assertIn('Replaced old-space with new-space.', self.output.getvalue())
+        self.assertNotIn('old-space is kept', self.output.getvalue())
+
     def test_nothing_gh_printed_reaches_a_journal_or_receipt(self):
         for step in ('get', 'machines', 'user', 'existing', 'launch'):
             self.api.failure = step

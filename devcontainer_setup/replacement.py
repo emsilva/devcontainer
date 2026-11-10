@@ -399,7 +399,7 @@ class _Coordinator:
         self.phase('offered')
         replacing.archive(self.state, self.journal, 'completed', self.now())
         print(f'Replaced {old} with {new}.', flush=True)
-        if (_optional(self.state / 'deletions' / (old + '.json')) or {}).get('phase') != 'cleaned':
+        if (_optional(self.state / 'deletions' / (old + '.json')) or {}).get('phase') not in ('deleted', 'cleaned'):
             print(f'{old} is kept; task work offers its delete.', flush=True)
         print('Connect with task work:cs.', flush=True)
         return 0

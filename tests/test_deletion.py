@@ -978,6 +978,33 @@ class DeletionTests(unittest.TestCase):
         self.mocks['scratch.terminate_retired'].assert_called_once()
         self.mocks['restore.end_target_proxies'].assert_called_once_with('space', self.state)
 
+    def test_already_deleted_retired_target_keeps_cleanup_pending_without_a_journal(self):
+        from tests.test_replacing import journal
+        reader = importlib.import_module('devcontainer_setup.project_sync.replacing')
+        value = journal(old='space')
+        reader.write(self.state, value)
+        archive = self.retired()
+        (self.state / 'retired/space.json').unlink()
+        self.write(self.state / 'accounts.json', {'schema': 1, 'codespaces': {'space': 'octo'}})
+        self.api.states = ['Deleted']
+        binding = (self.state / 'scratch.json').read_bytes()
+        self.assertFalse((self.state / 'deletions/space.json').exists())
+        code, output, ask = self.run_delete(name='space', check=True, as_json=True)
+        self.assertEqual(code, 1, output)
+        self.assertEqual(json.loads(output)['outcome'], 'cleanup-pending')
+        ask.assert_not_called()
+        self.assertEqual(self.mutations(), [])
+        self.assertFalse((self.state / 'deletions/space.json').exists())
+        code, output, ask = self.run_delete(name='space')
+        self.assertEqual(code, 0, output)
+        ask.assert_called_once()
+        self.assertEqual(self.d._journal(self.state, 'space')['phase'], 'cleaned')
+        self.assertEqual(reader.ended_by_fact(self.state, value), 'space')
+        self.assertEqual((self.state / 'scratch.json').read_bytes(), binding)
+        self.assertTrue(archive.is_dir())
+        self.assertEqual(self.mutations(), ['restore.end_target_proxies', 'scratch.terminate_retired'])
+        self.connect.assert_not_called()
+
     def test_externally_deleted_target_cleans_up_only_after_typing_delete(self):
         self.api.states = ['Deleted']
         for answer in ('yes', EOFError()):
