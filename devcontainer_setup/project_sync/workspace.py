@@ -278,8 +278,8 @@ def _choose_pairing(project, state, value, rebind=None, expect_owner=None, start
             login = "this Mac's GitHub account"
             try:
                 account = service._api('GET', 'user', api_env).get('login')
-                if isinstance(account, str) and account and all(c.isalnum() or c == '-' for c in account):
-                    login = account
+                from .transport import _login
+                login = _login(account)
             except (OSError, ValueError):
                 pass
             inventory = ("This repository's Codespaces: " + ', '.join(row['name'] for row in spaces) + '.'

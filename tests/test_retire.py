@@ -226,3 +226,14 @@ class RetireTests(unittest.TestCase):
                 archive = workspace.retire(self.project, self.state, 'cs-new')
                 self.assertEqual(state.read_json(archive / 'deleted.json')['codespace'], 'cs-new')
                 self.assertFalse((self.state / 'scratch.json').exists())
+
+    def test_a_new_binding_with_the_old_registry_does_not_supersede_retirement(self):
+        self.crash_after(1)
+        # A crashed cutover can publish NEW's binding before its registry. Matching
+        # roots alone cannot authorize archiving OLD's unfinished retirement.
+        newer = dict(self.binding, codespace='cs-new')
+        state.atomic_write(self.state / scratch.CONFIG, json.dumps(newer).encode() + b'\n')
+        before = self.snapshot()
+        with self.assertRaisesRegex(ValueError, 'the pairing changed since the delete began'):
+            workspace.retire(self.project, self.state, 'cs-old')
+        self.assertEqual(self.snapshot(), before)

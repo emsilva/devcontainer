@@ -16,6 +16,17 @@ from unittest.mock import Mock, patch
 
 
 class ScratchTests(unittest.TestCase):
+    def test_deleted_worker_messages_use_validated_enterprise_logins(self):
+        for login in ('octo_enterprise', 'octo', 'bad_name_suffix', 'öcto', None):
+            with self.subTest(login=login):
+                notices = self._notices([0.0])
+                label = login if login in ('octo_enterprise', 'octo') else "this Mac's GitHub account"
+                with patch('devcontainer_setup.project_sync.replication.read_codespace_state', return_value='Deleted'), \
+                        patch('devcontainer_setup.project_sync.transport._upstream',
+                              return_value=(200, json.dumps({'login': login}).encode())):
+                    self.assertEqual(notices._read_state(), 'Deleted')
+                self.assertIn(f'bound-name is not visible to {label}:', notices._deleted_message())
+
     def retired_fixture(self):
         receipt = dict(name='scratch-' + 'a' * 48, identifier='sync_old', nonce='a' * 48,
                        established=True, binding={'codespace': 'cs-old'})

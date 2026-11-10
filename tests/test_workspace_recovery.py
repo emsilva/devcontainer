@@ -12,6 +12,24 @@ from devcontainer_setup.project_sync.checkpoint_store import Store
 from devcontainer_setup.project_sync.state import discover_project, read_json
 
 class ExistingCheckoutTests(unittest.TestCase):
+    def test_missing_codespace_messages_use_validated_enterprise_logins(self):
+        from devcontainer_setup.project_sync.codespaces import Codespaces, CodespaceNotFound
+        value = self.registry()
+        scratch._write(self.state / scratch.CONFIG, dict(codespace='space', identity=self.project.identity))
+        for login in ('octo_enterprise', 'octo', 'bad_name_suffix', 'öcto', None):
+            with self.subTest(login=login):
+                def api(method, route, env):
+                    if route == 'user':
+                        return {'login': login}
+                    raise CodespaceNotFound('fixture missing')
+                label = login if login in ('octo_enterprise', 'octo') else "this Mac's GitHub account"
+                with patch.object(Codespaces, '_api_env', return_value={}), \
+                        patch.object(Codespaces, '_api', side_effect=api), \
+                        patch.object(Codespaces, 'spaces', return_value=[]):
+                    with self.assertRaises(ValueError) as error:
+                        workspace._choose_pairing(self.project, self.state, value)
+                self.assertIn(f'space is not visible to {label}: it was deleted', str(error.exception))
+
     def test_expected_old_refuses_before_any_effect(self):
         import inspect
         self.assertIn('expected_old', inspect.signature(workspace.remote).parameters)
