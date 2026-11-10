@@ -575,6 +575,8 @@ class DeletionTests(unittest.TestCase):
         code, output, _ = self.run_delete(name='space')
         self.assertEqual(code, 0, output)
         self.assertEqual([path.read_bytes() for path in paths], before)
+        self.assertEqual(self.mutations(), ['post_stop', 'delete', 'restore.end_target_proxies',
+                                           'scratch.terminate_retired'])
         from tests.test_keeper import FakeAPI as KeeperAPI, FakeHerdr, FakeKeepAlive, T0, up, down
         from devcontainer_setup.project_sync import keeper
         anchor = T0 - 3600
@@ -590,6 +592,16 @@ class DeletionTests(unittest.TestCase):
             k.step()
         self.assertEqual(api.posts, 1)
         self.assertEqual(read_json(self.state / keeper.RUNTIME)['last_restart']['resume'], 'delivered')
+
+    def test_sealed_check_requires_the_retained_snapshot(self):
+        self.retired()
+        (Store(self.state).root / 'manifests' / self.receipt['snapshot_id']).unlink()
+        code, output, _ = self.run_delete(name='space', check=True, as_json=True)
+        self.assertEqual(code, 1)
+        history = next(row for row in json.loads(output)['categories'] if row['name'] == 'history')
+        self.assertEqual(history['verdict'], 'unknown')
+        self.assertEqual(history['text'], 'Unknown: the final capture is no longer on this Mac')
+        self.assertEqual(self.mutations(), [])
 
     def test_404_alone_is_not_deleted(self):
         self.api.status, self.api.gone = 404, None
