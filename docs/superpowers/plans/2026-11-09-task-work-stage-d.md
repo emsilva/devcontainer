@@ -1060,12 +1060,14 @@ Source: the Fable C+D review (`stage-d/review-cd/REVIEW.md`, at 78fb906), every 
 - **F1 (7A, review P2-1). A rerun with OLD still paired flushes again.** Replaces Task 2 step 2's "When the binding
   still names OLD" branch. After `move.finish_pending`:
   - binding names NEW: reconnect, as before;
-  - binding names OLD and `scratch-retarget.json` (candidate), `recovery-move.json` (`new`) or
-    `workspace-pending.json` (`codespace`) names NEW: a crash inside the move's publication; replay it with no new
-    flush, as before (`test_a_crash_inside_the_move_finishes_forward` unchanged);
-  - binding names OLD and none of those names NEW (the latch alone, or a retired record alone): go on to step 3, the
-    ordinary path (Available read, worker, `move.decide`, agents, gather, a new seal, the move). The latch still
-    keeps abandon closed.
+  - binding names a third Codespace: refuse, as before;
+  - binding names OLD: always go on to step 3, the ordinary path (Available read, worker, `move.decide`, agents,
+    gather, a new seal, the move). The latch still keeps abandon closed. (Revision 8: an intent file naming NEW is
+    not proof of a crash inside the publication. An ordinary failed move leaves `workspace-pending.json` and
+    `scratch-retarget.json` the same way, and the real `move.finish_pending` always removes `recovery-move.json`
+    while the binding is on OLD. The ordinary path's reconnect of OLD clears the other two before OLD's worker
+    starts; with OLD's worker already running, the move's own `workspace.remote` drops a stale pending registry.
+    Review 2's P2-1; `test_a_crash_inside_the_move_finishes_forward` keeps only its binding-on-NEW case.)
   `test_the_latch_alone_keeps_finishing_forward` becomes `test_the_latch_alone_flushes_again_before_moving`.
 - **F2 (7A, review P2-4). Nothing reaches OLD between the recorded scan and the move.** In the flush, after gather
   passes and before `seal.write`: `scratch.stop(state)` (it ends the supervisor, which pauses its Mutagen session and
@@ -1074,7 +1076,9 @@ Source: the Fable C+D review (`stage-d/review-cd/REVIEW.md`, at 78fb906), every 
   final flush was recorded; nothing moved.` and exit 1. Every exit after the stop that leaves the binding on OLD
   prints `Sync with OLD is paused. Run the replace again, or task work:cs to resume it.` after its own line. Nothing
   may restart OLD's sync between the stop and the binding move (a test pins it). The rerun's ordinary path already
-  reconnects OLD when its worker is not current.
+  reconnects OLD when its worker is not current. (Revision 8: a stop whose phase is not `stopped` is retried once;
+  unless the final result is not running and `stopped`, print `Sync with OLD did not stop cleanly; nothing moved.`
+  and exit 1, with no rescan or seal.)
 - **F3 (7B, review P2-2). A lost create reply is reconciled before abandon is offered.** Amends Task 5 step 2: at
   `create-requested` with no NEW, call 10's reconcile runs before the `continue`/`abandon` choice.
   - It adopts NEW: the journal is `created`; abandon is then offered with the line that names NEW's checked delete.
