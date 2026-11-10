@@ -145,6 +145,18 @@ class WorkOverviewTests(unittest.TestCase):
         self.assertIn('Next: ', commands)
         self.assertNotIn('\x1b', self.out.getvalue())
 
+    def test_no_terminal_names_the_replace_in_next_lines(self):
+        from tests.test_replacing import journal
+        self.assertTrue(hasattr(self.local, 'replacing'), 'Local needs the offline replacing fact')
+        state.atomic_write(self.local.state / 'replace.json', json.dumps(journal()).encode())
+        before = snapshot(self.local.state)
+        self.assertEqual(self.run_overview(), 0)
+        self.assertIn('Replacing old-space: stopped at flush and move.', self.out.getvalue())
+        self.assertIn('Next: task setup -- --replace\n', self.out.getvalue())
+        self.assertEqual(snapshot(self.local.state), before)
+        self.call.assert_not_called()
+        self.assert_frame()
+
     def test_no_terminal_prints_state_and_next_lines_and_exits_0(self):
         for stdin_tty, stdout_tty in ((False, False), (True, False), (False, True)):
             with self.subTest(stdin=stdin_tty, stdout=stdout_tty):
@@ -295,8 +307,8 @@ class WorkOverviewTests(unittest.TestCase):
                 self.assertEqual(title, 'What next?')
                 self.assertEqual(options[-1], 'Exit')
                 self.assertIn('(task work:cs)', options[0])
-                self.assertIn('(task work:cs:armed)', options[1])
-                return options[1]
+                self.assertIn('(task setup -- --replace)', options[1])
+                return next(option for option in options if '(task work:cs:armed)' in option)
 
         def call(argv, *, cwd):
             self.assertEqual(argv, ['task', 'work:cs:armed'])

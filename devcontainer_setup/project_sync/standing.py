@@ -12,7 +12,7 @@ import re
 import subprocess
 import time
 
-from . import keeper, scratch, state as project_state, sync_cycle
+from . import keeper, replacing, scratch, state as project_state, sync_cycle
 
 
 @dataclass(frozen=True)
@@ -67,6 +67,7 @@ class Local:
     refusals: tuple[Refusal, ...] = ()
     retired: tuple[str, ...] = ()
     cleanup: tuple[str, ...] = ()
+    replacing: dict | None = None
     launch: Launch | None = None
     checkout: Checkout = Checkout()
     problems: tuple[str, ...] = ()
@@ -397,6 +398,15 @@ def _state_facts(state, project, reader, timeout):
     if not isinstance(pairing, str) or not _NAME.fullmatch(pairing):
         pairing = None
     values = dict(pairing=pairing, **_retirement_facts(state, reader))
+    try:
+        journal = replacing.read(state)
+        if journal is not None and journal['ended'] is None:
+            if journal['repository'].casefold() != project.identity.removeprefix('github.com/').casefold():
+                reader.problem('The replace record belongs to another project')
+            elif replacing.ended_by_fact(state, journal) is None:
+                values['replacing'] = {key: journal[key] for key in ('old', 'new', 'phase')}
+    except (OSError, ValueError):
+        reader.problem('The replace record cannot be read')
     arming = reader.json(state / 'arming.json', private=True, missing={'schema': 1, 'armed': False})
     if arming is None or arming.get('schema') != 1 or type(arming.get('armed')) is not bool:
         reader.problem('arming.json cannot be read')

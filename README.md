@@ -106,14 +106,16 @@ tools confirmed signed out. To connect and sign in before Herdr opens, run
 `task work:cs -- --then-signin-all`. Use `task work:signin` to finish waiting
 sign-ins when the worker is disconnected. See [sign-ins](docs/project-continuity.md#sign-ins).
 
-`task work:cs` always reconnects the paired Codespace. After setup replaces it, move
-sync and recovery to the new one with `task work:cs -- --rebind <codespace>`;
-setup prints the exact command. Recovery consent is kept when the GitHub account
-and billing owner match; otherwise it asks you to type `arm` for the new Codespace. The
-old binding is paused and kept, not deleted. Herdr moves too: its connection to the
-old Codespace ends, and when the new one lacks the Herdr version your Mac runs, it
-asks to install it there. If you keep another version that Herdr accepts, it does not
-ask again for that pair.
+`task work:cs` always reconnects the paired Codespace. To replace it, run
+`task setup -- --replace` in this repository, or `task devcontainer:setup -- --replace`
+in a generated project. You can also choose `Replace NAME` in `task work`, or
+`replace NAME` in the setup wizard. Replacement reads its live machine and idle
+timeout, creates and validates the new Codespace from the default branch, records
+the old one's final flush, then moves sync, recovery and Herdr. It signs in and
+checks the new one before offering the old one's checked delete. Recovery consent
+is kept when the GitHub account and billing owner match; otherwise it asks you to
+type `arm` before the move. Rerun the same replace command to continue an unfinished
+phase. See [Replace a Codespace](docs/project-continuity.md#replace-a-codespace).
 
 Replace a Codespace first, then run `task work:cs:delete -- --codespace <old-codespace>`.
 It verifies the GitHub account recorded when the Codespace was connected or armed,

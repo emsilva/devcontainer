@@ -62,6 +62,81 @@ class OverviewTests(unittest.TestCase):
         self.assertTrue(hasattr(self.local, 'cleanup'), 'Local needs cleanup facts')
         return replace(self.local, **kwargs)
 
+    def replacing_local(self, **kwargs):
+        self.assertTrue(hasattr(self.local, 'replacing'), 'Local needs the offline replacing fact')
+        return replace(self.local, replacing={'old': 'old-cs', 'new': 'new-cs', 'phase': 'ready'}, **kwargs)
+
+    def test_unfinished_replace_comes_first(self):
+        phases = {'inspected': 'inspect', 'create-requested': 'create', 'created': 'create',
+                  'ready': 'flush and move', 'moved': 'sign in', 'signed-in': 'check',
+                  'checked': 'delete offer', 'offered': 'delete offer'}
+        for phase, text in phases.items():
+            local = self.replacing_local()
+            local = replace(local, replacing=dict(local.replacing, phase=phase))
+            frame = self.frame(local)
+            self.assertEqual(frame.lines[0], self.overview.fit(
+                f'Replacing old-cs: stopped at {text}. Finish it: task devcontainer:setup -- --replace'))
+            self.assertEqual(frame.actions[0].label, 'Finish replacing old-cs')
+            self.assertEqual(frame.actions[0].argv, ('task', 'devcontainer:setup', '--', '--replace'))
+            recovery = self.frame(replace(local, armed=True, keeper='stopped'))
+            self.assertEqual(recovery.lines[0], 'Recovery is off until you connect')
+            self.assertEqual(recovery.lines[1], frame.lines[0])
+            self.assertEqual([a.key for a in recovery.actions[:2]], ['connect', 'finish-replace'])
+
+    def test_replace_command_matches_the_generated_project_coordinator(self):
+        import tempfile
+        from devcontainer_setup import replacement
+        local = self.replacing_local()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wrapper = root / '.devcontainer/scripts/project-sync.sh'
+            wrapper.parent.mkdir(parents=True)
+            wrapper.write_text('# fixture wrapper\n')
+            coordinator = replacement._Coordinator(root, root / 'state', None, api=None, ui=None,
+                ask=None, env={}, runner=None, now=None, sleep=None)
+            self.assertEqual(coordinator.replace, 'task devcontainer:setup -- --replace')
+            finish = self.frame(replace(local, root=root)).actions[0]
+            self.assertEqual(finish.command, coordinator.replace)
+            paired = next(a for a in self.frame(replace(local, root=root)).actions if a.key == 'replace')
+            self.assertEqual(paired.command, coordinator.replace)
+
+    def test_replace_is_offered_after_connect_or_start_only(self):
+        self.replacing_local()
+        for status in ('Available', 'Shutdown', 'Starting', 'ShuttingDown', 'Moved', 'Failed'):
+            frame = self.frame(remote=self.remote_state(status))
+            keys = [a.key for a in frame.actions]
+            if status == 'Failed':
+                self.assertNotIn('replace', keys)
+            else:
+                self.assertEqual(keys[1], 'replace')
+                self.assertEqual(frame.actions[1].label, 'Replace paired-cs')
+        for local, remote in ((replace(self.local, setup='missing'), self.remote),
+                              (replace(self.local, launch=Launch('paired-cs', False)), self.remote),
+                              (self.local, replace(self.remote, setup_prs=self.ok((7,)))),
+                              (replace(self.local, pairing=None), self.remote)):
+            self.assertNotIn('replace', [a.key for a in self.frame(local, remote).actions])
+
+    def test_ended_replace_is_not_shown(self):
+        self.replacing_local()
+        frame = self.frame()
+        self.assertFalse(any('Replacing ' in line for line in frame.lines))
+        self.assertNotIn('finish-replace', [a.key for a in frame.actions])
+
+    def test_every_overlay_together_keeps_the_ranked_actions(self):
+        local = self.replacing_local(armed=True, keeper='stopped', cleanup=('cleanup-cs',),
+            retired=('old-cs',), refusals=(Refusal('codex', 'session-1', 'refused'),),
+            checkout=replace(self.local.checkout, relation='behind', behind=2))
+        remote = replace(self.remote, setup_prs=self.ok((7, 9)), upstream=self.ok('b' * 40),
+                         spaces=self.ok((*self.remote.spaces.value, Space('old-cs', 'Shutdown', None))))
+        frame = self.frame(local, remote)
+        self.assertEqual([a.key for a in frame.actions],
+                         ['connect', 'finish-replace', 'cleanup:cleanup-cs', 'pr:7', 'delete:old-cs', 'details'])
+        self.assertEqual(frame.lines[0], 'Recovery is off until you connect')
+        self.assertTrue(frame.lines[1].startswith('Replacing old-cs:'))
+        self.assertEqual(frame.lines[2], 'Cleanup after deleting cleanup-cs is not finished.')
+        self.assertEqual(len(frame.lines), 6)
+        self.assertTrue(all(self.overview.cells(line) <= 78 for line in frame.lines))
+
     def test_cleanup_pending_comes_first_or_after_recovery(self):
         local = self.retirement_local(cleanup=('oldest-cs', 'later-cs'))
         for recovery, state in product((False, True), ('Available', 'Shutdown')):
@@ -132,6 +207,8 @@ class OverviewTests(unittest.TestCase):
         fallback = self.argv('work:logs', 'work:status')
         setup = [('task', 'devcontainer:setup')]
         create = setup + fallback
+        replace_command = [('task', 'devcontainer:setup', '--', '--replace')]
+        paired = self.argv('work:cs') + replace_command + fallback
         logs = ('gh', 'codespace', 'logs', '-c', 'paired-cs')
         resume = ('task', 'devcontainer:setup', '--', '--resume', 'paired-cs')
         cases = [
@@ -172,28 +249,28 @@ class OverviewTests(unittest.TestCase):
              'No Codespace is paired with this checkout', self.argv('work:cs') + setup + fallback),
             (self.local, self.remote,
              'Codespace paired-cs is available (checked 09:10)',
-             self.argv('work:cs', 'work:cs:armed', 'work:cs:stop', 'work:status')),
+             self.argv('work:cs') + replace_command + self.argv('work:cs:armed', 'work:cs:stop', 'work:status')),
             (self.local, self.remote_state('Shutdown'),
-             'Codespace paired-cs is stopped (checked 09:10)', self.argv('work:cs') + fallback),
+             'Codespace paired-cs is stopped (checked 09:10)', paired),
             (replace(self.local, owner_stop_at=self.at), self.remote_state('Shutdown'),
-             'Codespace paired-cs is stopped; you stopped it at 09:10', self.argv('work:cs') + fallback),
+             'Codespace paired-cs is stopped; you stopped it at 09:10', paired),
             (replace(self.local, down_kind='OWNER', down_at=self.at), self.remote_state('Shutdown'),
-             'Codespace paired-cs is stopped; you stopped it at 09:10', self.argv('work:cs') + fallback),
+             'Codespace paired-cs is stopped; you stopped it at 09:10', paired),
             (replace(self.local, down_kind='LIFETIME', down_at=self.at), self.remote_state('Shutdown'),
              "Codespace paired-cs was stopped by GitHub's 12-hour limit at 09:10",
-             self.argv('work:cs') + fallback),
+             paired),
             (replace(self.local, down_kind='OTHER', down_at=self.at), self.remote_state('Shutdown'),
-             'Codespace paired-cs stopped at 09:10, not by you', self.argv('work:cs') + fallback),
+             'Codespace paired-cs stopped at 09:10, not by you', paired),
             (self.local, self.remote_state('Starting'),
-             'Codespace paired-cs is starting (checked 09:10)', self.argv('work:cs') + fallback),
+             'Codespace paired-cs is starting (checked 09:10)', paired),
             (self.local, self.remote_state('ShuttingDown'),
-             'Codespace paired-cs is stopping (checked 09:10)', self.argv('work:cs') + fallback),
+             'Codespace paired-cs is stopping (checked 09:10)', paired),
             (self.local, self.remote_state('Moved'),
-             'Codespace paired-cs is in state Moved (checked 09:10)', self.argv('work:cs') + fallback),
+             'Codespace paired-cs is in state Moved (checked 09:10)', paired),
             (self.local, replace(self.unavailable(), spaces=self.failed('no answer within 2 s', 'unknown')),
-             'Codespace paired-cs: GitHub did not answer within 2 s', self.argv('work:cs') + fallback),
+             'Codespace paired-cs: GitHub did not answer within 2 s', paired),
             (self.local, self.unavailable(), 'Codespace paired-cs: request failed',
-             self.argv('work:cs') + fallback),
+             paired),
         ]
         for local, remote, first, actions in cases:
             with self.subTest(first=first, setup=local.setup):
@@ -213,6 +290,7 @@ class OverviewTests(unittest.TestCase):
             'Checkout is 2 commits behind origin/main (local copy)'))
         self.assert_actions(frame, [
             ('task', 'work:cs'),
+            ('task', 'devcontainer:setup', '--', '--replace'),
             ('task', 'work:forget', '--', '--agent', 'codex', '--session', 'session-1'),
             ('git', '-C', '/fixture/project', 'merge', '--ff-only', 'origin/main'),
             ('task', 'work:status')])
@@ -391,9 +469,9 @@ class OverviewTests(unittest.TestCase):
         frame = self.frame(local, forgotten=frozenset((('codex', 'session-1'),)))
         self.assertIn('paired-cs refused 2 conversations; forget them to clear the sync warning', frame.lines)
         self.assertNotIn('forget:codex:session-1', [a.key for a in frame.actions])
-        # First three own actions and two forget actions fill the five slots before Details.
+        # Replace occupies one slot, leaving the first remaining forget action before Details.
         self.assertEqual([a.key for a in frame.actions],
-                         ['connect', 'arm', 'stop', 'forget:claude:session-2', 'forget:codex:session-3', 'details'])
+                         ['connect', 'replace', 'arm', 'stop', 'forget:claude:session-2', 'details'])
         cleared = self.frame(local, forgotten=frozenset((r.agent, r.session_id) for r in refusals))
         self.assertFalse(any('refused' in line for line in cleared.lines))
         self.assertFalse(any(a.key.startswith('forget:') for a in cleared.actions))

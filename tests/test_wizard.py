@@ -117,6 +117,21 @@ class ReviewRerunTests(unittest.TestCase):
         self.assertEqual(self.prompts, ['Review setup'])
         self.assertTrue(self.rendered[-1]['customizations']['devcontainerSetup']['selections']['ssh'])
 
+    def test_replace_review_reads_no_resources(self):
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard
+        launch = {'action': 'replace', 'name': 'paired'}
+        api, ui = Mock(), Mock()
+        api.machines.side_effect = AssertionError('Replace must inspect resources in the coordinator')
+        with patch.object(wizard, '_repository', return_value='owner/project'):
+            self.assertEqual(wizard._ask_launch_resources(ui, api, self.root, launch), launch)
+        ui.choose.assert_not_called()
+        api.machines.assert_not_called()
+        with patch.object(wizard, '_resolve_launch', return_value=launch):
+            self.run_wizard(github=True, api=api, paired='paired')
+        self.assertIn('Codespace: replace paired (its machine and idle timeout); SSH: enabled', self.output)
+        self.assertNotIn('Launch:', self.output)
+
     def test_rerun_asks_only_the_new_finding(self):
         self.found['runtimes']['rust'].update(selected=True, version='1.99.1')
         self.found['tools']['aws'] = {'selected': True, 'evidence': ['build.sh: aws s3']}
@@ -700,7 +715,7 @@ class WizardCliTests(unittest.TestCase):
         self.assertEqual(self.git('rev-parse', 'HEAD'), before)
         self.assertEqual(self.git('status', '--porcelain'), '')
 
-    def _split_menu(self, spaces, *, paired=None, choice=None, published=True, unavailable=None):
+    def _split_menu(self, spaces, *, paired=None, choice=None, published=True, unavailable=None, unlisted=None):
         import contextlib
         import io
         from devcontainer_setup import __main__ as wizard
@@ -719,6 +734,8 @@ class WizardCliTests(unittest.TestCase):
                 calls.append(('get', name))
                 if name == unavailable:
                     raise ValueError('Not visible (HTTP 404)')
+                if unlisted is not None and name == paired:
+                    return unlisted
                 return next(space for space in spaces if space['name'] == name)
             def machines(self, *args):
                 raise AssertionError('Rebuild/reuse must keep the actual resources')
@@ -766,6 +783,84 @@ class WizardCliTests(unittest.TestCase):
         self.assertEqual(menus[0][2], 'none')
         self.assertIn('rebuild paired', menus[0][1])
         self.assertEqual(result['action'], 'none')
+
+    def test_paired_menu_lists_replace(self):
+        result, menus, _, _, _ = self._split_menu(
+            [self._space('paired')], paired='paired', choice='none')
+        self.assertIn('replace paired', menus[0][1])
+        self.assertEqual(menus[0], ('Codespace', ['none', 'rebuild paired', 'replace paired'], 'none'))
+        self.assertEqual(result['action'], 'none')
+        result, _, _, _, _ = self._split_menu(
+            [self._space('paired')], paired='paired', choice='replace paired')
+        self.assertEqual(result, {'action': 'replace', 'name': 'paired'})
+
+    def test_replace_is_listed_for_a_paired_feature_branch_codespace(self):
+        _, menus, _, _, _ = self._split_menu(
+            [self._space('paired', 'feature'), self._space('other')], paired='paired', choice='none')
+        self.assertIn('replace paired', menus[0][1])
+        self.assertEqual(menus[0][1][:2], ['none', 'replace paired'])
+        self.assertEqual(menus[0][2], 'reuse other')
+
+    def test_replace_is_not_listed_for_an_unlisted_or_unreadable_pairing(self):
+        # Establish the positive case too: refusing every pairing would hide this regression.
+        _, menus, _, _, _ = self._split_menu([self._space('paired')], paired='paired', choice='none')
+        self.assertIn('replace paired', menus[0][1])
+        for listed in (False, True):
+            with self.subTest(listed=listed):
+                spaces = [self._space('other')] + ([self._space('paired')] if listed else [])
+                _, menus, _, _, _ = self._split_menu(
+                    spaces, paired='paired', unavailable='paired', choice='none')
+                self.assertFalse(any(option.startswith('replace ') for option in menus[0][1]))
+        _, menus, _, _, _ = self._split_menu(
+            [self._space('other')], paired='paired', unlisted=self._space('paired'), choice='none')
+        self.assertNotIn('replace paired', menus[0][1])
+
+    def test_replace_mode_runs_only_the_coordinator(self):
+        import contextlib
+        import io
+        from devcontainer_setup import __main__ as wizard
+        from devcontainer_setup import replacement
+        class Terminal(io.StringIO):
+            def isatty(self): return True
+        with patch.object(replacement, 'run', return_value=23) as run, \
+                patch.object(wizard, 'interactive', side_effect=AssertionError('No wizard in replace mode')), \
+                patch.object(wizard, 'source_ref', side_effect=AssertionError('No setup preparation')), \
+                patch.object(wizard, 'scan', side_effect=AssertionError('No scan in replace mode')), \
+                patch.object(sys, 'stdin', Terminal()), contextlib.redirect_stdout(Terminal()), \
+                contextlib.redirect_stderr(Terminal()):
+            try:
+                code = wizard.main(['--project', str(self.root), '--replace'])
+            except SystemExit as error:
+                self.fail(f'--replace must be a setup mode: parser exited {error.code}')
+            self.assertEqual(code, 23)
+            run.assert_called_once_with(self.root.resolve())
+            for stdin_tty, stdout_tty in ((False, True), (True, False), (False, False)):
+                run.reset_mock()
+                stdin, stdout = Terminal(), Terminal()
+                stdin.isatty = lambda: stdin_tty
+                stdout.isatty = lambda: stdout_tty
+                with patch.object(sys, 'stdin', stdin), contextlib.redirect_stdout(stdout):
+                    self.assertEqual(wizard.main(['--project', str(self.root), '--replace']), 1)
+                run.assert_not_called()
+            for other in ('--scan', '--check', '--dry-run'):
+                with self.assertRaises(SystemExit) as caught:
+                    wizard.main(['--replace', other])
+                self.assertEqual(caught.exception.code, 2)
+
+    def test_the_test_branch_override_is_never_shown(self):
+        import contextlib
+        import io
+        from devcontainer_setup import __main__ as wizard
+        output = io.StringIO()
+        with patch.dict(os.environ, SETUP_REPLACE_TEST_BRANCH='hidden-branch'), \
+                contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as caught:
+                wizard.main(['--help'])
+            self.assertEqual(caught.exception.code, 0)
+            _, menus, _, _, _ = self._split_menu([self._space('paired')], paired='paired')
+        self.assertIn('--replace', output.getvalue())
+        self.assertNotIn('SETUP_REPLACE_TEST_BRANCH', output.getvalue() + repr(menus))
+        self.assertNotIn('hidden-branch', output.getvalue() + repr(menus))
 
     def test_choosing_rebuild_forces_rebuild_on_paired(self):
         import contextlib
@@ -815,7 +910,7 @@ class WizardCliTests(unittest.TestCase):
                     self.assertNotIn('rebuild paired', options)
                     self.assertEqual(menus[0][2], 'reuse other')
                 self.assertIn('reuse other', options)
-                self.assertFalse(any('replace' in option for option in options))
+                self.assertEqual('replace paired' in options, unavailable is None)
 
     def test_codespace_default_uses_published_setup_not_feature_files(self):
         self._ensure_origin()
@@ -1364,7 +1459,7 @@ class WizardCliTests(unittest.TestCase):
             {'name': 'first', 'git_status': {'ref': 'main'}},
             {'name': 'second', 'git_status': {'ref': 'main'}}])
         self.assertEqual(selected, ('none',))
-        self.assertEqual(options, ['none', 'rebuild second', 'reuse first'])
+        self.assertEqual(options, ['none', 'rebuild second', 'replace second', 'reuse first'])
 
     def test_existing_codespace_menu_never_defaults_to_create(self):
         cases = (
@@ -1430,7 +1525,7 @@ class WizardCliTests(unittest.TestCase):
             options, selected = self._existing_menu([
                 {'name': 'paired-space', 'git_status': {'ref': 'feat,x'}},
                 {'name': 'here', 'git_status': {'ref': 'main'}}])
-            self.assertEqual(options, ['none', 'reuse paired-space (paired; on feat,x)',
+            self.assertEqual(options, ['none', 'replace paired-space', 'reuse paired-space (paired; on feat,x)',
                                        'reuse here', 'create like last time'])
             self.assertEqual(selected, ('reuse here',))
             self.assertNotIn(',', selected[0])
@@ -1440,7 +1535,7 @@ class WizardCliTests(unittest.TestCase):
         options, selected = self._existing_menu([
             {'name': 'paired-space', 'git_status': {'ref': 'feature'}},
             {'name': 'here', 'git_status': {'ref': 'main'}}])
-        self.assertEqual(options, ['none', 'reuse paired-space (paired; on feature)',
+        self.assertEqual(options, ['none', 'replace paired-space', 'reuse paired-space (paired; on feature)',
                                    'reuse here', 'create like last time'])
         self.assertEqual(selected, ('reuse here',))
         self.assertNotIn(',', selected[0])
@@ -1812,6 +1907,42 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.assertIn('Publish: merge into main', seen['output'])
         self.assertIn('Codespace: none', seen['output'])
         self.assert_nothing_left()
+
+    def _replace_after_publishing(self, ending):
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard, replacement
+        if ending == 'open-pr':
+            self.decline_merge()
+        elif ending == 'already-published':
+            self._publish_without_codespace(saved_ssh=True)
+        start = len(self.gh()['calls'])
+        def coordinate(project):
+            self.assertEqual(project, self.root)
+            self.assertEqual(self.git('rev-parse', 'HEAD'), self.origin_git('rev-parse', 'main'))
+            self.assertFalse(any(pr['state'] == 'open' for pr in self.gh()['prs']))
+            return 19
+        with patch.object(wizard, '_launch_options', return_value={'action': 'replace', 'name': 'paired'}), \
+                patch.object(wizard, '_resolve_launch', return_value={'action': 'replace', 'name': 'paired'}), \
+                patch.object(wizard, 'setup_continuity') as continuity, \
+                patch.object(wizard.Codespaces, 'launch', Mock(return_value=None)) as launch, \
+                patch.object(replacement, 'run', side_effect=coordinate) as run:
+            seen = self.interact(dict(self.SPLIT_NONE, **{self.SPLIT_MERGE: True}))
+        run.assert_called_once_with(self.root)
+        self.assertEqual(seen['result'], 19)
+        launch.assert_not_called()
+        continuity.assert_not_called()
+        calls = self.gh()['calls'][start:]
+        self.assertFalse(any(call['args'][:2] == ['codespace', 'create'] for call in calls))
+        self.assert_nothing_left()
+
+    def test_choosing_replace_runs_the_coordinator_after_publishing(self):
+        self._replace_after_publishing('normal')
+
+    def test_choosing_replace_runs_the_coordinator_after_the_open_pr_merge(self):
+        self._replace_after_publishing('open-pr')
+
+    def test_choosing_replace_runs_the_coordinator_when_already_published(self):
+        self._replace_after_publishing('already-published')
 
     def test_open_pr_path_asks_two_questions(self):
         start = self.decline_merge()

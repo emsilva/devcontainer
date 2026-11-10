@@ -104,6 +104,36 @@ class StandingTests(unittest.TestCase):
         return {str(p.relative_to(self.base)): hashlib.sha256(p.read_bytes()).hexdigest()
                 for p in self.base.rglob('*') if p.is_file()}
 
+    def test_active_replace_is_read_offline(self):
+        from tests.test_replacing import journal
+        from devcontainer_setup.project_sync import replacing
+        self.assertTrue(hasattr(self.read(), 'replacing'), 'Local needs the offline replacing fact')
+        value = journal(repository='EXample/PRoject')
+        self.write('replace.json', value)
+        # Hold the actual coordinator lock: observational readers must still finish.
+        with state.locked(self.state / replacing.LOCK):
+            before = self.snapshot()
+            local = self.read()
+            self.assertEqual(local.replacing, {'old': 'old-space', 'new': 'new-space', 'phase': 'ready'})
+            self.assertEqual(self.snapshot(), before)
+        for name in ('old-space', 'new-space'):
+            for phase in ('deleted', 'cleaned'):
+                with self.subTest(name=name, phase=phase):
+                    self.deletion(name, phase, 1001)
+                    before = self.snapshot()
+                    self.assertIsNone(self.read().replacing)
+                    self.assertEqual(self.snapshot(), before)
+                    (self.state / 'deletions' / (name + '.json')).unlink()
+        for ended in replacing.ENDED:
+            self.write('replace.json', dict(value, ended=ended, ended_at=1001))
+            self.assertIsNone(self.read().replacing)
+        self.write('replace.json', dict(value, repository='other/project'))
+        self.assertIsNone(self.read().replacing)
+        self.assertIn('The replace record belongs to another project', self.read().problems)
+        state.atomic_write(self.state / 'replace.json', b'{')
+        self.assertIsNone(self.read().replacing)
+        self.assertIn('The replace record cannot be read', self.read().problems)
+
     def retired(self, name, at):
         self.write('retired/' + name + '.json', dict(
             schema=1, codespace=name, identity=self.project.identity, repository='example/project',
