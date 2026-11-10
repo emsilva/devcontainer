@@ -424,6 +424,20 @@ class ReplacementTests(unittest.TestCase):
         self.assertEqual(self.creates(), [])
         self.assertFalse(any(row[1:3] == ['codespace', 'rebuild'] for row in self.api.gh.calls))
 
+    def test_malformed_connected_accounts_keeps_create_requested_without_a_choice(self):
+        before = self.active()
+        self.save('accounts.json', {'schema': 1, 'codespaces': []})
+        self.ui.answers = ['abandon']
+        self.assertEqual(self.run_replace(), 1)
+        self.assertIn('The connected Codespace accounts cannot be read', self.output.getvalue())
+        self.assertEqual(replacing.read(self.state), before)
+        self.assertFalse(self.ui.calls)
+        self.assertFalse(self.prompts)
+        self.assertFalse(self.api.launches)
+        self.assertEqual(self.creates(), [])
+        self.assertFalse(self.steps)
+        self.assertFalse(self.archives())
+
     def test_lost_reply_adopts_before_offering_abandon(self):
         self.active()
         self.api.rows.append(self.api.row())

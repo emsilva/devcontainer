@@ -189,8 +189,8 @@ several candidates or unreadable candidates require a choice. If none appears
 during the two-minute recheck, `continue` leads to the typed `create` that alone
 allows another create request.
 
-A rerun with the old Codespace still paired records a fresh final flush, unless it
-is finishing publication of a partial move. If OLD changes while the flush is
+A rerun with the old Codespace still paired always records a fresh final flush
+first, even after a failed or partial move. If OLD changes while the flush is
 recorded, it prints `OLD changed while its final flush was recorded; nothing moved.`
 When sync is paused and OLD remains paired, it prints
 `Sync with OLD is paused. Run the replace again, or task work:cs to resume it.`

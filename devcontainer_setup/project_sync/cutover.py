@@ -19,20 +19,6 @@ def _binding(state):
         return {}
 
 
-def _pending_move(state, new):
-    for filename, key in (('scratch-retarget.json', 'candidate'), ('recovery-move.json', 'new'),
-                          ('workspace-pending.json', 'codespace')):
-        try:
-            value = read_json(state / filename).get(key)
-        except FileNotFoundError:
-            continue
-        if key == 'candidate':
-            value = value.get('codespace') if isinstance(value, dict) else None
-        if value == new:
-            return True
-    return False
-
-
 def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tty=None,
         api_factory=lifecycle.LifecycleAPI, connect=transport.CodespaceConnection,
         now=time.time, sleep=time.sleep) -> int:
@@ -112,15 +98,7 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
                     moved_line()
                     return 0
                 return 1
-            elif _binding(state).get('codespace') == old:
-                if _pending_move(state, new):
-                    decision = move.decide(project, state, new, ask=ask)
-                    remote(rebind=new, move=decision, armed=recovery if decision is not None else armed, expected_old=old)
-                    if moved():
-                        moved_line()
-                        return 0
-                    return 1
-            else:
+            if _binding(state).get('codespace') != old:
                 raise ValueError(f'{old} is no longer the paired Codespace; nothing moved.')
 
         binding = _binding(state)

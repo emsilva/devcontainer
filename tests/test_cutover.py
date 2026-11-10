@@ -70,6 +70,7 @@ class CutoverTests(unittest.TestCase):
         self.status = self.stack.enter_context(patch.object(scratch, 'status', side_effect=lambda *_: dict(self.runtime)))
         self.stop = self.stack.enter_context(patch.object(scratch, 'stop', side_effect=self.stop_old))
         self.decide = self.stack.enter_context(patch.object(move, 'decide', side_effect=self.decide_move))
+        self.actual_finish = move.finish_pending
         self.finish = self.stack.enter_context(patch.object(move, 'finish_pending', side_effect=lambda *_: self.order.append('finish')))
         self.scanner = self.stack.enter_context(patch.object(target_scan, 'scan', side_effect=self.scan_old))
         self.gather = self.stack.enter_context(patch.object(self.c.deletion, 'gather', side_effect=self.gather_old))
@@ -134,6 +135,122 @@ class CutoverTests(unittest.TestCase):
                                  hashlib.sha256(raw).hexdigest(), ())
         self.decide.side_effect = lambda *a, **k: self.order.append('decide') or decision
         return decision
+
+    def real_move(self, verify=None):
+        """Keep publication real; fake remote IO and detached worker/keeper starts."""
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        self.finish.side_effect = lambda *a: self.order.append('finish') or self.actual_finish(*a)
+        self.remote.side_effect = lambda *a, **k: self.order.append('remote') or self.actual_remote(*a, **k)
+        def choose(project, state, value, rebind=None, **options):
+            return rebind or read_json(self.state / 'scratch.json')['codespace'], '/workspaces/project'
+        def start(*args):
+            self.order.append('start:' + read_json(self.state / 'scratch.json')['codespace'])
+            self.runtime.update(running=True, phase='syncing', runtime_id=scratch._runtime_id(),
+                                checkpoint_version=sync_cycle.SCHEMA, heartbeat_at=time.time())
+        for item in (patch.object(workspace, '_prerequisites'),
+                     patch.object(workspace, '_project', return_value=self.project),
+                     patch.object(workspace, '_choose_pairing', side_effect=choose),
+                     patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection),
+                     patch.object(workspace, '_verify_roots', return_value=[]),
+                     patch.object(workspace, '_remote_herdr', return_value='herdr fixture'),
+                     patch.object(workspace, '_remember_account'),
+                     patch.object(scratch, 'discover_project', return_value=self.project),
+                     patch.object(scratch, '_verify_destination', side_effect=verify),
+                     patch.object(scratch, 'start', side_effect=start),
+                     patch.object(workspace, '_ready', return_value={}),
+                     patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'),
+                     patch('devcontainer_setup.project_sync.restore.end_proxies_elsewhere', return_value=[]),
+                     patch('devcontainer_setup.project_sync.herdr.open_remote', return_value=0),
+                     patch('devcontainer_setup.project_sync.keeper.stop', side_effect=lambda *_: self.order.append('keeper-stop'))):
+            stack.enter_context(item)
+        return stack
+
+    def assert_failed_move_flushes_again(self, *, armed=False, retarget_intent=False, worker_current=False):
+        if armed:
+            self.arm()
+        actual_write = scratch._write
+        def fail_after_intent(path, value):
+            actual_write(path, value)
+            if path == self.state / 'scratch-retarget.json':
+                raise ValueError('fixture failed after retarget intent')
+        verify = None if retarget_intent else Mock(side_effect=ValueError('fixture NEW unreachable'))
+        with self.real_move(verify), patch.object(scratch, '_write', side_effect=fail_after_intent):
+            code, out = self.run_cutover()
+        self.assertEqual(code, 1, out)
+        self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'old-space')
+        self.assertEqual(read_json(self.state / workspace.PENDING)['codespace'], 'new-space')
+        self.assertEqual((self.state / move.INTENT).exists(), armed)
+        self.assertEqual((self.state / 'scratch-retarget.json').exists(), retarget_intent)
+        self.assertEqual('keeper-stop' in self.order, armed)
+        self.assertFalse(self.runtime['running'])
+        self.assertEqual(seal.read(self.state, 'old-space').sealed_at, self.clock)
+        replacing.write(self.state, dict(self.journal, moving=self.clock))
+
+        # OLD can acquire new work after any failed move, including after scratch:start.
+        self.runtime.update(running=worker_current, phase='syncing' if worker_current else 'stopped')
+        self.clock += 86400
+        self.scan = replace(self.scan, at=self.clock, scratch=(('notes/late.md', 'f' * 64),))
+        self.evidence = replace(self.evidence, scan=self.scan, mac_scratch=self.scan.scratch)
+        scans = iter((replace(self.scan, agents=(('claude', 1),)), self.scan, self.scan))
+        def scan(*args, **kwargs):
+            self.order.append('scan')
+            return next(scans)
+        self.scanner.side_effect = scan
+        self.ask.side_effect = lambda _: self.order.append('ask') or ''
+        self.recovery.side_effect = lambda *_: self.order.append('recovery:' + arming.read(self.state)['codespace'])
+        self.order.clear()
+        self.api.calls.clear()
+        for leaf in (self.factory, self.scanner, self.gather, self.sealer, self.ask, self.remote, self.recovery):
+            leaf.reset_mock()
+        with self.real_move():
+            code, out = self.run_cutover()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.api.calls, ['read'], 'rerun must read OLD Available once')
+        self.factory.assert_called_once_with('old-space', gh_user='octo')
+        self.assertEqual(self.scanner.call_count, 3)
+        self.ask.assert_called_once_with('> ')
+        self.assertIn('On old-space: claude (1) running.', out)
+        self.gather.assert_called_once()
+        self.sealer.assert_called_once()
+        self.assertEqual(seal.read(self.state, 'old-space').sealed_at, self.clock)
+        self.assertEqual(seal.read(self.state, 'old-space').scratch, self.scan.scratch)
+        self.assertLess(self.order.index('ask'), self.order.index('gather'))
+        if worker_current:
+            self.remote.assert_called_once()
+            self.assertNotIn('start:old-space', self.order)
+            self.assertEqual(self.remote.call_args.kwargs['rebind'], 'new-space')
+        else:
+            self.assertEqual(self.remote.call_count, 2)
+            self.assertEqual(self.remote.call_args_list[0].kwargs,
+                             dict(armed=self.recovery if armed else None, enter=False,
+                                  expected_old='old-space', start=False))
+            self.assertLess(self.order.index('start:old-space'), self.order.index('scan'))
+        if armed:
+            self.recovery.assert_any_call(self.project)
+            self.assertEqual(self.order.count('recovery:old-space'), 1)
+            self.assertLess(self.order.index('recovery:old-space'), self.order.index('scan'))
+            self.assertLess(self.order.index('recovery:old-space'), self.order.index('gather'))
+            self.assertEqual(self.order.count('recovery:new-space'), 1)
+        self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'new-space')
+        for name in ('scratch-retarget.json', move.INTENT, workspace.PENDING):
+            self.assertFalse((self.state / name).exists(), name)
+        receipt = read_json(self.receipt_path)
+        self.assertTrue(receipt['moved'])
+        self.assertEqual(receipt['sealed_at'], self.clock)
+        self.assertEqual(replacing.read(self.state)['moving'], 1000.0)
+
+    def test_unreachable_new_flushes_again_before_moving(self):
+        self.assert_failed_move_flushes_again()
+
+    def test_armed_failed_move_recovers_old_before_a_fresh_flush(self):
+        self.assert_failed_move_flushes_again(armed=True)
+
+    def test_failed_retarget_intent_flushes_again_before_moving(self):
+        self.assert_failed_move_flushes_again(retarget_intent=True)
+
+    def test_current_old_worker_flushes_again_under_a_pending_registry(self):
+        self.assert_failed_move_flushes_again(worker_current=True)
 
     def test_consent_is_decided_before_the_flush(self):
         decision = self.arm()
@@ -452,28 +569,45 @@ class CutoverTests(unittest.TestCase):
         self.assertEqual(replacing.read(self.state)['moving'], 999.0)
 
     def test_a_replayed_move_never_overwrites_a_third_pairing(self):
-        for when in ('before-replay', 'after-decide'):
+        actual_binding = self.c._binding
+        for when in ('before-replay', 'after-finish-race', 'ordinary-path', 'after-decide'):
             with self.subTest(when=when):
-                replacing.write(self.state, dict(self.journal, moving=999.0))
-                self.write(workspace.PENDING, dict(codespace='new-space'))
-                self.bind('other-space' if when == 'before-replay' else 'old-space')
+                replacing.write(self.state, dict(self.journal, moving=None if when == 'ordinary-path' else 999.0))
+                (self.state / workspace.PENDING).unlink(missing_ok=True)
+                if when != 'ordinary-path':
+                    self.write(workspace.PENDING, dict(codespace='new-space'))
+                self.bind('old-space' if when == 'after-decide' else 'other-space')
                 def decide(*args, **kwargs):
                     self.bind('other-space')
                     return None
                 self.decide.side_effect = decide
-                for leaf in (self.decide, self.remote):
+                for leaf in (self.finish, self.decide, self.remote, self.factory):
                     leaf.reset_mock()
-                code, out = self.run_cutover()
+                after_finish = 0
+                def binding(state):
+                    nonlocal after_finish
+                    value = actual_binding(state)
+                    if self.finish.called:
+                        after_finish += 1
+                        if when == 'after-finish-race' and after_finish == 2:
+                            # Even if another writer restores OLD immediately, the
+                            # third binding just observed must end this attempt.
+                            self.bind('old-space')
+                    return value
+                with patch.object(self.c, '_binding', side_effect=binding):
+                    code, out = self.run_cutover()
                 self.assertEqual(code, 1)
                 self.assertIn('old-space is no longer the paired Codespace; nothing moved.', out)
-                self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'other-space')
+                self.assertEqual(read_json(self.state / 'scratch.json')['codespace'],
+                                 'old-space' if when == 'after-finish-race' else 'other-space')
                 self.assertFalse(read_json(self.receipt_path)['moved'])
-                if when == 'before-replay':
+                self.remote.assert_not_called()
+                if when != 'after-decide':
                     self.decide.assert_not_called()
-                    self.remote.assert_not_called()
+                    self.factory.assert_not_called()
                 else:
                     self.decide.assert_called_once()
-                    self.remote.assert_called_once()
+                    self.factory.assert_called_once()
                 for leaf in (self.scanner, self.gather, self.sealer):
                     leaf.assert_not_called()
 
@@ -524,32 +658,26 @@ class CutoverTests(unittest.TestCase):
 
     def test_a_crash_inside_the_move_finishes_forward(self):
         self.arm()
-        for name, value in (('scratch.json', {'codespace': 'new-space'}),
-                            ('scratch-retarget.json', {'candidate': {'codespace': 'new-space'}}),
-                            ('recovery-move.json', {'new': 'new-space'}),
-                            ('workspace-pending.json', {'codespace': 'new-space'})):
-            with self.subTest(name=name):
-                self.bind('old-space')
-                seal.write(self.state, self.store, self.scan, evidence=self.evidence, identity=self.project.identity,
-                           repository='example/project', gh_user='octo', remote_root='/workspaces/project',
-                           operation=self.operation, cycle_id='final-cycle', snapshot_id=self.snapshot, now=self.clock)
-                self.sealer.reset_mock()
-                if name == 'scratch.json':
-                    self.bind('new-space')
-                else:
-                    self.write(name, value)
-                self.remote.reset_mock()
-                self.finish.reset_mock()
-                self.assertEqual(self.run_cutover()[0], 0)
-                self.finish.assert_called_once()
-                self.remote.assert_called_once()
-                self.assertIs(self.remote.call_args.kwargs['armed'], self.recovery)
-                self.assertIs(self.remote.call_args.kwargs['enter'], False)
-                for leaf in (self.scanner, self.gather, self.sealer, self.factory):
-                    leaf.assert_not_called()
-                self.assertTrue(read_json(self.receipt_path)['moved'])
-                if name != 'scratch.json':
-                    (self.state / name).unlink()
+        seal.write(self.state, self.store, self.scan, evidence=self.evidence, identity=self.project.identity,
+                   repository='example/project', gh_user='octo', remote_root='/workspaces/project',
+                   operation=self.operation, cycle_id='final-cycle', snapshot_id=self.snapshot, now=self.clock)
+        self.sealer.reset_mock()
+        self.bind('new-space')
+        self.assertEqual(self.run_cutover()[0], 0)
+        self.finish.assert_called_once()
+        self.remote.assert_called_once()
+        self.assertIs(self.remote.call_args.kwargs['armed'], self.recovery)
+        self.assertIs(self.remote.call_args.kwargs['enter'], False)
+        for leaf in (self.scanner, self.gather, self.sealer, self.factory):
+            leaf.assert_not_called()
+        self.assertTrue(read_json(self.receipt_path)['moved'])
+
+    def test_a_finished_move_never_prints_the_paused_line(self):
+        code, out = self.run_cutover()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'new-space')
+        self.assertTrue(read_json(self.receipt_path)['moved'])
+        self.assertNotIn('Sync with old-space is paused.', out)
 
     def test_receipt_names_the_seal_and_herdr_result(self):
         for failure in (7, ValueError('Herdr workspace failed')):
