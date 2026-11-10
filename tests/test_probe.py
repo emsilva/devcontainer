@@ -384,27 +384,28 @@ class ProbeTests(unittest.TestCase):
         return source
 
     def test_upstream_tip_matches_fetch_release(self):
+        # Check what is read; 2 s/reaping: test_all_reads_finish_inside_the_deadline, test_grandchild_is_gone_after_the_deadline, test_cancel_kills_and_reaps.
         source = self.local_repository()
         for ref in ('main', 'annotated', 'lightweight', 'refs/heads/main', 'refs/tags/annotated'):
             with self.subTest(ref=ref), patch.dict(os.environ, self.env, clear=True):
                 expected = fetch_release(str(source), ref, cache=self.root / 'release-cache')[1]
                 self.specfile.write_text(json.dumps(self.spec))
                 before = snapshot(self.root)
-                remote = self.start(generator=(str(source), ref)).join()
+                remote = self.start(generator=(str(source), ref), deadline=30.0).join()
                 after = snapshot(self.root)
                 # Only the fake's call receipt and unchanged test fixture may be touched.
                 for path in ('calls.jsonl', 'fixture.json'):
                     before.pop(path, None); after.pop(path, None)
                 self.assertEqual(after, before)
                 self.assertEqual((remote.upstream.status, remote.upstream.value), ('ok', expected))
-        self.assertEqual(self.start(generator=(str(source), 'missing')).join().upstream.status, 'failed')
+        self.assertEqual(self.start(generator=(str(source), 'missing'), deadline=30.0).join().upstream.status, 'failed')
         for ref in ('a' * 40, 'A' * 40):
             calls = len(self.calls_read())
-            observation = self.start(generator=(str(source), ref), want_prs=False).join().upstream
+            observation = self.start(generator=(str(source), ref), want_prs=False, deadline=30.0).join().upstream
             self.assertEqual((observation.status, observation.reason), ('unknown', 'pinned'))
             self.assertFalse(any(call['tool'] == 'git' for call in self.calls_read()[calls:]))
         with chdir(self.root):
-            self.assertEqual(self.start(generator=('source', 'main')).join().upstream.status, 'ok')
+            self.assertEqual(self.start(generator=('source', 'main'), deadline=30.0).join().upstream.status, 'ok')
         self.assertFalse((self.root / 'helper-calls').exists())
 
     def test_no_token_is_failed_without_api_calls(self):
