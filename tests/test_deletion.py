@@ -282,6 +282,44 @@ class DeletionTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(output.strip(), "space is not among octo's Codespaces on GitHub.")
 
+    def test_unknown_owner_cleanup_never_becomes_proof_of_deletion(self):
+        self.api.states = ['Deleted']
+        code, output, _ = self.run_delete()
+        self.assertEqual(code, 0, output)
+        journal = read_json(self.state / 'deletions/space.json')
+        self.assertIs(journal.get('owner_checked'), False)
+        at = self.d.overview._when(journal['at']['cleaned'], self.clock)
+        expected = ("space was not among octo's Codespaces on GitHub; this Mac's copies were removed at "
+                    + at + '. Nothing is left to clean up.')
+        for login in ('octo', 'other'):
+            self.mocks['arming.account'].return_value = login
+            code, output, _ = self.run_delete(name='space', as_json=True)
+            self.assertEqual(code, 0, output)
+            result = json.loads(output)
+            self.assertEqual(result['outcome'], 'cleaned')
+            self.assertEqual(result['message'], expected)
+            code, output, _ = self.run_delete(name='space')
+            self.assertEqual(code, 0, output)
+            self.assertNotIn('was deleted', output)
+            self.assertNotIn('was paired as', output)
+            code, output, _ = self.run_delete(name='space', start=True, as_json=True)
+            self.assertEqual(code, 1, output)
+            self.assertEqual(json.loads(output)['message'],
+                             "space was not among octo's Codespaces on GitHub; nothing was started.")
+
+    def test_known_owner_delete_records_checked_ownership(self):
+        self.write(self.state / 'accounts.json', {'schema': 1, 'codespaces': {'space': 'octo'}})
+        code, output, _ = self.run_delete()
+        self.assertEqual(code, 0, output)
+        self.assertIs(read_json(self.state / 'deletions/space.json').get('owner_checked'), True)
+
+    def test_delete_journal_rejects_non_boolean_owner_checked(self):
+        for value in (None, 0, 1, 'false', []):
+            with self.subTest(value=value):
+                self.journal(owner_checked=value)
+                with self.assertRaisesRegex(ValueError, 'delete journal cannot be read'):
+                    self.d._journal(self.state, 'space')
+
     def test_scratch_uses_the_synchronized_binding_root(self):
         synced_root = self.base / 'primary'
         (synced_root / '.scratch').mkdir(parents=True)

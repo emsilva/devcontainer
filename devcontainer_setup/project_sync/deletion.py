@@ -126,6 +126,7 @@ def _journal(state, name):
                 or value['kind'] not in STEPS or not isinstance(value['account'], str)
                 or not isinstance(value['repository'], str) or not isinstance(value['at'], dict)
                 or not isinstance(value['cleanup'], dict)
+                or type(value.get('owner_checked', True)) is not bool
                 or not re.fullmatch('[0-9a-f]{64}', value['fingerprint'])):
             raise ValueError
         if any(key not in PHASES or type(stamp) not in (int, float) or not math.isfinite(stamp)
@@ -153,10 +154,10 @@ def _save(state, journal, now, phase=None):
     journal.update(value)
 
 
-def _new_journal(target, account, repository, fingerprint):
+def _new_journal(target, account, repository, fingerprint, *, owner_checked=True):
     return dict(schema=1, codespace=target.name, kind=target.kind, account=account, repository=repository,
                 fingerprint=fingerprint, phase='confirmed', at={},
-                archive=str(target.archive) if target.archive else None, cleanup={})
+                archive=str(target.archive) if target.archive else None, cleanup={}, owner_checked=owner_checked)
 
 
 def _archive(project, state, name):
@@ -348,7 +349,8 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
                 return result('refused', f"{target.name}'s delete was started as {journal['account']} for "
                               f"{journal['repository']}; switch to that account and repository, then try again.")
             armed = arming.read(state)
-            owner = (journal['account'] if journal else None) or workspace.accounts(state).get(target.name) or \
+            owner = (journal['account'] if journal and journal.get('owner_checked', True) else None) or \
+                    workspace.accounts(state).get(target.name) or \
                     (armed.get('gh_user') if armed.get('codespace') == target.name else None) or \
                     (target.seal.gh_user if target.seal else None)
             if owner is not None and owner != account:
@@ -356,8 +358,15 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
                               'Switch with gh auth switch, then run the delete again.')
             if journal and journal['phase'] in ('deleted', 'cleaned'):
                 if start:
+                    if not journal.get('owner_checked', True):
+                        return result('refused', f"{target.name} was not among {journal['account']}'s Codespaces "
+                                      'on GitHub; nothing was started.')
                     return result('refused', target.name + ' was deleted.')
                 if journal['phase'] == 'cleaned':
+                    if not journal.get('owner_checked', True):
+                        at = overview._when(journal['at']['cleaned'], now())
+                        return result('cleaned', f"{target.name} was not among {journal['account']}'s Codespaces "
+                                      f"on GitHub; this Mac's copies were removed at {at}. Nothing is left to clean up.", 0)
                     at = overview._when(journal['at'].get('deleted', journal['at']['cleaned']), now())
                     return result('cleaned', f'{target.name} was deleted at {at}; nothing is left to clean up.', 0)
                 if check or not terminal():
@@ -402,7 +411,7 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
                     if not consent():
                         say('Nothing was deleted.')
                         return 1
-                    journal = _new_journal(target, account, repository, '0' * 64)
+                    journal = _new_journal(target, account, repository, '0' * 64, owner_checked=owner is not None)
                 _save(state, journal, now, 'deleted')
                 return finish_cleanup()
             if target.kind == 'unpaired':
