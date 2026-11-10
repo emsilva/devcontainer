@@ -108,7 +108,8 @@ def _retire_digest(data):
 def _retired_registry(project, data):
     value = json.loads(data)
     if (not isinstance(value, dict) or value.get('schema') != 1 or value.get('project_id') != project.project_id
-            or value.get('identity') != project.identity or value.get('local_root') != str(project.root)):
+            or value.get('identity') != project.identity
+            or str(project.root) not in (value.get('local_root'), value.get('local_active_root'))):
         raise ValueError('the pairing changed since the delete began')
     for key in ('codespace', 'remote_root', 'remote_active_root', 'verified_remote_historical_roots'):
         value.pop(key, None)

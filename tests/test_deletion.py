@@ -298,6 +298,65 @@ class DeletionTests(unittest.TestCase):
         self.mocks['scratch.inspect_sync'].assert_called_with(synced_root, self.state)
         self.assertEqual(self.mutations(), [])
 
+    def test_another_checkout_is_refused_before_api_or_cleanup(self):
+        other = self.root / '.claude/worktrees/feature'
+        other.mkdir(parents=True)
+        self.project = replace(self.project, root=other)
+        for state, journal in (('Available', False), ('Deleted', False), ('Deleted', True)):
+            with self.subTest(state=state, journal=journal):
+                self.api.states, self.api.calls = [state], []
+                self.factory.reset_mock()
+                for leaf in self.mocks.values():
+                    leaf.reset_mock()
+                if journal:
+                    self.journal()
+                code, output, _ = self.run_delete(check=state == 'Available', as_json=True)
+                self.assertEqual(code, 1)
+                row = json.loads(output)
+                self.assertEqual(row['outcome'], 'refused')
+                self.assertEqual(row['message'], 'Another checkout already owns this project pairing; '
+                                 'use its task work:cs entrypoint')
+                self.factory.assert_not_called()
+                self.assertEqual(self.api.calls, [])
+                self.assertEqual(self.mutations(), [])
+
+    def active_checkout(self):
+        primary = self.base / 'primary'
+        (primary / '.scratch').mkdir(parents=True)
+        binding = read_json(self.state / 'scratch.json')
+        self.write(self.state / 'scratch.json', dict(binding, root=str(primary)))
+        registry = read_json(self.state / 'workspace.json')
+        self.write(self.state / 'workspace.json', dict(registry, local_root=str(primary),
+                                                      local_active_root=str(self.root)))
+        original = self.current_cycle
+        def cycle(*args):
+            value, current = original(*args)
+            return dict(value, local_root=str(primary)), current
+        return primary, patch.object(self, 'current_cycle', side_effect=cycle)
+
+    def test_active_checkout_can_finish_a_delete(self):
+        primary, cycle = self.active_checkout()
+        with cycle:
+            code, output, _ = self.run_delete()
+        self.assertEqual(code, 0, output)
+        registry = read_json(self.state / 'workspace.json')
+        self.assertEqual((registry['local_root'], registry['local_active_root']), (str(primary), str(self.root)))
+        self.assertEqual(read_json(self.state / 'deletions/space.json')['phase'], 'cleaned')
+
+    def test_active_checkout_can_resume_pending_cleanup(self):
+        _, cycle = self.active_checkout()
+        self.mocks['restore.end_target_proxies'].side_effect = ValueError('a Herdr connection to space is still open')
+        with cycle:
+            code, output, _ = self.run_delete()
+        self.assertEqual(code, 1, output)
+        self.assertEqual(read_json(self.state / 'deletions/space.json')['cleanup']['pairing'], 'done')
+        self.mocks['restore.end_target_proxies'].side_effect = None
+        self.factory.reset_mock()
+        code, output, _ = self.run_delete(name='space')
+        self.assertEqual(code, 0, output)
+        self.factory.assert_not_called()
+        self.assertEqual(read_json(self.state / 'deletions/space.json')['phase'], 'cleaned')
+
     def test_a_paired_scan_must_compare_the_bracketing_manifests_cutoffs(self):
         self.api.states = ['Available']
         expected = 'Unknown: sync has not finished a cycle since the check began; check again in a minute'

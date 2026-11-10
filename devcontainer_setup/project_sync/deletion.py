@@ -333,6 +333,10 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
                 return result('refused', f'Unset {key} before deleting a Codespace; it must use a real gh account.')
         with locked(state / 'delete.lock'):
             have_delete_lock = True
+            try:
+                workspace.registry(project, state)
+            except ValueError as error:
+                return result('refused', str(error))
             account = arming.account(env)
             if codespace is None and not _optional(state / scratch.CONFIG):
                 return result('refused', 'No Codespace is paired. Name one: ' +
