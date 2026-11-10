@@ -11,7 +11,7 @@ import re
 
 from . import state as project_state, target_scan
 from .replication import validate_manifest
-from .transport import _name
+from .transport import _login, _name
 
 
 @dataclass(frozen=True)
@@ -86,8 +86,10 @@ def _decode(state, codespace, value):
             continue
         if current.get('identity') != identity:
             raise ValueError('Final-flush project differs')
-    if not re.fullmatch('[A-Za-z0-9-]+', _text(value['gh_user'])):
-        raise ValueError('Invalid final-flush account')
+    try:
+        _login(_text(value['gh_user']))
+    except ValueError:
+        raise ValueError('Invalid final-flush account') from None
     _path(value['remote_root'], absolute=True)
     _text(value['operation'])
     _text(value['cycle_id'])

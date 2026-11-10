@@ -30,6 +30,12 @@ def _name(name):
     return name
 
 
+def _login(value) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9-]+(?:_[A-Za-z0-9]+)?', value):
+        raise ValueError('Invalid GitHub login.')
+    return value
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None

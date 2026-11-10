@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 
 from .state import atomic_write, read_json
-from .transport import _name
+from .transport import _login as _github_login, _name
 
 
 JOURNAL = 'replace.json'
@@ -41,8 +41,10 @@ def _epoch(value):
 
 
 def _login(value):
-    if not re.fullmatch('[A-Za-z0-9-]+', _text(value)):
-        raise ValueError(_ERROR)
+    try:
+        return _github_login(value)
+    except ValueError:
+        raise ValueError(_ERROR) from None
 
 
 def _validate(value):

@@ -1,8 +1,13 @@
 """Consumer generation and real Taskfile surface for project continuity."""
+from contextlib import chdir
 import hashlib
 import json
+import os
 from pathlib import Path
+import shlex
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -30,6 +35,107 @@ class ContinuityIntegrationTests(unittest.TestCase):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
+
+    def test_replace_steps_run_the_vendored_runtime(self):
+        from devcontainer_setup import replacement
+        from devcontainer_setup.project_sync.state import discover_project, runtime_id, state_dir
+        from tests.test_replacing import journal
+
+        self.install(render(self.root, SOURCE, self.selection, REF))
+        for args in (('init', '--quiet', '-b', 'main'),
+                     ('remote', 'add', 'origin', 'https://github.com/owner/project.git')):
+            subprocess.run(['git', '-C', str(self.root), *args], check=True, capture_output=True)
+        project = discover_project(self.root)
+        outside = self.root.parent / 'outside'
+        outside.mkdir()
+        hostile = self.root.parent / 'hostile'
+        (hostile / 'project_sync').mkdir(parents=True)
+        marker = self.root.parent / 'hostile-imported'
+        poison = ('from pathlib import Path; Path(' + repr(str(marker)) + ').touch(); '
+                  'raise RuntimeError("ambient import was used")\n')
+        for path in (hostile / 'sitecustomize.py', hostile / 'project_sync/__init__.py',
+                     self.root / 'json.py', outside / 'json.py'):
+            path.write_text(poison)
+        tools = self.root.parent / 'fake-bin'
+        tools.mkdir()
+        forbidden = self.root.parent / 'forbidden-command'
+        real_git = shutil.which('git')
+        allowed = [['-C', str(self.root), 'rev-parse', '--show-toplevel'],
+                   ['-C', str(self.root), 'remote', 'get-url', 'origin']]
+        git = tools / 'git'
+        git.write_text(f'#!{sys.executable} -I\nimport os,sys\nfrom pathlib import Path\n'
+                       f'if sys.argv[1:] not in {allowed!r}:\n'
+                       f' Path({str(forbidden)!r}).write_text("git"); sys.exit(99)\n'
+                       f'os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n')
+        git.chmod(0o700)
+        for name in ('gh', 'ssh', 'herdr'):
+            tool = tools / name
+            tool.write_text(f'#!{sys.executable} -I\nfrom pathlib import Path\n'
+                            f'Path({str(forbidden)!r}).write_text({name!r})\nraise SystemExit(99)\n')
+            tool.chmod(0o700)
+        env = dict(PATH=str(tools) + os.pathsep + os.environ.get('PATH', ''),
+                   HOME=str(self.root.parent / 'home'), XDG_STATE_HOME=str(self.root.parent / 'state'),
+                   XDG_CONFIG_HOME=str(self.root.parent / 'config'), XDG_CACHE_HOME=str(self.root.parent / 'cache'),
+                   PYTHONPATH=str(hostile))
+        state = state_dir(project, env)
+        captured = []
+
+        class CommandBuilt(Exception):
+            pass
+
+        def capture(argv, **kwargs):
+            captured.append((argv, kwargs))
+            raise CommandBuilt
+
+        coordinator = replacement._Coordinator(self.root, state, project, api=None, ui=None,
+            ask=lambda prompt: self.fail('unexpected prompt'), env=env, runner=capture,
+            now=lambda: 0, sleep=lambda seconds: None)
+        coordinator.journal = journal(operation='ffffffffffff', phase='signed-in', at={'signed-in': 0.0})
+        with chdir(outside), self.assertRaises(CommandBuilt):
+            coordinator.check()
+        self.assertEqual(len(captured), 1)
+        argv, options = captured[0]
+        wrapper = self.root / '.devcontainer/scripts/project-sync.sh'
+        self.assertEqual(argv[:4], ['bash', str(wrapper), '--project', str(self.root)])
+        self.assertEqual(options, dict(cwd=self.root, env=env))
+        with chdir(outside):
+            result = subprocess.run(argv, **options, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('This replace record does not match; run the replace again.', result.stdout)
+        self.assertEqual(result.stderr, '')
+        self.assertFalse(Path(argv[argv.index('--receipt') + 1]).exists())
+
+        # Reuse the rendered wrapper's interpreter flags and bootstrap path setup.
+        command = wrapper.read_text().split('exec ', 1)[1].replace('\\\n', '')
+        python = shlex.split(command)
+        code_index = python.index('-c') + 1
+        prefix, separator, _ = python[code_index].rpartition(';')
+        self.assertTrue(separator)
+        setup_id = runtime_id()
+        probe = ('import json,time; from project_sync import state,workspace; '
+                 'identity=state.runtime_id(); '
+                 'worker=dict(running=True,phase="syncing",checkpoint_version=workspace.sync_cycle.SCHEMA,'
+                 'runtime_id=identity,heartbeat_at=time.time()); '
+                 'print(json.dumps(dict(bootstrap=identity,status=workspace.scratch._runtime_id(),'
+                 'current=workspace._current_worker(worker),'
+                 'setup_current=workspace._current_worker(dict(worker,runtime_id=' + repr(setup_id) + ')), '
+                 'module=workspace.__file__)))')
+        bootstrap = python[:code_index] + [prefix + '; ' + probe, str(wrapper.parent)]
+        identities = []
+        for cwd in (outside, self.root):
+            result = subprocess.run(bootstrap, cwd=cwd, env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, '')
+            identities.append(json.loads(result.stdout))
+        self.assertEqual(identities[0], identities[1])
+        identity = identities[0]
+        self.assertEqual(identity['bootstrap'], identity['status'])
+        self.assertNotEqual(identity['bootstrap'], setup_id)
+        self.assertTrue(identity['current'])
+        self.assertFalse(identity['setup_current'])
+        self.assertEqual(Path(identity['module']).parent, wrapper.parent / 'project_sync')
+        self.assertFalse(marker.exists())
+        self.assertFalse(forbidden.exists())
 
     def test_selected_continuity_packages_canonical_runtime_and_ssh(self):
         files = render(self.root, SOURCE, self.selection, REF)

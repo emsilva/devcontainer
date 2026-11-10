@@ -15,6 +15,7 @@ import time
 from urllib.parse import urlencode
 
 from .git_ops import SETUP_BRANCH
+from .project_sync.transport import _login
 
 RERUN = 'Merge it, then run task devcontainer:setup again to create the Codespace.'
 GH_TIMEOUT = 60  # seconds for each GitHub call while merging
@@ -155,10 +156,10 @@ class Codespaces:
         """The active gh account; setup never switches it."""
         data = self.command('api', 'user', json_output=True)
         login = data.get('login') if isinstance(data, dict) else None
-        # An enterprise managed user's login ends in _<shortcode>, such as mannu_kyndryl.
-        if not isinstance(login, str) or not re.fullmatch(r'[A-Za-z0-9-]+(?:_[A-Za-z0-9]+)?', login):
-            raise ValueError('GitHub returned no account name; check gh auth status.')
-        return login
+        try:
+            return _login(login)
+        except ValueError:
+            raise ValueError('GitHub returned no account name; check gh auth status.') from None
 
     def setup_prs(self, repo: str, base: str) -> list[dict]:
         """Open PRs into base from this repository's setup/devcontainer[-N] branches."""

@@ -14,7 +14,7 @@ import time
 from urllib.parse import urlencode
 
 from .lifecycle import parse_time
-from .transport import clean_env, _name
+from .transport import clean_env, _login, _name
 
 LIMIT = 2 * 1024 * 1024
 
@@ -247,8 +247,7 @@ class Probe:
                 obj = json.loads(text)
                 if child.key == 'account':
                     value = obj.get('login') if isinstance(obj, dict) else None
-                    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9-]+(?:_[A-Za-z0-9]+)?', value):
-                        raise ValueError('request failed')
+                    value = _login(value)
                 elif child.key == 'names':
                     names, spaces = _inventory(obj, self._request.repository)
                     at = time.time()
