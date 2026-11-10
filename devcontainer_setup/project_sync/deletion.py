@@ -266,7 +266,8 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
 
     def say(message):
         if not as_json:
-            print(overview.fit(message, max(78, len(message) * 2)))
+            for line in verdict.wrap(message):
+                print(line)
 
     def result(outcome, message, code=1, *, observed=None):
         value = observed or verdict.Verdict(target, now(), account, repository, (), (), None, None)
@@ -276,7 +277,7 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
                              cleanup=journal.get('cleanup') if journal else None), sort_keys=True))
         else:
             if observed:
-                for line in verdict.lines(observed, local):
+                for line in verdict.lines(observed, local, check=check):
                     print(line)
             if message:
                 say(message)

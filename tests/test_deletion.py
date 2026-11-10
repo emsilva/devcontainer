@@ -212,6 +212,14 @@ class DeletionTests(unittest.TestCase):
         self.assertEqual(self.mutations(), [])
         self.assertFalse((self.state / 'deletions').exists())
 
+    def test_human_check_names_the_delete_command_without_prompting(self):
+        code, output, ask = self.run_delete(check=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(output.splitlines()[-1], 'To delete it: task work:cs:delete -- --codespace space')
+        self.assertNotIn('Type delete', output)
+        ask.assert_not_called()
+        self.assertEqual(self.mutations(), [])
+
     def test_unreadable_parts_name_the_cause_in_either_scan(self):
         cases = (('git_complete', 'git', 'could not read every repository under /workspaces'),
                  ('scratch_complete', 'scratch', 'could not read .scratch on space'),
@@ -865,7 +873,7 @@ class DeletionTests(unittest.TestCase):
         for as_json in (False, True):
             code, output, _ = self.run_delete(check=True, as_json=as_json)
             self.assertEqual(code, 1)
-            message = json.loads(output)['message'] if as_json else output.strip()
+            message = json.loads(output)['message'] if as_json else ' '.join(output.split())
             self.assertEqual(message, 'No Codespace is paired. Name one: '
                              'task devcontainer:work:cs:delete -- --codespace NAME')
         self.factory.assert_not_called()

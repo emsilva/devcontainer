@@ -272,6 +272,8 @@ def _scratch(target, evidence, now):
         fine = 'unchanged since the final flush at ' + _when(target.seal.sealed_at, now)
     changed = tuple(path for path, digest in scan.scratch if (path, digest) not in saved)
     if changed:
+        if len(changed) == 1:
+            suffix = suffix.replace('differ from', 'differs from')
         return _category('Scratch', UNSAFE, _quantity(len(changed), 'file') + ' ' + suffix +
                          ' (' + _listed(changed) + ')', changed)
     return _category('Scratch', SAFE, fine + ' (' + _quantity(len(scan.scratch), 'file') + ')')
@@ -310,7 +312,8 @@ def _history(target, evidence, now):
     # health projection, not evidence of conversations still awaiting transfer.
     pending = inbound.get('counts', {}).get('pending', 0)
     if pending > 0:
-        return _category('History', UNSAFE, _quantity(pending, 'conversation') + ' have not reached this Mac yet')
+        return _category('History', UNSAFE, _quantity(pending, 'conversation') +
+                         (' has' if pending == 1 else ' have') + ' not reached this Mac yet')
     issues = row.get('capture_issues', [])
     if issues:
         return _category('History', UNSAFE, _quantity(len(issues), 'conversation') + ' could not be read on ' + target.name)
@@ -323,6 +326,8 @@ def _history(target, evidence, now):
         if keys:
             items = tuple(agent + ' ' + ids.get((agent, name), name) for agent, name in keys)
             suffix = '; resume each and let it finish, then check again' if keys is scan.tails else ''
+            if len(keys) == 1:
+                text = text.replace('differ from', 'differs from').replace('have a turn', 'has a turn')
             return _category('History', UNSAFE, _quantity(len(keys), 'conversation') + ' ' + text +
                              ' (' + _listed(items) + ')' + suffix, items)
     return _category('History', SAFE, 'nothing waiting to reach this Mac')
@@ -370,7 +375,42 @@ def kept_conversations(state, project, binding) -> tuple[tuple[str, str], ...]:
     return tuple(sorted({(row.agent, row.session_id) for row in refusals} | set(forget.forgotten(state))))
 
 
-def lines(verdict, local) -> list[str]:
+def wrap(message) -> list[str]:
+    """Keep all sanitized text, wrapping by terminal cells at its text column."""
+    message = _clean(message)
+    if overview.cells(message) <= 78:
+        return [message]
+    category = message.startswith(tuple(f'  {name:<8} ' for name in CATEGORIES))
+    prefix = message[:11] if category else ''
+    continuation = ' ' * (11 if category else 2)
+    result, line = [], prefix
+    for word in re.split(r'(?<! ) (?! )', message[len(prefix):]):
+        separator = ' ' if line != prefix else ''
+        if overview.cells(line + separator + word) <= 78:
+            line += separator + word
+            continue
+        if line != prefix:
+            result.append(line)
+        prefix = continuation
+        line = prefix
+        available = 78 - len(prefix)
+        while overview.cells(word) > available:
+            used, end = 0, 0
+            for index, char in enumerate(word):
+                size = overview.cells(char)
+                if used + size > available:
+                    break
+                used += size
+                end = index + 1
+            result.append(line + word[:end])
+            word = word[end:]
+        line += word
+    if line != prefix:
+        result.append(line)
+    return result
+
+
+def lines(verdict, local, *, check=False) -> list[str]:
     result = [f'Checked {verdict.target.name} at {_when(verdict.checked_at, verdict.checked_at)}:']
     for category in verdict.categories:
         text = category.text
@@ -383,10 +423,11 @@ def lines(verdict, local) -> list[str]:
     if verdict.action:
         result.append(verdict.action)
     if verdict.deletable:
-        result.append('Type delete to delete it.')
+        result.append('To delete it: ' + shlex.join(overview.task_command(local, 'work:cs:delete', '--',
+                      '--codespace', verdict.target.name)) if check else 'Type delete to delete it.')
     else:
         result.append('Nothing was deleted. Resolve the lines marked Not safe or Unknown, then check again.')
-    return [overview.fit(line) for line in result]
+    return [part for line in result for part in wrap(line)]
 
 
 def as_json(verdict, *, outcome='checked', message=None, phase=None, cleanup=None) -> dict:
