@@ -254,7 +254,7 @@ def _ordinary(root):
             and not any(ord(c) < 32 for c in root))
 
 
-def _choose_pairing(project, state, value, rebind=None, expect_owner=None):
+def _choose_pairing(project, state, value, rebind=None, expect_owner=None, start=True):
     from . import evidence
     from .codespaces import Codespaces, CodespaceNotFound
     from .terminal import Gum
@@ -296,6 +296,9 @@ def _choose_pairing(project, state, value, rebind=None, expect_owner=None):
             if not owner or owner != expect_owner:
                 raise ValueError(f'{name} changed billing owner since you confirmed; nothing moved.')
         if row.get('state') != 'Available':
+            if not start:
+                raise ValueError(f'{name} is {row.get("state") or "unknown"}. Start it with task work:cs:restart, '
+                                 'then run the replace again.')
             posted = service.start_codespace(name)
             if posted is not None:
                 evidence.record_start(state, name, posted, 'started')
@@ -311,6 +314,9 @@ def _choose_pairing(project, state, value, rebind=None, expect_owner=None):
         row = spaces[0] if len(spaces) == 1 else spaces[labels.index(Gum().choose('Codespace', labels))]
         name = row['name']
         if row.get('state') != 'Available':
+            if not start:
+                raise ValueError(f'{name} is {row.get("state") or "unknown"}. Start it with task work:cs:restart, '
+                                 'then run the replace again.')
             posted = service.start_codespace(name)
             if posted is not None:
                 evidence.record_start(state, name, posted, 'started')
@@ -417,7 +423,8 @@ def _remote_herdr(connection):
     return text if text == '' else version_line(text)
 
 
-def remote(project, state, armed=None, rebind=None, before_herdr=None, move=None):
+def remote(project, state, armed=None, rebind=None, before_herdr=None, move=None, *,
+           enter: bool = True, expected_old: str | None = None, start: bool = True):
     """Connect; run `armed(primary)` then `before_herdr(primary, name)` before Herdr, unlocked."""
     if os.environ.get('CODESPACES') == 'true':
         raise ValueError('Run task work:cs on your Mac to connect the project')
@@ -428,6 +435,20 @@ def remote(project, state, armed=None, rebind=None, before_herdr=None, move=None
     state = Path(state)
     with ExitStack() as locks:
         locks.enter_context(locked(state / 'workspace-control.lock', blocking=True))
+        if expected_old is not None:
+            try:
+                current = read_json(state / scratch.CONFIG)
+            except FileNotFoundError:
+                current = {}
+            if current.get('codespace') != expected_old:
+                raise ValueError(f'{expected_old} is no longer the paired Codespace; nothing moved.')
+        if rebind is not None and move is None and arming.read(state).get('armed'):
+            try:
+                current = read_json(state / scratch.CONFIG)
+            except FileNotFoundError:
+                current = {}
+            if current.get('codespace') != rebind:
+                raise ValueError(recovery_move.CHANGED)
         try:
             locks.enter_context(locked(state / 'signins.lock'))
         except BlockingIOError:
@@ -443,6 +464,8 @@ def remote(project, state, armed=None, rebind=None, before_herdr=None, move=None
         print('Connecting Codespace…', flush=True)
         # Selection/verification precedes any controller/binding changes.
         options = {'expect_owner': move.billable_owner} if move is not None else {}
+        if not start:
+            options['start'] = False
         name, remote_root = _choose_pairing(primary, state, value, rebind=rebind, **options)
         if move is not None and name != move.new:
             raise ValueError('The selected Codespace changed since you confirmed; nothing moved.')
@@ -525,7 +548,7 @@ def remote(project, state, armed=None, rebind=None, before_herdr=None, move=None
         env_files.ensure_on(name, state, primary.root, remote_root)
 
     return open_remote(primary, state, remote_root, remote_herdr=remote_herdr, prepared=prepared,
-                       expected_codespace=name)
+                       expected_codespace=name, enter=enter)
 
 
 def cycle_scope(project, value: dict, runtime: dict, sync: dict) -> tuple[dict, bool]:
