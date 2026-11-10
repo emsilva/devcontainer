@@ -42,6 +42,7 @@ class Evidence:
     sessions_by_file: tuple[tuple[str, str, str], ...]
     capture_loads: bool | None
     kept: tuple[tuple[str, str], ...]
+    incomplete: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -281,7 +282,7 @@ def _history(target, evidence, now):
     if target.kind == 'moved':
         return _category('History', UNKNOWN, 'moved with --rebind, so no final flush was recorded')
     if not scan.sessions_complete:
-        return _category('History', UNKNOWN, 'could not read conversations on ' + target.name)
+        return _category('History', UNKNOWN, 'could not read every conversation on ' + target.name)
     if target.kind == 'sealed':
         if target.seal is None:
             return _category('History', UNKNOWN, 'the final capture is no longer on this Mac')
@@ -339,9 +340,25 @@ def _agents(target, scan):
     return _category('Agents', SAFE, 'none running', server)
 
 
+def incomplete(scan) -> tuple[str, ...]:
+    flags = (scan.git_complete and all(repo.ok and all(tree.ok for tree in repo.worktrees)
+                                      for repo in scan.repositories),
+             scan.scratch_complete, scan.sessions_complete, scan.agents_complete)
+    return tuple(name for name, complete in zip(CATEGORIES, flags) if not complete)
+
+
 def judge(target, evidence, *, now) -> tuple[Category, ...]:
     if target.kind == 'unpaired':
         return unreachable(target, 'this Mac has never connected to ' + target.name + '; pair it first')
+    unreadable = set(evidence.incomplete) | set(incomplete(evidence.scan))
+    if unreadable:
+        reasons = ('could not read every repository under /workspaces',
+                   'could not read .scratch on ' + target.name,
+                   'could not read every conversation on ' + target.name,
+                   'could not read processes on ' + target.name)
+        return tuple(_category(name, UNKNOWN, reason if name in unreadable else
+                               'not judged until every part of ' + target.name + ' can be read')
+                     for name, reason in zip(CATEGORIES, reasons))
     if not evidence.steady:
         return unreachable(target, target.name + ' changed while it was being checked; check again when nothing is running on it')
     return (_git(evidence.scan, evidence.proofs), _scratch(target, evidence, now),

@@ -212,6 +212,26 @@ class DeletionTests(unittest.TestCase):
         self.assertEqual(self.mutations(), [])
         self.assertFalse((self.state / 'deletions').exists())
 
+    def test_unreadable_parts_name_the_cause_in_either_scan(self):
+        cases = (('git_complete', 'git', 'could not read every repository under /workspaces'),
+                 ('scratch_complete', 'scratch', 'could not read .scratch on space'),
+                 ('sessions_complete', 'history', 'could not read every conversation on space'),
+                 ('agents_complete', 'agents', 'could not read processes on space'))
+        for flag, category, reason in cases:
+            for first_only in (False, True):
+                with self.subTest(flag=flag, first_only=first_only):
+                    failed = replace(self.scan, **{flag: False})
+                    self.api.states = ['Available']
+                    self.mocks['target_scan.scan'].side_effect = [failed, self.scan if first_only else failed]
+                    code, output, _ = self.run_delete(check=True, as_json=True)
+                    self.assertEqual(code, 1)
+                    rows = json.loads(output)['categories']
+                    for row in rows:
+                        self.assertEqual(row['verdict'], 'unknown')
+                        expected = reason if row['name'] == category else 'not judged until every part of space can be read'
+                        self.assertEqual(row['text'], 'Unknown: ' + expected)
+                    self.assertEqual(self.mutations(), [])
+
     def test_recorded_owner_refuses_another_account_for_every_target_kind(self):
         self.mocks['arming.account'].return_value = 'other'
         self.write(self.state / 'accounts.json', {'schema': 1, 'codespaces': {'space': 'octo'}})

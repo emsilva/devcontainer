@@ -55,6 +55,7 @@ def gather(project, state, target, connection, *, now=time.time, sleep=time.slee
     first = target_scan.scan(connection, target.name, target.remote_root, now=now)
     finished = now()
     scan, steady = first, True
+    incomplete = ()
     cycle, receipt, sessions, capture_loads = None, None, (), None
     running, conflicts, mac = False, (), None
     binding = _optional(state / scratch.CONFIG)
@@ -96,7 +97,8 @@ def gather(project, state, target, connection, *, now=time.time, sleep=time.slee
                 cycle = None
             first_fingerprint = target_scan.fingerprint(first)
             steady = first_fingerprint is not None and first_fingerprint == target_scan.fingerprint(scan)
-            if steady or attempt:
+            incomplete = tuple(dict.fromkeys((*verdict.incomplete(first), *verdict.incomplete(scan))))
+            if incomplete or steady or attempt:
                 break
             outbound = (cycle or {}).get('directions', {}).get('desktop_to_codespace', {})
             publication = outbound.get('publication')
@@ -112,7 +114,7 @@ def gather(project, state, target, connection, *, now=time.time, sleep=time.slee
         except (OSError, ValueError):
             capture_loads = False
     return verdict.Evidence(scan, steady, pushed.prove(project, verdict.claims(scan)), mac, conflicts,
-                            running, cycle, receipt, sessions, capture_loads, kept)
+                            running, cycle, receipt, sessions, capture_loads, kept, incomplete=incomplete)
 
 
 def _journal(state, name):

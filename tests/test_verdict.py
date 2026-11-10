@@ -132,7 +132,7 @@ class VerdictTests(unittest.TestCase):
                          scan=replace(self.evidence.scan, repositories=(bad,)))).verdict, 'unknown')
         dirty = replace(repo.worktrees[0], changes=1, changed=('changed',))
         scan = replace(self.evidence.scan, git_complete=False, repositories=(replace(repo, worktrees=(dirty,)),))
-        self.assertEqual(self.judge('Git', replace(self.evidence, scan=scan)).verdict, 'unsafe')
+        self.assertEqual(self.judge('Git', replace(self.evidence, scan=scan)).verdict, 'unknown')
 
     def test_unsteady_evidence_is_unknown_everywhere(self):
         rows = self.v.judge(self.target, replace(self.evidence, steady=False), now=NOW)
