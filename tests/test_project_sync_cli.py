@@ -16,6 +16,41 @@ SOURCE = Path(__file__).resolve().parents[1]
 
 
 class DeleteCLITests(unittest.TestCase):
+    def test_replace_subcommand_options(self):
+        from types import ModuleType
+        from unittest.mock import Mock, patch
+        from devcontainer_setup import project_sync
+        from devcontainer_setup.project_sync import __main__ as cli
+        self.assertIn('replace', parser()._subparsers._group_actions[0].choices)
+        for step, options in (('cutover', dict(operation='012345abcdef', old='old-space', new='new-space', receipt='/receipt')),
+                              ('check', dict(operation='012345abcdef', receipt='/receipt'))):
+            argv = [item for key, value in options.items() for item in ('--' + key, value)]
+            for missing in options:
+                incomplete = [item for key, value in options.items() if key != missing for item in ('--' + key, value)]
+                with self.subTest(step=step, missing=missing), contextlib.redirect_stderr(io.StringIO()), \
+                        self.assertRaises(SystemExit) as caught:
+                    parser().parse_args(['replace', step, *incomplete])
+                self.assertEqual(caught.exception.code, 2)
+            standin = ModuleType('devcontainer_setup.project_sync.replace_check')
+            standin.run = Mock(return_value=0)
+            with patch.object(cli, 'discover_project') as project, patch.object(cli, 'state_dir') as state, \
+                    patch('devcontainer_setup.project_sync.cutover.run', return_value=0) as cutover, \
+                    patch.dict(sys.modules, {'devcontainer_setup.project_sync.replace_check': standin}), \
+                    patch.object(project_sync, 'replace_check', standin, create=True), \
+                    patch.object(cli, '_resume_recovery') as recovery, \
+                    patch('sys.stdin.isatty', return_value=False), patch('sys.stdout.isatty', return_value=False):
+                self.assertEqual(cli.run(parser().parse_args(['replace', step, *argv])), 0)
+                run = cutover if step == 'cutover' else standin.run
+                call = run.call_args
+                self.assertEqual(call.args, (project.return_value, state.return_value))
+                expected = {key: Path(value) if key == 'receipt' else value for key, value in options.items()}
+                if step == 'cutover':
+                    callback = call.kwargs['recovery']
+                    callback(project.return_value)
+                    recovery.assert_called_once_with(project.return_value, state.return_value)
+                    expected['recovery'] = callback
+                self.assertEqual(call.kwargs, expected)
+
     def test_delete_subcommand_options(self):
         from unittest.mock import patch
         from devcontainer_setup.project_sync import __main__ as cli
