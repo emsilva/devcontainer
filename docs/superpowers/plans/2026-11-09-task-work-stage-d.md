@@ -29,10 +29,13 @@ Anti-goals, Constraints, "Tests the plan must include" (D and Live lists), calls
 and 13. Stage C plan `docs/superpowers/plans/2026-11-09-task-work-stage-c.md`, "Left for stage D" and its Live check
 (CPLAN). Source inventory at f29835f plus Task 5 at 4697af1:
 `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/inventory/INVENTORY.md` (INV §n). Revision
-3 answers the plan checks
-`/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/plancheck/CHECK.md` (F1-F18) and
-`/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/plancheck2/CHECK.md` (N1-N11). **Line
-numbers are at c4088a3**, and builders re-derive any line a brief does not repeat.
+4 answers the plan checks
+`/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/plancheck/CHECK.md` (F1-F18),
+`/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/plancheck2/CHECK.md` (N1-N11) and
+`/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/plancheck3/CHECK.md` (M1-M2 and its
+notes). **Line numbers are at c4088a3**; stage C Task 8 (CPLAN) then changes `deletion.py`, `workspace.py`,
+`target_scan.py`, `verdict.py` and `seal.py`, so builders re-derive any line in those files and any line a brief
+does not repeat.
 
 ## Global Constraints
 
@@ -132,6 +135,8 @@ numbers are at c4088a3**, and builders re-derive any line a brief does not repea
    checked delete proves them pushed. Then `seal.write(..., evidence=evidence, operation=<operation>)` runs, and the
    retarget follows. A rerun before the move seals again (`seal.write` overwrites, `seal.py:131`). `gather`'s wait
    for a later normal cycle (up to two brackets) is the spec's "one final normal cycle". No capture is requested.
+   `seal.write` itself also refuses unsteady evidence and a History that is not SAFE (CPLAN Task 8 R6); the cutover
+   checks first and prints its own line, so that refusal is a backstop.
 10. **A lost create reply is resolved from the inventory, never by creating again** (F1). Before `codespace create`
     the journal records `request = {at, before}`: the request time and the names of every Codespace on the
     repository. That covers an exception, a lost or empty reply, and a killed process. From then on, any run that
@@ -139,16 +144,23 @@ numbers are at c4088a3**, and builders re-derive any line a brief does not repea
     - First, `api.user()` must equal the journal's account, and the inventory must be complete
       (`existing(..., complete=True)`, Task 4). An incomplete or unreadable inventory proves nothing: the run stops
       with its phase kept and never offers `create` (N4).
-    - **Operation evidence** comes first. When NEW's branch receipt now names a Codespace that is in neither `before`
-      nor `branch_receipt`, `launch` wrote it during this operation's create, and that name is adopted.
-    - Otherwise **candidates** are rows on the repository whose `git_status.ref` is the branch, whose name is not in
-      `before`, whose `machine.name` is the journal's machine, and whose `created_at` (an ISO-8601 UTC string)
-      parses as no earlier than `at - 120` seconds (clock-skew allowance). Exactly one candidate is adopted, as spec
-      step 2 rules, and the `Found NEW…` line names it. A wrong adoption is bounded: `launch(resume=…)` refuses a
-      Codespace with other resources or user changes before any rebuild (`codespaces.py:339-352,398-404`).
-    - With none, the coordinator rechecks every 10 s for up to 2 minutes, then asks the owner to type `create`
-      (anything else stops, phase kept). Only that typed word allows a second POST.
-    - With several, the owner chooses one in Gum or cancels.
+    - **Candidates** are rows on the repository whose name is not in `before`, whose `git_status.ref` is the
+      branch, whose `machine.name` is the journal's machine, and whose `created_at` (an ISO-8601 UTC string) parses
+      as no earlier than `at - 120` seconds (clock-skew allowance). A row not in `before` whose ref, machine or
+      `created_at` is missing or unreadable is **uncertain**: it never counts as none.
+    - NEW's branch receipt is not evidence here (plan check 3 M1): its path is per repository and branch
+      (`codespaces.py:445-447`) and another setup on that branch rewrites it, so it never narrows the candidates.
+    - Exactly one candidate and no uncertain row: it is adopted, as spec step 2 rules, and the `Found NEW…` line
+      says what matched. That is the spec's heuristic, not proof of ownership: a clean unrelated Codespace with the
+      same branch, machine and resources passes `launch(resume=…)`'s guards (`codespaces.py:339-352,398-404` refuse
+      only other resources or user changes). The account, complete-inventory and machine checks narrow it.
+    - None and no uncertain row: the coordinator rechecks every 10 s for up to 2 minutes, then asks the owner to
+      type `create` (anything else stops, phase kept). Only that typed word allows a second POST. Every later
+      reconciliation keeps the first request's `at` and `before` (the second POST's time is appended to
+      `request.retries`), so a late Codespace from the first POST is still a candidate. After a second POST
+      returns, the coordinator reads the inventory once more and names any other candidate in the `Also new…` line.
+    - Several candidates, or any uncertain row: the owner chooses one in Gum, each shown with its machine and
+      creation time, or cancels.
 
     An adopted NEW gets its start evidence from the coordinator (`evidence.record_start(state, NEW, request.at,
     'created')`). Its first resume rebuilds once, because no receipt validated it. That rebuild is accepted on this
@@ -202,8 +214,9 @@ numbers are at c4088a3**, and builders re-derive any line a brief does not repea
     coordinator writes `"moving": <epoch>` into the journal the first time it observes a started move, before any
     cutover run replays it. Replaying the move consumes some of those files, so after that the latch alone keeps the
     operation finishing forward. The coordinator checks `move_started` before every cutover run and after every
-    cutover exit. A started move at a phase before `moved` goes to the cutover, which finishes it forward. Phases
-    never go back: a journal at `moved` or later resumes its own phase (N9).
+    cutover exit, an error or interrupted return included. The latch write is atomic and must succeed before the
+    cutover child starts; a failed write stops the run with its phase kept. A started move at a phase before
+    `moved` goes to the cutover, which finishes it forward. Phases never go back: a journal at `moved` or later resumes its own phase (N9).
     Ctrl-C or EOF at any prompt stops the run with its phase kept. Abandon (`continue` or `abandon` in Gum) is
     offered only while the phase precedes `moved` and the move has not started. It removes this operation's seal,
     leaves OLD paired and NEW listed, and archives the journal `abandoned`.
@@ -249,6 +262,11 @@ numbers are at c4088a3**, and builders re-derive any line a brief does not repea
       before `_finish_pending_registry`, its prerequisites and the selection, it refuses when `scratch.json` no
       longer names that Codespace. The cutover passes OLD on the move, so a rebind
       made elsewhere during the prompt or the gather is never overwritten.
+22. **Replace is offered only for a pairing it can inspect** (plan check 3 M2; narrows F10's "a pairing exists").
+    The wizard lists it when PAIRED is among the listed Codespaces and its read succeeded. An unlisted or
+    unreadable pairing keeps today's menu: spec D step 1 starts by reading OLD, and a deleted OLD ends the journal,
+    so the option could only fail. The coordinator's inspection still refuses an unreadable OLD for `--replace`
+    and `task work`.
 
 ## Copy (exact strings)
 
@@ -266,7 +284,8 @@ Recovery on NEW will need a typed arm: consent was given as LOGIN, gh is signed 
 Creating the new Codespace from BRANCH at SHA12.
 BRANCH moved to SHA12 since the check; checking its setup again.
 Created NEW.
-Found NEW, created by the interrupted run.
+Found NEW on BRANCH (MACHINE, created at HH:MM), the only new Codespace since the create request.
+Also new since the create request: NAME (MACHINE, created at HH:MM). This replace did not use it.
 Replace stopped at PHASE: REASON. Run REPLACE to continue.
 A replace of OLD is at PHASE.
 The move to NEW has started; finishing it.
@@ -292,7 +311,8 @@ Connect with task work:cs.
   again.`
 - Lost reply: `GitHub did not confirm the new Codespace. Looking for it for up to 2 minutes.` ·
   `No new Codespace appeared. Type create to create one, or anything else to stop.` ·
-  `Several new Codespaces appeared: NAMES. Choose the one this replace keeps; delete the others with work:cs:delete.`
+  `New Codespaces since the create request: NAME (MACHINE, created at HH:MM), … Choose the one this replace keeps;
+  the others stay as they are.` (an uncertain row shows `unknown` for what could not be read)
 - Sign-ins: `Not signed in yet on NEW: TOOLS. Retry with task work:signin:all.` · `Sign-in on NEW did not finish;
   retry with task work:signin:all.`
 - NEW not ready: `NEW is not ready: fix the lines marked Not ready, then run REPLACE to check it again. OLD stays.`
@@ -387,7 +407,7 @@ Kept on this Mac only: codex SESSION_ID
   - Journal `{"schema": 1, "operation": 12 lowercase hex, "old": str, "new": str | null, "account": str,
     "repository": "OWNER/REPO", "branch": str, "commit": 40 hex, "remote_root": str (NEW's folder), "resources":
     {"machine": str, "cpus": int, "idle_timeout_minutes": int, "billable_owner": str}, "old_receipt": dict | null,
-    "branch_receipt": dict | null, "request": {"at": float, "before": [str, …]} | null, "phase": PHASE, "at":
+    "branch_receipt": dict | null, "request": {"at": float, "before": [str, …], "retries": [float, …]} | null, "phase": PHASE, "at":
     {PHASE: float}, "signins": {"retry": [str, …], "at": float} | null, "check": dict | null, "moving": float | null,
     "ended": null | ENDED, "ended_at": float | null}`.
   - `read(state) -> dict | None`: the active journal. None when absent, or when an archive with the same `operation`
@@ -413,6 +433,8 @@ Kept on this Mac only: codex SESSION_ID
   only on NAME`. An incomplete scan part reads UNKNOWN, as for every kind.
 - Produces, `deletion.py`:
   - `STEPS['replacement'] = ()`.
+  - The delete's owner order (CPLAN Task 8 R1) gains the replace journal's `account` for the NEW `naming_new`
+    gives, after the delete journal and before `accounts.json`, so a never-paired NEW is never owner-unknown.
   - `_cleanup` returns at once for `replacement`, journaling `cleaned`, with no primitive called.
   - `gather` treats `replacement` like `moved` (one scan, no cutoffs, `steady=True`).
   - In `run`, the connection for a `replacement` target gets `accept_new = True` before it is entered, and `--start`
@@ -424,7 +446,12 @@ Kept on this Mac only: codex SESSION_ID
   cannot be read, or whose `snapshot_id` is not 64 hex, raises `ValueError` before anything is deleted. The caller
   already catches that and retries in an hour (`replication.py:237-265`). `_record_received` also retires shorter
   proven-prefix records on an identical retry, not only on a new receive (`checkpoint_store.py:217-239`). A crash
-  between writing the new record and unlinking the old one then heals on the next receipt (origin fix for N5).
+  between writing the new record and unlinking the old one then heals on the next receipt (origin fix for N5). On an
+  identical retry it first looks in the relay records it already listed for another record with the same
+  `(agent, session_id)` and reads heads only when one exists, so `tests/test_checkpoint_store.py:246`
+  (`test_identical_record_retry_does_not_read_heads_again`) holds. Both the retry and the new-receive path decide
+  "contains" and "proven prefix" by Task 3's full-closure digest rule over every file, not by the head alone
+  (`checkpoint_store.py:224-231` today).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -441,6 +468,7 @@ def test_receipt_must_match_operation_and_step(self)
 # tests/test_checkpoint_store.py
 def test_collect_keeps_what_a_seal_names(self)      # manifest older than keep_days and its blobs survive apply=True
 def test_collect_deletes_nothing_when_a_seal_cannot_be_read(self)
+def test_a_changed_ancestor_is_never_retired(self)  # equal heads, a different Codex ancestor -> both records kept
 def test_an_identical_retry_retires_a_crash_left_prefix(self)  # new record written, old not unlinked; the same
                                                     # manifest acknowledged again -> one record left
 # tests/test_verdict.py
@@ -646,7 +674,11 @@ def test_incompatible_content_is_diverged(self)           # a same-key entry tha
 def test_a_real_refusal_is_kept_and_does_not_fail(self)   # driven through replication.sync_project_data with a real
                                                           # native refusal, so the mirrored cycle issue is present
                                                           # (plan check 2's refusal-cycle probe) -> kept; sync ok
-def test_any_other_cycle_issue_blocks_sync(self)          # memory, capture, transfer and inbound issues
+def test_a_refused_carrying_entry_is_kept_even_if_a_prefix_published(self)  # through publish_conversations
+                                                          # (conversations.py:1131-1147): the obsolete prefix
+                                                          # imported, the carrying entry an issue -> kept
+def test_any_other_cycle_issue_blocks_sync(self)           # memory (rpc.py:140-142's remote issue included),
+                                                          # capture, transfer and inbound issues
 def test_a_mac_only_refusal_does_not_block(self)
 def test_forgotten_is_named_and_does_not_fail(self)
 def test_carried_but_unpublished_is_pending(self)
@@ -706,10 +738,13 @@ def test_replace_check_passes_after_a_real_relay(self)    # the chain of :164 an
     `resume_hint` replaces the `Resume with: task devcontainer:setup -- --resume NAME` sentence in the raised
     message. `before_create` runs immediately before the `codespace create` command, after every preflight. An
     exception before it therefore means no POST was sent.
-  - `existing(repo, branch=None, *, complete=False)`: with `complete=True`, every page's `total_count` must agree
-    and equal the number of rows, else `ValueError('the Codespace list from GitHub is incomplete')`.
-  - `find_receipt(state_root: Path, repo: str, codespace: str) -> Path | None`: the search `migrate_receipt` makes
-    (`codespaces.py:450-469`), without copying anything.
+  - `existing(repo, branch=None, *, complete=False)`: with `complete=True`, every page's `total_count` must be
+    present, agree across pages and equal the number of raw rows on all pages, counted before the repository and
+    branch filter (`codespaces.py:131-134`), else `ValueError('the Codespace list from GitHub is incomplete')`.
+  - `find_receipt(state_root: Path, repo: str, codespace: str) -> Path | None`: only the source search
+    `migrate_receipt` makes (`codespaces.py:457-468`: regular non-symlink files, matching repository and codespace,
+    each at its own branch's hashed path, the newest by mtime). Not its destination short-circuit (`:453-455`) or
+    write (`:469-470`): a receipt at the default branch's path must not hide OLD's.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -731,8 +766,9 @@ def test_setup_differs_uses_the_renderers_rules(self)  # a rendered fixture repo
 def test_empty_create_reply_is_a_value_error(self)  # FakeGitHub create prints nothing -> ValueError, no receipt
 def test_resume_hint_replaces_the_setup_resume_sentence(self)
 def test_before_create_runs_after_preflight_and_before_the_post(self)  # a preflight failure -> not called
-def test_complete_inventory_checks_total_count(self)
-def test_find_receipt_searches_other_branches(self)
+def test_complete_inventory_checks_total_count(self)   # two pages, two repositories: total 2, one project row,
+                                                    # passes; a missing or unreadable total_count raises
+def test_find_receipt_searches_other_branches(self)  # a receipt at the default branch's path does not hide OLD's
 # tests/test_wizard.py
 def test_launch_options_hold_the_ordinary_values(self)    # a fixture project's dotfiles repository, receipt
                                                           # namespace, workspace, machine profile and configured
@@ -794,6 +830,9 @@ def test_launch_options_hold_the_ordinary_values(self)    # a fixture project's 
        `record_created`.
      - An exception while the phase is still `inspected` (no POST was sent) stops with its message, exit 1.
      - Any exception while `new` is still null → reconciliation (call 10).
+     - On a second submission (call 10) the phase is already `create-requested`: `before_create` appends to
+       `request.retries` and keeps `at` and `before`, and a preflight failure leaves the first request for the next
+       run's reconciliation.
      - An exception after `new` is set → `Replace stopped at create: REASON. Run REPLACE to continue.`, exit 1.
      - A return → `ready`.
   5. Rerun at `create-requested` with `new` null: reconciliation first (call 10). Never step 4's POST. At `created`
@@ -834,7 +873,16 @@ def test_lost_create_reply_adopts_exactly_one(self)     # reply lost, empty, a r
                                                         # 'created' at request.at
 def test_adoption_ignores_older_or_other_branch_codespaces(self)  # a name missing from before but created before
                                                         # at - 120, on another branch, or on another machine
-def test_receipt_evidence_adopts_before_the_inventory(self)
+def test_a_competing_creation_is_a_choice_not_an_adoption(self)  # M1: this request's A (callback failed) and
+                                                        # another setup's B on the same branch and machine, both
+                                                        # outside before; the branch receipt names B -> the owner
+                                                        # chooses; 0 creates
+def test_an_uncertain_row_is_never_none(self)           # a new row without ref, machine or created_at -> shown in the
+                                                        # choice; the typed-create prompt never appears
+def test_a_late_first_codespace_is_named_after_a_second_create(self)  # first reply lost, 2 minutes of nothing,
+                                                        # typed create -> 2nd create; the first's Codespace appears
+                                                        # -> the Also new line; request.before unchanged
+def test_a_preflight_failure_on_the_second_create_keeps_the_first_request(self)
 def test_an_incomplete_inventory_never_offers_create(self)
 def test_a_failure_before_the_post_is_not_a_lost_reply(self)  # preflight error -> phase inspected, 0 rechecks
 def test_none_found_asks_before_creating_again(self)    # 2 minutes of rechecks; 'create' -> 2nd create; other -> 0
@@ -876,7 +924,10 @@ def test_replace_steps_run_the_vendored_runtime(self)   # a rendered generated p
                                                         # no-match line (the vendored subcommand ran), and the
                                                         # vendored runtime_id under the wrapper's bootstrap equals
                                                         # what vendored status computes and differs from the setup
-                                                        # package's (the plan check's probes.py:207-219 method)
+                                                        # package's (the plan check's probes.py:207-219 method).
+                                                        # It proves import identity and dispatch only; whether a
+                                                        # started worker or keeper is current is the Live check's
+                                                        # task work:status step
 ```
 
 - [ ] **Step 2: Run them; they fail.** Run: `python3 -m unittest tests.test_replacement
@@ -905,9 +956,9 @@ def test_replace_steps_run_the_vendored_runtime(self)   # a rendered generated p
 - Produces, setup `__main__.py`:
   - `--replace` in the mutually exclusive mode group. It needs a terminal and runs `replacement.run(project)` and
     nothing else (no review, no publish).
-  - In the wizard, `_codespace_choice` lists `replace PAIRED` when a pairing for this project exists, on any branch
-    (F10). It sits after `rebuild PAIRED` when that is listed, else after `none`, and the default choice is
-    unchanged.
+  - In the wizard, `_codespace_choice` lists `replace PAIRED` when PAIRED is among the listed Codespaces and the
+    menu's own read of it succeeded (`__main__.py:755-757`), on any branch (F10, narrowed by call 22). It sits after
+    `rebuild PAIRED` when that is listed, else after `none`, and the default choice is unchanged.
   - The choice returns `{'action': 'replace', 'name': PAIRED}`. Every consumer of the launch value checks for
     `replace` before reading resources:
     - `_ask_launch_resources` asks nothing. `_resolve_launch` is unchanged: it never produces `replace`, and the
@@ -933,10 +984,13 @@ def test_replace_steps_run_the_vendored_runtime(self)   # a rendered generated p
 # tests/test_wizard.py
 def test_paired_menu_lists_replace(self)                    # default stays 'none'; after rebuild when listed
 def test_replace_is_listed_for_a_paired_feature_branch_codespace(self)
+def test_replace_is_not_listed_for_an_unlisted_or_unreadable_pairing(self)  # pairing not listed (:1379), or its
+                                                            # read fails (:802's unavailable case)
 def test_replace_review_reads_no_resources(self)            # no KeyError; no resource prompt; the review line
 def test_choosing_replace_runs_the_coordinator_after_publishing(self)  # default-branch ending and the open-PR
                                                             # ending: api.launch not called; replacement.run once,
-                                                            # after the merge
+                                                            # after the merge; setup_continuity not called on
+                                                            # either ending
 def test_replace_mode_runs_only_the_coordinator(self)       # --replace: no review screens; no TTY -> refused
 def test_the_test_branch_override_is_never_shown(self)      # env set: menu labels and --help hold no override
 # tests/test_standing.py
@@ -956,7 +1010,9 @@ def test_no_terminal_names_the_replace_in_next_lines(self)
   - `tests/test_work_overview.py:290` (`test_menu_runs_the_chosen_command_after_printing_it`: arm is no longer item 1);
   - `tests/test_overview.py:131`, `:204`, `:387` and `:440` (exact action arrays, the second forget action and the
     upgrade position);
-  - `tests/test_wizard.py:1361`, `:1414` and `:1438` (the menu gains `replace`).
+  - `tests/test_wizard.py:802` (`test_no_create_with_a_usable_pairing`: Replace listed for the readable pairing on
+    `main` and `feature`, absent when its read fails; its other assertions unchanged), `:1361`, `:1414` (the paired
+    subtest) and `:1438` (the menu gains `replace`). `:1379`'s unlisted pairing keeps its exact menu (call 22).
 - [ ] **Step 2: Run them; they fail.** Run: `python3 -m unittest tests.test_wizard tests.test_standing
   tests.test_overview tests.test_work_overview -v`. Expected: exit 1.
 - [ ] **Step 3: Implement** as in Interfaces.
@@ -979,7 +1035,8 @@ def test_no_terminal_names_the_replace_in_next_lines(self)
 - `tests/test_render.py::test_managed_runtime_version_tampering_fails_validation` (`:548`),
   `::test_removing_managed_command_stops_update` (`:557`) and
   `::test_legacy_lock_native_cli_normalization_is_safe_to_validate_and_render` (`:794`).
-- `tests/test_deletion.py` and `tests/test_seal.py` (all); `tests/test_checkpoint_store.py::test_collect_*`;
+- `tests/test_deletion.py` and `tests/test_seal.py` (all); `tests/test_checkpoint_store.py::test_collect_*` and
+  `::test_identical_record_retry_does_not_read_heads_again` (`:246`);
   `tests/test_replication.py:164-260` (relay chain); `tests/test_signins.py` (all).
 - `tests/test_project_sync_cli.py::test_plain_rebind_of_an_armed_project_moves_recovery` and
   `::test_codespace_restart_still_requires_a_terminal`.
@@ -988,7 +1045,7 @@ def test_no_terminal_names_the_replace_in_next_lines(self)
 ## Order and parallelism
 
 At most three builders at once (shared Mac, memory `shared-mac-load-flakes`). Builders start only after the stage C
-re-review's fixes are merged, because D consumes `deletion.gather`, `deletion.run`, `seal.write` and
+re-review's fixes (CPLAN Task 8) are merged, because D consumes `deletion.gather`, `deletion.run`, `seal.write` and
 `verdict.resolve`.
 - **Wave 1:** Tasks 1 and 4. Task 1 owns `replacing.py`, `verdict.py`, `deletion.py` and `checkpoint_store.py`. Task 4
   owns `codespaces.py`, `replace_inputs.py` and the two module-level helpers in setup `__main__.py`.
