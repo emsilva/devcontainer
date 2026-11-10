@@ -32,6 +32,30 @@ class ReplacingTests(unittest.TestCase):
     def save(self, path, value):
         atomic_write(self.state / path, json.dumps(value).encode())
 
+    def assert_login_round_trip(self, field):
+        value = journal()
+        target = value if field == 'account' else value['resources']
+        target[field] = 'owner_enterprise'
+        try:
+            self.r.write(self.state, value)
+        except ValueError as error:
+            self.fail(f'Valid enterprise {field} was rejected: {error}')
+        self.assertEqual(self.r.read(self.state), value)
+        for login in ('owner_', 'owner__x', 'a b', '', None, True, 123, 'owner\n'):
+            with self.subTest(login=login):
+                target[field] = login
+                with self.assertRaisesRegex(ValueError, '^The replace record cannot be read$'):
+                    self.r.write(self.state, value)
+                self.save('replace.json', value)
+                with self.assertRaisesRegex(ValueError, '^The replace record cannot be read$'):
+                    self.r.read(self.state)
+
+    def test_enterprise_account_round_trips_and_malformed_logins_are_refused(self):
+        self.assert_login_round_trip('account')
+
+    def test_enterprise_billing_owner_round_trips_and_malformed_logins_are_refused(self):
+        self.assert_login_round_trip('billable_owner')
+
     def test_round_trip_and_malformed(self):
         self.assertIsNone(self.r.read(self.state))
         value = journal(request=dict(at=999.0, before=['old-space'], retries=[1000.0]),
