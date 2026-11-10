@@ -385,16 +385,86 @@ class ReplacementTests(unittest.TestCase):
         self.assertEqual(self.api.launches[0][1]['resume'], 'new-space')
         self.assertEqual(self.creates(), [])
 
+    def test_lost_reply_adopts_before_offering_abandon(self):
+        self.active()
+        self.api.rows.append(self.api.row())
+        self.ui.answers = ['abandon']
+        self.assertEqual(self.run_replace(), 0)
+        archived = self.archives()[-1]
+        self.assertEqual((archived['phase'], archived['new'], archived['ended']),
+                         ('created', 'new-space', 'abandoned'))
+        self.assertIn('new-space stays listed. Check and delete it with task work:cs:delete -- --codespace new-space.',
+                      self.output.getvalue())
+        self.assertNotIn('nothing was created', self.output.getvalue())
+        self.assertFalse(self.api.launches)
+        self.assertEqual(self.creates(), [])
+
+    def test_lost_reply_row_choice_precedes_continue_or_abandon(self):
+        for uncertain in (False, True):
+            with self.subTest(uncertain=uncertain):
+                self.active()
+                self.api.rows = [self.api.old, self.api.row()]
+                row = {'name': 'other-space'} if uncertain else self.api.row('other-space')
+                self.api.rows.append(row)
+                self.api.details['other-space'] = row
+                self.ui.calls.clear()
+                self.ui.answers = ['cancel']
+                self.assertEqual(self.run_replace(), 1)
+                self.assertEqual(len(self.ui.calls), 1)
+                self.assertEqual(self.ui.calls[0][1][-1], 'cancel')
+                self.assertNotIn('abandon', self.ui.calls[0][1])
+                self.assertEqual(replacing.read(self.state)['phase'], 'create-requested')
+                self.assertFalse(self.api.launches)
+                self.assertEqual(self.creates(), [])
+
+    def test_lost_reply_proves_none_before_abandon_or_typed_create(self):
+        self.active()
+        choose = self.ui.choose
+        def after_recheck(title, options):
+            self.assertGreaterEqual(sum(self.clock.waits), 120)
+            self.assertTrue(any(call[0] == 'existing' for call in self.api.calls))
+            self.assertFalse(self.prompts)
+            return choose(title, options)
+        with patch.object(self.ui, 'choose', side_effect=after_recheck):
+            self.ui.answers = ['abandon']
+            self.assertEqual(self.run_replace(), 0)
+        self.assertIsNone(self.archives()[-1]['new'])
+        self.assertIn('nothing was created', self.output.getvalue())
+        self.assertEqual(self.creates(), [])
+        self.active()
+        self.clock.waits.clear()
+        self.ui.answers, self.answers = ['continue'], ['create']
+        with patch.object(self.ui, 'choose', side_effect=after_recheck):
+            self.assertEqual(self.run_replace(), 0)
+        self.assertEqual(len(self.prompts), 1)
+        self.assertEqual(len(self.creates()), 1)
+
+    def test_lost_reply_unreadable_inventory_or_other_account_never_offers_abandon(self):
+        for failure in ('incomplete', 'unreadable', 'account'):
+            with self.subTest(failure=failure):
+                self.active()
+                self.api.account = 'another' if failure == 'account' else 'owner'
+                error = OSError('unreadable inventory') if failure == 'unreadable' else ValueError('incomplete inventory')
+                self.api.inventory = lambda: (_ for _ in ()).throw(error)
+                self.ui.calls.clear()
+                self.ui.answers = ['abandon']
+                self.assertEqual(self.run_replace(), 1)
+                self.assertFalse(self.ui.calls)
+                self.assertEqual(replacing.read(self.state)['phase'], 'create-requested')
+                self.assertFalse(self.archives())
+                self.assertFalse(self.prompts)
+                self.assertEqual(self.creates(), [])
+
     def test_a_competing_creation_is_a_choice_not_an_adoption(self):
         self.active()
         self.api.rows += [self.api.row(), self.api.row('competing-space')]
         self.valid_launch()
-        self.ui.answers = ['continue', 1]
+        self.ui.answers = [1, 'continue']
         self.cutover_ok = False
         self.assertEqual(self.run_replace(), 1)
         self.assertEqual(self.api.launches[0][1]['resume'], 'competing-space')
         self.assertEqual(self.creates(), [])
-        self.assertEqual(self.ui.calls[-1][1][-1], 'cancel')
+        self.assertEqual(self.ui.calls[0][1][-1], 'cancel')
 
     def test_an_uncertain_row_is_never_none(self):
         self.active()
@@ -404,7 +474,7 @@ class ReplacementTests(unittest.TestCase):
             if malformed:
                 self.api.rows[-1] = self.api.row('uncertain-space', git_status={'ref': 123}, machine={'name': 456})
                 self.api.details['uncertain-space'] = self.api.rows[-1]
-            self.ui.answers = ['continue', 'cancel']
+            self.ui.answers = ['cancel']
             self.assertEqual(self.run_replace(), 1)
             self.assertEqual(replacing.read(self.state)['phase'], 'create-requested')
             self.assertIn('uncertain-space cannot be fully read from GitHub', self.output.getvalue())
@@ -474,7 +544,7 @@ class ReplacementTests(unittest.TestCase):
     def test_several_found_asks_which_to_keep(self):
         self.active()
         self.api.rows += [self.api.row(), self.api.row('other-space')]
-        self.ui.answers = ['continue', 'cancel']
+        self.ui.answers = ['cancel']
         self.assertEqual(self.run_replace(), 1)
         self.assertEqual(len(self.ui.calls[-1][1]), 3)
         self.assertEqual(self.creates(), [])
