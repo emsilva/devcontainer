@@ -772,6 +772,51 @@ class ReplacementTests(unittest.TestCase):
                     self.assertNotIn('ghp_TEST_ONLY', item.read_text())
             (self.state / 'replace.json').unlink(missing_ok=True)
         self.assertEqual(self.creates(), [])
+        self.api.failure = None
+        self.assertEqual(self.run_replace(), 0)
+        for folder in ('replacements', 'replace-receipts'):
+            path = self.state / folder
+            self.assertTrue(path.is_dir(), folder + ' must exist after the runtime steps')
+            files = list(path.glob('*.json'))
+            self.assertTrue(files, folder + ' must contain records to inspect')
+            for item in files:
+                self.assertNotIn('private.invalid', item.read_text())
+                self.assertNotIn('ghp_TEST_ONLY', item.read_text())
+
+    def test_check_receipt_extra_fields_are_not_copied_into_the_journal(self):
+        self.active(phase='signed-in', new='new-space')
+        self.valid_launch()
+        receipts = []
+        def check(argv):
+            if 'check' not in argv:
+                return None
+            path = Path(argv[argv.index('--receipt') + 1])
+            value = dict(schema=1, operation=replacing.read(self.state)['operation'], step='check',
+                         codespace='new-space', ok=True, external_output='https://private.invalid/ghp_TEST_ONLY')
+            atomic_write(path, json.dumps(value).encode())
+            receipts.append(path)
+            return subprocess.CompletedProcess(argv, 0)
+        self.runner_hook = check
+        self.assertEqual(self.run_replace(), 0)
+        self.assertIn('external_output', read_json(receipts[0]))
+        saved = self.archives()[-1]['check']
+        self.assertTrue(saved['ok'])
+        self.assertNotIn('external_output', saved)
+        self.assertNotIn('private.invalid', json.dumps(self.archives()[-1]))
+
+    def test_launch_receipt_extra_fields_are_not_copied_into_the_journal(self):
+        old = dict(codespace='old-space', repository='owner/project', branch='feature/topic', commit='c' * 40)
+        branch = dict(codespace='other-space', repository='owner/project', branch='main', commit='b' * 40)
+        for value in (old, branch):
+            path = receipt_path(self.root / 'state', 'owner/project', value['branch'])
+            atomic_write(path, json.dumps(dict(value, external_output='https://private.invalid/ghp_TEST_ONLY')).encode())
+        self.assertEqual(self.run_replace(), 0)
+        saved = self.archives()[-1]
+        self.assertNotIn('external_output', saved['old_receipt'])
+        self.assertNotIn('external_output', saved['branch_receipt'])
+        self.assertEqual(saved['old_receipt'], old)
+        self.assertEqual(saved['branch_receipt'], branch)
+        self.assertNotIn('private.invalid', json.dumps(saved))
 
     def test_another_replace_running_refuses(self):
         with locked(self.state / 'replace.lock'):

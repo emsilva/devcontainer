@@ -225,6 +225,27 @@ class DeletionTests(unittest.TestCase):
         self.assertEqual(self.mocks['target_scan.scan'].call_count, 1)
         self.assertIsNone(self.mocks['target_scan.scan'].call_args.kwargs.get('cutoffs'))
 
+    def test_never_paired_replacement_delete_accepts_a_mixed_case_origin(self):
+        reader, value = self.replacement()
+        self.project = replace(self.project, remote='https://github.com/Example/Project.git')
+        reader.write(self.state, dict(value, repository='Example/Project'))
+        code, output, _ = self.run_delete(name='space', check=True)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.d.verdict.resolve(self.project, self.state, 'space').kind, 'replacement')
+        self.connect.assert_called_once()
+        self.mocks['target_scan.scan'].assert_called_once()
+        self.assertEqual(self.mutations(), [])
+
+    def test_replacement_from_another_repository_is_refused_before_the_api(self):
+        reader, value = self.replacement()
+        reader.write(self.state, dict(value, repository='example/another'))
+        code, output, _ = self.run_delete(name='space', check=True)
+        self.assertEqual(code, 1, output)
+        self.assertIn('The delete could not read its account or local evidence; nothing was deleted.', output)
+        self.factory.assert_not_called()
+        self.connect.assert_not_called()
+        self.assertEqual(self.mutations(), [])
+
     def test_replacement_delete_cleans_nothing_and_rereads_its_journal(self):
         reader, value = self.replacement()
         code, output, _ = self.run_delete(name='space')
