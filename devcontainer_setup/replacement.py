@@ -17,7 +17,7 @@ import time
 from . import git_ops, replace_inputs
 from .codespaces import Codespaces, find_receipt, receipt_path
 from .preferences import load_preferences
-from .project_sync import arming, evidence, replacing
+from .project_sync import arming, evidence, replacing, workspace
 from .project_sync.state import discover_project, locked, read_json, state_dir
 from .ui import Cancelled, Gum
 
@@ -233,6 +233,8 @@ class _Coordinator:
 
     def candidates(self):
         self.account()
+        paired = (_optional(self.state / 'scratch.json') or {}).get('codespace')
+        connected = workspace.accounts(self.state)
         candidates, uncertain = [], []
         for original in self.api.existing(self.journal['repository'], complete=True):
             name = original.get('name')
@@ -240,6 +242,8 @@ class _Coordinator:
                 continue
             if not isinstance(name, str) or not re.fullmatch('[A-Za-z0-9-]+', name):
                 raise ValueError('the Codespace list from GitHub is incomplete')
+            if name == paired or name in connected:
+                continue
             row = original
             for attempt in range(2):
                 ref = row.get('git_status')

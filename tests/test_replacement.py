@@ -385,6 +385,45 @@ class ReplacementTests(unittest.TestCase):
         self.assertEqual(self.api.launches[0][1]['resume'], 'new-space')
         self.assertEqual(self.creates(), [])
 
+    def assert_current_pairing_is_not_adopted(self, validated_commit):
+        self.active()
+        self.api.rows.append(self.api.row('work-space'))
+        self.save('scratch.json', dict(read_json(self.state / 'scratch.json'), codespace='work-space'))
+        if validated_commit is not None:
+            path = receipt_path(self.root / 'state', 'owner/project', 'main')
+            atomic_write(path, json.dumps(dict(codespace='work-space', repository='owner/project', branch='main',
+                commit=validated_commit, validated_commit=validated_commit, rebuild_pending=False)).encode())
+        self.cutover_ok = False
+        self.assertEqual(self.run_replace(), 1)
+        self.assertIsNone(replacing.read(self.state)['new'])
+        self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'work-space')
+        self.assertFalse(self.api.launches)
+        self.assertEqual(self.creates(), [])
+        self.assertFalse(any(row[1:3] == ['codespace', 'rebuild'] for row in self.api.gh.calls))
+
+    def test_current_pairing_validated_at_the_pin_is_never_adopted(self):
+        self.assert_current_pairing_is_not_adopted('a' * 40)
+
+    def test_current_pairing_validated_at_a_later_tip_is_never_adopted(self):
+        self.assert_current_pairing_is_not_adopted('b' * 40)
+
+    def test_current_pairing_without_a_receipt_is_never_adopted(self):
+        self.assert_current_pairing_is_not_adopted(None)
+
+    def test_previously_connected_names_are_excluded_without_hiding_new(self):
+        self.active()
+        self.save('accounts.json', {'schema': 1, 'codespaces': {'known-space': 'another-account'}})
+        self.api.rows.extend([{'name': 'known-space'}, self.api.row()])
+        self.api.details['known-space'] = ValueError('must not read a known Codespace')
+        self.ui.answers = ['abandon']
+        self.assertEqual(self.run_replace(), 0)
+        self.assertEqual(self.archives()[-1]['new'], 'new-space')
+        self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'old-space')
+        self.assertNotIn(('get', 'known-space'), self.api.calls)
+        self.assertFalse(self.api.launches)
+        self.assertEqual(self.creates(), [])
+        self.assertFalse(any(row[1:3] == ['codespace', 'rebuild'] for row in self.api.gh.calls))
+
     def test_lost_reply_adopts_before_offering_abandon(self):
         self.active()
         self.api.rows.append(self.api.row())
@@ -576,6 +615,8 @@ class ReplacementTests(unittest.TestCase):
     def test_each_phase_resumes_on_rerun(self):
         for phase in replacing.PHASES:
             with self.subTest(phase=phase):
+                paired = 'old-space' if replacing.PHASES.index(phase) < replacing.PHASES.index('moved') else 'new-space'
+                self.save('scratch.json', dict(read_json(self.state / 'scratch.json'), codespace=paired))
                 self.active(phase=phase, new=None if phase in ('inspected', 'create-requested') else 'new-space')
                 self.api.rows = [self.api.old, self.api.row()]
                 self.valid_launch()
