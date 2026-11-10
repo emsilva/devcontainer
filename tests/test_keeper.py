@@ -137,6 +137,14 @@ class KeeperStepTests(unittest.TestCase):
         atomic_write(self.state / 'scratch.json',
                      json.dumps({'codespace': codespace, 'root': '/work/proj'}).encode())
 
+    def test_start_rereads_the_binding_before_launching(self):
+        self.bind('another-cs')
+        with patch.object(keeper, 'launch_detached', return_value={}) as launch, \
+                patch.object(keeper, 'status', return_value={'running': False}):
+            with self.assertRaisesRegex(ValueError, 'The project moved to another Codespace meanwhile'):
+                keeper.start(self.state.parent, self.state)
+        launch.assert_not_called()
+
     def advance(self, seconds):
         self.clock += seconds
 

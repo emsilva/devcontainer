@@ -606,6 +606,61 @@ class DeletionTests(unittest.TestCase):
                 self.assertEqual(self.mutations(), [])
                 self.mocks['arming.account'].return_value = 'octo'
 
+    def test_a_safe_recheck_with_a_new_fingerprint_names_the_changed_files(self):
+        def change(_):
+            self.mocks['target_scan.scan'].return_value = replace(self.scan,
+                sessions=(('claude/project/completed.jsonl', 'b' * 64),))
+            return 'delete'
+        code, output, _ = self.run_delete(answer=change)
+        self.assertIn('space changed since the check (its files, repositories, conversations or agents); '
+                      'nothing was deleted.', ' '.join(output.split()))
+        self.assertEqual(code, 1)
+        self.assertEqual(self.mutations(), [])
+
+    def test_refused_delete_names_the_http_status_and_leaves_cleanup_alone(self):
+        self.api.status = 403
+        code, output, _ = self.run_delete()
+        self.assertIn('GitHub refused to delete space (HTTP 403). It stays stopped; nothing else changed.',
+                      ' '.join(output.split()))
+        self.assertEqual(code, 1)
+        self.assertEqual(self.api.calls.count('delete'), 1)
+        self.assertNotIn('confirm_deleted', self.api.calls)
+        self.mocks['keeper.stop'].assert_not_called()
+        self.assertEqual(read_json(self.state / 'deletions/space.json')['phase'], 'delete-requested')
+
+    def test_paired_cleanup_keeps_recovery_armed_for_another_codespace(self):
+        self.journal()
+        arming.arm(self.state, gh_user='octo', codespace='new-space', consent='x', billable_owner='octo', ports=[], now=1)
+        before = (self.state / arming.ARMING).read_bytes()
+        code, output, _ = self.run_delete()
+        self.assertEqual((self.state / arming.ARMING).read_bytes(), before)
+        self.extra_mutations['write'].assert_not_called()
+        self.assertEqual(code, 1, output)
+        self.assertEqual(read_json(self.state / 'deletions/space.json')['cleanup']['recovery'],
+                         'the armed Codespace changed; recovery was kept')
+
+    def test_confirmed_journal_is_durable_before_the_stop_begins(self):
+        original = self.d.power.stop
+        def stop(*args, **kwargs):
+            path = self.state / 'deletions/space.json'
+            self.assertTrue(path.exists(), 'confirmed journal missing when power.stop begins')
+            saved = read_json(path)
+            self.assertEqual(saved['phase'], 'confirmed')
+            self.assertEqual(saved['fingerprint'], target_scan.fingerprint(self.scan))
+            return original(*args, **kwargs)
+        with patch.object(self.d.power, 'stop', side_effect=stop):
+            code, output, _ = self.run_delete()
+        self.assertEqual(code, 0, output)
+
+    def test_another_repositorys_journal_is_refused_before_api_or_cleanup(self):
+        self.journal(repository='example/another')
+        code, output, _ = self.run_delete(check=True, as_json=True)
+        self.assertEqual(json.loads(output)['outcome'], 'refused')
+        self.assertIn('switch to that account and repository', json.loads(output)['message'])
+        self.assertEqual(code, 1)
+        self.factory.assert_not_called()
+        self.assertEqual(self.mutations(), [])
+
     def test_paired_stop_is_recorded_before_the_post(self):
         observed = []
         original = self.api.post_stop
