@@ -29,11 +29,11 @@ Anti-goals, Constraints, "Tests the plan must include" (D and Live lists), calls
 and 13. Stage C plan `docs/superpowers/plans/2026-11-09-task-work-stage-c.md`, "Left for stage D" and its Live check
 (CPLAN). Source inventory at f29835f plus Task 5 at 4697af1:
 `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/inventory/INVENTORY.md` (INV §n). Revision
-4 answers the plan checks
+5 answers the plan checks
 `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/plancheck/CHECK.md` (F1-F18),
-`/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/plancheck2/CHECK.md` (N1-N11) and
+`/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/plancheck2/CHECK.md` (N1-N11),
 `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/plancheck3/CHECK.md` (M1-M2 and its
-notes). **Line numbers are at c4088a3**; stage C Task 8 (CPLAN) then changes `deletion.py`, `workspace.py`,
+notes) and `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/plancheck4/CHECK.md` (Q1-Q4). **Line numbers are at c4088a3**; stage C Task 8 (CPLAN) then changes `deletion.py`, `workspace.py`,
 `target_scan.py`, `verdict.py` and `seal.py`, so builders re-derive any line in those files and any line a brief
 does not repeat.
 
@@ -146,8 +146,11 @@ does not repeat.
       with its phase kept and never offers `create` (N4).
     - **Candidates** are rows on the repository whose name is not in `before`, whose `git_status.ref` is the
       branch, whose `machine.name` is the journal's machine, and whose `created_at` (an ISO-8601 UTC string) parses
-      as no earlier than `at - 120` seconds (clock-skew allowance). A row not in `before` whose ref, machine or
-      `created_at` is missing or unreadable is **uncertain**: it never counts as none.
+      as no earlier than `at - 120` seconds (clock-skew allowance). A row not in `before` is excluded as soon as one
+      readable field disqualifies it (another ref, another machine, a `created_at` before `at - 120`), whatever else
+      is missing (plan check 4 Q1). A row with no disqualifying field and a missing or unreadable one is read once
+      more (`api.get(name)`); still incomplete, it is **uncertain**: never adopted without the owner's choice, and
+      never counted as none.
     - NEW's branch receipt is not evidence here (plan check 3 M1): its path is per repository and branch
       (`codespaces.py:445-447`) and another setup on that branch rewrites it, so it never narrows the candidates.
     - Exactly one candidate and no uncertain row: it is adopted, as spec step 2 rules, and the `Found NEW…` line
@@ -159,8 +162,10 @@ does not repeat.
       reconciliation keeps the first request's `at` and `before` (the second POST's time is appended to
       `request.retries`), so a late Codespace from the first POST is still a candidate. After a second POST
       returns, the coordinator reads the inventory once more and names any other candidate in the `Also new…` line.
-    - Several candidates, or any uncertain row: the owner chooses one in Gum, each shown with its machine and
-      creation time, or cancels.
+    - Several candidates, or any uncertain row: the owner chooses in Gum among those rows, each shown with its
+      machine and creation time (`unknown` where unread), plus `create a new one` when no row is a full candidate
+      (it then asks for the typed `create`, as with none), and `cancel` (stops, phase kept). An uncertain row
+      therefore never strands the run.
 
     An adopted NEW gets its start evidence from the coordinator (`evidence.record_start(state, NEW, request.at,
     'created')`). Its first resume rebuilds once, because no receipt validated it. That rebuild is accepted on this
@@ -284,7 +289,7 @@ Recovery on NEW will need a typed arm: consent was given as LOGIN, gh is signed 
 Creating the new Codespace from BRANCH at SHA12.
 BRANCH moved to SHA12 since the check; checking its setup again.
 Created NEW.
-Found NEW on BRANCH (MACHINE, created at HH:MM), the only new Codespace since the create request.
+Found NEW (MACHINE, created at HH:MM): the only new Codespace on BRANCH with that machine since the create request.
 Also new since the create request: NAME (MACHINE, created at HH:MM). This replace did not use it.
 Replace stopped at PHASE: REASON. Run REPLACE to continue.
 A replace of OLD is at PHASE.
@@ -312,7 +317,9 @@ Connect with task work:cs.
 - Lost reply: `GitHub did not confirm the new Codespace. Looking for it for up to 2 minutes.` ·
   `No new Codespace appeared. Type create to create one, or anything else to stop.` ·
   `New Codespaces since the create request: NAME (MACHINE, created at HH:MM), … Choose the one this replace keeps;
-  the others stay as they are.` (an uncertain row shows `unknown` for what could not be read)
+  the others stay as they are.` (an uncertain row shows `unknown` for what could not be read). Gum options: one
+  `NAME (MACHINE, created at HH:MM)` per row, then `create a new one` (only when no row is a full candidate), then
+  `cancel`.
 - Sign-ins: `Not signed in yet on NEW: TOOLS. Retry with task work:signin:all.` · `Sign-in on NEW did not finish;
   retry with task work:signin:all.`
 - NEW not ready: `NEW is not ready: fix the lines marked Not ready, then run REPLACE to check it again. OLD stays.`
@@ -451,7 +458,11 @@ Kept on this Mac only: codex SESSION_ID
   `(agent, session_id)` and reads heads only when one exists, so `tests/test_checkpoint_store.py:246`
   (`test_identical_record_retry_does_not_read_heads_again`) holds. Both the retry and the new-receive path decide
   "contains" and "proven prefix" by Task 3's full-closure digest rule over every file, not by the head alone
-  (`checkpoint_store.py:224-231` today).
+  (`checkpoint_store.py:224-231` today). The suite's shared `conversation()` fixture
+  (`tests/test_checkpoint_store.py:32-37`) then emits complete, truthful per-file metadata (`path`, `size`,
+  `sha256`, as capture writes them, `conversations.py:479`), so `test_appended_revision_retires_the_earlier_record`
+  (`:70`) and `test_older_revision_arriving_later_is_not_recorded` (`:77`) keep their one-record assertions (plan
+  check 4 Q2). A record whose closure cannot be proved is kept, never retired.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -825,14 +836,15 @@ def test_launch_options_hold_the_ordinary_values(self)    # a fixture project's 
      - `before = names of api.existing(repo, complete=True)`.
      - Then `api.launch(repo, branch, commit, machine, f'{idle}m', **dict(launch_options(...),
        open_after_create='none'), receipt=…, before_create=…, on_created=…, resume_hint=REPLACE)`, with every option
-       passed once by keyword (N3). `before_create()` writes `request = {"at": now(), "before": before}` at
-       `create-requested`. `on_created(name, before)` first journals `new = name` at `created`, then calls
+       passed once by keyword (N3). `before_create()` writes `request = {"at": now(), "before": before, "retries": []}`
+       at `create-requested` (a reader treats an absent `retries` as `[]`). `on_created(name, before)` first journals `new = name` at `created`, then calls
        `record_created`.
      - An exception while the phase is still `inspected` (no POST was sent) stops with its message, exit 1.
      - Any exception while `new` is still null → reconciliation (call 10).
-     - On a second submission (call 10) the phase is already `create-requested`: `before_create` appends to
-       `request.retries` and keeps `at` and `before`, and a preflight failure leaves the first request for the next
-       run's reconciliation.
+     - On a second submission (call 10) the phase is already `create-requested`: `before_create` appends `now()` to
+       `request.retries` and keeps `at` and `before`. An exception before `before_create` ran on that submission (a
+       preflight failure; no POST was sent) stops with its message, exit 1, before the null-NEW branch above, and
+       keeps the first request for the next run's reconciliation.
      - An exception after `new` is set → `Replace stopped at create: REASON. Run REPLACE to continue.`, exit 1.
      - A return → `ready`.
   5. Rerun at `create-requested` with `new` null: reconciliation first (call 10). Never step 4's POST. At `created`
@@ -877,12 +889,18 @@ def test_a_competing_creation_is_a_choice_not_an_adoption(self)  # M1: this requ
                                                         # another setup's B on the same branch and machine, both
                                                         # outside before; the branch receipt names B -> the owner
                                                         # chooses; 0 creates
-def test_an_uncertain_row_is_never_none(self)           # a new row without ref, machine or created_at -> shown in the
-                                                        # choice; the typed-create prompt never appears
+def test_an_uncertain_row_is_never_none(self)           # a new row without ref, machine or created_at, still
+                                                        # incomplete after the re-read -> shown in the choice beside
+                                                        # 'create a new one'; never the automatic recheck path
+def test_a_known_nonmatch_with_a_missing_field_is_excluded(self)  # another ref, machine or an older created_at with
+                                                        # another field missing -> excluded on every rerun; zero
+                                                        # candidates reach the recheck and the typed create
 def test_a_late_first_codespace_is_named_after_a_second_create(self)  # first reply lost, 2 minutes of nothing,
                                                         # typed create -> 2nd create; the first's Codespace appears
                                                         # -> the Also new line; request.before unchanged
-def test_a_preflight_failure_on_the_second_create_keeps_the_first_request(self)
+def test_a_preflight_failure_on_the_second_create_keeps_the_first_request(self)  # the first request is written
+                                                        # with retries []; the second appends in order; at and
+                                                        # before unchanged; the preflight failure stops, exit 1
 def test_an_incomplete_inventory_never_offers_create(self)
 def test_a_failure_before_the_post_is_not_a_lost_reply(self)  # preflight error -> phase inspected, 0 rechecks
 def test_none_found_asks_before_creating_again(self)    # 2 minutes of rechecks; 'create' -> 2nd create; other -> 0
