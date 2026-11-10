@@ -127,18 +127,33 @@ class OverviewTests(unittest.TestCase):
 
     def test_every_overlay_together_keeps_the_ranked_actions(self):
         local = self.replacing_local(armed=True, keeper='stopped', cleanup=('cleanup-cs',),
-            retired=('old-cs',), refusals=(Refusal('codex', 'session-1', 'refused'),),
+            retired=('other-cs',), refusals=(Refusal('codex', 'session-1', 'refused'),),
             checkout=replace(self.local.checkout, relation='behind', behind=2))
         remote = replace(self.remote, setup_prs=self.ok((7, 9)), upstream=self.ok('b' * 40),
-                         spaces=self.ok((*self.remote.spaces.value, Space('old-cs', 'Shutdown', None))))
+                         spaces=self.ok((*self.remote.spaces.value, Space('other-cs', 'Shutdown', None))))
         frame = self.frame(local, remote)
         self.assertEqual([a.key for a in frame.actions],
-                         ['connect', 'finish-replace', 'cleanup:cleanup-cs', 'pr:7', 'delete:old-cs', 'details'])
+                         ['connect', 'finish-replace', 'cleanup:cleanup-cs', 'pr:7', 'delete:other-cs', 'details'])
         self.assertEqual(frame.lines[0], 'Recovery is off until you connect')
         self.assertTrue(frame.lines[1].startswith('Replacing old-cs:'))
         self.assertEqual(frame.lines[2], 'Cleanup after deleting cleanup-cs is not finished.')
         self.assertEqual(len(frame.lines), 6)
         self.assertTrue(all(self.overview.cells(line) <= 78 for line in frame.lines))
+
+    def test_old_delete_waits_for_checked_and_keeps_the_other_seals_slot(self):
+        for phase in self.overview.replacing.PHASES:
+            with self.subTest(phase=phase):
+                local = replace(self.replacing_local(retired=('old-cs', 'other-cs')),
+                                pairing='new-cs',
+                                replacing={'old': 'old-cs', 'new': 'new-cs', 'phase': phase})
+                remote = replace(self.remote, spaces=self.ok(tuple(
+                    Space(name, 'Available', self.at) for name in ('new-cs', 'old-cs', 'other-cs'))))
+                frame = self.frame(local, remote)
+                target = 'old-cs' if phase in ('checked', 'offered') else 'other-cs'
+                self.assertEqual(frame.actions[-2].key, 'delete:' + target)
+                self.assertEqual(frame.actions[-1].key, 'details')
+                if phase not in ('checked', 'offered'):
+                    self.assertNotIn('delete:old-cs', [action.key for action in frame.actions])
 
     def test_cleanup_pending_comes_first_or_after_recovery(self):
         local = self.retirement_local(cleanup=('oldest-cs', 'later-cs'))
