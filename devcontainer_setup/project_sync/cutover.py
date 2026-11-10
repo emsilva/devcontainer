@@ -168,11 +168,14 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
             if not evidence.steady or len(required) != 3 or any(row.verdict != verdict.SAFE for row in required):
                 flush_lines(target, required)
                 return 1
-            stopped = scratch.stop(state)
             paused = True
-            if stopped.get('phase') == 'cleanup_required':
+            stopped = scratch.stop(state)
+            if stopped.get('phase') != 'stopped':
                 # A supervisor exit can leave its saved session needing recovery.
-                scratch.stop(state)
+                stopped = scratch.stop(state)
+            if stopped.get('running') or stopped.get('phase') != 'stopped':
+                print(f'Sync with {old} did not stop cleanly; nothing moved.')
+                return 1
             scan = target_scan.scan(connection, old, target.remote_root, now=now)
             fingerprint = target_scan.fingerprint(evidence.scan)
             if fingerprint is None or fingerprint != target_scan.fingerprint(scan):

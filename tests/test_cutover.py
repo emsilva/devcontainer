@@ -275,6 +275,66 @@ class CutoverTests(unittest.TestCase):
         self.assertEqual(self.stop.call_count, 2)
         self.assertEqual(self.scanner.call_count, 2)
 
+    def test_a_stop_timeout_keeps_the_resume_guidance_and_does_not_move(self):
+        message = 'Scratch supervisor is still shutting down; inspect status before retrying.'
+        self.stop.side_effect = ValueError(message)
+        code, out = self.run_cutover()
+        self.assertEqual(code, 1)
+        self.assertEqual(out.splitlines(), [message, 'Nothing moved.',
+                         'Sync with old-space is paused. Run the replace again, or task work:cs to resume it.'])
+        self.stop.assert_called_once_with(self.state)
+        self.scanner.assert_called_once()
+        self.sealer.assert_not_called()
+        self.remote.assert_not_called()
+        self.assertIsNone(seal.read(self.state, 'old-space'))
+        self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'old-space')
+        self.assertFalse(read_json(self.receipt_path)['moved'])
+
+    def test_a_dead_syncing_worker_is_recovered_before_the_final_scan(self):
+        def stop(*args):
+            result = self.stop_old(*args)
+            if self.stop.call_count == 1:
+                result['phase'] = 'syncing'
+            return result
+        self.stop.side_effect = stop
+        code, out = self.run_cutover()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.stop.call_count, 2)
+        self.assertEqual(self.order, ['decide', 'scan', 'gather', 'stop', 'stop', 'scan', 'remote'])
+        self.assertEqual(self.scanner.call_count, 2)
+        self.sealer.assert_called_once()
+        self.remote.assert_called_once()
+        self.assertIsNotNone(seal.read(self.state, 'old-space'))
+        self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'new-space')
+        self.assertTrue(read_json(self.receipt_path)['moved'])
+
+    def assert_unclean_stop_refuses(self, calls):
+        code, out = self.run_cutover()
+        self.assertEqual(code, 1, out)
+        self.assertEqual(out.splitlines(), ['Sync with old-space did not stop cleanly; nothing moved.',
+                         'Sync with old-space is paused. Run the replace again, or task work:cs to resume it.'])
+        self.assertEqual(self.stop.call_count, calls)
+        self.scanner.assert_called_once()
+        self.sealer.assert_not_called()
+        self.remote.assert_not_called()
+        self.assertIsNone(seal.read(self.state, 'old-space'))
+        self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'old-space')
+        self.assertFalse(read_json(self.receipt_path)['moved'])
+
+    def test_repeated_cleanup_required_does_not_scan_seal_or_move(self):
+        self.stop.side_effect = [dict(running=False, phase='cleanup_required'),
+                                 dict(running=False, phase='cleanup_required')]
+        self.assert_unclean_stop_refuses(2)
+
+    def test_stop_recovery_still_waiting_does_not_scan_seal_or_move(self):
+        self.stop.side_effect = [dict(running=False, phase='cleanup_required'),
+                                 dict(running=False, phase='waiting')]
+        self.assert_unclean_stop_refuses(2)
+
+    def test_a_running_stop_result_does_not_scan_seal_or_move(self):
+        self.stop.side_effect = [dict(running=True, phase='stopped')]
+        self.assert_unclean_stop_refuses(1)
+
     def test_real_remote_and_retarget_keep_old_sync_stopped_until_new_is_bound(self):
         self.remote.side_effect = self.actual_remote
         actual_retarget = scratch.retarget
