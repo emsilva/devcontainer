@@ -77,6 +77,17 @@ class VerdictTests(unittest.TestCase):
     def write(self, path, value):
         atomic_write(path, json.dumps(value).encode())
 
+    def test_wrap_keeps_the_label_and_first_column_for_long_first_words(self):
+        for message, prefix in [('  Git      /workspaces/' + 'r' * 90 + ' has 2 commits not on GitHub', '  Git      '),
+                                ('界' * 60 + ' has more text', '界')]:
+            with self.subTest(prefix=prefix):
+                lines = self.v.wrap(message)
+                self.assertTrue(lines[0].startswith(prefix), lines)
+                self.assertTrue(all(overview.cells(line) <= 78 for line in lines), lines)
+                self.assertEqual(''.join(lines).replace(' ', ''), message.replace(' ', ''))
+                indent = ' ' * (11 if prefix.startswith(' ') else 2)
+                self.assertTrue(all(line.startswith(indent) for line in lines[1:]), lines)
+
     def seal(self):
         return self.seals.Seal('space', IDENTITY, 'example/project', 'octo', '/workspaces/project',
                                'replace-1', NOW, 'cycle', 'b' * 64,

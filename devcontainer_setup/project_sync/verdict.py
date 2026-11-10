@@ -391,8 +391,8 @@ def wrap(message) -> list[str]:
             continue
         if line != prefix:
             result.append(line)
-        prefix = continuation
-        line = prefix
+            prefix = continuation
+            line = prefix
         available = 78 - len(prefix)
         while overview.cells(word) > available:
             used, end = 0, 0
@@ -404,6 +404,9 @@ def wrap(message) -> list[str]:
                 end = index + 1
             result.append(line + word[:end])
             word = word[end:]
+            prefix = continuation
+            line = prefix
+            available = 78 - len(prefix)
         line += word
     if line != prefix:
         result.append(line)
