@@ -38,7 +38,7 @@ def _binding(project, state, expected):
             or any(journal[key] != expected[key] for key in ('operation', 'old', 'new'))
             or not journal['new'] or binding.get('codespace') != journal['new']
             or binding.get('identity') != project.identity
-            or journal['repository'] != project.identity.removeprefix('github.com/')):
+            or journal['repository'].casefold() != project.identity.removeprefix('github.com/').casefold()):
         raise ValueError('Unbound replace check')
     workspace.registry(project, state)
     return binding

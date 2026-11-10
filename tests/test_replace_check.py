@@ -356,3 +356,32 @@ class ReplaceCheckTests(unittest.TestCase):
         self.assertEqual(result['recovery'], 'recovery still points at old-space')
         self.assertNotIn(unsafe, output)
         self.assertNotIn(unsafe.encode(), (self.state / 'check.json').read_bytes())
+
+    def test_mixed_case_repository_binds_but_another_repository_is_refused(self):
+        import subprocess
+        from devcontainer_setup.project_sync.state import discover_project
+        origin = 'https://github.com/Example/Project.git'
+        for args in [('init', '-q'), ('remote', 'add', 'origin', origin)]:
+            subprocess.run(['git', '-C', str(self.project.root), *args], check=True, capture_output=True)
+        project = discover_project(self.project.root)
+        self.assertEqual(project.remote, origin)
+        self.assertEqual(project.identity, 'github.com/example/project')
+        mismatch = 'This replace record does not match; run the replace again.'
+        for repository, matches in [('Example/Other', False), ('Example/Project', True)]:
+            with self.subTest(repository=repository):
+                record = dict(replacing.read(self.state), repository=repository)
+                replacing.write(self.state, record)
+                output = io.StringIO()
+                with patch.object(self.checker, '_observe', return_value=None) as observed, \
+                        patch.object(self.checker, '_herdr', return_value='ok'), redirect_stdout(output):
+                    code = self.checker.run(project, self.state, operation=record['operation'],
+                                            receipt=self.state / 'case-check.json', wait=0)
+                self.assertEqual(observed.call_count, 1 if matches else 0)
+                self.assertEqual(replacing.read(self.state)['repository'], repository)
+                if matches:
+                    self.assertNotIn(mismatch, output.getvalue())
+                    self.assertEqual(read_json(self.state / 'case-check.json')['sync'],
+                                     'no sync cycle completed in 6 minutes')
+                else:
+                    self.assertEqual(code, 1)
+                    self.assertEqual(output.getvalue(), mismatch + '\n')
