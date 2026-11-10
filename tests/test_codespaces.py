@@ -106,6 +106,109 @@ class CodespacesTests(unittest.TestCase):
         return self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'browser',
                                None, self.receipt)
 
+    def test_empty_create_reply_is_a_value_error(self):
+        real = self.runner
+
+        def runner(args, **kwargs):
+            result = real(args, **kwargs)
+            return subprocess.CompletedProcess(args, 0, '', '') if args[1:3] == ['codespace', 'create'] else result
+
+        self.api.run = runner
+        with self.assertRaisesRegex(ValueError, 'Creation did not return a codespace name'):
+            self.launch()
+        self.assertFalse(self.receipt.exists())
+        self.assertEqual(sum(call[1:3] == ['codespace', 'create'] for call in self.runner.calls), 1)
+
+    def test_resume_hint_replaces_the_setup_resume_sentence(self):
+        self.runner.fail_personalization = True
+        with self.assertRaises(ValueError) as caught:
+            self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'none',
+                            'owner/dotfiles', self.receipt, resume_hint='task setup -- --replace')
+        self.assertIn('Resume with: task setup -- --replace', str(caught.exception))
+        self.assertNotIn('task devcontainer:setup -- --resume', str(caught.exception))
+        self.assertEqual(json.loads(self.receipt.read_text())['validated_commit'], 'a' * 40)
+        self.runner.fail_personalization = False
+        self.assertEqual(self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'none',
+                                        'owner/dotfiles', self.receipt, resume='new-space',
+                                        resume_hint='task setup -- --replace'), 'new-space')
+        self.assertEqual(sum(call[1:3] == ['codespace', 'create'] for call in self.runner.calls), 1)
+        self.assertFalse(any(call[1:3] == ['codespace', 'rebuild'] for call in self.runner.calls))
+
+    def test_before_create_runs_after_preflight_and_before_the_post(self):
+        observed = []
+
+        def before_create():
+            self.assertTrue(self.receipt.parent.is_dir())
+            self.assertTrue(self.runner.calls[-1][2].endswith('/machines'))
+            observed.append(len(self.runner.calls))
+
+        self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'none', None,
+                        self.receipt, before_create=before_create)
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(self.runner.calls[observed[0]][1:3], ['codespace', 'create'])
+        for options in ({'open_after_create': 'invalid'}, {'workspace': 'relative'}, {'machine': 'unavailable'}):
+            self.runner.calls.clear()
+            observed.clear()
+            arguments = dict(machine=MACHINE['name'], idle_timeout='30m', open_after_create='none',
+                             dotfiles_repo=None, receipt=self.receipt, before_create=before_create)
+            arguments.update(options)
+            with self.assertRaises(ValueError):
+                self.api.launch('owner/project', 'main', 'a' * 40, **arguments)
+            self.assertEqual(observed, [])
+            self.assertFalse(any(call[1:3] == ['codespace', 'create'] for call in self.runner.calls))
+
+        self.runner.calls.clear()
+        with self.assertRaisesRegex(ValueError, 'journal cannot be stored'):
+            self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'none', None,
+                            self.receipt, before_create=lambda: (_ for _ in ()).throw(
+                                ValueError('journal cannot be stored')))
+        self.assertFalse(any(call[1:3] == ['codespace', 'create'] for call in self.runner.calls))
+
+    def test_complete_inventory_checks_total_count(self):
+        wanted = {'name': 'old-space', 'repository': {'full_name': 'owner/project'}, 'git_status': {'ref': 'main'}}
+        other = {'name': 'other-space', 'repository': {'full_name': 'owner/other'}, 'git_status': {'ref': 'main'}}
+        pages = [{'total_count': 2, 'codespaces': [wanted]}, {'total_count': 2, 'codespaces': [other]}]
+
+        def inventory(value):
+            return Codespaces(run=lambda args, **kwargs: subprocess.CompletedProcess(args, 0, json.dumps(value), ''))
+
+        self.assertEqual(inventory(pages).existing('OWNER/PROJECT', 'main', complete=True), [wanted])
+        self.assertEqual(inventory(pages).existing('owner/project', 'other', complete=True), [])
+        self.assertEqual(inventory([{'total_count': 0, 'codespaces': []}]).existing('owner/project', complete=True), [])
+        for invalid in ([], {}, [None], [{'codespaces': [wanted]}],
+                        [{'total_count': None, 'codespaces': [wanted]}],
+                        [{'total_count': '1', 'codespaces': [wanted]}],
+                        [{'total_count': True, 'codespaces': [wanted]}],
+                        [{'total_count': -1, 'codespaces': []}],
+                        [{'total_count': 2, 'codespaces': [wanted]}],
+                        [{'total_count': 1, 'codespaces': [wanted]}, {'total_count': 2, 'codespaces': [other]}],
+                        [{'total_count': 1, 'codespaces': None}], [{'total_count': 0}],
+                        [{'total_count': 1, 'codespaces': [None]}]):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, 'the Codespace list from GitHub is incomplete'):
+                    inventory(invalid).existing('owner/project', complete=True)
+        # Ordinary callers keep accepting pages without completeness metadata.
+        self.assertEqual(inventory([{'codespaces': [wanted]}]).existing('owner/project'), [wanted])
+
+    def test_find_receipt_searches_other_branches(self):
+        from devcontainer_setup import codespaces
+        self.assertTrue(hasattr(codespaces, 'find_receipt'), 'read-only receipt search is not implemented')
+        state = Path(self.tmp.name) / 'state'
+        for branch, name in (('main', 'new-space'), ('setup/devcontainer', 'old-space'), ('feature/work', 'old-space')):
+            path = receipt_path(state, 'owner/project', branch)
+            self.api._save_receipt(path, {'codespace': name, 'repository': 'owner/project', 'branch': branch})
+            os.utime(path, (100 if branch == 'setup/devcontainer' else 200,)*2)
+        old = receipt_path(state, 'owner/project', 'feature/work')
+        # Neither a newer unbound file, a malformed record nor a symlink can be evidence.
+        self.api._save_receipt(old.parent / 'unbound.json',
+                               {'codespace': 'old-space', 'repository': 'owner/project', 'branch': 'main'})
+        (old.parent / 'malformed.json').write_text('{')
+        (old.parent / 'linked.json').symlink_to(old)
+        before = {path.name: path.read_bytes() for path in old.parent.glob('*.json')}
+        self.assertEqual(codespaces.find_receipt(state, 'owner/project', 'old-space'), old)
+        self.assertIsNone(codespaces.find_receipt(state, 'owner/project', 'missing-space'))
+        self.assertEqual({path.name: path.read_bytes() for path in old.parent.glob('*.json')}, before)
+
     def test_create_with_none_opens_nothing(self):
         self.api.launch('owner/project', 'main', 'a' * 40, MACHINE['name'], '30m', 'none', None, self.receipt)
         self.assertFalse(any(call[1:3] == ['codespace', 'code'] for call in self.runner.calls))

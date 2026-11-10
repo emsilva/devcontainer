@@ -2471,6 +2471,46 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.assertNotIn('lacks the new setup files', output.getvalue())
         self.assertEqual(self.snapshot(), before)
 
+    def test_launch_options_hold_the_ordinary_values(self):
+        import contextlib
+        import io
+        from devcontainer_setup import __main__ as wizard
+        from devcontainer_setup.codespaces import receipt_path
+        from devcontainer_setup.preferences import save_open_after_create
+        self.assertTrue(hasattr(wizard, 'launch_options'), 'shared launch options are not implemented')
+        config = {'workspaceFolder': '/workspaces/custom',
+                  'customizations': {'devcontainerSetup': {'selections': {'dotfiles': True}}}}
+        preferences = {'apply_dotfiles': False, 'dotfiles_repo': 'owner/dotfiles'}
+        profile = {'git': {'name': 'Test User', 'email': 'test@example.com'}}
+        save_open_after_create('vscode')
+        expected = {'dotfiles_repo': 'owner/dotfiles', 'machine_profile': profile,
+                    'workspace': '/workspaces/custom', 'state_root': self.state, 'open_after_create': 'vscode'}
+        with patch.object(wizard, '_machine_profile', return_value=profile):
+            self.assertEqual(wizard.launch_options(self.root, config, preferences), expected)
+            disabled = json.loads(json.dumps(config))
+            disabled['customizations']['devcontainerSetup']['selections']['dotfiles'] = False
+            self.assertEqual(wizard.launch_options(self.root, disabled, preferences),
+                             dict(expected, dotfiles_repo=None, machine_profile=None))
+            self.push_to_main({'.devcontainer/devcontainer.json': json.dumps(config)})
+            sha = self.origin_git('rev-parse', 'main')
+            calls = []
+
+            class API:
+                def launch(self, *args, **kwargs):
+                    calls.append((args, kwargs))
+                    return 'new-space'
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                wizard._launch_on_default(API(), self.root, 'owner/project', 'main', sha,
+                                          {'machine': 'premiumLinux', 'idle_timeout': '120m'}, preferences)
+        ((args, kwargs),) = calls
+        self.assertEqual(args, ('owner/project', 'main', sha))
+        for key, value in expected.items():
+            self.assertEqual(kwargs[key], value, key)
+        self.assertEqual(kwargs['receipt'], receipt_path(self.state, 'owner/project', 'main'))
+        self.assertEqual((kwargs['machine'], kwargs['idle_timeout']), ('premiumLinux', '120m'))
+        self.assertTrue(callable(kwargs['on_created']))
+
     def test_setup_records_created_evidence_even_when_not_paired(self):
         # #61: setup records created evidence even when the Codespace is not paired.
         import contextlib
