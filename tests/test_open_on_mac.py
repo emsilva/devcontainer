@@ -38,8 +38,9 @@ class OpenOnMacTests(unittest.TestCase):
 
     def run_helper(self, url=URL, path=HELPER, **env):
         self.assertTrue(HELPER.is_file(), 'templates/tools/open-on-mac is missing')
+        # Startup hang guard; test_finishes_within_a_second pins the speed promise.
         return subprocess.run([sys.executable, str(path), url], env=dict(self.env, **env),
-                              capture_output=True, text=True, timeout=2)
+                              capture_output=True, text=True, timeout=30)
 
     def heartbeat(self, age=0):
         self.state.mkdir(exist_ok=True)
