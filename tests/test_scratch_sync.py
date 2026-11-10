@@ -368,6 +368,7 @@ class ScratchTests(unittest.TestCase):
                         patch.object(m.signal, 'signal'), patch.object(m.threading, 'Event', return_value=exiting), \
                         patch.object(m, 'start', side_effect=start), \
                         patch.object(workspace, '_prerequisites'), \
+                        patch('devcontainer_setup.project_sync.arming.account', return_value='octo'), \
                         patch.object(workspace, '_choose_pairing', return_value=('fixture', str(remote))), \
                         patch.object(workspace, '_ready', side_effect=lambda project, owner: actual_ready(project, owner, timeout=5)), \
                         patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), \

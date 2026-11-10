@@ -151,7 +151,8 @@ without creating duplicate imports.
 
 Replace first, then check the old Codespace with
 `task work:cs:delete -- --codespace NAME`. Run it on your Mac: it verifies the
-repository and GitHub account, checks the Codespace and prints a verdict for
+repository and the GitHub account recorded when the Codespace was connected or armed,
+checks the Codespace and prints a verdict for
 Git, Scratch, History and Agents. Every category must be safe. Type `delete`
 in the terminal to authorize deletion; the command checks everything again
 before recording the stop, waiting for Shutdown and deleting it. It confirms

@@ -212,6 +212,48 @@ class DeletionTests(unittest.TestCase):
         self.assertEqual(self.mutations(), [])
         self.assertFalse((self.state / 'deletions').exists())
 
+    def test_recorded_owner_refuses_another_account_for_every_target_kind(self):
+        self.mocks['arming.account'].return_value = 'other'
+        self.write(self.state / 'accounts.json', {'schema': 1, 'codespaces': {'space': 'octo'}})
+        for kind in ('paired', 'sealed', 'moved'):
+            with self.subTest(kind=kind):
+                if kind != 'paired':
+                    self.retired()
+                if kind == 'moved':
+                    (self.state / 'retired/space.json').unlink()
+                code, output, _ = self.run_delete(name='space', check=True, as_json=True)
+                self.assertEqual(code, 1)
+                self.assertEqual(json.loads(output)['outcome'], 'refused')
+                self.assertIn('space was paired as octo, but gh is signed in as other.', output)
+                self.factory.assert_not_called()
+                self.assertEqual(self.api.calls, [])
+                self.assertEqual(self.mutations(), [])
+
+    def test_disarmed_pairing_still_names_its_owner(self):
+        arming.arm(self.state, gh_user='octo', codespace='space', consent='x', billable_owner='octo', ports=[], now=1)
+        arming.write(self.state, dict(arming.read(self.state), armed=False))
+        self.mocks['arming.account'].return_value = 'other'
+        code, output, _ = self.run_delete(check=True, as_json=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output)['outcome'], 'refused')
+        self.factory.assert_not_called()
+        self.assertEqual(self.mutations(), [])
+
+    def test_unknown_owner_names_the_inventory_without_claiming_deleted(self):
+        self.api.states = ['Deleted']
+        for options in ({'check': True, 'as_json': True}, {'tty': False}, {'answer': 'no'}):
+            with self.subTest(options=options):
+                code, output, _ = self.run_delete(**options)
+                self.assertEqual(code, 1)
+                self.assertIn("space is not among octo's Codespaces on GitHub", output)
+                self.assertNotIn('Deleted space', output)
+                self.assertNotIn('is already deleted', output)
+                self.assertEqual(self.mutations(), [])
+        (self.state / 'scratch.json').unlink()
+        code, output, _ = self.run_delete(name='space', check=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(output.strip(), "space is not among octo's Codespaces on GitHub.")
+
     def test_scratch_uses_the_synchronized_binding_root(self):
         synced_root = self.base / 'primary'
         (synced_root / '.scratch').mkdir(parents=True)
