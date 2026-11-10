@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import shlex
 
-from . import forget, overview, pushed, seal, standing, sync_cycle, target_scan
+from . import forget, overview, pushed, replacing, seal, standing, sync_cycle, target_scan
 from .seal import Seal
 from .state import read_json
 from .transport import _name
@@ -131,6 +131,11 @@ def resolve(project, state, name: str | None) -> Target:
         return Target(name, 'sealed', record.remote_root, record, newest)
     if newest is not None:
         return Target(name, 'moved', remote_root, None, newest)
+    journal = replacing.naming_new(state, name)
+    if journal is not None:
+        if journal['repository'].casefold() != project.identity.removeprefix('github.com/').casefold():
+            raise ValueError('The replace record belongs to another project')
+        return Target(name, 'replacement', journal['remote_root'], None, None)
     return Target(name, 'unpaired', None, None, None)
 
 
@@ -253,6 +258,13 @@ def _scratch(target, evidence, now):
         return _category('Scratch', UNKNOWN, 'moved with --rebind, so no final flush was recorded')
     if not scan.scratch_complete:
         return _category('Scratch', UNKNOWN, 'could not read .scratch on ' + target.name)
+    if target.kind == 'replacement':
+        paths = tuple(path for path, _ in scan.scratch)
+        if paths:
+            return _category('Scratch', UNSAFE, _quantity(len(paths), 'file') +
+                             (' exists' if len(paths) == 1 else ' exist') + ' only on ' + target.name +
+                             ' (' + _listed(paths) + ')', paths)
+        return _category('Scratch', SAFE, 'no files in .scratch')
     if target.kind == 'paired':
         if not evidence.sync_running:
             return _category('Scratch', UNKNOWN, _SYNC_STOPPED)
@@ -285,6 +297,12 @@ def _history(target, evidence, now):
         return _category('History', UNKNOWN, 'moved with --rebind, so no final flush was recorded')
     if not scan.sessions_complete:
         return _category('History', UNKNOWN, 'could not read every conversation on ' + target.name)
+    if target.kind == 'replacement':
+        paths = tuple(path for path, _ in scan.sessions)
+        if paths:
+            return _category('History', UNSAFE, _quantity(len(paths), 'conversation file') +
+                             (' exists' if len(paths) == 1 else ' exist') + ' only on ' + target.name, paths)
+        return _category('History', SAFE, 'no conversations on ' + target.name)
     if target.kind == 'sealed':
         if target.seal is None:
             return _category('History', UNKNOWN, 'the final capture is no longer on this Mac')

@@ -13,7 +13,7 @@ import shlex
 import sys
 import time
 
-from . import (arming, herdr, keeper, lifecycle, overview, power, pushed, restore,
+from . import (arming, herdr, keeper, lifecycle, overview, power, pushed, replacing, restore,
                scratch, scratch_tree, ssh_hosts, standing, target_scan, verdict, workspace)
 from .checkpoint_store import Store
 from .state import atomic_write, locked, read_json
@@ -23,7 +23,8 @@ from .transport import CodespaceConnection
 PHASES = ('confirmed', 'stop-recorded', 'stop-requested', 'shutdown', 'delete-requested', 'deleted', 'cleaned')
 STEPS = {'paired': ('keeper', 'sync worker', 'pairing', 'Herdr connections', 'recovery', 'SSH alias',
                     'Herdr profile', 'sync session'),
-         'sealed': ('Herdr connections', 'sync session'), 'moved': ('Herdr connections', 'sync session')}
+         'sealed': ('Herdr connections', 'sync session'), 'moved': ('Herdr connections', 'sync session'),
+         'replacement': ()}
 _DONE = ('done', 'kept', 'moved')
 
 
@@ -171,6 +172,9 @@ def _archive(project, state, name):
 def _cleanup(project, state, journal, *, now, say):
     """Use the recorded kind, keeping every successful primitive durable on replay."""
     name, kind, results = journal['codespace'], journal['kind'], journal['cleanup']
+    if kind == 'replacement':
+        _save(state, journal, now, 'cleaned')
+        return None
 
     def perform(step, action):
         if results.get(step) in _DONE:
@@ -289,7 +293,7 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
         if state_name == 'Shutdown':
             if target.kind == 'paired':
                 action = 'To check it, restart it: ' + shlex.join(overview.task_command(local, 'work:cs:restart'))
-            elif target.kind in ('sealed', 'moved'):
+            elif target.kind in ('sealed', 'moved', 'replacement'):
                 action = 'To check it, start it: ' + command('--', '--codespace', target.name, '--start')
         elif state_name:
             action = 'Check again once it is Available.'
@@ -297,11 +301,12 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
         return result('unreachable', reason if as_json else None, observed=value)
 
     def pending_cleanup():
+        kind = journal['kind'] if journal else target.kind
         if owner is None and not delete_attempted:
             return result('cleanup-pending', unknown_inventory() + '; this Mac still keeps ' +
-                          ', '.join(STEPS[target.kind]) + '. Run ' +
+                          ', '.join(STEPS[kind]) + '. Run ' +
                           command('--', '--codespace', target.name) + ' in a terminal to remove them.')
-        steps = STEPS.get(journal['kind'] if journal else target.kind, ())
+        steps = STEPS.get(kind, ())
         step = next((item for item in steps if not journal or journal['cleanup'].get(item) not in _DONE),
                     steps[0] if steps else 'sync session')
         reason = journal['cleanup'].get(step, 'not finished') if journal else 'not finished'
@@ -315,7 +320,8 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
             return pending_cleanup()
         if owner is not None or delete_attempted:
             say('Deleted ' + target.name + '.')
-        say('Cleaned up: ' + ', '.join(STEPS[journal['kind']]) + '.')
+        if STEPS[journal['kind']]:
+            say('Cleaned up: ' + ', '.join(STEPS[journal['kind']]) + '.')
         return 0
 
     def unknown_inventory():
@@ -349,7 +355,9 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
                 return result('refused', f"{target.name}'s delete was started as {journal['account']} for "
                               f"{journal['repository']}; switch to that account and repository, then try again.")
             armed = arming.read(state)
+            replacement = replacing.naming_new(state, target.name)
             owner = (journal['account'] if journal and journal.get('owner_checked', True) else None) or \
+                    (replacement['account'] if replacement else None) or \
                     workspace.accounts(state).get(target.name) or \
                     (armed.get('gh_user') if armed.get('codespace') == target.name else None) or \
                     (target.seal.gh_user if target.seal else None)
@@ -385,7 +393,7 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
                                   shlex.join(overview.task_command(local, 'work:cs:restart')) + '.')
                 if not terminal():
                     return result('refused', '--start needs a terminal.')
-                if target.kind not in ('sealed', 'moved') or reading.state != 'Shutdown' or reading.pending is True:
+                if target.kind not in ('sealed', 'moved', 'replacement') or reading.state != 'Shutdown' or reading.pending is True:
                     return unavailable(target.name + ' is ' + reading.state, reading.state)
                 start_attempted = True
                 status = api.post_start()
@@ -398,6 +406,9 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
                 deleted_confirmed = True
                 kept = journal or target.kind == 'paired' or target.archive is not None
                 if not kept:
+                    if target.kind == 'replacement':
+                        journal = _new_journal(target, account, repository, '0' * 64)
+                        _save(state, journal, now, 'cleaned')
                     message = target.name + ' is already deleted.' if owner is not None else unknown_inventory() + '.'
                     return result('already-deleted', message, 0)
                 if check or not terminal():
@@ -422,7 +433,10 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
 
             with ExitStack() as connections:
                 try:
-                    connection = connections.enter_context(connect(target.name, state=state))
+                    connection = connect(target.name, state=state)
+                    if target.kind == 'replacement':
+                        connection.accept_new = True
+                    connection = connections.enter_context(connection)
                 except ValueError:
                     return unavailable('could not connect to ' + target.name)
                 evidence = gather(project, state, target, connection, now=now, sleep=sleep)

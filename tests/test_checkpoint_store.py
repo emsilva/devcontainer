@@ -1,4 +1,5 @@
 """Durable content validation and acknowledgement ordering."""
+import copy
 import hashlib
 import json
 import os
@@ -33,8 +34,82 @@ class StoreTests(unittest.TestCase):
         # Codex dependencies can precede the head in the files list.
         return dict(agent=agent, session_id=sid, source_root='/workspaces/project',
                     cutoff=dict(bytes=len(body)), files=[
-                        dict(session_id='ancestor', blob=self.store.put(b'ancestor context')),
-                        dict(session_id=sid, blob=self.store.put(body))])
+                        dict(session_id='ancestor', path='ancestor.jsonl', size=len(b'ancestor context'),
+                             sha256=self.store.put(b'ancestor context'), blob=self.store.put(b'ancestor context')),
+                        dict(session_id=sid, path=sid + '.jsonl', size=len(body),
+                             sha256=self.store.put(body), blob=self.store.put(body))])
+
+    def test_collect_keeps_what_a_seal_names(self):
+        snapshots = []
+        for name in ('one', 'two'):
+            blob = self.store.put(name.encode())
+            snapshot = self.store.save({'files': [{'blob': blob}]})
+            snapshots.append(snapshot)
+            self.age('manifests', snapshot, 10)
+            self.age('objects', blob, 10)
+            atomic_write(self.path / 'retired' / (name + '.json'),
+                         json.dumps({'snapshot_id': snapshot}).encode())
+        self.assertEqual(self.store.collect(apply=True)['manifests'], 0)
+        for snapshot in snapshots:
+            self.assertIsNotNone(self.store.load(snapshot))
+
+    def test_collect_deletes_nothing_when_a_seal_cannot_be_read(self):
+        blob = self.store.put(b'would be collected')
+        snapshot = self.store.save({'files': [{'blob': blob}]})
+        self.age('manifests', snapshot, 10)
+        self.age('objects', blob, 10)
+        for body in (b'{', b'{}', b'{"snapshot_id": "bad"}', b'{"snapshot_id": []}'):
+            with self.subTest(body=body):
+                atomic_write(self.path / 'retired/old-space.json', body)
+                with self.assertRaises(ValueError):
+                    self.store.collect(apply=True)
+                self.assertEqual(self.store.read(blob), b'would be collected')
+                self.assertIsNotNone(self.store.load(snapshot))
+
+    def test_a_changed_ancestor_is_never_retired(self):
+        earlier = self.conversation(b'head', agent='codex')
+        changed = copy.deepcopy(earlier)
+        body = b'changed ancestor'
+        changed['files'][0].update(size=len(body), sha256=self.store.put(body), blob=self.store.put(body))
+        self.receive(earlier)
+        self.receive(changed)
+        self.assertEqual(len(self.relay_records()), 2)
+        self.assertEqual(self.store.relay_entries(), ([dict(e, relayed=True) for e in (earlier, changed)], []))
+
+    def test_collect_deletes_nothing_when_seals_cannot_be_listed(self):
+        blob = self.store.put(b'sealed data')
+        snapshot = self.store.save({'files': [{'blob': blob}]})
+        self.age('manifests', snapshot, 10)
+        self.age('objects', blob, 10)
+        real = checkpoint_store.os.scandir
+        def scandir(path):
+            if Path(path) == self.path / 'retired':
+                raise PermissionError('fixture seals cannot be listed')
+            return real(path)
+        with mock.patch.object(checkpoint_store.os, 'scandir', side_effect=scandir):
+            with self.assertRaisesRegex(ValueError, 'final-flush record cannot be read'):
+                self.store.collect(apply=True)
+        self.assertEqual(self.store.read(blob), b'sealed data')
+        self.assertIsNotNone(self.store.load(snapshot))
+
+    def test_inconsistent_file_metadata_cannot_prove_retirement(self):
+        earlier, later = self.conversation(b'AB'), self.conversation(b'AC')
+        earlier['files'][1].update(size=1, sha256=hashlib.sha256(b'A').hexdigest())
+        self.receive(earlier)
+        self.receive(later)
+        self.assertEqual(len(self.relay_records()), 2)
+
+    def test_an_identical_retry_retires_a_crash_left_prefix(self):
+        earlier, later = self.conversation(b'A'), self.conversation(b'AB')
+        self.receive(earlier)
+        snapshot = self.store.save(dict(conversations=dict(entries=[later])))
+        with mock.patch.object(checkpoint_store.os, 'unlink', side_effect=OSError('crash before retirement')):
+            with self.assertRaisesRegex(OSError, 'crash before retirement'):
+                self.store.acknowledge(snapshot, source='codespace')
+        self.assertEqual(len(self.relay_records()), 2)
+        self.store.acknowledge(snapshot, source='codespace')
+        self.assertEqual(len(self.relay_records()), 1)
+        self.assertEqual(self.store.relay_entries(), ([dict(later, relayed=True)], []))
 
     def receive(self, *entries, source='codespace'):
         snapshot = self.store.save(dict(schema=2, conversations=dict(entries=list(entries), issues=[])))

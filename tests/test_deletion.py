@@ -204,6 +204,105 @@ class DeletionTests(unittest.TestCase):
         self.write(archive / 'scratch-session.json', {'name': 'archived-session'})
         return archive
 
+    def replacement(self):
+        from tests.test_replacing import journal
+        reader = importlib.import_module('devcontainer_setup.project_sync.replacing')
+        value = journal(new='space')
+        reader.write(self.state, value)
+        self.bind('old-space')
+        return reader, value
+
+    def test_replacement_target_accepts_its_first_host_key(self):
+        self.replacement()
+        connection = self.connect.return_value
+        def enter(*_):
+            self.assertIs(connection.accept_new, True)
+            return connection
+        connection.__enter__.side_effect = enter
+        code, output, _ = self.run_delete(name='space', check=True)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.mutations(), [])
+        self.assertEqual(self.mocks['target_scan.scan'].call_count, 1)
+        self.assertIsNone(self.mocks['target_scan.scan'].call_args.kwargs.get('cutoffs'))
+
+    def test_replacement_delete_cleans_nothing_and_rereads_its_journal(self):
+        reader, value = self.replacement()
+        code, output, _ = self.run_delete(name='space')
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.mutations(), ['post_stop', 'delete'])
+        saved = self.d._journal(self.state, 'space')
+        self.assertEqual((saved['phase'], saved['kind'], saved['cleanup']), ('cleaned', 'replacement', {}))
+        self.assertEqual(reader.ended_by_fact(self.state, value), 'space')
+        self.factory.side_effect = AssertionError('a completed delete must not read GitHub')
+        code, output, _ = self.run_delete(name='space')
+        self.assertEqual(code, 0, output)
+        self.assertIn('space was deleted at', output)
+        self.mocks['restore.end_target_proxies'].assert_not_called()
+        self.mocks['scratch.terminate_retired'].assert_not_called()
+
+    def test_already_deleted_replacement_records_its_deletion(self):
+        reader, value = self.replacement()
+        self.api.states = ['Deleted']
+        code, output, _ = self.run_delete(name='space', check=True)
+        self.assertEqual(code, 0, output)
+        self.assertIn('space is already deleted.', output)
+        self.assertEqual(self.d._journal(self.state, 'space')['phase'], 'cleaned')
+        self.assertEqual(reader.ended_by_fact(self.state, value), 'space')
+        self.assertEqual(self.mutations(), [])
+
+    def test_delete_never_takes_the_replace_lock(self):
+        self.replacement()
+        with locked(self.state / 'replace.lock'), patch.object(self.d, 'locked', wraps=locked) as locks:
+            for check in (True, False):
+                self.api.states = ['Available', 'Available', 'Shutdown']
+                code, output, _ = self.run_delete(name='space', check=check)
+                self.assertEqual(code, 0, output)
+        self.assertNotIn(self.state / 'replace.lock', [call.args[0] for call in locks.call_args_list])
+
+    def test_delete_of_sealed_old_after_a_replace_keeps_new_recovery(self):
+        from tests.test_replacing import journal
+        reader = importlib.import_module('devcontainer_setup.project_sync.replacing')
+        value = journal(old='space')
+        reader.write(self.state, value)
+        target = self.d.verdict.resolve(self.project, self.state, 'space')
+        evidence = self.d.gather(self.project, self.state, target, object(), now=lambda: self.clock, sleep=self.advance)
+        seal.write(self.state, Store(self.state), evidence.scan, evidence=evidence, identity=IDENTITY,
+                   repository='example/project', gh_user='octo', remote_root=REMOTE, operation=value['operation'],
+                   cycle_id='cycle', snapshot_id=self.receipt['snapshot_id'], now=self.clock)
+        self.bind('new-space')
+        arming.arm(self.state, gh_user='octo', codespace='new-space', consent='arm', billable_owner='octo',
+                   ports=[], now=self.clock)
+        for name in ('herdr-ssh.json', 'herdr-machine.json'):
+            self.write(self.state / name, {'codespace': 'new-space'})
+        paths = [self.state / name for name in ('scratch.json', 'workspace.json', 'arming.json',
+                                               'herdr-ssh.json', 'herdr-machine.json')]
+        before = [path.read_bytes() for path in paths]
+        code, output, _ = self.run_delete(name='space')
+        self.assertEqual(code, 0, output)
+        self.assertEqual([path.read_bytes() for path in paths], before)
+        self.extra_mutations['write'].assert_not_called()
+        self.assertEqual(reader.ended_by_fact(self.state, value), 'space')
+
+    def test_replacement_owner_precedes_accounts_and_refuses_another_login(self):
+        self.replacement()
+        self.write(self.state / 'accounts.json', {'schema': 1, 'codespaces': {'space': 'other'}})
+        code, output, _ = self.run_delete(name='space', check=True)
+        self.assertEqual(code, 0, output)
+        self.mocks['arming.account'].return_value = 'other'
+        self.factory.reset_mock()
+        code, output, _ = self.run_delete(name='space', check=True)
+        self.assertEqual(code, 1, output)
+        self.assertIn('space was paired as octo', output)
+        self.factory.assert_not_called()
+
+    def test_stopped_replacement_can_be_explicitly_started(self):
+        self.replacement()
+        self.api.states = ['Shutdown', 'Available']
+        code, output, _ = self.run_delete(name='space', start=True)
+        self.assertEqual(code, 0, output)
+        self.assertIn('Started space.', output)
+        self.assertEqual(self.mutations(), ['post_start'])
+
     def test_check_json_makes_no_destructive_call(self):
         code, output, ask = self.run_delete(check=True, as_json=True, tty=False)
         self.assertEqual(code, 0)
@@ -319,6 +418,20 @@ class DeletionTests(unittest.TestCase):
                 self.journal(owner_checked=value)
                 with self.assertRaisesRegex(ValueError, 'delete journal cannot be read'):
                     self.d._journal(self.state, 'space')
+
+    def test_unknown_owner_pending_cleanup_uses_the_journals_kind(self):
+        self.journal('deleted', owner_checked=False)
+        (self.state / 'scratch.json').unlink()
+        for options in (dict(check=True), dict(tty=False)):
+            with self.subTest(options=options):
+                code, output, _ = self.run_delete(name='space', as_json=True, **options)
+                value = json.loads(output)
+                self.assertEqual(code, 1, output)
+                self.assertEqual(value['outcome'], 'cleanup-pending')
+                self.assertIn("space is not among octo's Codespaces on GitHub", value['message'])
+                self.assertIn(', '.join(self.d.STEPS['paired']), value['message'])
+                self.assertNotIn('was deleted', value['message'])
+        self.assertEqual(self.mutations(), [])
 
     def test_scratch_uses_the_synchronized_binding_root(self):
         synced_root = self.base / 'primary'
