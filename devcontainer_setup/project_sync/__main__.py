@@ -55,6 +55,15 @@ def parser():
     delete.add_argument('--check', action='store_true')
     delete.add_argument('--json', action='store_true')
     delete.add_argument('--start', action='store_true')
+    replace = groups.add_parser('replace', help='Run a replacement step in this project runtime')
+    steps = replace.add_subparsers(dest='step', required=True)
+    for name in ('cutover', 'check'):
+        step = steps.add_parser(name)
+        step.add_argument('--operation', required=True)
+        step.add_argument('--receipt', type=Path, required=True)
+        if name == 'cutover':
+            step.add_argument('--old', required=True)
+            step.add_argument('--new', required=True)
     sync = groups.add_parser('scratch', help='Advanced scratch synchronization controls').add_subparsers(dest='action', required=True)
     configure = sync.add_parser('configure')
     configure.add_argument('--codespace', required=True)
@@ -316,6 +325,13 @@ def run(args):
         from . import deletion
         return deletion.run(project, state, codespace=args.codespace, check=args.check,
                             as_json=args.json, start=args.start)
+    if args.group == 'replace':
+        if args.step == 'cutover':
+            from . import cutover
+            return cutover.run(project, state, operation=args.operation, old=args.old, new=args.new,
+                               receipt=args.receipt, recovery=lambda primary: _resume_recovery(primary, state))
+        from . import replace_check
+        return replace_check.run(project, state, operation=args.operation, receipt=args.receipt)
     if args.group == 'work':
         from . import workspace
         if args.forget:

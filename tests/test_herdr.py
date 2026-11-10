@@ -25,6 +25,39 @@ def cold_socket_error(reason='Connection refused (os error 111)'):
 
 
 class HerdrTests(unittest.TestCase):
+    def test_enter_false_never_runs_the_herdr_client(self):
+        import inspect
+        self.assertIn('enter', inspect.signature(herdr.open_remote).parameters)
+        self.pair('space', '/remote')
+        alias = 'devcontainer-' + self.project.project_id
+        self.fake_catalog([dict(id='saved', target=alias, session=herdr._session(self.project), enabled=True)])
+        calls = self.home / 'calls.jsonl'
+        order = []
+        with mock.patch.dict(os.environ, {'HERDR_ENV': ''}), \
+                mock.patch.object(herdr, 'configure_ssh', return_value=alias), \
+                mock.patch.object(herdr, '_workspace', side_effect=lambda *a: order.append('workspace')):
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote', expected_codespace='space',
+                             enter=False, prepared=lambda: order.append('prepared')), 0)
+        self.assertEqual(order, ['prepared', 'workspace'])
+        self.assertNotIn([], [json.loads(line) for line in calls.read_text().splitlines()])
+
+    def test_enter_false_keeps_machine_setup_codes_and_workspace_errors(self):
+        import inspect
+        self.assertIn('enter', inspect.signature(herdr.open_remote).parameters)
+        self.pair('space', '/remote')
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr, '_matching_machines', return_value=[]), \
+                mock.patch.object(herdr.subprocess, 'call', return_value=7), \
+                mock.patch.object(herdr, '_workspace') as workspace, mock.patch.object(herdr, '_local_version'):
+            self.assertEqual(herdr.open_remote(self.project, self.state, '/remote', expected_codespace='space', enter=False), 7)
+            workspace.assert_not_called()
+        machine = dict(id='saved', enabled=True)
+        with mock.patch.object(herdr, 'configure_ssh', return_value='alias'), \
+                mock.patch.object(herdr, '_matching_machines', return_value=[machine]), \
+                mock.patch.object(herdr, '_workspace', side_effect=ValueError('workspace failed')):
+            with self.assertRaisesRegex(ValueError, 'workspace failed'):
+                herdr.open_remote(self.project, self.state, '/remote', expected_codespace='space', enter=False)
+
     def fake_catalog(self, rows):
         catalog, calls = self.home / 'catalog.json', self.home / 'calls.jsonl'
         catalog.write_text(json.dumps(rows))

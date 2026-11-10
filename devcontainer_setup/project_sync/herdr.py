@@ -213,7 +213,7 @@ def _local_version():
 
 
 def open_remote(project, state: Path, remote_root: str, remote_herdr: str | None = None, prepared=None, *,
-                expected_codespace: str) -> int:
+                expected_codespace: str, enter: bool = True) -> int:
     """Connect the project's saved machine and open local Herdr when needed.
 
     `prepared`, when given, runs once after the machine receipt is saved and
@@ -306,6 +306,6 @@ def open_remote(project, state: Path, remote_root: str, remote_herdr: str | None
         prepared()
     _workspace(project, remote_root, ['--machine', machine_id])
     print('Codespace connected. Select its Codespace group in Herdr.')
-    if os.environ.get('HERDR_ENV') == '1':
+    if not enter or os.environ.get('HERDR_ENV') == '1':
         return 0
     return subprocess.call(['herdr'], cwd=project.root)

@@ -12,6 +12,29 @@ from devcontainer_setup.project_sync.checkpoint_store import Store
 from devcontainer_setup.project_sync.state import discover_project, read_json
 
 class ExistingCheckoutTests(unittest.TestCase):
+    def test_expected_old_refuses_before_any_effect(self):
+        import inspect
+        self.assertIn('expected_old', inspect.signature(workspace.remote).parameters)
+        for armed in (False, True):
+            with self.subTest(armed=armed):
+                self.registry(codespace='other-space')
+                scratch._write(self.state / scratch.CONFIG, dict(codespace='other-space', identity=self.project.identity))
+                scratch._write(self.state / workspace.PENDING, dict(codespace='new-space', value={'state': 'Shutdown'}))
+                scratch._write(self.state / 'arming.json', dict(armed=armed))
+                paths = [self.state / name for name in (scratch.CONFIG, workspace.PENDING, 'arming.json')]
+                before = [path.read_bytes() for path in paths]
+                with patch.object(workspace, '_finish_pending_registry') as repair, \
+                        patch.object(workspace, '_prerequisites') as prerequisites, \
+                        patch.object(workspace, '_choose_pairing') as choose, \
+                        patch.object(scratch, 'retarget') as retarget, \
+                        patch('devcontainer_setup.project_sync.move.check_arming') as consent:
+                    with self.assertRaisesRegex(ValueError, 'old-space is no longer the paired Codespace; nothing moved.'):
+                        workspace.remote(self.project, self.state, rebind='new-space', expected_old='old-space',
+                                         move=Mock() if armed else None, enter=False)
+                for effect in (repair, prerequisites, choose, retarget, consent):
+                    effect.assert_not_called()
+                self.assertEqual([path.read_bytes() for path in paths], before)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve(); self.root = self.base / 'desktop'; self.root.mkdir()
