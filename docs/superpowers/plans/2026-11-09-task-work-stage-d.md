@@ -29,11 +29,12 @@ Anti-goals, Constraints, "Tests the plan must include" (D and Live lists), calls
 and 13. Stage C plan `docs/superpowers/plans/2026-11-09-task-work-stage-c.md`, "Left for stage D" and its Live check
 (CPLAN). Source inventory at f29835f plus Task 5 at 4697af1:
 `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/inventory/INVENTORY.md` (INV §n). Revision
-5 answers the plan checks
+6 answers the plan checks
 `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/plancheck/CHECK.md` (F1-F18),
 `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/plancheck2/CHECK.md` (N1-N11),
 `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/plancheck3/CHECK.md` (M1-M2 and its
-notes) and `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/plancheck4/CHECK.md` (Q1-Q4). **Line numbers are at c4088a3**; stage C Task 8 (CPLAN) then changes `deletion.py`, `workspace.py`,
+notes), `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/plancheck4/CHECK.md` (Q1-Q4) and
+`/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-d/plancheck5/CHECK.md` (V1-V2). **Line numbers are at c4088a3**; stage C Task 8 (CPLAN) then changes `deletion.py`, `workspace.py`,
 `target_scan.py`, `verdict.py` and `seal.py`, so builders re-derive any line in those files and any line a brief
 does not repeat.
 
@@ -163,9 +164,10 @@ does not repeat.
       `request.retries`), so a late Codespace from the first POST is still a candidate. After a second POST
       returns, the coordinator reads the inventory once more and names any other candidate in the `Also new…` line.
     - Several candidates, or any uncertain row: the owner chooses in Gum among those rows, each shown with its
-      machine and creation time (`unknown` where unread), plus `create a new one` when no row is a full candidate
-      (it then asks for the typed `create`, as with none), and `cancel` (stops, phase kept). An uncertain row
-      therefore never strands the run.
+      machine and creation time (`unknown` where unread), or `cancel` (stops, phase kept). No choice here allows a
+      POST: another create needs the bounded recheck above to find neither a candidate nor an uncertain row (spec
+      D step 2; plan check 5 V1). A row that stays unreadable therefore stops the replace until GitHub shows it
+      whole or the owner deletes it, and the stop line says so.
 
     An adopted NEW gets its start evidence from the coordinator (`evidence.record_start(state, NEW, request.at,
     'created')`). Its first resume rebuilds once, because no receipt validated it. That rebuild is accepted on this
@@ -318,8 +320,9 @@ Connect with task work:cs.
   `No new Codespace appeared. Type create to create one, or anything else to stop.` ·
   `New Codespaces since the create request: NAME (MACHINE, created at HH:MM), … Choose the one this replace keeps;
   the others stay as they are.` (an uncertain row shows `unknown` for what could not be read). Gum options: one
-  `NAME (MACHINE, created at HH:MM)` per row, then `create a new one` (only when no row is a full candidate), then
-  `cancel`.
+  `NAME (MACHINE, created at HH:MM)` per row, then `cancel`. Cancel with an uncertain row listed: `Replace stopped
+  at create: NAME cannot be fully read from GitHub, and it may be the Codespace this replace asked for. Check it on
+  GitHub, then run REPLACE again.`
 - Sign-ins: `Not signed in yet on NEW: TOOLS. Retry with task work:signin:all.` · `Sign-in on NEW did not finish;
   retry with task work:signin:all.`
 - NEW not ready: `NEW is not ready: fix the lines marked Not ready, then run REPLACE to check it again. OLD stays.`
@@ -462,7 +465,10 @@ Kept on this Mac only: codex SESSION_ID
   (`tests/test_checkpoint_store.py:32-37`) then emits complete, truthful per-file metadata (`path`, `size`,
   `sha256`, as capture writes them, `conversations.py:479`), so `test_appended_revision_retires_the_earlier_record`
   (`:70`) and `test_older_revision_arriving_later_is_not_recorded` (`:77`) keep their one-record assertions (plan
-  check 4 Q2). A record whose closure cannot be proved is kept, never retired.
+  check 4 Q2). A record whose closure cannot be proved is kept, never retired. Retirement on either path also needs both
+  closures readable and verified (every blob of the old and the new entry read and hashed): an older record whose
+  head blob cannot be read is kept with its unreadable-relay issue, as
+  `tests/test_checkpoint_store.py:181` (`test_unreadable_head_cannot_prove_retirement`) requires (plan check 5 V2).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -890,8 +896,10 @@ def test_a_competing_creation_is_a_choice_not_an_adoption(self)  # M1: this requ
                                                         # outside before; the branch receipt names B -> the owner
                                                         # chooses; 0 creates
 def test_an_uncertain_row_is_never_none(self)           # a new row without ref, machine or created_at, still
-                                                        # incomplete after the re-read -> shown in the choice beside
-                                                        # 'create a new one'; never the automatic recheck path
+                                                        # incomplete after the re-read -> shown in the choice with
+                                                        # cancel only; 0 second creates; cancel prints the
+                                                        # uncertain stop line; once it reads whole and disqualifies,
+                                                        # the next run reaches the recheck
 def test_a_known_nonmatch_with_a_missing_field_is_excluded(self)  # another ref, machine or an older created_at with
                                                         # another field missing -> excluded on every rerun; zero
                                                         # candidates reach the recheck and the typed create
@@ -1054,7 +1062,8 @@ def test_no_terminal_names_the_replace_in_next_lines(self)
   `::test_removing_managed_command_stops_update` (`:557`) and
   `::test_legacy_lock_native_cli_normalization_is_safe_to_validate_and_render` (`:794`).
 - `tests/test_deletion.py` and `tests/test_seal.py` (all); `tests/test_checkpoint_store.py::test_collect_*` and
-  `::test_identical_record_retry_does_not_read_heads_again` (`:246`);
+  `::test_identical_record_retry_does_not_read_heads_again` (`:246`) and
+  `::test_unreadable_head_cannot_prove_retirement` (`:181`);
   `tests/test_replication.py:164-260` (relay chain); `tests/test_signins.py` (all).
 - `tests/test_project_sync_cli.py::test_plain_rebind_of_an_armed_project_moves_recovery` and
   `::test_codespace_restart_still_requires_a_terminal`.
