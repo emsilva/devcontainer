@@ -59,7 +59,7 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
         print('This replace record does not match; run the replace again.')
         return 1
 
-    record, herdr = None, None
+    record, herdr, paused = None, None, False
 
     def moved():
         try:
@@ -168,6 +168,16 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
             if not evidence.steady or len(required) != 3 or any(row.verdict != verdict.SAFE for row in required):
                 flush_lines(target, required)
                 return 1
+            stopped = scratch.stop(state)
+            paused = True
+            if stopped.get('phase') == 'cleanup_required':
+                # A supervisor exit can leave its saved session needing recovery.
+                scratch.stop(state)
+            scan = target_scan.scan(connection, old, target.remote_root, now=now)
+            fingerprint = target_scan.fingerprint(evidence.scan)
+            if fingerprint is None or fingerprint != target_scan.fingerprint(scan):
+                print(f'{old} changed while its final flush was recorded; nothing moved.')
+                return 1
             sealed_at = now()
             seal.write(state, Store(state), evidence.scan, evidence=evidence, identity=project.identity,
                        repository=journal['repository'], gh_user=journal['account'], remote_root=target.remote_root,
@@ -194,6 +204,13 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
         print('Nothing moved.')
         return 1
     finally:
+        if paused:
+            try:
+                still_old = _binding(state).get('codespace') == old
+            except (OSError, ValueError):
+                still_old = False
+            if still_old:
+                print(f'Sync with {old} is paused. Run the replace again, or task work:cs to resume it.')
         # Re-read the seal even when remote raised after publishing its binding.
         try:
             record = seal.read(state, old)
