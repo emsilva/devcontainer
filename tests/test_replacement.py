@@ -385,16 +385,125 @@ class ReplacementTests(unittest.TestCase):
         self.assertEqual(self.api.launches[0][1]['resume'], 'new-space')
         self.assertEqual(self.creates(), [])
 
+    def assert_current_pairing_is_not_adopted(self, validated_commit):
+        self.active()
+        self.api.rows.append(self.api.row('work-space'))
+        self.save('scratch.json', dict(read_json(self.state / 'scratch.json'), codespace='work-space'))
+        if validated_commit is not None:
+            path = receipt_path(self.root / 'state', 'owner/project', 'main')
+            atomic_write(path, json.dumps(dict(codespace='work-space', repository='owner/project', branch='main',
+                commit=validated_commit, validated_commit=validated_commit, rebuild_pending=False)).encode())
+        self.cutover_ok = False
+        self.assertEqual(self.run_replace(), 1)
+        self.assertIsNone(replacing.read(self.state)['new'])
+        self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'work-space')
+        self.assertFalse(self.api.launches)
+        self.assertEqual(self.creates(), [])
+        self.assertFalse(any(row[1:3] == ['codespace', 'rebuild'] for row in self.api.gh.calls))
+
+    def test_current_pairing_validated_at_the_pin_is_never_adopted(self):
+        self.assert_current_pairing_is_not_adopted('a' * 40)
+
+    def test_current_pairing_validated_at_a_later_tip_is_never_adopted(self):
+        self.assert_current_pairing_is_not_adopted('b' * 40)
+
+    def test_current_pairing_without_a_receipt_is_never_adopted(self):
+        self.assert_current_pairing_is_not_adopted(None)
+
+    def test_previously_connected_names_are_excluded_without_hiding_new(self):
+        self.active()
+        self.save('accounts.json', {'schema': 1, 'codespaces': {'known-space': 'another-account'}})
+        self.api.rows.extend([{'name': 'known-space'}, self.api.row()])
+        self.api.details['known-space'] = ValueError('must not read a known Codespace')
+        self.ui.answers = ['abandon']
+        self.assertEqual(self.run_replace(), 0)
+        self.assertEqual(self.archives()[-1]['new'], 'new-space')
+        self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'old-space')
+        self.assertNotIn(('get', 'known-space'), self.api.calls)
+        self.assertFalse(self.api.launches)
+        self.assertEqual(self.creates(), [])
+        self.assertFalse(any(row[1:3] == ['codespace', 'rebuild'] for row in self.api.gh.calls))
+
+    def test_lost_reply_adopts_before_offering_abandon(self):
+        self.active()
+        self.api.rows.append(self.api.row())
+        self.ui.answers = ['abandon']
+        self.assertEqual(self.run_replace(), 0)
+        archived = self.archives()[-1]
+        self.assertEqual((archived['phase'], archived['new'], archived['ended']),
+                         ('created', 'new-space', 'abandoned'))
+        self.assertIn('new-space stays listed. Check and delete it with task work:cs:delete -- --codespace new-space.',
+                      self.output.getvalue())
+        self.assertNotIn('nothing was created', self.output.getvalue())
+        self.assertFalse(self.api.launches)
+        self.assertEqual(self.creates(), [])
+
+    def test_lost_reply_row_choice_precedes_continue_or_abandon(self):
+        for uncertain in (False, True):
+            with self.subTest(uncertain=uncertain):
+                self.active()
+                self.api.rows = [self.api.old, self.api.row()]
+                row = {'name': 'other-space'} if uncertain else self.api.row('other-space')
+                self.api.rows.append(row)
+                self.api.details['other-space'] = row
+                self.ui.calls.clear()
+                self.ui.answers = ['cancel']
+                self.assertEqual(self.run_replace(), 1)
+                self.assertEqual(len(self.ui.calls), 1)
+                self.assertEqual(self.ui.calls[0][1][-1], 'cancel')
+                self.assertNotIn('abandon', self.ui.calls[0][1])
+                self.assertEqual(replacing.read(self.state)['phase'], 'create-requested')
+                self.assertFalse(self.api.launches)
+                self.assertEqual(self.creates(), [])
+
+    def test_lost_reply_proves_none_before_abandon_or_typed_create(self):
+        self.active()
+        choose = self.ui.choose
+        def after_recheck(title, options):
+            self.assertGreaterEqual(sum(self.clock.waits), 120)
+            self.assertTrue(any(call[0] == 'existing' for call in self.api.calls))
+            self.assertFalse(self.prompts)
+            return choose(title, options)
+        with patch.object(self.ui, 'choose', side_effect=after_recheck):
+            self.ui.answers = ['abandon']
+            self.assertEqual(self.run_replace(), 0)
+        self.assertIsNone(self.archives()[-1]['new'])
+        self.assertIn('nothing was created', self.output.getvalue())
+        self.assertEqual(self.creates(), [])
+        self.active()
+        self.clock.waits.clear()
+        self.ui.answers, self.answers = ['continue'], ['create']
+        with patch.object(self.ui, 'choose', side_effect=after_recheck):
+            self.assertEqual(self.run_replace(), 0)
+        self.assertEqual(len(self.prompts), 1)
+        self.assertEqual(len(self.creates()), 1)
+
+    def test_lost_reply_unreadable_inventory_or_other_account_never_offers_abandon(self):
+        for failure in ('incomplete', 'unreadable', 'account'):
+            with self.subTest(failure=failure):
+                self.active()
+                self.api.account = 'another' if failure == 'account' else 'owner'
+                error = OSError('unreadable inventory') if failure == 'unreadable' else ValueError('incomplete inventory')
+                self.api.inventory = lambda: (_ for _ in ()).throw(error)
+                self.ui.calls.clear()
+                self.ui.answers = ['abandon']
+                self.assertEqual(self.run_replace(), 1)
+                self.assertFalse(self.ui.calls)
+                self.assertEqual(replacing.read(self.state)['phase'], 'create-requested')
+                self.assertFalse(self.archives())
+                self.assertFalse(self.prompts)
+                self.assertEqual(self.creates(), [])
+
     def test_a_competing_creation_is_a_choice_not_an_adoption(self):
         self.active()
         self.api.rows += [self.api.row(), self.api.row('competing-space')]
         self.valid_launch()
-        self.ui.answers = ['continue', 1]
+        self.ui.answers = [1, 'continue']
         self.cutover_ok = False
         self.assertEqual(self.run_replace(), 1)
         self.assertEqual(self.api.launches[0][1]['resume'], 'competing-space')
         self.assertEqual(self.creates(), [])
-        self.assertEqual(self.ui.calls[-1][1][-1], 'cancel')
+        self.assertEqual(self.ui.calls[0][1][-1], 'cancel')
 
     def test_an_uncertain_row_is_never_none(self):
         self.active()
@@ -404,7 +513,7 @@ class ReplacementTests(unittest.TestCase):
             if malformed:
                 self.api.rows[-1] = self.api.row('uncertain-space', git_status={'ref': 123}, machine={'name': 456})
                 self.api.details['uncertain-space'] = self.api.rows[-1]
-            self.ui.answers = ['continue', 'cancel']
+            self.ui.answers = ['cancel']
             self.assertEqual(self.run_replace(), 1)
             self.assertEqual(replacing.read(self.state)['phase'], 'create-requested')
             self.assertIn('uncertain-space cannot be fully read from GitHub', self.output.getvalue())
@@ -474,7 +583,7 @@ class ReplacementTests(unittest.TestCase):
     def test_several_found_asks_which_to_keep(self):
         self.active()
         self.api.rows += [self.api.row(), self.api.row('other-space')]
-        self.ui.answers = ['continue', 'cancel']
+        self.ui.answers = ['cancel']
         self.assertEqual(self.run_replace(), 1)
         self.assertEqual(len(self.ui.calls[-1][1]), 3)
         self.assertEqual(self.creates(), [])
@@ -506,6 +615,8 @@ class ReplacementTests(unittest.TestCase):
     def test_each_phase_resumes_on_rerun(self):
         for phase in replacing.PHASES:
             with self.subTest(phase=phase):
+                paired = 'old-space' if replacing.PHASES.index(phase) < replacing.PHASES.index('moved') else 'new-space'
+                self.save('scratch.json', dict(read_json(self.state / 'scratch.json'), codespace=paired))
                 self.active(phase=phase, new=None if phase in ('inspected', 'create-requested') else 'new-space')
                 self.api.rows = [self.api.old, self.api.row()]
                 self.valid_launch()
@@ -649,6 +760,18 @@ class ReplacementTests(unittest.TestCase):
         self.assertIn('old-space is kept; task work offers its delete.', self.output.getvalue())
         self.assertIn('Connect with task work:cs.', self.output.getvalue())
 
+    def test_deleted_old_with_cleanup_pending_is_not_reported_as_kept(self):
+        def deleted(argv):
+            if 'delete' in argv:
+                self.save('deletions/old-space.json', {'phase': 'deleted'})
+                return subprocess.CompletedProcess(argv, 1)
+            return None
+        self.runner_hook = deleted
+        self.assertEqual(self.run_replace(), 0)
+        self.assertEqual(self.archives()[-1]['ended'], 'completed')
+        self.assertIn('Replaced old-space with new-space.', self.output.getvalue())
+        self.assertNotIn('old-space is kept', self.output.getvalue())
+
     def test_nothing_gh_printed_reaches_a_journal_or_receipt(self):
         for step in ('get', 'machines', 'user', 'existing', 'launch'):
             self.api.failure = step
@@ -661,6 +784,51 @@ class ReplacementTests(unittest.TestCase):
                     self.assertNotIn('ghp_TEST_ONLY', item.read_text())
             (self.state / 'replace.json').unlink(missing_ok=True)
         self.assertEqual(self.creates(), [])
+        self.api.failure = None
+        self.assertEqual(self.run_replace(), 0)
+        for folder in ('replacements', 'replace-receipts'):
+            path = self.state / folder
+            self.assertTrue(path.is_dir(), folder + ' must exist after the runtime steps')
+            files = list(path.glob('*.json'))
+            self.assertTrue(files, folder + ' must contain records to inspect')
+            for item in files:
+                self.assertNotIn('private.invalid', item.read_text())
+                self.assertNotIn('ghp_TEST_ONLY', item.read_text())
+
+    def test_check_receipt_extra_fields_are_not_copied_into_the_journal(self):
+        self.active(phase='signed-in', new='new-space')
+        self.valid_launch()
+        receipts = []
+        def check(argv):
+            if 'check' not in argv:
+                return None
+            path = Path(argv[argv.index('--receipt') + 1])
+            value = dict(schema=1, operation=replacing.read(self.state)['operation'], step='check',
+                         codespace='new-space', ok=True, external_output='https://private.invalid/ghp_TEST_ONLY')
+            atomic_write(path, json.dumps(value).encode())
+            receipts.append(path)
+            return subprocess.CompletedProcess(argv, 0)
+        self.runner_hook = check
+        self.assertEqual(self.run_replace(), 0)
+        self.assertIn('external_output', read_json(receipts[0]))
+        saved = self.archives()[-1]['check']
+        self.assertTrue(saved['ok'])
+        self.assertNotIn('external_output', saved)
+        self.assertNotIn('private.invalid', json.dumps(self.archives()[-1]))
+
+    def test_launch_receipt_extra_fields_are_not_copied_into_the_journal(self):
+        old = dict(codespace='old-space', repository='owner/project', branch='feature/topic', commit='c' * 40)
+        branch = dict(codespace='other-space', repository='owner/project', branch='main', commit='b' * 40)
+        for value in (old, branch):
+            path = receipt_path(self.root / 'state', 'owner/project', value['branch'])
+            atomic_write(path, json.dumps(dict(value, external_output='https://private.invalid/ghp_TEST_ONLY')).encode())
+        self.assertEqual(self.run_replace(), 0)
+        saved = self.archives()[-1]
+        self.assertNotIn('external_output', saved['old_receipt'])
+        self.assertNotIn('external_output', saved['branch_receipt'])
+        self.assertEqual(saved['old_receipt'], old)
+        self.assertEqual(saved['branch_receipt'], branch)
+        self.assertNotIn('private.invalid', json.dumps(saved))
 
     def test_another_replace_running_refuses(self):
         with locked(self.state / 'replace.lock'):

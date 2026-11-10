@@ -331,7 +331,10 @@ def view(local: Local, remote: Remote | None, *,
         line(-1, f'Cleanup after deleting {target} is not finished.')
     candidates = priority + candidates
     listed = {space.name for space in spaces or ()}
-    retired = next((target for target in local.retired if target != name and target in listed), None)
+    unchecked_old = (local.replacing['old'] if local.replacing is not None and
+                     replacing.PHASES.index(local.replacing['phase']) < replacing.PHASES.index('checked') else None)
+    retired = next((target for target in local.retired
+                    if target != name and target != unchecked_old and target in listed), None)
     delete_key = 'delete:' + retired if retired is not None else None
     if retired is not None:
         action(delete_key, f'Check and delete {retired}', 'work:cs:delete', '--', '--codespace', retired)

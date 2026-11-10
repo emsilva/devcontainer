@@ -17,7 +17,7 @@ import time
 from . import git_ops, replace_inputs
 from .codespaces import Codespaces, find_receipt, receipt_path
 from .preferences import load_preferences
-from .project_sync import arming, evidence, replacing
+from .project_sync import arming, evidence, replacing, workspace
 from .project_sync.state import discover_project, locked, read_json, state_dir
 from .ui import Cancelled, Gum
 
@@ -233,6 +233,8 @@ class _Coordinator:
 
     def candidates(self):
         self.account()
+        paired = (_optional(self.state / 'scratch.json') or {}).get('codespace')
+        connected = workspace.accounts(self.state)
         candidates, uncertain = [], []
         for original in self.api.existing(self.journal['repository'], complete=True):
             name = original.get('name')
@@ -240,6 +242,8 @@ class _Coordinator:
                 continue
             if not isinstance(name, str) or not re.fullmatch('[A-Za-z0-9-]+', name):
                 raise ValueError('the Codespace list from GitHub is incomplete')
+            if name == paired or name in connected:
+                continue
             row = original
             for attempt in range(2):
                 ref = row.get('git_status')
@@ -282,7 +286,12 @@ class _Coordinator:
         value = datetime.fromtimestamp(stamp)
         return value.strftime('%H:%M' if value.date() == datetime.fromtimestamp(self.now()).date() else '%Y-%m-%d %H:%M')
 
-    def reconcile(self):
+    def retry_create(self):
+        if self.ask('No new Codespace appeared. Type create to create one, or anything else to stop.') != 'create':
+            return self.stop('no new Codespace appeared')
+        return self.launch(retry=True)
+
+    def reconcile(self, *, resume=True):
         print('GitHub did not confirm the new Codespace. Looking for it for up to 2 minutes.', flush=True)
         deadline = self.now() + 120
         while True:
@@ -290,9 +299,7 @@ class _Coordinator:
             if candidates or uncertain:
                 break
             if self.now() >= deadline:
-                if self.ask('No new Codespace appeared. Type create to create one, or anything else to stop.') != 'create':
-                    return self.stop('no new Codespace appeared')
-                return self.launch(retry=True)
+                return self.retry_create() if resume else None
             self.sleep(10)
         if len(candidates) == 1 and not uncertain:
             chosen = candidates[0]
@@ -314,7 +321,7 @@ class _Coordinator:
             chosen = rows[labels.index(answer)]
         self.phase('created', new=chosen['name'])
         evidence.record_start(self.state, chosen['name'], self.journal['request']['at'], 'created')
-        return self.launch(resume=True)
+        return self.launch(resume=True) if resume else None
 
     def cutover(self):
         self.latch()  # Must be durable before the child can consume the move intents.
@@ -392,7 +399,7 @@ class _Coordinator:
         self.phase('offered')
         replacing.archive(self.state, self.journal, 'completed', self.now())
         print(f'Replaced {old} with {new}.', flush=True)
-        if (_optional(self.state / 'deletions' / (old + '.json')) or {}).get('phase') != 'cleaned':
+        if (_optional(self.state / 'deletions' / (old + '.json')) or {}).get('phase') not in ('deleted', 'cleaned'):
             print(f'{old} is kept; task work offers its delete.', flush=True)
         print('Connect with task work:cs.', flush=True)
         return 0
@@ -418,6 +425,10 @@ class _Coordinator:
                     if result is not None:
                         return result
                 elif before_move:
+                    if self.journal['phase'] == 'create-requested' and self.journal['new'] is None:
+                        result = self.reconcile(resume=False)
+                        if result is not None:
+                            return result
                     answer = self.choose(f'A replace of {self.old} is unfinished.', ['continue', 'abandon'])
                     if answer == 'abandon':
                         seal_path = self.state / 'retired' / (self.old + '.json')
@@ -441,7 +452,7 @@ class _Coordinator:
                 if result is not None:
                     return result
             elif self.journal['phase'] == 'create-requested':
-                result = self.reconcile()
+                result = self.retry_create()
                 if result is not None:
                     return result
             elif self.journal['phase'] == 'created':

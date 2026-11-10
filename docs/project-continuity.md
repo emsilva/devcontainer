@@ -184,9 +184,16 @@ The project keeps a private replace journal and one operation lock. Rerun the sa
 replace command after interruption: it prints its phase and continues it.
 `task work` shows `Finish replacing NAME` ahead of other work, below a recovery
 connection when recovery is off. After a lost create reply it checks the inventory
-before creating again. One matching new Codespace is adopted; several candidates
-or unreadable candidates require a choice. If none appears during the two-minute
-recheck, only typing `create` allows another create request.
+before offering `continue` or `abandon`. One matching new Codespace is adopted;
+several candidates or unreadable candidates require a choice. If none appears
+during the two-minute recheck, `continue` leads to the typed `create` that alone
+allows another create request.
+
+A rerun with the old Codespace still paired records a fresh final flush, unless it
+is finishing publication of a partial move. If OLD changes while the flush is
+recorded, it prints `OLD changed while its final flush was recorded; nothing moved.`
+When sync is paused and OLD remains paired, it prints
+`Sync with OLD is paused. Run the replace again, or task work:cs to resume it.`
 
 Before the move starts, a rerun offers `continue` or `abandon`. Abandon keeps the old
 pairing and leaves any new Codespace listed for an explicit checked delete; nothing
