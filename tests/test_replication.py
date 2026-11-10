@@ -161,6 +161,91 @@ class ReplicationTests(unittest.TestCase):
         from devcontainer_setup.project_sync.sessions import claude_namespace
         return sorted((Path(env['CLAUDE_CONFIG_DIR']) / 'projects' / claude_namespace(self.root)).glob('*.jsonl'))
 
+    def replacement_relay(self, *, refuse=False):
+        """Real capture, transfer, native publication and relay, with an offline Codex client."""
+        from devcontainer_setup.project_sync import agents, conversations, replace_check
+        from tests.test_native_checkpoints import NativeFixture
+        from tests.test_replace_check import check_cycle, seal_snapshot, write_context
+        native = NativeFixture('runTest')
+        native.project, native.env = self.project, self.connection.env
+        native.sid, native.turn = str(uuid.uuid4()), str(uuid.uuid4())
+        ancestor = native.codex()
+        leaf = str(uuid.uuid4())
+        native.codex(leaf, parent=(ancestor, ancestor.stat().st_size,
+                                  len(ancestor.read_bytes().splitlines())), rows=[])
+        claude_sid, claude_path = self.conversation(self.connection.env)
+        originals = {p: p.read_bytes() for p in [ancestor, claude_path]}
+        owner = self
+
+        class Client:
+            def __init__(self, *args, **kwargs): pass
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def call(self, method, params):
+                if method == 'thread/resume':
+                    self.sid = params['threadId']
+                    return dict(thread=dict(id=self.sid))
+                if method == 'thread/list':
+                    return dict(data=[dict(id=self.sid)], nextCursor=None)
+                return {}
+
+        class Endpoint(rpc.LocalEndpoint):
+            def call(self, operation, **values):
+                # Only fixture homes are visible to native capture/publication.
+                with patch.dict(os.environ, owner.connection.env, clear=True):
+                    return super().call(operation, **values)
+
+        def endpoint(*args):
+            return Endpoint(self.project, self.remote_store.state)
+
+        with patch.object(rpc, 'RemoteEndpoint', side_effect=endpoint), \
+                patch.object(agents, 'CodexClient', Client), \
+                patch.object(agents, '_history', return_value=dict(
+                    turns=[dict(id=native.turn, status='completed')], items=[])):
+            old = self.cycle()
+            inbound = old['directions']['codespace_to_desktop']
+            self.assertEqual(inbound['outcome'], 'complete')
+            sealed = self.store.load(inbound['snapshot_id'])
+            leaf_entry = next(e for e in sealed['conversations']['entries'] if e['session_id'] == leaf)
+            self.assertEqual(len(leaf_entry['files']), 2)
+            seal_snapshot(self.project, self.store, inbound['snapshot_id'])
+            self.replace_codespace('replacement-check-' + uuid.uuid4().hex[:6])
+            ready = self.cycle()
+            self.assertEqual(ready['outcome'], 'complete')
+            if refuse:
+                write_context(self.project, self.store.state)
+                code, first, _ = check_cycle(self.project, self.store.state, ready, replace_check)
+                self.assertEqual((code, first['ok']), (0, True))
+                self.assertEqual({pair[0] for pair in first['conversations']['on_new']}, {'claude', 'codex'})
+                self.replace_codespace('second-replacement-check-' + uuid.uuid4().hex[:6])
+                ready = self.cycle()
+                self.assertEqual(ready['outcome'], 'complete')
+                # The real native publisher refuses a missing completed import.
+                published = ready['remote_publication']
+                imported = next(item for field in ('imported', 'unchanged') for item in published[field]
+                                if item['agent'] == 'claude' and item['source_session_id'] == claude_sid)
+                target = next(path for path in self.native_files(self.connection.env)
+                              if path.stem == imported['session_id'])
+                target.unlink()
+                ready = self.cycle()
+                row = ready['directions']['desktop_to_codespace']
+                self.assertTrue(any(i.get('session_id') == claude_sid for i in row['publication_issues']))
+                self.assertTrue(ready['issues'], 'production mirrored publication issues are required')
+                self.assertEqual(ready['directions']['codespace_to_desktop']['outcome'], 'complete')
+            write_context(self.project, self.store.state)
+            result = check_cycle(self.project, self.store.state, ready, replace_check)
+        self.assertEqual({p: p.read_bytes() for p in originals}, originals)
+        return result
+
+    def test_replace_check_passes_after_a_real_relay(self):
+        import importlib.util
+        self.assertIsNotNone(importlib.util.find_spec('devcontainer_setup.project_sync.replace_check'),
+                             'replacement check is missing')
+        code, result, _ = self.replacement_relay(refuse=True)
+        self.assertEqual((code, result['sync'], result['ok']), (0, 'ok', True))
+        self.assertTrue(result['conversations']['on_new'])
+        self.assertTrue(result['conversations']['kept'])
+
     def test_published_predecessor_conversation_reaches_replacement(self):
         sid, source = self.conversation(self.connection.env)
         original = source.read_bytes()
