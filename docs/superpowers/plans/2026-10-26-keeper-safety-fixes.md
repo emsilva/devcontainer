@@ -136,8 +136,8 @@
     - `test_the_keeper_watch_accepts_a_beating_keeper_in_phase_deleted`.
   - `tests/test_project_sync_cli.py`:
     - `test_work_cs_on_a_missing_pairing_lists_this_repositorys_codespaces`: exact copy `cs-1 is not visible to octo: it was deleted, or it belongs to another account. This repository's Codespaces: a, b. Move to one with task work:cs -- --rebind <name>, or create one with task devcontainer:setup.` For an armed project the move hint is `task work:cs:armed -- --rebind <name>`. With none listed: `This repository has no Codespaces.`
-    - `test_work_cs_stop_on_a_confirmed_deletion_says_nothing_to_stop`: `cs-1 no longer exists on GitHub; there is nothing to stop.`, and the owner-stop record is still written first (R33).
-    - `test_work_cs_restart_on_a_confirmed_deletion_says_nothing_to_stop`.
+    - `test_work_cs_stop_on_an_unarmed_confirmed_deletion_says_how_to_rebind` and `test_work_cs_restart_on_an_unarmed_confirmed_deletion_says_how_to_rebind`: `cs-1 no longer exists on GitHub (deleted). Pair another with task work:cs -- --rebind <name>.`, and the owner-stop record is still written first and survives (R33).
+    - `test_work_cs_stop_on_an_armed_confirmed_deletion_says_how_to_rebind_or_disarm` and `test_work_cs_restart_on_an_armed_confirmed_deletion_says_how_to_rebind_or_disarm`: `cs-1 no longer exists on GitHub (deleted). Pair another with task work:cs:armed -- --rebind <name>, or run task work:disarm.`
 - [ ] **Step 10: Run** those files. Expected: FAIL.
 - [ ] **Step 11: Implement.**
   - `recovery_lines`: phase `deleted` gets the status line above.
@@ -147,7 +147,7 @@
     - armed projects leave the notification to the keeper.
   - `Codespaces._api` keeps gh's stderr on failure and raises a distinct error for `HTTP 404`.
   - `_choose_pairing` turns that into the listing message using `spaces()` and the active login.
-  - `_owner_power`: on a 404 from `post_stop`, if `api.confirm_deleted()` is True, raise the "nothing to stop" text; otherwise keep today's 4xx text.
+  - `power.stop`, shared by both `_owner_power` commands: on a 404 from `post_stop`, if `api.confirm_deleted()` is True, raise the shared `arming.deleted_message` used by `recovery_lines`; otherwise keep today's 4xx text.
 - [ ] **Step 12: Gates.** `task check` and `task test`, both exit 0.
 - [ ] **Step 13: Commit** `Name a deleted Codespace as deleted and let the Mac sleep (#60)`.
 

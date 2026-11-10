@@ -86,7 +86,7 @@ It doesn't exit. A rebind replaces it (`keeper.start` already replaces a keeper 
   - Notifications keep today's split: an unarmed project hears from the worker, an armed one from the keeper.
   - The worker's keeper watch must not report "Recovery is not running" for a keeper in phase `deleted`.
 - `work:cs` on a missing pairing lists this repository's Codespaces (the same list setup uses) and names the rebind: `<name> is not visible to <login>: it was deleted, or it belongs to another account. This repository's Codespaces: a, b. Move to one with task work:cs -- --rebind <name>, or create one with task devcontainer:setup.`
-- `work:cs:stop` and `work:cs:restart` on a 404: `<name> no longer exists on GitHub; there is nothing to stop.` The owner-stop record is still written first, as today (R33).
+- `work:cs:stop` and `work:cs:restart` on a confirmed 404: `<name> no longer exists on GitHub (deleted). Pair another with task work:cs -- --rebind <name>.` For an armed project: `<name> no longer exists on GitHub (deleted). Pair another with task work:cs:armed -- --rebind <name>, or run task work:disarm.` Both commands and status use the shared `arming.deleted_message`. The owner-stop record is still written first and survives the refusal (R33); an unconfirmed 404 keeps the existing refusal.
 
 ## Part C: recovery comes back on connect (#57)
 

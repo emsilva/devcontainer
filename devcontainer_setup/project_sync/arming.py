@@ -18,6 +18,13 @@ ARMING = 'arming.json'
 SCOPE_ERROR = 'The selected GitHub account lacks the codespace scope; run gh auth refresh -h github.com -s codespace.'
 
 
+def deleted_message(codespace: str, *, armed: bool) -> str:
+    """Name a confirmed deletion and the next step for the project's recovery mode."""
+    hint = ('task work:cs:armed -- --rebind <name>, or run task work:disarm'
+            if armed else 'task work:cs -- --rebind <name>')
+    return f'{codespace} no longer exists on GitHub (deleted). Pair another with {hint}.'
+
+
 def read(state: Path) -> dict:
     try:
         value = read_json(Path(state) / ARMING)

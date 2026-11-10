@@ -594,14 +594,11 @@ def _token_hint(runtime):
 
 def recovery_lines(value):
     """Spec 6.8's Recovery block; each line that is not fine names the command to run."""
-    from .arming import format_time, short_time
+    from .arming import deleted_message, format_time, short_time
     from . import keeper, lifecycle
     config, runtime, now = value['arming'], value['keeper'], value['now']
     def deleted_line():
-        hint = ('task work:cs:armed -- --rebind <name>, or run task work:disarm'
-                if config.get('armed') else 'task work:cs -- --rebind <name>')
-        return ('Codespace    ' + str(runtime.get('codespace')) + ' no longer exists on GitHub (deleted). '
-                'Pair another with ' + hint + '.')
+        return 'Codespace    ' + deleted_message(str(runtime.get('codespace')), armed=bool(config.get('armed')))
     if config.get('issue'):
         # Unknown, not unarmed: a keeper may still be running, so its lines follow.
         lines = ['Recovery     arming.json cannot be read (' + config['issue'] + '); move '

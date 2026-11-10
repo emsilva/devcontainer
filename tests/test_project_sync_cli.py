@@ -352,16 +352,29 @@ class OwnerPowerTests(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             self.power(api, restart=restart)
         self.assertEqual(api.calls, [('stop', self.clock)])
+        self.assertEqual(arming.read(self.state)['owner_stop_at'], self.clock)
         api.confirm_deleted.assert_called_once_with()
         return str(caught.exception)
 
-    def test_work_cs_stop_on_a_confirmed_deletion_says_nothing_to_stop(self):
+    def test_work_cs_stop_on_an_unarmed_confirmed_deletion_says_how_to_rebind(self):
         # #60: R33's owner-stop record is durable before the 404 is confirmed.
-        self.assertEqual(self.missing_power(False), 'cs-1 no longer exists on GitHub; there is nothing to stop.')
+        self.assertEqual(self.missing_power(False), 'cs-1 no longer exists on GitHub (deleted). '
+                         'Pair another with task work:cs -- --rebind <name>.')
 
-    def test_work_cs_restart_on_a_confirmed_deletion_says_nothing_to_stop(self):
+    def test_work_cs_restart_on_an_unarmed_confirmed_deletion_says_how_to_rebind(self):
         # #60: a deleted Codespace cannot be restarted, and the owner stop still wins.
-        self.assertEqual(self.missing_power(True), 'cs-1 no longer exists on GitHub; there is nothing to stop.')
+        self.assertEqual(self.missing_power(True), 'cs-1 no longer exists on GitHub (deleted). '
+                         'Pair another with task work:cs -- --rebind <name>.')
+
+    def test_work_cs_stop_on_an_armed_confirmed_deletion_says_how_to_rebind_or_disarm(self):
+        self.arm()
+        self.assertEqual(self.missing_power(False), 'cs-1 no longer exists on GitHub (deleted). '
+                         'Pair another with task work:cs:armed -- --rebind <name>, or run task work:disarm.')
+
+    def test_work_cs_restart_on_an_armed_confirmed_deletion_says_how_to_rebind_or_disarm(self):
+        self.arm()
+        self.assertEqual(self.missing_power(True), 'cs-1 no longer exists on GitHub (deleted). '
+                         'Pair another with task work:cs:armed -- --rebind <name>, or run task work:disarm.')
 
     def test_an_unconfirmed_stop_404_keeps_the_existing_refusal(self):
         # #60: failed and incomplete confirmations keep the existing 4xx diagnosis.

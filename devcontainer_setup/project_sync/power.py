@@ -137,7 +137,7 @@ def stop(state: Path, *, expected: str | None = None, until: float | None = None
     status = api.post_stop()
     # R33: keep the owner stop on every failure, including an ambiguous 404.
     if status == 404 and api.confirm_deleted() is True:
-        raise ValueError(f'{codespace} no longer exists on GitHub; there is nothing to stop.')
+        raise ValueError(arming.deleted_message(codespace, armed=armed))
     if 400 <= status < 500:
         raise ValueError(f'GitHub refused the stop request (HTTP {status}); it is recorded as your stop, so the '
                          'keeper will not restart it. Check task work:status.')
