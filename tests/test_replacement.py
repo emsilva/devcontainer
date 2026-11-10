@@ -14,7 +14,7 @@ import unittest
 from unittest.mock import patch
 
 from devcontainer_setup.codespaces import Codespaces, receipt_path
-from devcontainer_setup.project_sync import replacing
+from devcontainer_setup.project_sync import replacing, standing
 from devcontainer_setup.project_sync.state import atomic_write, discover_project, locked, read_json, state_dir
 from tests.test_codespaces import FakeGitHub
 from tests.test_replacing import journal
@@ -104,7 +104,7 @@ class API:
         return copy.deepcopy(self.rows)
 
     def row(self, name='new-space', **changes):
-        value = dict(name=name, repository={'full_name': 'owner/project'}, git_status={'ref': 'main'},
+        value = dict(name=name, repository=copy.deepcopy(self.old['repository']), git_status={'ref': 'main'},
                      machine={'name': 'premium', 'cpus': 8},
                      created_at=datetime.fromtimestamp(2000, timezone.utc).isoformat())
         value.update(changes)
@@ -257,6 +257,56 @@ class ReplacementTests(unittest.TestCase):
         path = receipt_path(self.root / 'state', 'owner/project', 'main')
         atomic_write(path, json.dumps(dict(codespace='new-space', repository='owner/project', branch='main',
             validated_commit='a' * 40, rebuild_pending=False)).encode())
+
+    def mixed_case_origin(self):
+        subprocess.run(['git', '-C', str(self.project), 'remote', 'set-url', 'origin',
+                        'https://github.com/Example/Project.git'], check=True, capture_output=True)
+        self.identity = discover_project(self.project)
+        self.state = state_dir(self.identity, self.env)
+        self.save('scratch.json', dict(version=1, identity=self.identity.identity, root=str(self.project),
+                                      codespace='old-space', remote_root='/workspaces/Project'))
+        self.api.old['repository']['full_name'] = 'Example/Project'
+        self.api.rows = [copy.deepcopy(self.api.old)]
+
+    def test_mixed_case_origin_preserves_olds_setup_receipt(self):
+        self.mixed_case_origin()
+        old = dict(codespace='old-space', repository='Example/Project', branch='feature/topic', commit='c' * 40)
+        path = receipt_path(self.root / 'state', 'Example/Project', old['branch'])
+        self.api.client._save_receipt(path, old)
+        self.assertEqual(self.run_replace(), 0, self.output.getvalue())
+        self.assertEqual(self.archives()[0]['old_receipt'], old)
+
+    def test_mixed_case_origin_new_launch_is_visible_to_standing(self):
+        self.mixed_case_origin()
+        self.assertEqual(self.run_replace(), 0, self.output.getvalue())
+        launch = standing.read(self.project, env=self.env, timeout=30).launch
+        self.assertIsNotNone(launch, 'standing cannot find the replacement launch receipt')
+        self.assertEqual(launch.codespace, 'new-space')
+        self.assertTrue(launch.complete)
+
+    def test_mixed_case_origin_preserves_default_workspace_folder(self):
+        self.mixed_case_origin()
+        self.options['workspace'] = None
+        self.assertEqual(self.run_replace(), 0, self.output.getvalue())
+        self.assertEqual(self.archives()[0]['remote_root'], '/workspaces/Project')
+        self.assertEqual(self.api.launches[0][1]['workspace'], '/workspaces/Project')
+
+    def test_mixed_case_origin_preserves_journal_repository(self):
+        self.mixed_case_origin()
+        self.assertEqual(self.run_replace(), 0, self.output.getvalue())
+        self.assertEqual(self.archives()[0]['repository'], 'Example/Project')
+        self.assertEqual(self.api.create_journals[0]['repository'], 'Example/Project')
+        self.assertTrue(all(call[1] == 'Example/Project' for call in self.api.calls
+                            if call[0] in ('machines', 'existing')))
+
+    def test_unreadable_or_foreign_origin_repository_refuses_before_api(self):
+        self.mixed_case_origin()
+        for repo in (None, 'other/project'):
+            with self.subTest(repo=repo), patch('devcontainer_setup.__main__._github_repository', return_value=repo):
+                self.assertEqual(self.run_replace(), 1)
+                self.assertIn('The pairing belongs to another project; nothing was created.', self.output.getvalue())
+                self.assertFalse(self.api.calls)
+        self.assertEqual(self.creates(), [])
 
     def test_premium_120_minutes_beats_a_stale_four_core_receipt(self):
         path = receipt_path(self.root / 'state', 'owner/project', 'main')

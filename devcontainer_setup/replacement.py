@@ -33,6 +33,11 @@ def launch_options(*args):
     return options(*args)
 
 
+def _github_repository(project):
+    from .__main__ import _github_repository as repository
+    return repository(project)
+
+
 def record_created(*args):
     from .__main__ import record_created as record
     return record(*args)
@@ -120,12 +125,11 @@ class _Coordinator:
                                 open_after_create='none')
         return self.options
 
-    def check_setup(self, branch, commit, resources):
+    def check_setup(self, repo, branch, commit, resources):
         reason = replace_inputs.setup_differs(self.project, commit)
         if reason:
             raise ValueError(f"{branch} at {commit[:12]} does not carry this checkout's setup ({reason}); "
                              'nothing was created. Run task setup first.')
-        repo = self.journal['repository'] if self.journal else self.identity.identity.removeprefix('github.com/')
         if not replace_inputs.offered(self.api.machines(repo, commit), resources):
             raise ValueError(f"{self.old}'s machine {resources.machine} ({resources.cpus} cores) is not offered "
                              f'for {branch} at {commit[:12]}; nothing was created.')
@@ -139,14 +143,14 @@ class _Coordinator:
         self.old = config['codespace']
         if not re.fullmatch('[A-Za-z0-9-]+', self.old):
             raise ValueError('The pairing cannot be read; nothing was created.')
-        if not self.identity.identity.startswith('github.com/'):
-            raise ValueError('The pairing is not for a GitHub repository; nothing was created.')
-        repo = self.identity.identity.removeprefix('github.com/')
+        repo = _github_repository(self.project)
+        if repo is None or repo.casefold() != self.identity.identity.removeprefix('github.com/').casefold():
+            raise ValueError('The pairing belongs to another project; nothing was created.')
         body = self.api.get(self.old)
         resources = replace_inputs.read_resources(dict(body, name=self.old), repo)
         branch = self.env.get('SETUP_REPLACE_TEST_BRANCH') or git_ops.default_branch(self.project)
         commit = replace_inputs.pin(self.project, branch)
-        self.check_setup(branch, commit, resources)
+        self.check_setup(repo, branch, commit, resources)
         account = self.api.user()
         consent = arming.read(self.state)
         if consent.get('armed'):
@@ -190,7 +194,8 @@ class _Coordinator:
                 if commit != journal['commit']:
                     print(f"{journal['branch']} moved to {commit[:12]} since the check; checking its setup again.",
                           flush=True)
-                    self.check_setup(journal['branch'], commit, replace_inputs.Resources(**journal['resources']))
+                    self.check_setup(journal['repository'], journal['branch'], commit,
+                                     replace_inputs.Resources(**journal['resources']))
                     self.write(commit=commit)
             before = [row['name'] for row in self.api.existing(journal['repository'], complete=True)]
             print(f"Creating the new Codespace from {journal['branch']} at {self.journal['commit'][:12]}.", flush=True)
