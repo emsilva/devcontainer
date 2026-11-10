@@ -216,6 +216,19 @@ Type delete to delete it.
   nothing was checked.` · `Another delete for this project is running; wait for it to finish.` · `No Codespace is
   paired. Name one: CMD` (CMD = `work:cs:delete -- --codespace NAME`) · `Unset GH_TOKEN before deleting a Codespace;
   it must use a real gh account.` (and `GITHUB_TOKEN`).
+- Owner unknown (Task 8 R1: no journal, `accounts.json`, `arming.json` or seal names the owner), in place of the
+  `already deleted` lines: `NAME is not among LOGIN's Codespaces on GitHub.` (nothing kept) · `NAME is not among
+  LOGIN's Codespaces on GitHub. This Mac still keeps: STEP, STEP.` then `If NAME belongs to another account, switch
+  with gh auth switch and run the delete again. Otherwise type delete to remove them.` · from `--check` or without a
+  terminal (exit 1, outcome `cleanup-pending`): `NAME is not among LOGIN's Codespaces on GitHub; this Mac still
+  keeps STEP, STEP. Run CMD in a terminal to remove them.`
+- A part that could not be read (Task 8 R3): History UNKNOWN `could not read every conversation on NAME`; any
+  category whose own part was read while another was not: `Unknown: not judged until every part of NAME can be
+  read`.
+- Layout (Task 8 R7): a line longer than 78 cells wraps at a word boundary onto continuation lines indented to its
+  text column (11 spaces for a category line, 2 for others); nothing is cut. Verbs agree with counts
+  (`1 conversation has`). `--check` without `--json` on a deletable Codespace ends `To delete it: CMD` (CMD =
+  `work:cs:delete -- --codespace NAME`) instead of `Type delete to delete it.`
 
 ## Review Focus
 
@@ -973,6 +986,94 @@ the manifest's `cutoffs_digest` in `Evidence` go to Task 5, which builds `gather
 
 Gates once, at the final commit: `task check && task test`, exit 0.
 
+### Task 8: Fixes from the second stage C review (Fable 5.2 at c4088a3)
+
+The review `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-c/review-fable-2/REVIEW.md`
+(sha256 6de1a26db0f8…) found two P1s, three P2s and P3s. The lead re-ran every reproduction script and read the
+rest (`/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/stage-c/verify/fable-review-2-c4088a3.verification.md`).
+The review is evidence; this task is what to build. Its scripts (`review-fable-2/repro/`) may become suite tests;
+its mutation sources are `review-fable-2/repro/mutate*.py` (the exports they ran on are gone: apply a mutation by
+hand in your worktree, run the named tests, restore).
+
+**Files:** `deletion.py`, `workspace.py` (`remote`, `_retired_registry`), `target_scan.py`, `verdict.py`,
+`seal.py`, the README and `docs/project-continuity.md` line on the account, and their tests. **Frozen** (stage D's
+plan consumes them): the signatures of `deletion.gather`, `deletion.run`, `verdict.resolve`, `judge`, `claims`,
+`seal.write`, `seal.read`, `scratch.configure`, `scratch.retarget`, `workspace.remote`; `scratch.json` and the
+retarget intents (their exact-dict equality and replay must not see a new field); no field of `Scan`, `Evidence`,
+`Category`, `Verdict` or the seal record is removed or renamed (a new field only with a default, named in the
+report); the JSON keys and outcome names of `--check --json`. The Copy section above holds every new string.
+
+One builder, one commit per item in this order, each item with a test shown failing first:
+
+- **R1 (P1-1, origin). Every delete knows whose Codespace it reads.**
+  - The connect records the account. `workspace.remote` writes `{NAME: LOGIN}` into a private
+    `STATE/accounts.json` (`{"schema": 1, "codespaces": {NAME: LOGIN}}`, atomic) when it holds no entry for NAME,
+    after `_verify_roots` succeeded on the connection and before the binding publishes (the `PENDING` write), under
+    the lock it already holds. LOGIN is `arming.account(os.environ)`, the login whose token the connection used
+    (both read `DEVCONTAINER_GH_USER`, else gh's active account: `transport.py:98-106`, `arming.py:118-150`). A
+    failing read records nothing and never stops the connect. An entry is never rewritten or removed here, so a
+    retired OLD keeps its owner, and every project gains its entry at its next `task work:cs`.
+  - The delete's owner is the first of: the journal's account; `accounts.json`'s entry for the target;
+    `arming.json`'s `gh_user` when its `codespace` is the target, armed or not (a disarm keeps it,
+    `__main__.py:201`); the seal's `gh_user`. A known owner other than the signed-in account is refused with the
+    existing copy, before any API call, for every target kind.
+  - With no owner known, a reading of `Deleted` (a 404 and absence from the inventory) is reported as that, with
+    the Copy section's `not among LOGIN's Codespaces` lines; `Deleted NAME` and `is already deleted` are printed
+    only when the owner is known or after this run's own DELETE.
+  - Docs: where the README and `docs/project-continuity.md` say the delete verifies the GitHub account, say it is
+    the account recorded when the Codespace was connected or armed.
+  - Tests (no test runs the real `gh`: every test reaching `workspace.remote` gets the login from one patch point
+    or the suite's fake `gh`; say which): an unarmed pairing recorded as `octo` with gh as `other` -> refused, zero
+    API calls, zero mutations (the review's `repro_wrong_account.py`); a pairing with no `accounts.json` and a
+    disarmed `arming.json` naming it -> refused; no record at all -> the `not among` lines and never `Deleted`;
+    `remote` records a missing entry once, keeps an existing one, and still connects when the read fails. Report
+    every caller of `arming.account` the change reaches. Message: `Know whose Codespace a delete reads, and never
+    call another account's Codespace deleted`.
+- **R2 (P1-2). Commits held by any other ref are claimed.** The tag loop (`target_scan.py:496-507`) covers every
+  ref outside `refs/heads/`, `refs/remotes/` and `refs/stash` that peels to a commit no branch contains, under its
+  full ref name. Tests: the review's Z4 (`refs/original/…`) and Z5 (`refs/notes/commits`) read Git Not safe
+  naming the ref; a ref whose commit a branch contains is not claimed; `pushed.py`'s graft and replace-ref tests
+  stay green. Message: `Claim commits that only a ref outside branches and tags holds`.
+- **R3 (P2-1). An unreadable part says so.** An unsteady pair still never reads SAFE. When either scan has an
+  incomplete part, that category prints its own UNKNOWN text and the others the `not judged` text (Copy). Two
+  complete scans that differ keep `NAME changed while it was being checked; …`. Tests: the review's three cases
+  (`repro_incomplete_reads_changed.py`), a first scan incomplete with a complete second, and the History case.
+  Message: `Name the part of a check that could not be read`.
+- **R4 (P2-2). Two tests that can fail.** `test_retired_delete_keeps_new_recovery_working` also asserts the exact
+  mutation list for a retired delete (`post_stop`, `delete`, `restore.end_target_proxies`,
+  `scratch.terminate_retired`, as the suite names them), shown failing under M53 (`mutate3b.py`). A sealed
+  `--check --json` with the seal's snapshot gone from the Store reads History `unknown` (`the final capture is no
+  longer on this Mac`), shown failing under M34 (`mutate.py`). Message: `Make the retired-delete and lost-capture
+  tests fail when their promise breaks`.
+- **R5 (P2-3). A delete from another checkout is refused up front; one from the active checkout finishes.**
+  `deletion.run` calls `workspace.registry(project, state)` under the delete lock, before the journal branch and
+  any API call, and returns its `ValueError` text as a refusal (exit 1, no API call, no mutation).
+  `_retired_registry` accepts `project.root` equal to the registry's `local_root` or `local_active_root` (what
+  `registry()` accepts on a Mac) and keeps writing `project.root` as `local_active_root`. Tests: both cases of the
+  review's `repro_other_checkout.py` (refused, zero API calls, zero mutations); `repro_active_root_delete.py`
+  finishes its cleanup; a rerun from that checkout after a pending cleanup step passes the registry check and
+  finishes. Message: `Refuse a delete from another checkout before reading GitHub, and finish one started from the
+  active checkout`.
+- **R6 (P3). `seal.write` refuses what a seal must not hold.** Besides Task 7's scratch rule it raises
+  `ValueError('Final-flush evidence is not steady')` unless `evidence.steady`, and `ValueError('Final-flush
+  capture is not complete')` unless the History category `verdict.judge` gives for a paired target built from its
+  own arguments (`remote_root`, `now`) is SAFE. Test: the review's `repro_seal_unsteady.py`, and the existing seal
+  tests stay green. Message: `Refuse to seal unsteady evidence or an unfinished capture`.
+- **R7 (P3, copy).** The Copy section's wrapping rule replaces the cut at 78 cells (`verdict.py:372`; JSON
+  unchanged); verbs agree with counts (`1 conversation has`); `--check` without `--json` on a deletable Codespace
+  ends `To delete it: CMD`. Test: the review's `repro_cut_lines.py` layout keeps every item. Message: `Wrap the
+  delete's lines instead of cutting them`.
+- **R8 (P3). Tests for the guards the destructive sequence relies on**, each shown failing under the review's
+  mutation: M04 (the recheck's fingerprint comparison; assert WHAT), M31 (the refused-DELETE line), M24 (the disarm
+  guard for another armed Codespace), M36 (the journal written before the stop), all in `mutate.py`; M51 (a journal
+  for another repository, `mutate3.py`); K01 (`keeper.start` re-reading the binding, `mutate2.py`). Message: `Test
+  the delete's guards that no test could fail on`.
+
+Not here: the Mac-turn-during-the-prompt remainder (never a false SAFE; the live check shows whether it bites),
+the guards M30, M48, T10, W04-W08, and the review's plausible-not-shown items (live check).
+
+Gates once, at the final commit: `task check && task test`, exit 0.
+
 ## Existing guards that must stay green (plan check, "Existing tests affected")
 
 `tests/test_replication.py::test_status_does_not_reuse_previous_health_for_partial_stale_or_failed_cycle`,
@@ -1019,6 +1120,11 @@ Gates once, at the final commit: `task check && task test`, exit 0.
 - Step 7 offers `deletion.run(..., codespace=OLD)`; a delete of either name closes the replace journal (CHECK Q11).
   Cross-stage tests for both before the release.
 
+- From Task 8: `seal.write` also refuses unsteady evidence and a capture whose History is not SAFE (call 9's
+  caller still checks first); `workspace.remote` records the account in `STATE/accounts.json`, so a NEW gets its
+  entry at the cutover's connect; a never-paired NEW's delete owner is the replace journal's account (stage D adds
+  that source to the delete's owner order).
+
 ## Order and parallelism
 
 At most three builders at once (shared Mac, memory `shared-mac-load-flakes`). Wave 1: Tasks 1, 2 and 4, from the
@@ -1027,6 +1133,7 @@ final plan commit (Task 2 does not import Task 1). Wave 2: Task 3, from the merg
 Task 5 owns `__main__.py`, `lifecycle.py` and `deletion.py`; Task 6 owns the template, `Taskfile.yml`,
 `root_tasks.py`, `standing.py`, `overview.py` and the docs. The lead merges each into `feature/task-work-cd` after its
 own re-gate, one gate at a time.
+Task 8 (one builder) runs after Task 7's merge (c4088a3), from the plan commit that adds it.
 
 ## Live check (part of the C+D release gate, not of these tasks)
 
