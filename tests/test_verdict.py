@@ -77,10 +77,87 @@ class VerdictTests(unittest.TestCase):
     def write(self, path, value):
         atomic_write(path, json.dumps(value).encode())
 
+    def test_wrap_keeps_the_label_and_first_column_for_long_first_words(self):
+        for message, prefix in [('  Git      /workspaces/' + 'r' * 90 + ' has 2 commits not on GitHub', '  Git      '),
+                                ('界' * 60 + ' has more text', '界')]:
+            with self.subTest(prefix=prefix):
+                lines = self.v.wrap(message)
+                self.assertTrue(lines[0].startswith(prefix), lines)
+                self.assertTrue(all(overview.cells(line) <= 78 for line in lines), lines)
+                self.assertEqual(''.join(lines).replace(' ', ''), message.replace(' ', ''))
+                indent = ' ' * (11 if prefix.startswith(' ') else 2)
+                self.assertTrue(all(line.startswith(indent) for line in lines[1:]), lines)
+
     def seal(self):
         return self.seals.Seal('space', IDENTITY, 'example/project', 'octo', '/workspaces/project',
                                'replace-1', NOW, 'cycle', 'b' * 64,
                                self.evidence.scan.scratch, self.evidence.scan.sessions)
+
+    def replace_journal(self, **updates):
+        from tests.test_replacing import journal
+        reader = importlib.import_module('devcontainer_setup.project_sync.replacing')
+        value = journal(**{'new': 'space', **updates})
+        reader.write(self.state, value)
+        return value
+
+    def test_journal_named_new_is_a_replacement_target(self):
+        self.replace_journal()
+        target = self.v.resolve(self.project, self.state, 'space')
+        self.assertEqual(target, self.v.Target('space', 'replacement', '/workspaces/project', None, None))
+        self.write(self.state / 'deletions/space.json', {'phase': 'deleted'})
+        self.assertEqual(self.v.resolve(self.project, self.state, 'space').kind, 'unpaired')
+
+    def test_a_paired_sealed_or_archived_name_keeps_its_kind(self):
+        self.replace_journal()
+        self.write(self.state / 'retired-bindings/100/scratch.json',
+                   dict(identity=IDENTITY, codespace='space', remote_root='/workspaces/previous'))
+        self.assertEqual(self.v.resolve(self.project, self.state, 'space').kind, 'moved')
+        self.write(self.state / 'retired/space.json', dict(schema=1, **self.seal().__dict__))
+        self.assertEqual(self.v.resolve(self.project, self.state, 'space').kind, 'sealed')
+        self.write(self.state / 'scratch.json', dict(identity=IDENTITY, codespace='space', remote_root='/workspaces/current'))
+        self.assertEqual(self.v.resolve(self.project, self.state, 'space').kind, 'paired')
+
+    def test_unnamed_new_stays_unpaired(self):
+        self.assertEqual(self.v.resolve(self.project, self.state, 'space').kind, 'unpaired')
+        self.replace_journal()
+        self.assertEqual(self.v.resolve(self.project, self.state, 'another-space').kind, 'unpaired')
+
+    def test_replacement_with_files_is_unsafe(self):
+        self.replace_journal()
+        target = self.v.resolve(self.project, self.state, 'space')
+        for name, text in (('Scratch', '1 file exists only on space (note.txt)'),
+                           ('History', '1 conversation file exists only on space')):
+            row = self.judge(name, target=target)
+            self.assertEqual(row.verdict, 'unsafe')
+            self.assertEqual(row.text, 'Not safe: ' + text)
+        for part in ('scratch_complete', 'sessions_complete'):
+            evidence = replace(self.evidence, scan=replace(self.evidence.scan, **{part: False}))
+            self.assertTrue(all(row.verdict == 'unknown' for row in self.v.judge(target, evidence, now=NOW)))
+
+    def test_empty_replacement_is_safe_for_scratch_and_history(self):
+        self.replace_journal()
+        target = self.v.resolve(self.project, self.state, 'space')
+        # The scan's scratch policy omits setup's .gitignore and README.md markers.
+        from devcontainer_setup.project_sync.scratch_tree import entries
+        root = self.project.root / '.scratch'
+        root.mkdir(parents=True)
+        (root / '.gitignore').write_text('*\n')
+        (root / 'README.md').write_text('Scratch files\n')
+        self.assertEqual(list(entries(root)), [])
+        evidence = replace(self.evidence, scan=replace(self.evidence.scan, scratch=(), sessions=()))
+        self.assertEqual(self.judge('Scratch', evidence, target).text, 'no files in .scratch')
+        self.assertEqual(self.judge('History', evidence, target).text, 'no conversations on space')
+        self.assertTrue(all(row.verdict == 'safe' for row in self.v.judge(target, evidence, now=NOW)))
+
+    def test_sealed_old_changed_after_the_flush_is_unsafe(self):
+        self.replace_journal(old='space', new='new-space')
+        self.write(self.state / 'retired/space.json', dict(schema=1, **self.seal().__dict__))
+        target = self.v.resolve(self.project, self.state, 'space')
+        changed = replace(self.evidence, capture_loads=True,
+                          scan=replace(self.evidence.scan, scratch=(('late.txt', DIGEST),),
+                                       sessions=(('codex/sessions/' + NAME, 'e' * 64),)))
+        self.assertEqual(self.judge('Scratch', changed, target).verdict, 'unsafe')
+        self.assertEqual(self.judge('History', changed, target).verdict, 'unsafe')
 
     def test_resolve_kinds(self):
         self.assertEqual(self.v.resolve(self.project, self.state, 'space').kind, 'unpaired')

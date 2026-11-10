@@ -193,12 +193,32 @@ class Store:
                 records.append((path, record))
         return records
 
-    def _head(self, entry: dict) -> bytes | None:
+    def _closure(self, entry: dict) -> dict | None:
+        """Read and verify every file before using an entry to retire any record."""
         try:
-            head = next(item for item in entry['files'] if item['session_id'] == entry['session_id'])
-            return self.read(head['blob'])
-        except (OSError, ValueError, KeyError, TypeError, StopIteration):
-            return None  # An unreadable head proves no append relationship.
+            files = entry['files']
+            if not isinstance(files, list) or not files:
+                return None
+            result = {}
+            for item in files:
+                key = (item['session_id'], item['path'])
+                size = item['size']
+                if (not all(isinstance(part, str) and part for part in key) or key in result
+                        or type(size) is not int or size < 0):
+                    return None
+                data = self.read(item['blob'])
+                if len(data) != size or item['blob'] != _digest(item['sha256']):
+                    return None
+                result[key] = data
+            if sum(sid == entry['session_id'] for sid, _ in result) != 1:
+                return None
+            return result
+        except (OSError, ValueError, KeyError, TypeError):
+            return None  # An unreadable or unproved closure retires nothing.
+
+    @staticmethod
+    def _contains(later, earlier):
+        return all(key in later and later[key].startswith(data) for key, data in earlier.items())
 
     def _record_received(self, manifest: dict) -> None:
         """Register received entries while the caller holds store.lock."""
@@ -215,25 +235,27 @@ class Store:
                 continue
             path = self.root / 'relay' / (digest + '.json')
             records = self._relay_records(issues=[])
-            if any(old_path == path for old_path, _ in records):
-                continue  # An identical retry needs no head-blob reads.
-            head = self._head(entry)
+            identical = any(old_path == path for old_path, _ in records)
+            others = [(old_path, record['entry']) for old_path, record in records if old_path != path
+                      and (record['entry'].get('agent'), record['entry'].get('session_id')) ==
+                      (entry.get('agent'), entry.get('session_id'))]
+            if identical and not others:
+                continue  # Preserve the read-free fast path when no prefix needs healing.
+            closure = self._closure(entry) if others else None
             retired = []
-            for old_path, record in records:
-                old = record['entry']
-                if (old.get('agent'), old.get('session_id')) != (entry.get('agent'), entry.get('session_id')):
+            for old_path, old in others:
+                old_closure = self._closure(old)
+                if closure is None or old_closure is None:
                     continue
-                old_head = self._head(old)
-                if head is None or old_head is None:
-                    continue
-                if old_head.startswith(head):
+                if not identical and self._contains(old_closure, closure):
                     break  # A live revision already contains the new entry.
-                if head.startswith(old_head):
+                if self._contains(closure, old_closure):
                     retired.append(old_path)
             else:
-                record = dict(schema=1, entry=entry, received_at=datetime.now(timezone.utc).isoformat())
-                # A crash must leave an extra old record, never lose the new one.
-                atomic_write(path, _canonical(record), mode=0o600)
+                if not identical:
+                    record = dict(schema=1, entry=entry, received_at=datetime.now(timezone.utc).isoformat())
+                    # A crash must leave an extra old record, never lose the new one.
+                    atomic_write(path, _canonical(record), mode=0o600)
                 for old_path in retired:
                     with _parent(old_path, private=True) as (parent, name):
                         os.unlink(name, dir_fd=parent)
@@ -296,6 +318,18 @@ class Store:
                     named.add(_digest(read_json(self._receipt(source))['snapshot_id']))
                 except FileNotFoundError:
                     pass
+            try:
+                with os.scandir(self.state / 'retired') as records:
+                    seals = [Path(record.path) for record in records if record.name.endswith('.json')]
+            except FileNotFoundError:
+                seals = []
+            except OSError:
+                raise ValueError('The final-flush record cannot be read; nothing was collected') from None
+            for path in seals:
+                try:
+                    named.add(_digest(read_json(path)['snapshot_id']))
+                except (OSError, ValueError, KeyError, TypeError):
+                    raise ValueError('The final-flush record cannot be read; nothing was collected') from None
             manifests = self._entries('manifests')
             kept = {digest for digest, info in manifests.items()
                     if digest in named or info.st_mtime >= now - keep_days * 86400}
