@@ -12,7 +12,7 @@ import sys
 import time
 import unicodedata
 
-from . import forget, probe, standing, terminal
+from . import forget, probe, replacing, standing, terminal
 from .probe import Remote, Space
 from .standing import Local
 
@@ -184,7 +184,11 @@ def view(local: Local, remote: Remote | None, *,
     recovery_off = (local.armed is True and local.keeper == 'stopped'
                     and pair.kind not in ('deleted', 'keeper-deleted', 'missing', 'elsewhere'))
     if recovery_off:
-        line(0, 'Recovery is off until you connect')
+        line(-3, 'Recovery is off until you connect')
+    if local.replacing is not None:
+        old, phase = local.replacing['old'], replacing.PHASE_WORDS[local.replacing['phase']]
+        command = shlex.join(task_command(local, 'setup', '--', '--replace'))
+        line(-2, f'Replacing {old}: stopped at {phase}. Finish it: {command}')
 
     name = local.pairing
     if situation == 'setup':
@@ -260,6 +264,12 @@ def view(local: Local, remote: Remote | None, *,
                 action('stop', 'Stop the Codespace', 'work:cs:stop')
         line(2, text)
 
+    connect = next((index for index, candidate in enumerate(candidates)
+                    if candidate.key in ('connect', 'start')), None)
+    if name and connect is not None and local.replacing is None:
+        candidates.insert(connect + 1, Action('replace', f'Replace {name}',
+                                              task_command(local, 'setup', '--', '--replace')))
+
     refusals = tuple(refusal for refusal in local.refusals
                      if (refusal.agent, refusal.session_id) not in forgotten)
     if refusals:
@@ -302,13 +312,24 @@ def view(local: Local, remote: Remote | None, *,
     if local.cycle_at is not None:
         line(8, 'Sync last completed ' + _when(local.cycle_at, now))
 
+    priority = []
+    if recovery_off:
+        connect = next((candidate for candidate in candidates if candidate.key in ('connect', 'start')), None)
+        if connect is not None:
+            candidates.remove(connect)
+        else:
+            connect = Action('connect', 'Connect', task_command(local, 'work:cs'))
+        priority.append(connect)
+    if local.replacing is not None:
+        priority.append(Action('finish-replace', f'Finish replacing {local.replacing["old"]}',
+                               task_command(local, 'setup', '--', '--replace')))
     if local.cleanup:
         target = local.cleanup[0]
         cleanup = Action('cleanup:' + target, f'Finish cleaning up after {target}',
                          task_command(local, 'work:cs:delete', '--', '--codespace', target))
-        position = 1 if recovery_off and candidates and candidates[0].key in ('connect', 'start') else 0
-        candidates.insert(position, cleanup)
-        line(0, f'Cleanup after deleting {target} is not finished.')
+        priority.append(cleanup)
+        line(-1, f'Cleanup after deleting {target} is not finished.')
+    candidates = priority + candidates
     listed = {space.name for space in spaces or ()}
     retired = next((target for target in local.retired if target != name and target in listed), None)
     delete_key = 'delete:' + retired if retired is not None else None
@@ -328,8 +349,6 @@ def view(local: Local, remote: Remote | None, *,
     # Reserve the last candidate slot so overlays cannot hide a listed retired target.
     delete = unique.pop(delete_key, None)
     actions = list(unique.values())[:4 if delete is not None else 5]
-    if recovery_off:
-        actions.sort(key=lambda candidate: candidate.key not in ('connect', 'start'))
     if len(actions) + (delete is not None) < 3:
         actions.append(Action('logs', 'Show recovery and sync logs', task_command(local, 'work:logs')))
     if delete is not None:

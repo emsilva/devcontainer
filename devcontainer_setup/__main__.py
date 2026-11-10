@@ -768,6 +768,8 @@ def _resolve_launch(api: Codespaces, project: Path, branch: str, paired: str | N
 
 
 def _ask_launch_resources(ui, api, project, options):
+    if options['action'] == 'replace':
+        return options
     if warning := options.get('warning'):
         print(f'Launch: {warning}', flush=True)
     if options['action'] != 'none' and not options.get('machine'):
@@ -833,6 +835,8 @@ def _codespace_choice(ui: Gum, api: Codespaces, project: Path, branch: str, *, p
         choices = {'none': ('none', None)}
         if usable:
             choices[f'rebuild {paired}'] = ('rebuild', paired)
+        if paired in refs and paired_data is not None:
+            choices[f'replace {paired}'] = ('replace', paired)
         for name, ref in refs.items():
             if not (usable and name == paired):
                 choices[_reuse_label(name, ref, branch, paired)] = ('reuse', name)
@@ -851,6 +855,8 @@ def _codespace_choice(ui: Gum, api: Codespaces, project: Path, branch: str, *, p
         action, name = choices[choice]
         if action == 'none':
             return _no_codespace()
+        if action == 'replace':
+            return {'action': action, 'name': name}
         if name:
             try:
                 return _reuse_options(api, name, branch, action, paired_data if name == paired else None)
@@ -1048,7 +1054,7 @@ def _launch_on_default(api: Codespaces, project: Path, repo: str, default: str, 
                      'merge-failed': 'Resolve the Git error, then'}[reason]
         print(f'{next_step} run: git -C {here} pull --ff-only', flush=True)
     config = json.loads(git(project, 'show', f'{sha}:.devcontainer/devcontainer.json'))
-    if not launch or launch.get('action') == 'none':
+    if not launch or launch.get('action') in ('none', 'replace'):
         return None, config
     shared = launch_options(project, config, preferences)
     options = {key: value for key, value in launch.items() if key not in ('action', 'name', 'repo', 'client', 'warning')}
@@ -1093,6 +1099,9 @@ def _resume_setup_pr(ui, api: Codespaces, project: Path, repo: str, default: str
         raise ValueError(f'PR #{pr["number"]} is open. {RERUN}')
     name, config = _merge_and_launch(ui, api, project, repo, default, pr['number'], pr['head']['ref'],
                                      pr['head']['sha'], None, launch, preferences)
+    if launch and launch.get('action') == 'replace':
+        from . import replacement
+        return replacement.run(project)
     if config.get('customizations', {}).get('devcontainerSetup', {}).get('selections', {}).get('continuity'):
         setup_continuity(project, ui, name)
     return 0
@@ -1207,8 +1216,10 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
                     and any(_finding_key(record) not in saved_decision_keys for record in decisions)):
                 print('Scan decisions are local only; they will be asked again until published on the default branch.', flush=True)
             target = f' {launch["name"]}' if launch['name'] else ''
+            if launch['action'] == 'replace':
+                target += ' (its machine and idle timeout)'
             print(f'Codespace: {launch["action"]}{target}; SSH: {"enabled" if chosen["ssh"] else "disabled"}', flush=True)
-            if launch['action'] != 'none':
+            if launch['action'] not in ('none', 'replace'):
                 print(f'Launch: {launch["machine"]}, idle {launch["idle_timeout"]}; '
                       f'editor after create: {editor_preference or load_open_after_create()}', flush=True)
             while True:
@@ -1257,6 +1268,9 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
         else:
             # Already configured: origin/<default> carries the setup files; nothing is pushed.
             name, _ = _launch_on_default(api, project, repo, default, sha, launch, preferences)
+        if launch['action'] == 'replace':
+            from . import replacement
+            return replacement.run(project)
     if chosen.get('continuity'):
         setup_continuity(project, ui, name)
     return 0
@@ -1269,12 +1283,18 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument('--scan', action='store_true', help='Print repository recommendations as JSON; no changes')
     mode.add_argument('--dry-run', action='store_true', help='Print the recommended configuration diff; no changes')
     mode.add_argument('--check', action='store_true', help='Validate the installed project configuration')
+    mode.add_argument('--replace', action='store_true', help='Replace the paired Codespace; rerun to continue')
     parser.add_argument('--upgrade', action='store_true', help='Review an explicit generator-version upgrade')
     parser.add_argument('--upgrade-loaded', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--resume', metavar='CODESPACE', help='Reuse the named codespace after confirmation')
     args = parser.parse_args(argv)
     try:
         project = Path(git(args.project, 'rev-parse', '--show-toplevel')).resolve()
+        if args.replace:
+            if not sys.stdin.isatty() or not sys.stdout.isatty():
+                raise ValueError('Replacing a Codespace needs a terminal on your Mac.')
+            from . import replacement
+            return replacement.run(project)
         if args.check:
             errors = validate(project)
             if errors:

@@ -147,6 +147,55 @@ the Mac, including ones the Mac did not publish locally. A conversation is never
 copied back to the Codespace it started on. Later sync cycles retry delivery
 without creating duplicate imports.
 
+## Replace a Codespace
+
+On your Mac, run `task setup -- --replace` in this repository, or
+`task devcontainer:setup -- --replace` in a generated project. Both commands need
+a terminal and a real gh account, with `GH_TOKEN` and `GITHUB_TOKEN` unset.
+`task work` offers `Replace NAME` after connect or start. The setup wizard offers
+`replace NAME` for a paired Codespace it can read, including one on a feature
+branch; it publishes any reviewed setup changes before starting the replacement.
+
+Replacement runs in this order:
+
+1. Inspect the paired Codespace's live machine, cores, idle timeout and billing
+   owner. Unreadable resources stop the operation before creating anything. The
+   default branch must carry this checkout's installed setup.
+2. Create the new Codespace from the default branch's tip, using the old one's
+   machine and idle timeout. The old one's branch may differ. Validate and apply
+   dotfiles to the new one. A dotfiles retry does not rebuild it.
+3. While the old one is still paired, decide recovery consent, ask you to end any
+   running agents, then record its final normal sync cycle and conversation flush.
+   The command never kills agents. Unfinished scratch or history stops the move.
+4. Move sync, recovery and Herdr to the new Codespace without opening Herdr's TUI.
+   Matching GitHub account and billing owner carry your recovery consent; otherwise
+   you type `arm` before the final flush. Nothing asks between that flush and move.
+5. Sign in through the existing all-tool sequence. Failed or skipped sign-ins are
+   listed for `task work:signin:all`; they do not block the next check.
+6. Check setup validation, a completed sync cycle, recovery when armed, Herdr
+   reachability and the old one's conversation revisions on the new one. Refused
+   conversations kept on this Mac and explicitly forgotten conversations are named.
+   A failed check keeps the old Codespace and stops before offering deletion.
+7. Offer the old one's [checked deletion](#checked-deletion), with fresh evidence
+   against its final flush and the typed word `delete`. Declining keeps it listed
+   in `task work`. Connect to the new one with `task work:cs` when finished.
+
+The project keeps a private replace journal and one operation lock. Rerun the same
+replace command after interruption: it prints its phase and continues it.
+`task work` shows `Finish replacing NAME` ahead of other work, below a recovery
+connection when recovery is off. After a lost create reply it checks the inventory
+before creating again. One matching new Codespace is adopted; several candidates
+or unreadable candidates require a choice. If none appears during the two-minute
+recheck, only typing `create` allows another create request.
+
+Before the move starts, a rerun offers `continue` or `abandon`. Abandon keeps the old
+pairing and leaves any new Codespace listed for an explicit checked delete; nothing
+deletes it automatically. Ctrl-C or EOF keeps the current phase for a rerun. Once
+the move starts, reruns finish forward, including after a partial move. Returning
+to the old Codespace then requires an explicit `task work:cs -- --rebind NAME`.
+Deletion of either Codespace ends that replacement operation. A completed replace
+keeps its archived journal, even when you declined the old one's deletion.
+
 ## Checked deletion
 
 Replace first, then check the old Codespace with
