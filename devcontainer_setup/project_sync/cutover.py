@@ -19,6 +19,20 @@ def _binding(state):
         return {}
 
 
+def _pending_move(state, new):
+    for filename, key in (('scratch-retarget.json', 'candidate'), ('recovery-move.json', 'new'),
+                          ('workspace-pending.json', 'codespace')):
+        try:
+            value = read_json(state / filename).get(key)
+        except FileNotFoundError:
+            continue
+        if key == 'candidate':
+            value = value.get('codespace') if isinstance(value, dict) else None
+        if value == new:
+            return True
+    return False
+
+
 def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tty=None,
         api_factory=lifecycle.LifecycleAPI, connect=transport.CodespaceConnection,
         now=time.time, sleep=time.sleep) -> int:
@@ -89,20 +103,25 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
         if record is not None and record.operation != operation:
             record = None
         armed = recovery if arming.read(state).get('armed') else None
-        if moved() or replacing.move_started(state, journal):
+        if moved() or record is not None or replacing.move_started(state, journal):
             move.finish_pending(project, state)
             armed = recovery if arming.read(state).get('armed') else None
             if moved():
                 remote(armed=armed)
+                if moved():
+                    moved_line()
+                    return 0
+                return 1
             elif _binding(state).get('codespace') == old:
-                decision = move.decide(project, state, new, ask=ask)
-                remote(rebind=new, move=decision, armed=recovery if decision is not None else armed, expected_old=old)
+                if _pending_move(state, new):
+                    decision = move.decide(project, state, new, ask=ask)
+                    remote(rebind=new, move=decision, armed=recovery if decision is not None else armed, expected_old=old)
+                    if moved():
+                        moved_line()
+                        return 0
+                    return 1
             else:
                 raise ValueError(f'{old} is no longer the paired Codespace; nothing moved.')
-            if moved():
-                moved_line()
-                return 0
-            return 1
 
         binding = _binding(state)
         if binding.get('codespace') != old or binding.get('identity') != project.identity:

@@ -249,12 +249,26 @@ class CutoverTests(unittest.TestCase):
         start.assert_not_called()
         self.assertEqual(self.api.calls, ['read'])
 
-    def test_the_latch_alone_keeps_finishing_forward(self):
+    def test_the_latch_alone_flushes_again_before_moving(self):
         replacing.write(self.state, dict(self.journal, moving=999.0))
         self.assertEqual(self.run_cutover()[0], 0)
         self.finish.assert_called_once()
         for leaf in (self.scanner, self.gather, self.sealer, self.factory):
-            leaf.assert_not_called()
+            leaf.assert_called_once()
+        self.assertTrue(read_json(self.receipt_path)['moved'])
+        self.assertEqual(replacing.read(self.state)['moving'], 999.0)
+
+    def test_a_retired_record_alone_flushes_again_before_moving(self):
+        seal.write(self.state, self.store, self.scan, evidence=self.evidence, identity=self.project.identity,
+                   repository='example/project', gh_user='octo', remote_root='/workspaces/project',
+                   operation=self.operation, cycle_id='final-cycle', snapshot_id=self.snapshot, now=999.0)
+        self.sealer.reset_mock()
+        self.assertEqual(self.run_cutover()[0], 0)
+        self.finish.assert_called_once()
+        for leaf in (self.scanner, self.gather, self.sealer, self.factory):
+            leaf.assert_called_once()
+        self.assertTrue(read_json(self.receipt_path)['moved'])
+        self.assertEqual(seal.read(self.state, 'old-space').sealed_at, self.clock)
 
     def test_stopped_old_is_not_started(self):
         for state in ('Shutdown', 'Starting', None):
