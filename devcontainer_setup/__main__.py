@@ -974,6 +974,27 @@ def _open_setup_prs(prs: list[dict]) -> str:
             'then run task devcontainer:setup again to create the Codespace.')
 
 
+def launch_options(project: Path, selected: dict, preferences: dict) -> dict:
+    """Ordinary launch values from the selected devcontainer configuration and user preferences."""
+    state_home = os.environ.get('XDG_STATE_HOME', '')
+    state = Path(state_home) if state_home and Path(state_home).is_absolute() else Path.home() / '.local/state'
+    selections = selected.get('customizations', {}).get('devcontainerSetup', {}).get('selections', {})
+    dotfiles = preferences['dotfiles_repo'] if selections.get('dotfiles', preferences['apply_dotfiles']) else None
+    return {'dotfiles_repo': dotfiles, 'machine_profile': _machine_profile(project) if dotfiles else None,
+            'workspace': selected.get('workspaceFolder'), 'state_root': state,
+            'open_after_create': load_open_after_create()}
+
+
+def record_created(project: Path, name: str, before: float) -> None:
+    """Record creation even without pairing; a lookup or write failure never fails setup."""
+    try:
+        from .project_sync.evidence import record_start
+        from .project_sync.state import discover_project, state_dir
+        record_start(state_dir(discover_project(project)), name, before, 'created')
+    except (OSError, ValueError):
+        _LOG.info('Start evidence was not written')
+
+
 def _launch_on_default(api: Codespaces, project: Path, repo: str, default: str, sha: str, launch: dict | None,
                        preferences: dict, merged: str | None = None, worktree: Path | None = None):
     """Once sha is on <default>: verify it, prune merged setup branches, fast-forward the checkout
@@ -1029,28 +1050,12 @@ def _launch_on_default(api: Codespaces, project: Path, repo: str, default: str, 
     config = json.loads(git(project, 'show', f'{sha}:.devcontainer/devcontainer.json'))
     if not launch or launch.get('action') == 'none':
         return None, config
-    state_home = os.environ.get('XDG_STATE_HOME', '')
-    state = Path(state_home) if state_home and Path(state_home).is_absolute() else Path.home() / '.local/state'
-    selected = config.get('customizations', {}).get('devcontainerSetup', {}).get('selections', {})
-    dotfiles = preferences['dotfiles_repo'] if selected.get('dotfiles', preferences['apply_dotfiles']) else None
-
-    def _record_created(name, before):
-        # Even when setup does not pair the new Codespace. A lookup or write error is logged, never raised.
-        try:
-            from .project_sync.evidence import record_start
-            from .project_sync.state import discover_project, state_dir
-            record_start(state_dir(discover_project(project)), name, before, 'created')
-        except (OSError, ValueError):
-            _LOG.info('Start evidence was not written')
-
+    shared = launch_options(project, config, preferences)
     options = {key: value for key, value in launch.items() if key not in ('action', 'name', 'repo', 'client', 'warning')}
     if 'action' in launch:
         options.update(resume=launch['name'], force_rebuild=launch['action'] == 'rebuild')
-    name = api.launch(repo, default, sha, dotfiles_repo=dotfiles, receipt=receipt_path(state, repo, default),
-                      workspace=config.get('workspaceFolder'), state_root=state,
-                      machine_profile=_machine_profile(project) if dotfiles else None,
-                      on_created=_record_created, open_after_create=load_open_after_create(),
-                      **options)
+    name = api.launch(repo, default, sha, receipt=receipt_path(shared['state_root'], repo, default),
+                      on_created=lambda name, before: record_created(project, name, before), **shared, **options)
     return name, config
 
 

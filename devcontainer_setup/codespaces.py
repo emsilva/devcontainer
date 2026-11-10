@@ -127,9 +127,26 @@ class Codespaces:
         if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo):
             raise ValueError('Select a GitHub repository in owner/repo form.')
 
-    def existing(self, repo: str, branch: str | None = None) -> list[dict]:
+    def existing(self, repo: str, branch: str | None = None, *, complete: bool = False) -> list[dict]:
         """This account's codespaces for repo; only those on branch when one is given."""
         pages = self.command('api', 'user/codespaces?per_page=100', '--paginate', '--slurp', json_output=True)
+        if complete:
+            invalid = ValueError('the Codespace list from GitHub is incomplete')
+            if not isinstance(pages, list) or not pages:
+                raise invalid
+            total, count = None, 0
+            for page in pages:
+                if not isinstance(page, dict):
+                    raise invalid
+                advertised, rows = page.get('total_count'), page.get('codespaces')
+                if (type(advertised) is not int or advertised < 0 or not isinstance(rows, list)
+                        or any(not isinstance(row, dict) for row in rows)):
+                    raise invalid
+                if total is not None and advertised != total:
+                    raise invalid
+                total, count = advertised, count + len(rows)
+            if total != count:
+                raise invalid
         return [space for page in pages for space in page.get('codespaces', [])
                 if space.get('repository', {}).get('full_name', '').lower() == repo.lower()
                 and branch in (None, space.get('git_status', {}).get('ref'))]
@@ -324,7 +341,8 @@ class Codespaces:
                *, resume: str | None = None, location: str | None = None,
                retention: str | None = None, workspace: str | None = None,
                machine_profile: dict | None = None, state_root: Path | None = None,
-               on_created: Callable[[str, float], None] | None = None, force_rebuild: bool = False) -> str:
+               on_created: Callable[[str, float], None] | None = None, force_rebuild: bool = False,
+               resume_hint: str | None = None, before_create: Callable[[], None] | None = None) -> str:
         """Create (or reuse) a codespace on branch, which must contain sha, the merged setup. A reused
         codespace confirmed on branch takes over its retired setup branch's receipt from state_root."""
         self._repository(repo)
@@ -367,7 +385,10 @@ class Codespaces:
                     args += ['--retention-period', retention]
                 print('Creating codespace; provisioning may take a few minutes.', flush=True)
                 before = time.time()
-                created = self.command(*args).splitlines()[-1]
+                if before_create is not None:
+                    before_create()
+                reply = self.command(*args).splitlines()
+                created = reply[-1] if reply else ''
                 if not re.fullmatch(r'[A-Za-z0-9-]+', created):
                     raise ValueError('Creation did not return a codespace name. Check gh codespace list before retrying.')
                 name = created
@@ -437,8 +458,8 @@ class Codespaces:
         except (ValueError, OSError, subprocess.TimeoutExpired) as error:
             if not name:
                 raise ValueError(str(error)) from error
-            raise ValueError(f'{error}\nSetup is on {branch}. Resume with: '
-                             f'task devcontainer:setup -- --resume {name}') from error
+            hint = resume_hint if resume_hint is not None else f'task devcontainer:setup -- --resume {name}'
+            raise ValueError(f'{error}\nSetup is on {branch}. Resume with: {hint}') from error
         return name
 
 
@@ -447,12 +468,7 @@ def receipt_path(state_root: Path, repo: str, branch: str) -> Path:
     return Path(state_root) / 'devcontainer-setup' / (hashlib.sha256(f'{repo}:{branch}'.encode()).hexdigest()[:16] + '.json')
 
 
-def migrate_receipt(state_root: Path, repo: str, default: str, codespace: str) -> Path | None:
-    """Copy the receipt a retired setup branch left for codespace, which the caller saw on default,
-    to default's path with that branch; the old file stays beside it. Returns the new path, if any."""
-    target = receipt_path(state_root, repo, default)
-    if target.exists() or target.is_symlink():
-        return None
+def _matching_receipt(state_root: Path, repo: str, codespace: str) -> tuple[Path, dict] | None:
     found = []
     for path in (Path(state_root) / 'devcontainer-setup').glob('*.json'):
         try:
@@ -460,11 +476,30 @@ def migrate_receipt(state_root: Path, repo: str, default: str, codespace: str) -
         except (ValueError, OSError):
             continue
         branch = values.get('branch') if isinstance(values, dict) else None
-        if (isinstance(branch, str) and branch != default and values.get('repository') == repo
+        if (isinstance(branch, str) and values.get('repository') == repo
                 and values.get('codespace') == codespace and path == receipt_path(state_root, repo, branch)):
             found.append((path.stat().st_mtime, path, values))
     if not found:
         return None
-    _, _, values = max(found, key=lambda entry: entry[0])
+    _, path, values = max(found, key=lambda entry: entry[0])
+    return path, values
+
+
+def find_receipt(state_root: Path, repo: str, codespace: str) -> Path | None:
+    """Read-only source lookup, independent of another Codespace's default-branch receipt."""
+    found = _matching_receipt(state_root, repo, codespace)
+    return found[0] if found else None
+
+
+def migrate_receipt(state_root: Path, repo: str, default: str, codespace: str) -> Path | None:
+    """Copy the receipt a retired setup branch left for codespace, which the caller saw on default,
+    to default's path with that branch; the old file stays beside it. Returns the new path, if any."""
+    target = receipt_path(state_root, repo, default)
+    if target.exists() or target.is_symlink():
+        return None
+    found = _matching_receipt(state_root, repo, codespace)
+    if found is None:
+        return None
+    _, values = found
     save_receipt(target, dict(values, branch=default))
     return target
