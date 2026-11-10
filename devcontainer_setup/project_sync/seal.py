@@ -103,7 +103,13 @@ def _decode(state, codespace, value):
 def write(state, store, scan, *, evidence, identity, repository, gh_user, remote_root, operation,
           cycle_id, snapshot_id, now) -> Path:
     """Refuse a seal unless this scan compared exactly the loaded snapshot map."""
-    from .verdict import Evidence, cutoffs
+    from .verdict import Evidence, SAFE, Target, cutoffs, judge
+    if isinstance(evidence, Evidence):
+        if not evidence.steady:
+            raise ValueError('Final-flush evidence is not steady')
+        target = Target(scan.codespace, 'paired', remote_root, None, None)
+        if next(row for row in judge(target, evidence, now=now) if row.name == 'History').verdict != SAFE:
+            raise ValueError('Final-flush capture is not complete')
     try:
         if (not isinstance(evidence, Evidence) or evidence.scan is not scan or evidence.sync_running is not True
                 or evidence.conflicts or evidence.mac_scratch is None

@@ -1,5 +1,6 @@
 """Final-flush records are private attestations of a verified captured prefix."""
 from dataclasses import replace
+from datetime import datetime, timezone
 import importlib
 import json
 from pathlib import Path
@@ -7,7 +8,7 @@ import stat
 import tempfile
 import unittest
 
-from devcontainer_setup.project_sync import target_scan, verdict
+from devcontainer_setup.project_sync import sync_cycle, target_scan, verdict
 from devcontainer_setup.project_sync.checkpoint_store import Store
 from devcontainer_setup.project_sync.state import atomic_write
 from tests.test_verdict import DIGEST, IDENTITY, NAME, NOW, example_scan, manifest
@@ -34,7 +35,13 @@ class SealTests(unittest.TestCase):
 
     def evidence(self, base_scan=None, **updates):
         scan = base_scan or example_scan()
-        return replace(verdict.Evidence(scan, True, (), scan.scratch, (), True, None, None, (), None, ()), **updates)
+        receipt = dict(snapshot_id=self.snapshot, received_at=datetime.fromtimestamp(NOW, timezone.utc).isoformat())
+        inbound = sync_cycle.direction()
+        inbound.update(outcome='complete', snapshot_id=self.snapshot, receipt=receipt)
+        cycle = dict(schema=3, cycle_id='cycle', outcome='complete', started_at=NOW - 1, completed_at=NOW,
+                     stage='complete', issues=[], directions=dict(codespace_to_desktop=inbound))
+        return replace(verdict.Evidence(scan, True, (), scan.scratch, (), True, cycle, receipt,
+                                       verdict.sessions_by_file(self.manifest), None, ()), **updates)
 
     def test_scratch_must_have_reached_the_mac_before_sealing(self):
         scan = example_scan()
@@ -48,6 +55,20 @@ class SealTests(unittest.TestCase):
     def test_evidence_is_required_for_a_final_flush(self):
         with self.assertRaises(TypeError):
             self.seal.write(self.state, self.store, example_scan(), **self.options)
+
+    def test_unsteady_evidence_cannot_seal_a_late_session(self):
+        scan = example_scan()
+        late = ('claude/project/11111111-2222-4333-8444-555555555555.jsonl', 'd' * 64)
+        scan = replace(scan, sessions=tuple(sorted((*scan.sessions, late))))
+        with self.assertRaisesRegex(ValueError, '^Final-flush evidence is not steady$'):
+            self.write(scan, evidence=self.evidence(scan, steady=False))
+        self.assertFalse((self.state / 'retired/space.json').exists())
+
+    def test_unfinished_capture_cannot_be_sealed(self):
+        scan = example_scan()
+        with self.assertRaisesRegex(ValueError, '^Final-flush capture is not complete$'):
+            self.write(scan, evidence=self.evidence(scan, cycle=None, receipt=None))
+        self.assertFalse((self.state / 'retired/space.json').exists())
 
     def test_write_then_read_round_trips(self):
         path = self.write()
