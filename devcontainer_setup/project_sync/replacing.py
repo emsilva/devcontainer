@@ -19,6 +19,16 @@ ARCHIVE = 'replacements'
 LOCK = 'replace.lock'
 RECEIPTS = 'replace-receipts'
 PHASES = ('inspected', 'create-requested', 'created', 'ready', 'moved', 'signed-in', 'checked', 'offered')
+PHASE_WORDS = {
+    'inspected': 'inspect',
+    'create-requested': 'create',
+    'created': 'create',
+    'ready': 'flush and move',
+    'moved': 'sign in',
+    'signed-in': 'check',
+    'checked': 'delete offer',
+    'offered': 'delete offer',
+}
 ENDED = ('completed', 'abandoned', 'deleted')
 _ERROR = 'The replace record cannot be read'
 

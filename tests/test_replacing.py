@@ -32,6 +32,10 @@ class ReplacingTests(unittest.TestCase):
     def save(self, path, value):
         atomic_write(self.state / path, json.dumps(value).encode())
 
+    def test_phase_words_cover_phases_in_order(self):
+        self.assertTrue(hasattr(self.r, 'PHASE_WORDS'), 'Shared phase words are missing')
+        self.assertEqual(tuple(self.r.PHASE_WORDS), self.r.PHASES)
+
     def assert_login_round_trip(self, field):
         value = journal()
         target = value if field == 'account' else value['resources']

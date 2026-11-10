@@ -22,11 +22,6 @@ from .project_sync.state import discover_project, locked, read_json, state_dir
 from .ui import Cancelled, Gum
 
 
-PHASE_COPY = dict(inspected='inspect', **{'create-requested': 'create'}, created='create',
-                  ready='flush and move', moved='sign in', **{'signed-in': 'check'},
-                  checked='delete offer', offered='delete offer')
-
-
 def launch_options(*args):
     # Lazy imports keep setup's eventual --replace entry point free of a cycle.
     from .__main__ import launch_options as options
@@ -86,7 +81,7 @@ class _Coordinator:
 
     def stop(self, reason):
         if self.journal:
-            phase = PHASE_COPY[self.journal['phase']]
+            phase = replacing.PHASE_WORDS[self.journal['phase']]
             print(f'Replace stopped at {phase}: {reason}. Run {self.replace} to continue.', flush=True)
         else:
             print(reason, flush=True)
@@ -412,7 +407,7 @@ class _Coordinator:
                     replacing.archive(self.state, self.journal, 'deleted', self.now())
                     print(f'The replace of {self.old} ended: {deleted} was deleted.', flush=True)
                     return 0
-                print(f"A replace of {self.old} is at {PHASE_COPY[self.journal['phase']] }.", flush=True)
+                print(f"A replace of {self.old} is at {replacing.PHASE_WORDS[self.journal['phase']] }.", flush=True)
                 if self.journal['phase'] == 'offered':
                     replacing.archive(self.state, self.journal, 'completed', self.now())
                     return 0

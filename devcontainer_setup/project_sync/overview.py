@@ -12,16 +12,13 @@ import sys
 import time
 import unicodedata
 
-from . import forget, probe, standing, terminal
+from . import forget, probe, replacing, standing, terminal
 from .probe import Remote, Space
 from .standing import Local
 
 
 _UNSAFE = frozenset(('Cc', 'Cf', 'Zl', 'Zp'))
 DEFAULT = object()
-_REPLACE_PHASE = dict(inspected='inspect', **{'create-requested': 'create'}, created='create',
-                      ready='flush and move', moved='sign in', **{'signed-in': 'check'},
-                      checked='delete offer', offered='delete offer')
 
 
 def cells(text: str) -> int:
@@ -189,7 +186,7 @@ def view(local: Local, remote: Remote | None, *,
     if recovery_off:
         line(-3, 'Recovery is off until you connect')
     if local.replacing is not None:
-        old, phase = local.replacing['old'], _REPLACE_PHASE[local.replacing['phase']]
+        old, phase = local.replacing['old'], replacing.PHASE_WORDS[local.replacing['phase']]
         command = shlex.join(task_command(local, 'setup', '--', '--replace'))
         line(-2, f'Replacing {old}: stopped at {phase}. Finish it: {command}')
 
@@ -269,7 +266,7 @@ def view(local: Local, remote: Remote | None, *,
 
     connect = next((index for index, candidate in enumerate(candidates)
                     if candidate.key in ('connect', 'start')), None)
-    if name and connect is not None:
+    if name and connect is not None and local.replacing is None:
         candidates.insert(connect + 1, Action('replace', f'Replace {name}',
                                               task_command(local, 'setup', '--', '--replace')))
 

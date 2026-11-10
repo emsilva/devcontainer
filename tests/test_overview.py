@@ -78,10 +78,12 @@ class OverviewTests(unittest.TestCase):
                 f'Replacing old-cs: stopped at {text}. Finish it: task devcontainer:setup -- --replace'))
             self.assertEqual(frame.actions[0].label, 'Finish replacing old-cs')
             self.assertEqual(frame.actions[0].argv, ('task', 'devcontainer:setup', '--', '--replace'))
+            self.assertNotIn('replace', [action.key for action in frame.actions])
             recovery = self.frame(replace(local, armed=True, keeper='stopped'))
             self.assertEqual(recovery.lines[0], 'Recovery is off until you connect')
             self.assertEqual(recovery.lines[1], frame.lines[0])
             self.assertEqual([a.key for a in recovery.actions[:2]], ['connect', 'finish-replace'])
+            self.assertNotIn('replace', [action.key for action in recovery.actions])
 
     def test_replace_command_matches_the_generated_project_coordinator(self):
         import tempfile
@@ -97,7 +99,8 @@ class OverviewTests(unittest.TestCase):
             self.assertEqual(coordinator.replace, 'task devcontainer:setup -- --replace')
             finish = self.frame(replace(local, root=root)).actions[0]
             self.assertEqual(finish.command, coordinator.replace)
-            paired = next(a for a in self.frame(replace(local, root=root)).actions if a.key == 'replace')
+            paired = next(a for a in self.frame(replace(local, root=root, replacing=None)).actions
+                          if a.key == 'replace')
             self.assertEqual(paired.command, coordinator.replace)
 
     def test_replace_is_offered_after_connect_or_start_only(self):

@@ -117,6 +117,12 @@ is kept when the GitHub account and billing owner match; otherwise it asks you t
 type `arm` before the move. Rerun the same replace command to continue an unfinished
 phase. See [Replace a Codespace](docs/project-continuity.md#replace-a-codespace).
 
+During replacement, Herdr's connection to the old Codespace ends. When the new
+one lacks the Herdr version your Mac runs, it asks to install it there. If you
+keep another version that Herdr accepts, it does not ask again for that pair.
+A plain `task work:cs -- --rebind NAME` moves sync and recovery to that Codespace;
+the old binding is paused and kept, not deleted.
+
 Replace a Codespace first, then run `task work:cs:delete -- --codespace <old-codespace>`.
 It verifies the GitHub account recorded when the Codespace was connected or armed,
 checks the old Codespace and deletes only after you type `delete` in a terminal.
