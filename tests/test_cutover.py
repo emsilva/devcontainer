@@ -76,7 +76,7 @@ class CutoverTests(unittest.TestCase):
         self.sealer = self.stack.enter_context(patch.object(seal, 'write', wraps=seal.write))
         self.actual_remote = workspace.remote
         self.remote = self.stack.enter_context(patch.object(workspace, 'remote', side_effect=self.move_remote))
-        self.ask = Mock(side_effect=lambda _: self.order.append('ask') or '')
+        self.ask = Mock(side_effect=lambda _: self.order.append('ask') or 'stop')
 
     def write(self, path, value):
         atomic_write(self.state / path, json.dumps(value).encode())
@@ -390,6 +390,54 @@ class CutoverTests(unittest.TestCase):
             leaf.assert_called_once()
         self.assertTrue(read_json(self.receipt_path)['moved'])
         self.assertEqual(replacing.read(self.state)['moving'], 999.0)
+
+    def test_a_replayed_move_never_overwrites_a_third_pairing(self):
+        for when in ('before-replay', 'after-decide'):
+            with self.subTest(when=when):
+                replacing.write(self.state, dict(self.journal, moving=999.0))
+                self.write(workspace.PENDING, dict(codespace='new-space'))
+                self.bind('other-space' if when == 'before-replay' else 'old-space')
+                def decide(*args, **kwargs):
+                    self.bind('other-space')
+                    return None
+                self.decide.side_effect = decide
+                for leaf in (self.decide, self.remote):
+                    leaf.reset_mock()
+                code, out = self.run_cutover()
+                self.assertEqual(code, 1)
+                self.assertIn('old-space is no longer the paired Codespace; nothing moved.', out)
+                self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'other-space')
+                self.assertFalse(read_json(self.receipt_path)['moved'])
+                if when == 'before-replay':
+                    self.decide.assert_not_called()
+                    self.remote.assert_not_called()
+                else:
+                    self.decide.assert_called_once()
+                    self.remote.assert_called_once()
+                for leaf in (self.scanner, self.gather, self.sealer):
+                    leaf.assert_not_called()
+
+    def test_mixed_case_origin_is_admitted_before_consent(self):
+        self.project = replace(self.project, remote='https://github.com/ExAmPlE/PrOjEcT.git')
+        replacing.write(self.state, dict(self.journal, repository='EXAMPLE/PROJECT'))
+        self.decide.side_effect = ValueError('Move cancelled; nothing moved.')
+        code, out = self.run_cutover()
+        self.assertEqual(code, 1)
+        self.assertIn('Move cancelled; nothing moved.', out)
+        self.factory.assert_called_once()
+        self.decide.assert_called_once()
+        self.sealer.assert_not_called()
+        self.remote.assert_not_called()
+
+    def test_mixed_case_origin_refuses_a_foreign_journal(self):
+        self.project = replace(self.project, remote='https://github.com/ExAmPlE/PrOjEcT.git')
+        replacing.write(self.state, dict(self.journal, repository='OTHER/PROJECT'))
+        code, out = self.run_cutover()
+        self.assertEqual(code, 1)
+        self.assertIn('This replace record does not match; run the replace again.', out)
+        self.assertFalse(self.receipt_path.exists())
+        for leaf in (self.factory, self.decide, self.scanner, self.gather, self.sealer, self.remote):
+            leaf.assert_not_called()
 
     def test_a_retired_record_alone_flushes_again_before_moving(self):
         seal.write(self.state, self.store, self.scan, evidence=self.evidence, identity=self.project.identity,
