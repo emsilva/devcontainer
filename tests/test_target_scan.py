@@ -128,6 +128,31 @@ class TargetScanTests(unittest.TestCase):
         self.assertTrue(result.scratch_complete)
         self.assertEqual([path for path, _ in result.scratch], ['repo/tracked'])
 
+    def test_commits_held_only_by_other_refs_are_claimed_and_unsafe(self):
+        from devcontainer_setup.project_sync import pushed, verdict
+        root = self.repo('project')
+        self.git(root, 'remote', 'add', 'origin', 'https://github.com/example/project.git')
+        (root / 'tracked').write_text('unpushed work')
+        self.git(root, 'commit', '-qam', 'Unpushed')
+        lost = self.git(root, 'rev-parse', 'HEAD')
+        backup = 'refs/original/refs/heads/main'
+        self.git(root, 'update-ref', backup, lost)
+        self.git(root, 'reset', '-q', '--hard', 'HEAD~1')
+        self.git(root, 'notes', 'add', '-m', 'Local notes', 'HEAD')
+        notes = self.git(root, 'rev-parse', 'refs/notes/commits')
+        self.git(root, 'update-ref', 'refs/backup/already-on-a-branch', 'HEAD')
+        scan = self.scan()
+        refs = dict(verdict.claims(scan)[0].refs)
+        self.assertEqual(refs.get(backup), lost)
+        self.assertEqual(refs.get('refs/notes/commits'), notes)
+        self.assertNotIn('refs/backup/already-on-a-branch', refs)
+        unpushed = tuple((name, oid) for name, oid in refs.items() if oid in (lost, notes))
+        proof = pushed.Proof(str(root), len(refs) - len(unpushed), unpushed, (), False)
+        category = verdict._git(scan, (proof,))
+        self.assertEqual(category.verdict, 'unsafe')
+        self.assertIn(backup, category.text)
+        self.assertIn('refs/notes/commits', category.text)
+
     def test_ignored_repository_search_has_its_own_entry_budget(self):
         root = self.repo('project')
         (root / '.gitignore').write_text('tmp/\n')
