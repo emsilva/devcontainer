@@ -134,11 +134,11 @@ does not repeat.
 9. **What the final flush requires.** Paired `deletion.gather` evidence for OLD that is `steady`, where
    `verdict.judge` gives SAFE for Scratch, History and Agents. Git is not required: OLD keeps its commits until the
    checked delete proves them pushed. Then `seal.write(..., evidence=evidence, operation=<operation>)` runs, and the
-   retarget follows. A rerun before the move seals again (`seal.write` overwrites, `seal.py:131`). `gather`'s wait
+   retarget follows. A rerun before the move seals again (`seal.write` overwrites, `seal.py:131`); Task 7 F1 and F2 amend when. `gather`'s wait
    for a later normal cycle (up to two brackets) is the spec's "one final normal cycle". No capture is requested.
    `seal.write` itself also refuses unsteady evidence and a History that is not SAFE (CPLAN Task 8 R6); the cutover
    checks first and prints its own line, so that refusal is a backstop.
-10. **A lost create reply is resolved from the inventory, never by creating again** (F1). Before `codespace create`
+10. **A lost create reply is resolved from the inventory, never by creating again** (F1; Task 7 F3, F5). Before `codespace create`
     the journal records `request = {at, before}`: the request time and the names of every Codespace on the
     repository. That covers an exception, a lost or empty reply, and a killed process. From then on, any run that
     finds `create-requested` with no NEW reconciles before anything else, keeping the original `at` and `before`.
@@ -220,14 +220,15 @@ does not repeat.
     `replacing.move_started(state, journal)` reads exactly these files, plus the journal's own latch (N2). The
     coordinator writes `"moving": <epoch>` into the journal the first time it observes a started move, before any
     cutover run replays it. Replaying the move consumes some of those files, so after that the latch alone keeps the
-    operation finishing forward. The coordinator checks `move_started` before every cutover run and after every
+    operation finishing forward (Task 7 F1: with OLD still paired and no intent left, it flushes again first).
+    The coordinator checks `move_started` before every cutover run and after every
     cutover exit, an error or interrupted return included. The latch write is atomic and must succeed before the
     cutover child starts; a failed write stops the run with its phase kept. A started move at a phase before
     `moved` goes to the cutover, which finishes it forward. Phases never go back: a journal at `moved` or later resumes its own phase (N9).
     Ctrl-C or EOF at any prompt stops the run with its phase kept. Abandon (`continue` or `abandon` in Gum) is
     offered only while the phase precedes `moved` and the move has not started. It removes this operation's seal,
     leaves OLD paired and NEW listed, and archives the journal `abandoned`.
-18. **`task work` shows an unfinished replace first** (F16). The order is:
+18. **`task work` shows an unfinished replace first** (F16; item 6 amended by Task 7 F4). The order is:
     1. `Recovery is off until you connect`, with its connect action;
     2. the unfinished replace (line one, and the action that reruns it);
     3. pending cleanup;
@@ -555,7 +556,8 @@ def test_delete_of_sealed_old_after_a_replace_keeps_new_recovery(self)  # stage 
   2. **Finish forward** when `scratch.json` names NEW, or `replacing.move_started` holds. Run `move.finish_pending`.
      When the binding still names OLD, run `decision = move.decide(project, state, new, ask=ask)` and
      `workspace.remote(project, state, rebind=new, move=decision, armed=armed, enter=False, expected_old=old)`. This
-     replays a stopped retarget the way an ordinary rerun of the rebind does. When it already names NEW, run
+     replays a stopped retarget the way an ordinary rerun of the rebind does (amended by Task 7 F1). When it
+     already names NEW, run
      `workspace.remote(project, state, armed=armed, enter=False)`, a reconnect that restarts a keeper or worker that
      failed. Write a receipt with `moved` and the existing seal's fields, exit 0 when moved. No scan, gather or seal.
   3. `scratch.json` must name OLD. `api_factory(old, gh_user=account).read()` must be `ok` and `Available`, else print
@@ -823,7 +825,8 @@ def test_launch_options_hold_the_ordinary_values(self)    # a fixture project's 
      - An active journal prints `A replace of OLD is at PHASE.`
      - When `replacing.move_started` holds and the phase precedes `moved`, journal the latch (`moving`), print `The
        move to NEW has started; finishing it.` and go to step 7. A phase at `moved` or later resumes its own phase;
-       `offered` archives `completed` and exits 0 (N9). Otherwise, before `moved`, `ui.choose` offers `continue` and
+       `offered` archives `completed` and exits 0 (N9). Otherwise, before `moved` (at `create-requested` with no NEW,
+       after reconcile: Task 7 F3), `ui.choose` offers `continue` and
        `abandon`. Abandon removes the
        seal for OLD when its `operation` is this one, archives the journal `abandoned`, prints the abandon line that
        fits and exits 0.
@@ -1045,6 +1048,66 @@ def test_no_terminal_names_the_replace_in_next_lines(self)
 - [ ] **Step 4: Run the gates.** Run: `task check && task test`. Expected: exit 0.
 - [ ] **Step 5: Commit**: `git add -A devcontainer_setup tests README.md docs && git commit -m "Reach replace from
   the wizard, setup and task work, and document the safe order"`
+
+### Task 7: Fixes from the C+D review
+
+Source: the Fable C+D review (`stage-d/review-cd/REVIEW.md`, at 78fb906), every finding reproduced by the lead at
+848a110 (`stage-d/verify/review-cd-848a110.verification.md`). Two builders with disjoint files: **7A** owns
+`cutover.py`, `tests/test_cutover.py`, and the login lines in `workspace.py` and `scratch.py` (plus their tests);
+**7B** owns `replacement.py`, `tests/test_replacement.py`, `overview.py`, `tests/test_overview.py`, tests only in
+`tests/test_deletion.py`, and `docs/project-continuity.md`. Each fix is test first, in its own commit.
+
+- **F1 (7A, review P2-1). A rerun with OLD still paired flushes again.** Replaces Task 2 step 2's "When the binding
+  still names OLD" branch. After `move.finish_pending`:
+  - binding names NEW: reconnect, as before;
+  - binding names OLD and `scratch-retarget.json` (candidate), `recovery-move.json` (`new`) or
+    `workspace-pending.json` (`codespace`) names NEW: a crash inside the move's publication; replay it with no new
+    flush, as before (`test_a_crash_inside_the_move_finishes_forward` unchanged);
+  - binding names OLD and none of those names NEW (the latch alone, or a retired record alone): go on to step 3, the
+    ordinary path (Available read, worker, `move.decide`, agents, gather, a new seal, the move). The latch still
+    keeps abandon closed.
+  `test_the_latch_alone_keeps_finishing_forward` becomes `test_the_latch_alone_flushes_again_before_moving`.
+- **F2 (7A, review P2-4). Nothing reaches OLD between the recorded scan and the move.** In the flush, after gather
+  passes and before `seal.write`: `scratch.stop(state)` (it ends the supervisor, which pauses its Mutagen session and
+  stops the daemon), then one `target_scan.scan` on the open connection. Seal only when that scan's fingerprint
+  equals the gathered scan's, compared the way gather compares its brackets. Otherwise print `OLD changed while its
+  final flush was recorded; nothing moved.` and exit 1. Every exit after the stop that leaves the binding on OLD
+  prints `Sync with OLD is paused. Run the replace again, or task work:cs to resume it.` after its own line. Nothing
+  may restart OLD's sync between the stop and the binding move (a test pins it). The rerun's ordinary path already
+  reconnects OLD when its worker is not current.
+- **F3 (7B, review P2-2). A lost create reply is reconciled before abandon is offered.** Amends Task 5 step 2: at
+  `create-requested` with no NEW, call 10's reconcile runs before the `continue`/`abandon` choice.
+  - It adopts NEW: the journal is `created`; abandon is then offered with the line that names NEW's checked delete.
+  - Several or uncertain rows: the existing row choice (cancel keeps the phase).
+  - It concludes none (complete inventory, past its recheck): `continue` or `abandon`. `continue` goes to the typed
+    `create`. Abandon's "nothing was created" is then proven.
+  - An incomplete or unreadable inventory, or another account: stop with the phase kept, no abandon.
+- **F4 (7B, review P2-3). `task work` offers OLD's delete only after NEW's check passed.** Amends call 18 item 6:
+  while `local.replacing` names OLD at a phase before `checked`, the reserved delete slot skips OLD. Another listed
+  seal can still take the slot. `task work:cs:delete -- --codespace OLD` itself is unchanged.
+- **F5 (7B, review P2-5). Reconcile never adopts a Codespace this Mac knows.** Amends call 10: `candidates()` drops
+  the row `scratch.json` names and every name in `workspace.accounts(state)`. Those names reach `accounts.json` only
+  when this Mac connected to them (`workspace.py:507`), which a lost-reply NEW never did.
+- **F6 (both, review P2-6). Tests that can fail.** Each is shown failing with its named mutation from
+  `review-cd/repro/mutate_d.py` applied, then passing:
+  - 7A: C02 and C18 (the latch set with the binding on a third Codespace: refused, binding unchanged); C08 and C08b
+    (a mixed-case origin through `cutover.run`).
+  - 7B: R17 (one whole row and one unreadable row: the Gum choice, never an adoption); V03 and V03b (a mixed-case
+    origin through the delete of a never-paired NEW); R28 and R29 (receipts with an extra key are not journaled
+    whole). Also fix `tests/test_replacement.py:652`, which reads `replace-receipts/` and `replacements/` before
+    they exist.
+- **F7 (small, in scope).**
+  - 7B: with OLD deleted and its cleanup pending (`deletions/OLD.json` at `deleted`), the coordinator treats OLD as
+    deleted, as for `cleaned`, not as kept.
+  - 7A: the login checks at `workspace.py:281` and `scratch.py:416` use `transport._login` (messages only).
+  - Tests only, each shown failing with its mutation from `review-cd/repro/mutate_survivors.py`: M48 (7B,
+    `deletion.py:407`), W04 (7A, `workspace.py:151`).
+- **Docs (7B).** `docs/project-continuity.md`'s rerun paragraph says:
+  - a rerun with OLD still paired records a fresh final flush;
+  - F2's refusal and the paused-sync line;
+  - abandon after a lost reply is offered once reconcile has run.
+- Deferred (`tmp/codespace-lifecycle/task-work/issues.md`, "C+D review, deferred"): the remaining P3s and mutant
+  tests.
 
 ## Existing guards that must stay green
 
