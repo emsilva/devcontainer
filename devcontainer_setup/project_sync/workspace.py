@@ -17,6 +17,32 @@ from .state import _parent, _regular, atomic_write, discover_project, locked, re
 PENDING = 'workspace-pending.json'
 
 
+def accounts(state):
+    """Owners recorded at verified connections, retained across rebindings."""
+    try:
+        value = read_json(Path(state) / 'accounts.json')
+    except FileNotFoundError:
+        return {}
+    if (value.get('schema') != 1 or not isinstance(value.get('codespaces'), dict)
+            or any(not isinstance(login, str) or not login for login in value['codespaces'].values())):
+        raise ValueError('The connected Codespace accounts cannot be read')
+    return value['codespaces']
+
+
+def _remember_account(state, name):
+    from . import arming
+    try:
+        owners = accounts(state)
+        if name in owners:
+            return
+        login = arming.account(os.environ)
+    except (OSError, ValueError):
+        # Account discovery is best effort; a legacy connection still works.
+        return
+    atomic_write(state / 'accounts.json',
+                 json.dumps({'schema': 1, 'codespaces': dict(owners, **{name: login})}, sort_keys=True).encode() + b'\n')
+
+
 def _write(state, value):
     atomic_write(Path(state) / 'workspace.json', json.dumps(value, sort_keys=True).encode() + b'\n')
 
@@ -82,7 +108,8 @@ def _retire_digest(data):
 def _retired_registry(project, data):
     value = json.loads(data)
     if (not isinstance(value, dict) or value.get('schema') != 1 or value.get('project_id') != project.project_id
-            or value.get('identity') != project.identity or value.get('local_root') != str(project.root)):
+            or value.get('identity') != project.identity
+            or str(project.root) not in (value.get('local_root'), value.get('local_active_root'))):
         raise ValueError('the pairing changed since the delete began')
     for key in ('codespace', 'remote_root', 'remote_active_root', 'verified_remote_historical_roots'):
         value.pop(key, None)
@@ -454,6 +481,7 @@ def remote(project, state, armed=None, rebind=None, before_herdr=None, move=None
             if arming.account(os.environ) != move.gh_user:
                 raise ValueError('The gh account changed since you confirmed; nothing moved. Run the command again.')
             recovery_move.begin(state, move, now=time.time())
+        _remember_account(state, name)
         # The binding publishes first; its verified registry can finish after a crash.
         pending = dict(codespace=name, predecessor_sha256=_registry_digest(state), value=updated)
         atomic_write(state / PENDING, json.dumps(pending, sort_keys=True).encode() + b'\n')

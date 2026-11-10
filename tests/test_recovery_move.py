@@ -382,9 +382,10 @@ class RecoveryMoveTests(unittest.TestCase):
 
     def test_unarmed_rebind_is_unchanged(self):
         arming.write(self.state, dict(self.armed, armed=False))
-        with patch.object(arming, 'account') as account:
+        with patch.object(arming, 'account', return_value='me') as account:
             self.assertEqual(self.connect('--rebind', 'new-cs'), 0)
-        account.assert_not_called()
+        account.assert_called_once()
+        self.assertEqual(read_json(self.state / 'accounts.json')['codespaces']['new-cs'], 'me')
         self.begin.assert_not_called()
         self.stop.assert_not_called()
         self.start.assert_not_called()

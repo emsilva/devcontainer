@@ -21,6 +21,8 @@ class ExistingCheckoutTests(unittest.TestCase):
         (self.root / '.scratch').mkdir()
         proxies = patch('devcontainer_setup.project_sync.restore.end_proxies_elsewhere', return_value=[])
         self.proxies = proxies.start(); self.addCleanup(proxies.stop)
+        account = patch('devcontainer_setup.project_sync.arming.account', return_value='octo')
+        self.account = account.start(); self.addCleanup(account.stop)
 
     def git(self, *args):
         return subprocess.check_output(['git', '-C', str(self.root), *args], stderr=subprocess.DEVNULL)
@@ -34,6 +36,52 @@ class ExistingCheckoutTests(unittest.TestCase):
     def connection(self):
         connection = Mock(); connection.__enter__ = Mock(return_value=connection); connection.__exit__ = Mock(return_value=None)
         return connection
+
+    def connect_for_account(self):
+        with patch.object(workspace, '_prerequisites'), \
+                patch.object(workspace, '_choose_pairing', return_value=('space', self.original)), \
+                patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection()), \
+                patch.object(workspace, '_verify_roots', return_value=[]), \
+                patch.object(workspace, '_remote_herdr'), patch.object(scratch, 'retarget'), \
+                patch.object(scratch, 'start'), patch.object(workspace, '_ready', return_value={}), \
+                patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), \
+                patch('devcontainer_setup.project_sync.herdr.open_remote', return_value=0):
+            return workspace.remote(self.project, self.state)
+
+    def test_connect_records_account_once_before_publishing_the_binding(self):
+        from devcontainer_setup.project_sync.state import atomic_write, locked
+        def publishing(*_):
+            self.assertTrue((self.state / 'accounts.json').exists(), 'connect did not record its account')
+            self.assertEqual(read_json(self.state / 'accounts.json'),
+                             {'schema': 1, 'codespaces': {'space': 'octo'}})
+            self.assertEqual((self.state / 'accounts.json').stat().st_mode & 0o777, 0o600)
+            with self.assertRaises(BlockingIOError), locked(self.state / 'workspace-control.lock'):
+                pass
+        original = workspace.atomic_write
+        def write(path, data):
+            if path.name == workspace.PENDING:
+                publishing()
+            return original(path, data)
+        with patch.object(workspace, 'atomic_write', side_effect=write):
+            self.assertEqual(self.connect_for_account(), 0)
+        before = (self.state / 'accounts.json').read_bytes()
+        self.account.return_value = 'other'
+        self.assertEqual(self.connect_for_account(), 0)
+        self.assertEqual((self.state / 'accounts.json').read_bytes(), before)
+        saved = read_json(self.state / 'accounts.json')
+        saved['codespaces']['old-space'] = 'retired-owner'
+        atomic_write(self.state / 'accounts.json', json.dumps(saved).encode())
+        self.assertEqual(self.connect_for_account(), 0)
+        self.assertEqual(read_json(self.state / 'accounts.json'), saved)
+
+    def test_connect_keeps_working_when_account_read_fails_then_records_on_retry(self):
+        self.account.side_effect = ValueError('fixture account unavailable')
+        self.assertEqual(self.connect_for_account(), 0)
+        self.assertFalse((self.state / 'accounts.json').exists())
+        self.account.side_effect = None
+        self.assertEqual(self.connect_for_account(), 0)
+        self.assertTrue((self.state / 'accounts.json').exists(), 'retry did not record its account')
+        self.assertEqual(read_json(self.state / 'accounts.json')['codespaces']['space'], 'octo')
 
     def test_remote_uses_verified_ordinary_checkout_and_never_capture_restore_or_git(self):
         self.registry()

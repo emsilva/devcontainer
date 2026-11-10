@@ -650,6 +650,7 @@ class ProjectSyncCLITests(unittest.TestCase):
                         mock.patch.object(workspace, 'registry', return_value=value),
                         mock.patch.object(workspace, '_project', return_value=project),
                         mock.patch.object(workspace, '_prerequisites'),
+                        mock.patch.object(arming, 'account', return_value='octo'),
                         mock.patch.object(workspace, '_choose_pairing', return_value=('paired', '/workspaces/project')),
                         mock.patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=connection),
                         mock.patch.object(workspace, '_verify_roots', return_value=[]),

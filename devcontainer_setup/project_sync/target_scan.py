@@ -496,11 +496,13 @@ def repository(path, candidates):
         for line in git(path, 'for-each-ref', '--format=%(refname:short) %(objectname)', 'refs/heads').decode().splitlines():
             name, head = line.split(' ', 1)
             branches.append([text(name), oid(head)])
-        for name in git(path, 'for-each-ref', '--format=%(refname)', 'refs/tags').decode().splitlines():
+        for name in git(path, 'for-each-ref', '--format=%(refname)').decode().splitlines():
+            if name.startswith(('refs/heads/', 'refs/remotes/')) or name == 'refs/stash':
+                continue
             text(name)
             commit = git(path, 'rev-parse', '-q', '--verify', name + '^{commit}', absent=(1,))
             if commit is None:
-                continue  # Tags can name trees or blobs, which contain no commits.
+                continue  # Refs can name trees or blobs, which contain no commits.
             head = oid(scalar(commit))
             if not git(path, 'for-each-ref', '--format=%(refname)', '--contains=' + head, 'refs/heads').strip():
                 branches.append([name, head])

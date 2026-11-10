@@ -116,7 +116,8 @@ asks to install it there. If you keep another version that Herdr accepts, it doe
 ask again for that pair.
 
 Replace a Codespace first, then run `task work:cs:delete -- --codespace <old-codespace>`.
-It checks the old Codespace and deletes only after you type `delete` in a terminal.
+It verifies the GitHub account recorded when the Codespace was connected or armed,
+checks the old Codespace and deletes only after you type `delete` in a terminal.
 See [checked deletion](docs/project-continuity.md#checked-deletion) for its scope.
 Keep anything you would need again in `.scratch/`: working files in `.scratch/tmp/`
 and shared notes in `.scratch/memory/`.

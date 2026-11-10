@@ -55,6 +55,7 @@ def gather(project, state, target, connection, *, now=time.time, sleep=time.slee
     first = target_scan.scan(connection, target.name, target.remote_root, now=now)
     finished = now()
     scan, steady = first, True
+    incomplete = ()
     cycle, receipt, sessions, capture_loads = None, None, (), None
     running, conflicts, mac = False, (), None
     binding = _optional(state / scratch.CONFIG)
@@ -96,7 +97,8 @@ def gather(project, state, target, connection, *, now=time.time, sleep=time.slee
                 cycle = None
             first_fingerprint = target_scan.fingerprint(first)
             steady = first_fingerprint is not None and first_fingerprint == target_scan.fingerprint(scan)
-            if steady or attempt:
+            incomplete = tuple(dict.fromkeys((*verdict.incomplete(first), *verdict.incomplete(scan))))
+            if incomplete or steady or attempt:
                 break
             outbound = (cycle or {}).get('directions', {}).get('desktop_to_codespace', {})
             publication = outbound.get('publication')
@@ -112,7 +114,7 @@ def gather(project, state, target, connection, *, now=time.time, sleep=time.slee
         except (OSError, ValueError):
             capture_loads = False
     return verdict.Evidence(scan, steady, pushed.prove(project, verdict.claims(scan)), mac, conflicts,
-                            running, cycle, receipt, sessions, capture_loads, kept)
+                            running, cycle, receipt, sessions, capture_loads, kept, incomplete=incomplete)
 
 
 def _journal(state, name):
@@ -255,7 +257,7 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
     local = standing.read(project.root, env=env)
     repository = project.identity.removeprefix('github.com/')
     target = verdict.Target(codespace or '', 'unpaired', None, None, None)
-    account, journal = None, None
+    account, journal, owner = None, None, None
     have_delete_lock = mutation_started = delete_attempted = deleted_confirmed = start_attempted = False
     terminal = tty or (lambda: sys.stdin.isatty() and sys.stdout.isatty())
 
@@ -264,7 +266,8 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
 
     def say(message):
         if not as_json:
-            print(overview.fit(message, max(78, len(message) * 2)))
+            for line in verdict.wrap(message):
+                print(line)
 
     def result(outcome, message, code=1, *, observed=None):
         value = observed or verdict.Verdict(target, now(), account, repository, (), (), None, None)
@@ -274,7 +277,7 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
                              cleanup=journal.get('cleanup') if journal else None), sort_keys=True))
         else:
             if observed:
-                for line in verdict.lines(observed, local):
+                for line in verdict.lines(observed, local, check=check):
                     print(line)
             if message:
                 say(message)
@@ -293,6 +296,10 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
         return result('unreachable', reason if as_json else None, observed=value)
 
     def pending_cleanup():
+        if owner is None and not delete_attempted:
+            return result('cleanup-pending', unknown_inventory() + '; this Mac still keeps ' +
+                          ', '.join(STEPS[target.kind]) + '. Run ' +
+                          command('--', '--codespace', target.name) + ' in a terminal to remove them.')
         steps = STEPS.get(journal['kind'] if journal else target.kind, ())
         step = next((item for item in steps if not journal or journal['cleanup'].get(item) not in _DONE),
                     steps[0] if steps else 'sync session')
@@ -305,9 +312,13 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
         pending = _cleanup(project, state, journal, now=now, say=say)
         if pending:
             return pending_cleanup()
-        say('Deleted ' + target.name + '.')
+        if owner is not None or delete_attempted:
+            say('Deleted ' + target.name + '.')
         say('Cleaned up: ' + ', '.join(STEPS[journal['kind']]) + '.')
         return 0
+
+    def unknown_inventory():
+        return f"{target.name} is not among {account}'s Codespaces on GitHub"
 
     def consent():
         try:
@@ -323,17 +334,22 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
                 return result('refused', f'Unset {key} before deleting a Codespace; it must use a real gh account.')
         with locked(state / 'delete.lock'):
             have_delete_lock = True
+            try:
+                workspace.registry(project, state)
+            except ValueError as error:
+                return result('refused', str(error))
             account = arming.account(env)
             if codespace is None and not _optional(state / scratch.CONFIG):
                 return result('refused', 'No Codespace is paired. Name one: ' +
                               command('--', '--codespace', 'NAME'))
             target = verdict.resolve(project, state, codespace)
             journal = _journal(state, target.name)
-            if journal and (journal['account'] != account or journal['repository'].casefold() != repository.casefold()):
+            if journal and journal['repository'].casefold() != repository.casefold():
                 return result('refused', f"{target.name}'s delete was started as {journal['account']} for "
                               f"{journal['repository']}; switch to that account and repository, then try again.")
-            armed = arming.read(state) if target.kind == 'paired' else {}
-            owner = (armed.get('gh_user') if armed.get('armed') else None) or \
+            armed = arming.read(state)
+            owner = (journal['account'] if journal else None) or workspace.accounts(state).get(target.name) or \
+                    (armed.get('gh_user') if armed.get('codespace') == target.name else None) or \
                     (target.seal.gh_user if target.seal else None)
             if owner is not None and owner != account:
                 return result('refused', f'{target.name} was paired as {owner}, but gh is signed in as {account}. '
@@ -373,12 +389,16 @@ def run(project, state, *, codespace: str | None, check: bool, as_json: bool, st
                 deleted_confirmed = True
                 kept = journal or target.kind == 'paired' or target.archive is not None
                 if not kept:
-                    return result('already-deleted', target.name + ' is already deleted.', 0)
+                    message = target.name + ' is already deleted.' if owner is not None else unknown_inventory() + '.'
+                    return result('already-deleted', message, 0)
                 if check or not terminal():
                     return pending_cleanup()
                 if journal is None:
-                    say(target.name + ' is already deleted. This Mac still keeps: ' + ', '.join(STEPS[target.kind]) + '.')
-                    say('Type delete to remove them.')
+                    message = target.name + ' is already deleted' if owner is not None else unknown_inventory()
+                    say(message + '. This Mac still keeps: ' + ', '.join(STEPS[target.kind]) + '.')
+                    say('Type delete to remove them.' if owner is not None else
+                        f'If {target.name} belongs to another account, switch with gh auth switch and run the delete again. '
+                        'Otherwise type delete to remove them.')
                     if not consent():
                         say('Nothing was deleted.')
                         return 1

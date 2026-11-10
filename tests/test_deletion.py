@@ -212,6 +212,76 @@ class DeletionTests(unittest.TestCase):
         self.assertEqual(self.mutations(), [])
         self.assertFalse((self.state / 'deletions').exists())
 
+    def test_human_check_names_the_delete_command_without_prompting(self):
+        code, output, ask = self.run_delete(check=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(output.splitlines()[-1], 'To delete it: task work:cs:delete -- --codespace space')
+        self.assertNotIn('Type delete', output)
+        ask.assert_not_called()
+        self.assertEqual(self.mutations(), [])
+
+    def test_unreadable_parts_name_the_cause_in_either_scan(self):
+        cases = (('git_complete', 'git', 'could not read every repository under /workspaces'),
+                 ('scratch_complete', 'scratch', 'could not read .scratch on space'),
+                 ('sessions_complete', 'history', 'could not read every conversation on space'),
+                 ('agents_complete', 'agents', 'could not read processes on space'))
+        for flag, category, reason in cases:
+            for first_only in (False, True):
+                with self.subTest(flag=flag, first_only=first_only):
+                    failed = replace(self.scan, **{flag: False})
+                    self.api.states = ['Available']
+                    self.mocks['target_scan.scan'].side_effect = [failed, self.scan if first_only else failed]
+                    code, output, _ = self.run_delete(check=True, as_json=True)
+                    self.assertEqual(code, 1)
+                    rows = json.loads(output)['categories']
+                    for row in rows:
+                        self.assertEqual(row['verdict'], 'unknown')
+                        expected = reason if row['name'] == category else 'not judged until every part of space can be read'
+                        self.assertEqual(row['text'], 'Unknown: ' + expected)
+                    self.assertEqual(self.mutations(), [])
+
+    def test_recorded_owner_refuses_another_account_for_every_target_kind(self):
+        self.mocks['arming.account'].return_value = 'other'
+        self.write(self.state / 'accounts.json', {'schema': 1, 'codespaces': {'space': 'octo'}})
+        for kind in ('paired', 'sealed', 'moved'):
+            with self.subTest(kind=kind):
+                if kind != 'paired':
+                    self.retired()
+                if kind == 'moved':
+                    (self.state / 'retired/space.json').unlink()
+                code, output, _ = self.run_delete(name='space', check=True, as_json=True)
+                self.assertEqual(code, 1)
+                self.assertEqual(json.loads(output)['outcome'], 'refused')
+                self.assertIn('space was paired as octo, but gh is signed in as other.', output)
+                self.factory.assert_not_called()
+                self.assertEqual(self.api.calls, [])
+                self.assertEqual(self.mutations(), [])
+
+    def test_disarmed_pairing_still_names_its_owner(self):
+        arming.arm(self.state, gh_user='octo', codespace='space', consent='x', billable_owner='octo', ports=[], now=1)
+        arming.write(self.state, dict(arming.read(self.state), armed=False))
+        self.mocks['arming.account'].return_value = 'other'
+        code, output, _ = self.run_delete(check=True, as_json=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output)['outcome'], 'refused')
+        self.factory.assert_not_called()
+        self.assertEqual(self.mutations(), [])
+
+    def test_unknown_owner_names_the_inventory_without_claiming_deleted(self):
+        self.api.states = ['Deleted']
+        for options in ({'check': True, 'as_json': True}, {'tty': False}, {'answer': 'no'}):
+            with self.subTest(options=options):
+                code, output, _ = self.run_delete(**options)
+                self.assertEqual(code, 1)
+                self.assertIn("space is not among octo's Codespaces on GitHub", output)
+                self.assertNotIn('Deleted space', output)
+                self.assertNotIn('is already deleted', output)
+                self.assertEqual(self.mutations(), [])
+        (self.state / 'scratch.json').unlink()
+        code, output, _ = self.run_delete(name='space', check=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(output.strip(), "space is not among octo's Codespaces on GitHub.")
+
     def test_scratch_uses_the_synchronized_binding_root(self):
         synced_root = self.base / 'primary'
         (synced_root / '.scratch').mkdir(parents=True)
@@ -235,6 +305,65 @@ class DeletionTests(unittest.TestCase):
         self.assertEqual(json.loads(output)['categories'][1]['verdict'], 'safe')
         self.mocks['scratch.inspect_sync'].assert_called_with(synced_root, self.state)
         self.assertEqual(self.mutations(), [])
+
+    def test_another_checkout_is_refused_before_api_or_cleanup(self):
+        other = self.root / '.claude/worktrees/feature'
+        other.mkdir(parents=True)
+        self.project = replace(self.project, root=other)
+        for state, journal in (('Available', False), ('Deleted', False), ('Deleted', True)):
+            with self.subTest(state=state, journal=journal):
+                self.api.states, self.api.calls = [state], []
+                self.factory.reset_mock()
+                for leaf in self.mocks.values():
+                    leaf.reset_mock()
+                if journal:
+                    self.journal()
+                code, output, _ = self.run_delete(check=state == 'Available', as_json=True)
+                self.assertEqual(code, 1)
+                row = json.loads(output)
+                self.assertEqual(row['outcome'], 'refused')
+                self.assertEqual(row['message'], 'Another checkout already owns this project pairing; '
+                                 'use its task work:cs entrypoint')
+                self.factory.assert_not_called()
+                self.assertEqual(self.api.calls, [])
+                self.assertEqual(self.mutations(), [])
+
+    def active_checkout(self):
+        primary = self.base / 'primary'
+        (primary / '.scratch').mkdir(parents=True)
+        binding = read_json(self.state / 'scratch.json')
+        self.write(self.state / 'scratch.json', dict(binding, root=str(primary)))
+        registry = read_json(self.state / 'workspace.json')
+        self.write(self.state / 'workspace.json', dict(registry, local_root=str(primary),
+                                                      local_active_root=str(self.root)))
+        original = self.current_cycle
+        def cycle(*args):
+            value, current = original(*args)
+            return dict(value, local_root=str(primary)), current
+        return primary, patch.object(self, 'current_cycle', side_effect=cycle)
+
+    def test_active_checkout_can_finish_a_delete(self):
+        primary, cycle = self.active_checkout()
+        with cycle:
+            code, output, _ = self.run_delete()
+        self.assertEqual(code, 0, output)
+        registry = read_json(self.state / 'workspace.json')
+        self.assertEqual((registry['local_root'], registry['local_active_root']), (str(primary), str(self.root)))
+        self.assertEqual(read_json(self.state / 'deletions/space.json')['phase'], 'cleaned')
+
+    def test_active_checkout_can_resume_pending_cleanup(self):
+        _, cycle = self.active_checkout()
+        self.mocks['restore.end_target_proxies'].side_effect = ValueError('a Herdr connection to space is still open')
+        with cycle:
+            code, output, _ = self.run_delete()
+        self.assertEqual(code, 1, output)
+        self.assertEqual(read_json(self.state / 'deletions/space.json')['cleanup']['pairing'], 'done')
+        self.mocks['restore.end_target_proxies'].side_effect = None
+        self.factory.reset_mock()
+        code, output, _ = self.run_delete(name='space')
+        self.assertEqual(code, 0, output)
+        self.factory.assert_not_called()
+        self.assertEqual(read_json(self.state / 'deletions/space.json')['phase'], 'cleaned')
 
     def test_a_paired_scan_must_compare_the_bracketing_manifests_cutoffs(self):
         self.api.states = ['Available']
@@ -477,6 +606,61 @@ class DeletionTests(unittest.TestCase):
                 self.assertEqual(self.mutations(), [])
                 self.mocks['arming.account'].return_value = 'octo'
 
+    def test_a_safe_recheck_with_a_new_fingerprint_names_the_changed_files(self):
+        def change(_):
+            self.mocks['target_scan.scan'].return_value = replace(self.scan,
+                sessions=(('claude/project/completed.jsonl', 'b' * 64),))
+            return 'delete'
+        code, output, _ = self.run_delete(answer=change)
+        self.assertIn('space changed since the check (its files, repositories, conversations or agents); '
+                      'nothing was deleted.', ' '.join(output.split()))
+        self.assertEqual(code, 1)
+        self.assertEqual(self.mutations(), [])
+
+    def test_refused_delete_names_the_http_status_and_leaves_cleanup_alone(self):
+        self.api.status = 403
+        code, output, _ = self.run_delete()
+        self.assertIn('GitHub refused to delete space (HTTP 403). It stays stopped; nothing else changed.',
+                      ' '.join(output.split()))
+        self.assertEqual(code, 1)
+        self.assertEqual(self.api.calls.count('delete'), 1)
+        self.assertNotIn('confirm_deleted', self.api.calls)
+        self.mocks['keeper.stop'].assert_not_called()
+        self.assertEqual(read_json(self.state / 'deletions/space.json')['phase'], 'delete-requested')
+
+    def test_paired_cleanup_keeps_recovery_armed_for_another_codespace(self):
+        self.journal()
+        arming.arm(self.state, gh_user='octo', codespace='new-space', consent='x', billable_owner='octo', ports=[], now=1)
+        before = (self.state / arming.ARMING).read_bytes()
+        code, output, _ = self.run_delete()
+        self.assertEqual((self.state / arming.ARMING).read_bytes(), before)
+        self.extra_mutations['write'].assert_not_called()
+        self.assertEqual(code, 1, output)
+        self.assertEqual(read_json(self.state / 'deletions/space.json')['cleanup']['recovery'],
+                         'the armed Codespace changed; recovery was kept')
+
+    def test_confirmed_journal_is_durable_before_the_stop_begins(self):
+        original = self.d.power.stop
+        def stop(*args, **kwargs):
+            path = self.state / 'deletions/space.json'
+            self.assertTrue(path.exists(), 'confirmed journal missing when power.stop begins')
+            saved = read_json(path)
+            self.assertEqual(saved['phase'], 'confirmed')
+            self.assertEqual(saved['fingerprint'], target_scan.fingerprint(self.scan))
+            return original(*args, **kwargs)
+        with patch.object(self.d.power, 'stop', side_effect=stop):
+            code, output, _ = self.run_delete()
+        self.assertEqual(code, 0, output)
+
+    def test_another_repositorys_journal_is_refused_before_api_or_cleanup(self):
+        self.journal(repository='example/another')
+        code, output, _ = self.run_delete(check=True, as_json=True)
+        self.assertEqual(json.loads(output)['outcome'], 'refused')
+        self.assertIn('switch to that account and repository', json.loads(output)['message'])
+        self.assertEqual(code, 1)
+        self.factory.assert_not_called()
+        self.assertEqual(self.mutations(), [])
+
     def test_paired_stop_is_recorded_before_the_post(self):
         observed = []
         original = self.api.post_stop
@@ -513,6 +697,8 @@ class DeletionTests(unittest.TestCase):
         code, output, _ = self.run_delete(name='space')
         self.assertEqual(code, 0, output)
         self.assertEqual([path.read_bytes() for path in paths], before)
+        self.assertEqual(self.mutations(), ['post_stop', 'delete', 'restore.end_target_proxies',
+                                           'scratch.terminate_retired'])
         from tests.test_keeper import FakeAPI as KeeperAPI, FakeHerdr, FakeKeepAlive, T0, up, down
         from devcontainer_setup.project_sync import keeper
         anchor = T0 - 3600
@@ -528,6 +714,16 @@ class DeletionTests(unittest.TestCase):
             k.step()
         self.assertEqual(api.posts, 1)
         self.assertEqual(read_json(self.state / keeper.RUNTIME)['last_restart']['resume'], 'delivered')
+
+    def test_sealed_check_requires_the_retained_snapshot(self):
+        self.retired()
+        (Store(self.state).root / 'manifests' / self.receipt['snapshot_id']).unlink()
+        code, output, _ = self.run_delete(name='space', check=True, as_json=True)
+        self.assertEqual(code, 1)
+        history = next(row for row in json.loads(output)['categories'] if row['name'] == 'history')
+        self.assertEqual(history['verdict'], 'unknown')
+        self.assertEqual(history['text'], 'Unknown: the final capture is no longer on this Mac')
+        self.assertEqual(self.mutations(), [])
 
     def test_404_alone_is_not_deleted(self):
         self.api.status, self.api.gone = 404, None
@@ -732,7 +928,7 @@ class DeletionTests(unittest.TestCase):
         for as_json in (False, True):
             code, output, _ = self.run_delete(check=True, as_json=as_json)
             self.assertEqual(code, 1)
-            message = json.loads(output)['message'] if as_json else output.strip()
+            message = json.loads(output)['message'] if as_json else ' '.join(output.split())
             self.assertEqual(message, 'No Codespace is paired. Name one: '
                              'task devcontainer:work:cs:delete -- --codespace NAME')
         self.factory.assert_not_called()

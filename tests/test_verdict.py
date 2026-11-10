@@ -132,7 +132,7 @@ class VerdictTests(unittest.TestCase):
                          scan=replace(self.evidence.scan, repositories=(bad,)))).verdict, 'unknown')
         dirty = replace(repo.worktrees[0], changes=1, changed=('changed',))
         scan = replace(self.evidence.scan, git_complete=False, repositories=(replace(repo, worktrees=(dirty,)),))
-        self.assertEqual(self.judge('Git', replace(self.evidence, scan=scan)).verdict, 'unsafe')
+        self.assertEqual(self.judge('Git', replace(self.evidence, scan=scan)).verdict, 'unknown')
 
     def test_unsteady_evidence_is_unknown_everywhere(self):
         rows = self.v.judge(self.target, replace(self.evidence, steady=False), now=NOW)
@@ -144,7 +144,7 @@ class VerdictTests(unittest.TestCase):
     def test_paired_scratch_needs_the_macs_copy(self):
         self.assertEqual(self.judge('Scratch').verdict, 'safe')
         for changes, verdict, text in [
-                (dict(mac_scratch=(('note.txt', 'c' * 64),)), 'unsafe', "differ from this Mac's copy"),
+                (dict(mac_scratch=(('note.txt', 'c' * 64),)), 'unsafe', "differs from this Mac's copy"),
                 (dict(mac_scratch=None), 'unknown', 'could not read'),
                 (dict(conflicts=('note.txt',)), 'unsafe', '1 conflict'),
                 (dict(sync_running=False), 'unknown', 'run task work:cs'),
@@ -193,7 +193,7 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(self.judge('History', replace(self.evidence, scan=incomplete)).verdict, 'unknown')
 
     def test_unfinished_turn_or_differing_prefix_is_unsafe_and_named(self):
-        for field, phrase in [('tails', 'a turn that never finished'), ('mismatched', "differ from this Mac's copy")]:
+        for field, phrase in [('tails', 'a turn that never finished'), ('mismatched', "differs from this Mac's copy")]:
             for root in ('sessions', 'archived_sessions'):
                 scan = replace(self.evidence.scan, sessions=((f'codex/{root}/' + NAME, DIGEST),),
                                **{field: (('codex', NAME),)})
@@ -299,6 +299,48 @@ class VerdictTests(unittest.TestCase):
                           fingerprint=None, action='To check it, restart it: task work:cs:restart')
         self.assertIn('  Git      Unknown: space is stopped', self.v.lines(unknown, self.local))
         self.assertNotIn('Type delete to delete it.', self.v.lines(unknown, self.local))
+
+    def test_long_verdict_lines_wrap_without_losing_items(self):
+        texts = (
+            'Not safe: project: 2 changed files (docs/plan.md, src/app.py); project: feature/login at 0123456789ab is not on GitHub',
+            "Not safe: 2 files differ from this Mac's copy (tmp/report-2026-11-09.md, memory/decisions.md)",
+            'Not safe: 1 conversation has a turn that never finished (claude ' + SID +
+            '); resume each and let it finish, then check again',
+            'Unknown: ' + '界' * 80 + ' e\u0301clair')
+        rows = tuple(self.v.Category(name, 'unsafe', text, ()) for name, text in zip(self.v.CATEGORIES, texts))
+        value = replace(self.result(), categories=rows,
+                        kept=(('codex', 'long-session-' * 12),))
+        rendered = self.v.lines(value, self.local)
+        self.assertTrue(all(overview.cells(line) <= 78 for line in rendered))
+        joined = ' '.join(line.strip() for line in rendered)
+        for text in texts[:3]:
+            self.assertIn(text, joined)
+        self.assertEqual(''.join(rendered).count('界'), 80)
+        self.assertIn('long-session-' * 12, ''.join(line.strip() for line in rendered))
+        for line in rendered:
+            if line.lstrip().startswith(('at 0123456789ab', 'resume each')):
+                self.assertTrue(line.startswith(' ' * 11))
+        self.assertNotIn('…', joined)
+
+    def test_history_verbs_agree_with_one_conversation(self):
+        for field, expected in (('tails', '1 conversation has a turn'),
+                                ('mismatched', '1 conversation differs from')):
+            scan = replace(self.evidence.scan, **{field: (('codex', NAME),)})
+            self.assertIn(expected, self.judge('History', replace(self.evidence, scan=scan)).text)
+        inbound = self.cycle['directions']['codespace_to_desktop']
+        inbound['counts']['pending'] = 1
+        self.assertIn('1 conversation has not reached', self.judge('History').text)
+        scan = replace(self.evidence.scan, scratch=(('changed.txt', DIGEST),))
+        self.assertIn('1 file differs from', self.judge('Scratch', replace(self.evidence, scan=scan)).text)
+
+    def test_wrapping_preserves_whitespace_inside_paths(self):
+        for item in ('tmp/report  final.md', 'tmp/report\u00a0final.md'):
+            with self.subTest(item=item):
+                message = "  Scratch  Not safe: 2 files differ from this Mac's copy (" + item + \
+                          ', memory/decisions-about-a-long-project.md)'
+                rendered = self.v.wrap(message)
+                self.assertIn(item, ' '.join(line.strip() for line in rendered))
+                self.assertTrue(all(overview.cells(line) <= 78 for line in rendered))
 
     def test_untrusted_names_never_reach_the_terminal_raw(self):
         bad = '\x1b[31munsafe\r\n\u202e'
