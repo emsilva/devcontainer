@@ -19,6 +19,20 @@ def _binding(state):
         return {}
 
 
+def _pending_move(state, new):
+    for filename, key in (('scratch-retarget.json', 'candidate'), ('recovery-move.json', 'new'),
+                          ('workspace-pending.json', 'codespace')):
+        try:
+            value = read_json(state / filename).get(key)
+        except FileNotFoundError:
+            continue
+        if key == 'candidate':
+            value = value.get('codespace') if isinstance(value, dict) else None
+        if value == new:
+            return True
+    return False
+
+
 def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tty=None,
         api_factory=lifecycle.LifecycleAPI, connect=transport.CodespaceConnection,
         now=time.time, sleep=time.sleep) -> int:
@@ -45,7 +59,7 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
         print('This replace record does not match; run the replace again.')
         return 1
 
-    record, herdr = None, None
+    record, herdr, paused = None, None, False
 
     def moved():
         try:
@@ -89,20 +103,25 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
         if record is not None and record.operation != operation:
             record = None
         armed = recovery if arming.read(state).get('armed') else None
-        if moved() or replacing.move_started(state, journal):
+        if moved() or record is not None or replacing.move_started(state, journal):
             move.finish_pending(project, state)
             armed = recovery if arming.read(state).get('armed') else None
             if moved():
                 remote(armed=armed)
+                if moved():
+                    moved_line()
+                    return 0
+                return 1
             elif _binding(state).get('codespace') == old:
-                decision = move.decide(project, state, new, ask=ask)
-                remote(rebind=new, move=decision, armed=recovery if decision is not None else armed, expected_old=old)
+                if _pending_move(state, new):
+                    decision = move.decide(project, state, new, ask=ask)
+                    remote(rebind=new, move=decision, armed=recovery if decision is not None else armed, expected_old=old)
+                    if moved():
+                        moved_line()
+                        return 0
+                    return 1
             else:
                 raise ValueError(f'{old} is no longer the paired Codespace; nothing moved.')
-            if moved():
-                moved_line()
-                return 0
-            return 1
 
         binding = _binding(state)
         if binding.get('codespace') != old or binding.get('identity') != project.identity:
@@ -149,6 +168,19 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
             if not evidence.steady or len(required) != 3 or any(row.verdict != verdict.SAFE for row in required):
                 flush_lines(target, required)
                 return 1
+            paused = True
+            stopped = scratch.stop(state)
+            if stopped.get('phase') != 'stopped':
+                # A supervisor exit can leave its saved session needing recovery.
+                stopped = scratch.stop(state)
+            if stopped.get('running') or stopped.get('phase') != 'stopped':
+                print(f'Sync with {old} did not stop cleanly; nothing moved.')
+                return 1
+            scan = target_scan.scan(connection, old, target.remote_root, now=now)
+            fingerprint = target_scan.fingerprint(evidence.scan)
+            if fingerprint is None or fingerprint != target_scan.fingerprint(scan):
+                print(f'{old} changed while its final flush was recorded; nothing moved.')
+                return 1
             sealed_at = now()
             seal.write(state, Store(state), evidence.scan, evidence=evidence, identity=project.identity,
                        repository=journal['repository'], gh_user=journal['account'], remote_root=target.remote_root,
@@ -175,6 +207,13 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
         print('Nothing moved.')
         return 1
     finally:
+        if paused:
+            try:
+                still_old = _binding(state).get('codespace') == old
+            except (OSError, ValueError):
+                still_old = False
+            if still_old:
+                print(f'Sync with {old} is paused. Run the replace again, or task work:cs to resume it.')
         # Re-read the seal even when remote raised after publishing its binding.
         try:
             record = seal.read(state, old)

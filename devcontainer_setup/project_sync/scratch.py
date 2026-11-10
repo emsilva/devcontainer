@@ -413,8 +413,8 @@ class _Notices:
                     status, body = _upstream('https://api.github.com/user', token)
                     account = json.loads(body) if status == 200 else {}
                     login = account.get('login') if isinstance(account, dict) else None
-                    if isinstance(login, str) and login and all(c.isalnum() or c == '-' for c in login):
-                        self.deleted_login = login
+                    from .transport import _login
+                    self.deleted_login = _login(login)
                 except Exception:
                     pass  # only the fixed fallback reaches a message
             return learned

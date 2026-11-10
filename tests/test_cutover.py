@@ -68,6 +68,7 @@ class CutoverTests(unittest.TestCase):
         self.runtime = dict(running=True, phase='syncing', checkpoint_version=sync_cycle.SCHEMA, runtime_id=scratch._runtime_id(),
                             heartbeat_at=time.time())
         self.status = self.stack.enter_context(patch.object(scratch, 'status', side_effect=lambda *_: dict(self.runtime)))
+        self.stop = self.stack.enter_context(patch.object(scratch, 'stop', side_effect=self.stop_old))
         self.decide = self.stack.enter_context(patch.object(move, 'decide', side_effect=self.decide_move))
         self.finish = self.stack.enter_context(patch.object(move, 'finish_pending', side_effect=lambda *_: self.order.append('finish')))
         self.scanner = self.stack.enter_context(patch.object(target_scan, 'scan', side_effect=self.scan_old))
@@ -75,7 +76,7 @@ class CutoverTests(unittest.TestCase):
         self.sealer = self.stack.enter_context(patch.object(seal, 'write', wraps=seal.write))
         self.actual_remote = workspace.remote
         self.remote = self.stack.enter_context(patch.object(workspace, 'remote', side_effect=self.move_remote))
-        self.ask = Mock(side_effect=lambda _: self.order.append('ask') or '')
+        self.ask = Mock(side_effect=lambda _: self.order.append('ask') or 'stop')
 
     def write(self, path, value):
         atomic_write(self.state / path, json.dumps(value).encode())
@@ -95,6 +96,11 @@ class CutoverTests(unittest.TestCase):
     def gather_old(self, *args, **kwargs):
         self.order.append('gather')
         return self.evidence
+
+    def stop_old(self, *args):
+        self.order.append('stop')
+        self.runtime.update(running=False, phase='stopped')
+        return dict(self.runtime)
 
     def move_remote(self, *args, **kwargs):
         self.order.append('remote')
@@ -137,7 +143,7 @@ class CutoverTests(unittest.TestCase):
             return original(*args, **kwargs)
         self.sealer.side_effect = write
         self.assertEqual(self.run_cutover()[0], 0)
-        self.assertEqual(self.order, ['decide', 'scan', 'gather', 'seal', 'remote'])
+        self.assertEqual(self.order, ['decide', 'scan', 'gather', 'stop', 'scan', 'seal', 'remote'])
         self.remote.assert_called_once_with(self.project, self.state, rebind='new-space', move=decision,
                                             armed=self.recovery, enter=False, expected_old='old-space')
         self.assertEqual(self.api.calls, ['read'])
@@ -156,7 +162,7 @@ class CutoverTests(unittest.TestCase):
         for answer in ('', 'stop', EOFError(), KeyboardInterrupt()):
             with self.subTest(answer=type(answer).__name__ if isinstance(answer, BaseException) else answer):
                 self.bind('old-space')
-                self.scanner.side_effect = [running, replace(self.scan, agents=(('herdr', 1),))]
+                self.scanner.side_effect = [running, replace(self.scan, agents=(('herdr', 1),)), self.scan]
                 self.ask.side_effect = answer if isinstance(answer, BaseException) else lambda _: answer
                 self.gather.reset_mock()
                 code, out = self.run_cutover()
@@ -197,9 +203,195 @@ class CutoverTests(unittest.TestCase):
         self.assertEqual(self.run_cutover()[0], 0)
         self.assertEqual(self.order[-2:], ['seal', 'remote'])
 
+    def test_a_changed_or_incomplete_post_stop_scan_refuses_the_move(self):
+        for changed in (replace(self.scan, scratch=(('late.md', 'a' * 64),)),
+                        replace(self.scan, sessions=(('claude/late.jsonl', 'b' * 64),)),
+                        replace(self.scan, agents=(('codex', 1),)),
+                        replace(self.scan, git_complete=False)):
+            with self.subTest(changed=changed):
+                self.bind('old-space')
+                self.runtime.update(running=True, phase='syncing')
+                self.scanner.side_effect = [self.scan, changed]
+                for leaf in (self.stop, self.sealer, self.remote):
+                    leaf.reset_mock()
+                code, out = self.run_cutover()
+                self.assertEqual(code, 1)
+                self.assertIn('old-space changed while its final flush was recorded; nothing moved.', out)
+                self.assertTrue(out.endswith('Sync with old-space is paused. Run the replace again, or task work:cs to resume it.\n'))
+                self.stop.assert_called_once_with(self.state)
+                self.sealer.assert_not_called()
+                self.remote.assert_not_called()
+                self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'old-space')
+                self.assertFalse(read_json(self.receipt_path)['moved'])
+
+    def test_a_paused_flush_reconnects_old_before_retrying(self):
+        replacing.write(self.state, dict(self.journal, moving=999.0))
+        self.scanner.side_effect = [self.scan, replace(self.scan, agents=(('codex', 1),))]
+        self.assertEqual(self.run_cutover()[0], 1)
+        self.assertFalse(self.runtime['running'])
+        self.order.clear()
+        self.scanner.side_effect = self.scan_old
+        self.gather.reset_mock()
+        self.sealer.reset_mock()
+        self.remote.reset_mock()
+        self.clock += 1
+        self.assertEqual(self.run_cutover()[0], 0)
+        self.assertEqual(self.order[:4], ['finish', 'finish', 'remote', 'decide'])
+        self.assertEqual(self.remote.call_args_list[0].kwargs,
+                         dict(armed=None, enter=False, expected_old='old-space', start=False))
+        self.gather.assert_called_once()
+        self.sealer.assert_called_once()
+        self.assertEqual(seal.read(self.state, 'old-space').sealed_at, self.clock)
+        self.assertEqual(replacing.read(self.state)['moving'], 999.0)
+
+    def test_every_failure_after_the_stop_explains_how_to_resume(self):
+        for leaf in ('scan', 'seal', 'remote'):
+            with self.subTest(leaf=leaf):
+                self.bind('old-space')
+                (self.state / 'retired/old-space.json').unlink(missing_ok=True)
+                self.runtime.update(running=True, phase='syncing')
+                self.scanner.side_effect = ([self.scan, ValueError('fixture scan failed')]
+                                            if leaf == 'scan' else self.scan_old)
+                self.sealer.side_effect = ValueError('fixture seal failed') if leaf == 'seal' else None
+                self.remote.side_effect = ValueError('fixture move failed') if leaf == 'remote' else self.move_remote
+                code, out = self.run_cutover()
+                self.assertEqual(code, 1)
+                self.assertIn('Nothing moved.\nSync with old-space is paused. Run the replace again, or task work:cs to resume it.\n', out)
+                self.assertFalse(read_json(self.receipt_path)['moved'])
+
+    def test_failed_pause_is_recovered_before_the_final_scan(self):
+        def stop(*args):
+            result = self.stop_old(*args)
+            if self.stop.call_count == 1:
+                result['phase'] = 'cleanup_required'
+            return result
+        self.stop.side_effect = stop
+        def scan(*args, **kwargs):
+            if self.stop.called:
+                self.assertEqual(self.stop.call_count, 2)
+            return self.scan_old(*args, **kwargs)
+        self.scanner.side_effect = scan
+        self.assertEqual(self.run_cutover()[0], 0)
+        self.assertEqual(self.stop.call_count, 2)
+        self.assertEqual(self.scanner.call_count, 2)
+
+    def test_a_stop_timeout_keeps_the_resume_guidance_and_does_not_move(self):
+        message = 'Scratch supervisor is still shutting down; inspect status before retrying.'
+        self.stop.side_effect = ValueError(message)
+        code, out = self.run_cutover()
+        self.assertEqual(code, 1)
+        self.assertEqual(out.splitlines(), [message, 'Nothing moved.',
+                         'Sync with old-space is paused. Run the replace again, or task work:cs to resume it.'])
+        self.stop.assert_called_once_with(self.state)
+        self.scanner.assert_called_once()
+        self.sealer.assert_not_called()
+        self.remote.assert_not_called()
+        self.assertIsNone(seal.read(self.state, 'old-space'))
+        self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'old-space')
+        self.assertFalse(read_json(self.receipt_path)['moved'])
+
+    def test_a_dead_syncing_worker_is_recovered_before_the_final_scan(self):
+        def stop(*args):
+            result = self.stop_old(*args)
+            if self.stop.call_count == 1:
+                result['phase'] = 'syncing'
+            return result
+        self.stop.side_effect = stop
+        code, out = self.run_cutover()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.stop.call_count, 2)
+        self.assertEqual(self.order, ['decide', 'scan', 'gather', 'stop', 'stop', 'scan', 'remote'])
+        self.assertEqual(self.scanner.call_count, 2)
+        self.sealer.assert_called_once()
+        self.remote.assert_called_once()
+        self.assertIsNotNone(seal.read(self.state, 'old-space'))
+        self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'new-space')
+        self.assertTrue(read_json(self.receipt_path)['moved'])
+
+    def assert_unclean_stop_refuses(self, calls):
+        code, out = self.run_cutover()
+        self.assertEqual(code, 1, out)
+        self.assertEqual(out.splitlines(), ['Sync with old-space did not stop cleanly; nothing moved.',
+                         'Sync with old-space is paused. Run the replace again, or task work:cs to resume it.'])
+        self.assertEqual(self.stop.call_count, calls)
+        self.scanner.assert_called_once()
+        self.sealer.assert_not_called()
+        self.remote.assert_not_called()
+        self.assertIsNone(seal.read(self.state, 'old-space'))
+        self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'old-space')
+        self.assertFalse(read_json(self.receipt_path)['moved'])
+
+    def test_repeated_cleanup_required_does_not_scan_seal_or_move(self):
+        self.stop.side_effect = [dict(running=False, phase='cleanup_required'),
+                                 dict(running=False, phase='cleanup_required')]
+        self.assert_unclean_stop_refuses(2)
+
+    def test_stop_recovery_still_waiting_does_not_scan_seal_or_move(self):
+        self.stop.side_effect = [dict(running=False, phase='cleanup_required'),
+                                 dict(running=False, phase='waiting')]
+        self.assert_unclean_stop_refuses(2)
+
+    def test_a_running_stop_result_does_not_scan_seal_or_move(self):
+        self.stop.side_effect = [dict(running=True, phase='stopped')]
+        self.assert_unclean_stop_refuses(1)
+
+    def test_real_remote_and_retarget_keep_old_sync_stopped_until_new_is_bound(self):
+        self.remote.side_effect = self.actual_remote
+        actual_retarget = scratch.retarget
+        def retarget(*args):
+            self.assertFalse(self.runtime['running'])
+            self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'old-space')
+            self.order.append('retarget')
+            result = actual_retarget(*args)
+            self.order.append('bound-new')
+            return result
+        def start(*args):
+            self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'new-space')
+            self.order.append('start-new')
+            self.runtime.update(running=True, phase='syncing')
+        def write(*args, **kwargs):
+            self.assertFalse(self.runtime['running'])
+            self.assertEqual(self.scanner.call_count, 2)
+            self.order.append('seal')
+            return self.sealer._mock_wraps(*args, **kwargs)
+        self.sealer.side_effect = write
+        with patch.object(workspace, '_prerequisites'), \
+                patch.object(workspace, '_project', return_value=self.project), \
+                patch.object(workspace, '_choose_pairing', return_value=('new-space', '/workspaces/project')), \
+                patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection), \
+                patch.object(workspace, '_verify_roots', return_value=[]), \
+                patch.object(workspace, '_remote_herdr', return_value='herdr fixture'), \
+                patch.object(scratch, 'discover_project', return_value=self.project), \
+                patch.object(scratch, '_verify_destination'), \
+                patch.object(scratch, 'retarget', side_effect=retarget), \
+                patch.object(scratch, 'start', side_effect=start) as started, \
+                patch.object(workspace, '_ready', return_value={}), \
+                patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), \
+                patch('devcontainer_setup.project_sync.restore.end_proxies_elsewhere', return_value=[]), \
+                patch('devcontainer_setup.project_sync.herdr.open_remote', return_value=0):
+            self.assertEqual(self.run_cutover()[0], 0)
+        self.assertEqual(self.order[:6], ['decide', 'scan', 'gather', 'stop', 'scan', 'seal'])
+        self.assertLess(self.order.index('seal'), self.order.index('retarget'))
+        self.assertLess(self.order.index('bound-new'), self.order.index('start-new'))
+        started.assert_called_once_with(self.root, self.state)
+
+    def test_failed_stop_recovery_keeps_the_resume_guidance_and_does_not_move(self):
+        def stop(*args):
+            result = self.stop_old(*args)
+            if self.stop.call_count == 2:
+                raise ValueError('fixture daemon stop failed')
+            return dict(result, phase='cleanup_required')
+        self.stop.side_effect = stop
+        code, out = self.run_cutover()
+        self.assertEqual(code, 1)
+        self.assertTrue(out.endswith('Sync with old-space is paused. Run the replace again, or task work:cs to resume it.\n'))
+        self.assertEqual(self.scanner.call_count, 1)
+        self.sealer.assert_not_called()
+        self.remote.assert_not_called()
+
     def test_changed_arming_after_decide_moves_nothing(self):
         self.arm()
-        self.scanner.side_effect = [replace(self.scan, agents=(('claude', 1),)), self.scan]
+        self.scanner.side_effect = [replace(self.scan, agents=(('claude', 1),)), self.scan, self.scan]
         def answer(_):
             arming.write(self.state, dict(arming.read(self.state), hold_until=2000))
             return ''
@@ -215,7 +407,7 @@ class CutoverTests(unittest.TestCase):
                 self.bind('old-space')
                 if armed:
                     self.arm()
-                self.scanner.side_effect = [replace(self.scan, agents=(('claude', 1),)), self.scan]
+                self.scanner.side_effect = [replace(self.scan, agents=(('claude', 1),)), self.scan, self.scan]
                 self.ask.side_effect = lambda _: self.bind('other-space') or ''
                 code, out = self.run_cutover()
                 self.assertEqual(code, 1)
@@ -249,12 +441,76 @@ class CutoverTests(unittest.TestCase):
         start.assert_not_called()
         self.assertEqual(self.api.calls, ['read'])
 
-    def test_the_latch_alone_keeps_finishing_forward(self):
+    def test_the_latch_alone_flushes_again_before_moving(self):
         replacing.write(self.state, dict(self.journal, moving=999.0))
         self.assertEqual(self.run_cutover()[0], 0)
         self.finish.assert_called_once()
-        for leaf in (self.scanner, self.gather, self.sealer, self.factory):
+        self.assertEqual(self.scanner.call_count, 2)  # Agent scan, then the post-stop fingerprint.
+        for leaf in (self.gather, self.sealer, self.factory):
+            leaf.assert_called_once()
+        self.assertTrue(read_json(self.receipt_path)['moved'])
+        self.assertEqual(replacing.read(self.state)['moving'], 999.0)
+
+    def test_a_replayed_move_never_overwrites_a_third_pairing(self):
+        for when in ('before-replay', 'after-decide'):
+            with self.subTest(when=when):
+                replacing.write(self.state, dict(self.journal, moving=999.0))
+                self.write(workspace.PENDING, dict(codespace='new-space'))
+                self.bind('other-space' if when == 'before-replay' else 'old-space')
+                def decide(*args, **kwargs):
+                    self.bind('other-space')
+                    return None
+                self.decide.side_effect = decide
+                for leaf in (self.decide, self.remote):
+                    leaf.reset_mock()
+                code, out = self.run_cutover()
+                self.assertEqual(code, 1)
+                self.assertIn('old-space is no longer the paired Codespace; nothing moved.', out)
+                self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'other-space')
+                self.assertFalse(read_json(self.receipt_path)['moved'])
+                if when == 'before-replay':
+                    self.decide.assert_not_called()
+                    self.remote.assert_not_called()
+                else:
+                    self.decide.assert_called_once()
+                    self.remote.assert_called_once()
+                for leaf in (self.scanner, self.gather, self.sealer):
+                    leaf.assert_not_called()
+
+    def test_mixed_case_origin_is_admitted_before_consent(self):
+        self.project = replace(self.project, remote='https://github.com/ExAmPlE/PrOjEcT.git')
+        replacing.write(self.state, dict(self.journal, repository='EXAMPLE/PROJECT'))
+        self.decide.side_effect = ValueError('Move cancelled; nothing moved.')
+        code, out = self.run_cutover()
+        self.assertEqual(code, 1)
+        self.assertIn('Move cancelled; nothing moved.', out)
+        self.factory.assert_called_once()
+        self.decide.assert_called_once()
+        self.sealer.assert_not_called()
+        self.remote.assert_not_called()
+
+    def test_mixed_case_origin_refuses_a_foreign_journal(self):
+        self.project = replace(self.project, remote='https://github.com/ExAmPlE/PrOjEcT.git')
+        replacing.write(self.state, dict(self.journal, repository='OTHER/PROJECT'))
+        code, out = self.run_cutover()
+        self.assertEqual(code, 1)
+        self.assertIn('This replace record does not match; run the replace again.', out)
+        self.assertFalse(self.receipt_path.exists())
+        for leaf in (self.factory, self.decide, self.scanner, self.gather, self.sealer, self.remote):
             leaf.assert_not_called()
+
+    def test_a_retired_record_alone_flushes_again_before_moving(self):
+        seal.write(self.state, self.store, self.scan, evidence=self.evidence, identity=self.project.identity,
+                   repository='example/project', gh_user='octo', remote_root='/workspaces/project',
+                   operation=self.operation, cycle_id='final-cycle', snapshot_id=self.snapshot, now=999.0)
+        self.sealer.reset_mock()
+        self.assertEqual(self.run_cutover()[0], 0)
+        self.finish.assert_called_once()
+        self.assertEqual(self.scanner.call_count, 2)
+        for leaf in (self.gather, self.sealer, self.factory):
+            leaf.assert_called_once()
+        self.assertTrue(read_json(self.receipt_path)['moved'])
+        self.assertEqual(seal.read(self.state, 'old-space').sealed_at, self.clock)
 
     def test_stopped_old_is_not_started(self):
         for state in ('Shutdown', 'Starting', None):
@@ -299,6 +555,7 @@ class CutoverTests(unittest.TestCase):
         for failure in (7, ValueError('Herdr workspace failed')):
             with self.subTest(failure=failure):
                 self.bind('old-space')
+                self.runtime.update(running=True, phase='syncing')
                 (self.state / 'retired/old-space.json').unlink(missing_ok=True)
                 def remote(*a, **k):
                     self.bind('new-space')
@@ -373,10 +630,11 @@ class CutoverTests(unittest.TestCase):
         for during in ('prompt', 'gather'):
             with self.subTest(during=during):
                 self.bind('old-space')
+                self.runtime.update(running=True, phase='syncing')
                 arming.write(self.state, dict(schema=1, armed=False))
                 self.decide.side_effect = self.decide_move
-                self.scanner.side_effect = ([replace(self.scan, agents=(('claude', 1),)), self.scan]
-                                            if during == 'prompt' else [self.scan])
+                self.scanner.side_effect = ([replace(self.scan, agents=(('claude', 1),)), self.scan, self.scan]
+                                            if during == 'prompt' else [self.scan, self.scan])
                 def answer(_):
                     self.arm()
                     return ''
