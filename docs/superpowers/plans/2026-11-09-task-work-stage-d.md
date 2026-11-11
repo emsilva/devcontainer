@@ -276,7 +276,7 @@ does not repeat.
     so the option could only fail. The coordinator's inspection still refuses an unreadable OLD for `--replace`
     and `task work`.
 
-23. **Background services on OLD** (live run 1 L3). PENDING THE OWNER (`stage-d/OWNER-BATCH.md` question 3); Task 8B
+23. **Background services on OLD** (live run 1 L3). ANSWERED (a) by the owner, 2026-11-11T11:33Z (`stage-d/OWNER-BATCH.md` question 3); Task 8B
     builds whichever answer comes back. The scan counts any process with an argv element named `codex` or `opencode`
     (`target_scan.py` `process_inventory`), so Codex's `codex app-server` processes (a launchd- or init-parented
     daemon that outlives the session that started it; on this Mac `app-server daemon pid-update-loop` has run for 8
@@ -1159,7 +1159,7 @@ main into `feature/task-work-cd`). It owns `devcontainer_setup/project_sync/sess
   `SSH connection to NAME failed after 10 minutes: ERROR`. Non-transport errors still raise at once; still read-only
   probes only. Tests with a fake clock: success after the old limit, the budget's end, a non-transport error.
 
-**8B, on `feature/task-work-cd`** after main is merged in. Starts when the owner answers call 23.
+**8B, on `feature/task-work-cd`** after main is merged in. The owner answered call 23 with (a).
 - **L3** as call 23 is answered, at the classifier in `target_scan.py` (one rule for its two readers, the cutover's
   agents gate and the verdict's Agents category), with tests and the Copy for its lines.
 - **L4 (Copy).** `verdict.py`'s History line names an unfinished turn for what it is:
