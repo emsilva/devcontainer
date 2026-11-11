@@ -64,6 +64,7 @@ class Scan:
     agents: tuple[tuple[str, int], ...]
     agents_complete: bool
     problems: tuple[str, ...]
+    services: tuple[tuple[str, int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ def cutoffs_digest(cutoffs: Mapping[tuple[str, str], Cutoff]) -> str:
 
 
 _AGENTS = ('claude', 'codex', 'grok', 'opencode', 'herdr')
+_SERVICES = ('codex app-server', 'opencode serve')
 _PROBLEMS = ('could not connect to the Codespace', 'could not read the Codespace inventory',
              'could not read every repository under /workspaces', 'could not read .scratch',
              'could not read conversations', 'could not read processes')
@@ -139,6 +141,20 @@ def _pairs(value, first, second):
         result.append((first(pair[0]), second(pair[1])))
     if result != sorted(result) or len({key for key, _ in result}) != len(result):
         raise ValueError('Unordered or duplicate inventory entries')
+    return tuple(result)
+
+
+def _services(value):
+    result = []
+    for row in _list(value):
+        if not isinstance(row, list) or len(row) != 3:
+            raise ValueError('Invalid service identity')
+        name, pid, start = _text(row[0]), _integer(row[1]), _integer(row[2])
+        if name not in _SERVICES or pid == 0:
+            raise ValueError('Invalid service identity')
+        result.append((name, pid, start))
+    if result != sorted(result) or len({pid for _, pid, _ in result}) != len(result):
+        raise ValueError('Unordered or duplicate service identities')
     return tuple(result)
 
 
@@ -220,13 +236,14 @@ def _decode(raw, codespace, at, cutoffs, cutoffs_sha256, limits):
     agents = _pairs(obj['agents'], _text, _integer)
     if {name for name, _ in agents} != set(_AGENTS):
         raise ValueError('Invalid agent names')
+    services = _services(obj['services'])
     problems = tuple(_text(value) for value in _list(obj['problems']))
     allowed = set(_PROBLEMS) | {row.path + ': its origin cannot be read' for row in repositories}
     if any(value not in allowed for value in problems) or len(set(problems)) != len(problems):
         raise ValueError('Invalid inventory problem')
     return Scan(codespace, at, tuple(repositories), _boolean(obj['git_complete']), scratch,
                 _boolean(obj['scratch_complete']), sessions, _boolean(obj['sessions_complete']), compared, checked,
-                mismatched, tails, agents, _boolean(obj['agents_complete']), problems)
+                mismatched, tails, agents, _boolean(obj['agents_complete']), problems, services)
 
 
 def _failed(codespace, at, problem):
@@ -274,13 +291,37 @@ def fingerprint(scan: Scan) -> str | None:
     if not all((scan.git_complete, scan.scratch_complete, scan.sessions_complete, scan.agents_complete)):
         return None
     record = asdict(scan)
-    evidence = {name: record[name] for name in ('repositories', 'scratch', 'sessions', 'agents')}
+    evidence = {name: record[name] for name in ('repositories', 'scratch', 'sessions', 'agents', 'services')}
     return hashlib.sha256(json.dumps(evidence, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+# The scan and the consented SIGTERM program must use exactly the same classifier.
+_PROCESS_HELPERS = r'''
+def service_name(command):
+    argv = command.split(b'\0')
+    names = {value.rsplit(b'/', 1)[-1] for value in argv}
+    if b'codex' in names and b'app-server' in argv[1:]:
+        return 'codex app-server'
+    if b'opencode' in names and b'serve' in argv[1:] and b'--service' in argv[1:]:
+        return 'opencode serve'
+    return None
+
+
+def process_stat(data):
+    # Linux comm can contain spaces and closing parentheses. Field 22 follows
+    # the closing comm's state field by 19 positions.
+    fields = data.rsplit(b')', 1)[1].split()
+    start = int(fields[19])
+    if start < 0:
+        raise ValueError('Invalid process start time')
+    return start, fields[0]
+
+'''
 
 
 # Kept self-contained: the remote interpreter uses no installed project package,
 # no temporary files, and -B at the transport boundary prevents bytecode writes.
-_PROGRAM = r'''
+_PROGRAM = _PROCESS_HELPERS + r'''
 import hashlib
 import json
 import os
@@ -314,7 +355,8 @@ cutoffs_sha256 = (None if request['cutoffs'] is None else
                   hashlib.sha256(json.dumps(cutoff_record, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
 result = dict(codespace=request['codespace'], at=request['at'], repositories=[], git_complete=True,
               scratch=[], scratch_complete=True, sessions=[], sessions_complete=True,
-              cutoffs_sha256=cutoffs_sha256, checked=[], mismatched=[], tails=[], agents=[], agents_complete=True, problems=[])
+              cutoffs_sha256=cutoffs_sha256, checked=[], mismatched=[], tails=[], agents=[], agents_complete=True,
+              problems=[], services=[])
 
 class Incomplete(Exception):
     pass
@@ -783,16 +825,27 @@ def process_inventory():
                         command = source.read(limits['output'] + 1)
                     if len(command) > limits['output']:
                         raise Incomplete()
+                    service = service_name(command)
+                    if service is not None:
+                        fd = os.open(root / process.name / 'stat', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                        with os.fdopen(fd, 'rb') as source:
+                            data = source.read(limits['output'] + 1)
+                        if len(data) > limits['output']:
+                            raise Incomplete()
+                        start, _ = process_stat(data)
+                        result['services'].append([service, int(process.name), start])
+                        continue
                     found = {value.rsplit(b'/', 1)[-1] for value in command.split(b'\0')}
                     for name in names:
                         counts[name] += name.encode() in found
                 except (FileNotFoundError, ProcessLookupError):
                     continue
-                except (OSError, ValueError, Incomplete):
+                except (OSError, ValueError, IndexError, Incomplete):
                     problem('agents')
     except (OSError, ValueError, IndexError, Incomplete):
         problem('agents')
     result['agents'] = sorted(counts.items())
+    result['services'].sort()
 
 for inventory, part in ((git_inventory, 'git'), (scratch_inventory, 'scratch'),
                         (session_inventory, 'sessions'), (process_inventory, 'agents')):

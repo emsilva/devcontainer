@@ -354,6 +354,11 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(row.verdict, 'unsafe')
         self.assertIn('claude (2), codex (1) running: end them, then check again', row.text)
 
+    def test_background_services_alone_do_not_block_checked_delete(self):
+        scan = replace(self.evidence.scan, services=(('codex app-server', 100001, 1), ('opencode serve', 100002, 2)))
+        row = self.judge('Agents', replace(self.evidence, scan=scan))
+        self.assertEqual((row.verdict, row.text), ('safe', 'none running'))
+
     def test_verdict_lines_match_the_copy(self):
         result = replace(self.result(), kept=(('codex', 'session'), ('claude', 'other')))
         self.assertEqual(self.v.lines(result, self.local), [

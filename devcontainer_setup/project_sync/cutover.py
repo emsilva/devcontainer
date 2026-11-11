@@ -1,6 +1,7 @@
 """Record OLD's final normal flush, then finish its move to NEW without a TUI."""
 from __future__ import annotations
 
+from collections import Counter
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,77 @@ import time
 from . import arming, deletion, lifecycle, move, overview, replacing, scratch, seal, standing, target_scan, transport, verdict, workspace
 from .checkpoint_store import Store
 from .state import atomic_write, read_json
+
+
+def _listed_services(services):
+    counts = Counter(name for name, _, _ in services)
+    return verdict._listed(tuple(f'{name} ({count})' for name, count in sorted(counts.items())))
+
+
+def _end_services(connection, services):
+    raw = connection.python(_END_SERVICES, payload=json.dumps(dict(services=services)).encode(),
+                            timeout=10 * len(services) + 30)
+    try:
+        ended = target_scan._services(json.loads(raw))
+        if not set(ended) <= set(services):
+            raise ValueError()
+    except (ValueError, TypeError, UnicodeError):
+        raise ValueError('Could not verify which background services ended.') from None
+    return ended
+
+
+_END_SERVICES = target_scan._PROCESS_HELPERS + r'''
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+
+request = json.load(sys.stdin)
+root = Path('/proc')
+ended = []
+
+
+def read(pid, filename):
+    fd = os.open(root / str(pid) / filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        data = stream.read(16 * 1024 * 1024 + 1)
+    if len(data) > 16 * 1024 * 1024:
+        raise ValueError('Process evidence too large')
+    return data
+
+
+for name, pid, start in request['services']:
+    try:
+        if process_stat(read(pid, 'stat'))[0] != start:
+            continue
+        if service_name(read(pid, 'cmdline')) != name:
+            continue
+        # Recheck after cmdline so a PID reused during that read is skipped too.
+        if process_stat(read(pid, 'stat'))[0] != start:
+            continue
+        os.kill(pid, signal.SIGTERM)
+    except (OSError, ValueError, IndexError):
+        continue
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            current, status = process_stat(read(pid, 'stat'))
+            exited = current != start or status in (b'Z', b'X')
+        except (FileNotFoundError, ProcessLookupError):
+            exited = True
+        except (OSError, ValueError, IndexError):
+            break
+        if exited:
+            ended.append([name, pid, start])
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.1, remaining))
+print(json.dumps(ended))
+'''
 
 
 def _binding(state):
@@ -134,13 +206,24 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
                 counts = dict(scan.agents)
                 agents = [f'{agent} ({counts[agent]})' for agent in ('claude', 'codex', 'grok', 'opencode')
                           if counts.get(agent, 0) > 0]
-                if not agents:
+                if agents or scan.services:
+                    if agents:
+                        print(f'On {old}: {", ".join(agents)} running. End them, then press Enter to check again, or type stop.')
+                    else:
+                        print(f'On {old}: background services running: {_listed_services(scan.services)}. '
+                              'Type end to end them, press Enter to check again, or type stop.')
+                    answer = ask('> ').strip()
+                    if answer == 'stop':
+                        print('Nothing moved.')
+                        return 1
+                    if not agents and answer == 'end':
+                        ended = _end_services(connection, scan.services)
+                        if ended:
+                            print(f'Ended {_listed_services(ended)} on {old}.')
+                    continue
+                evidence = deletion.gather(project, state, target, connection, now=now, sleep=sleep)
+                if not evidence.scan.services:
                     break
-                print(f'On {old}: {", ".join(agents)} running. End them, then press Enter to check again, or type stop.')
-                if ask('> ').strip() == 'stop':
-                    print('Nothing moved.')
-                    return 1
-            evidence = deletion.gather(project, state, target, connection, now=now, sleep=sleep)
             categories = verdict.judge(target, evidence, now=now())
             required = tuple(row for row in categories if row.name in ('Scratch', 'History', 'Agents'))
             if not evidence.steady or len(required) != 3 or any(row.verdict != verdict.SAFE for row in required):

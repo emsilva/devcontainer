@@ -435,6 +435,77 @@ class TargetScanTests(unittest.TestCase):
         self.assertEqual(dict(result.agents), dict(claude=1, codex=1, grok=0, opencode=0, herdr=1))
         self.assertNotIn(b'/usr/lib/bin/claude', self.connection.raw)
 
+    def service(self, pid, argv, start=123):
+        path = self.process(pid, argv)
+        (path / 'stat').write_text(f'{pid} (fixture with ) parentheses) S 0 ' + '0 ' * 17 + str(start))
+        return path
+
+    def test_background_service_forms_are_separate_from_sessions(self):
+        commands = (
+            b'/usr/bin/codex\0app-server\0',
+            b'node\0/opt/bin/codex\0app-server\0daemon\0',
+            b'/opt/bin/opencode\0serve\0--service\0',
+            b'node\0/opt/bin/opencode\0--service\0serve\0',
+            b'codex\0', b'opencode\0', b'codex\0/tmp/app-server\0',
+            b'opencode\0serve\0', b'opencode\0serve\0--service-mode\0')
+        for offset, argv in enumerate(commands):
+            self.service(100001 + offset, argv, start=200 + offset)
+        result = self.scan()
+        self.assertTrue(result.agents_complete)
+        self.assertEqual(dict(result.agents), dict(claude=0, codex=2, grok=0, opencode=3, herdr=0))
+        expected = (('codex app-server', 100001, 200), ('codex app-server', 100002, 201),
+                    ('opencode serve', 100003, 202), ('opencode serve', 100004, 203))
+        self.assertEqual(result.services, expected)
+        self.assertEqual(json.loads(self.connection.raw)['services'], [list(row) for row in expected])
+
+    def test_malformed_services_are_refused(self):
+        self.scan()
+        valid = json.loads(self.connection.raw)
+        variants = [None, {}, 'codex app-server', [None], [['codex app-server', 1]],
+                    [['codex', 1, 2]], [['codex app-server', True, 2]],
+                    [['codex app-server', 0, 2]], [['codex app-server', -1, 2]],
+                    [['codex app-server', 1, True]], [['codex app-server', 1, -1]],
+                    [['codex app-server', 1, '2']], [['codex app-server', 1.0, 2]],
+                    [['codex app-server', 1, 2.0]],
+                    [['codex app-server', 2, 3], ['codex app-server', 1, 2]],
+                    [['codex app-server', 1, 2], ['codex app-server', 1, 2]],
+                    [['codex app-server', 1, 2], ['opencode serve', 1, 3]]]
+        for services in variants:
+            with self.subTest(services=services):
+                self.connection.python = lambda *a, **k: json.dumps(dict(valid, services=services)).encode()
+                refused = self.scan()
+                self.assertFalse(refused.agents_complete)
+                self.assertIsNone(self.api.fingerprint(refused))
+                self.assertEqual(refused.services, ())
+        self.connection.python = lambda *a, **k: json.dumps(
+            {key: value for key, value in valid.items() if key != 'services'}).encode()
+        self.assertFalse(self.scan().agents_complete)
+
+    def test_services_participate_in_fingerprint_and_fixed_shape(self):
+        before = self.scan()
+        self.service(100001, b'codex\0app-server\0')
+        after = self.scan()
+        self.assertEqual(before.agents, after.agents)
+        self.assertNotEqual(self.api.fingerprint(before), self.api.fingerprint(after))
+        self.assertNotEqual(self.api.fingerprint(after), self.api.fingerprint(
+            replace(after, services=(('codex app-server', 100001, 124),))))
+        expired = self.scan(limits=self.api.Limits(seconds=0))
+        self.assertEqual(expired.services, ())
+        self.assertEqual(json.loads(self.connection.raw)['services'], [])
+        self.assertFalse(expired.agents_complete)
+
+    def test_service_stat_failures_are_incomplete(self):
+        path = self.service(100001, b'codex\0app-server\0')
+        for data in ('malformed', '100001 (fixture) S 0 ' + '0 ' * 17 + '-1'):
+            with self.subTest(stat=data):
+                (path / 'stat').write_text(data)
+                result = self.scan()
+                self.assertFalse(result.agents_complete)
+                self.assertIsNone(self.api.fingerprint(result))
+        (path / 'stat').unlink()
+        (path / 'stat').mkdir()
+        self.assertFalse(self.scan().agents_complete)
+
     def test_the_scan_itself_is_not_an_agent(self):
         self.api
         self.connection.self_process = True
@@ -484,7 +555,7 @@ class TargetScanTests(unittest.TestCase):
             else:
                 self.process(100001, b'codex\0')
             self.assertNotEqual(before, self.api.fingerprint(self.scan()), action)
-        body = {name: asdict(baseline)[name] for name in ('repositories', 'scratch', 'sessions', 'agents')}
+        body = {name: asdict(baseline)[name] for name in ('repositories', 'scratch', 'sessions', 'agents', 'services')}
         self.assertEqual(digest, hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
 
     def test_scan_changes_nothing(self):

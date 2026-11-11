@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import signal
 import tempfile
 import time
 import unittest
@@ -288,6 +289,127 @@ class CutoverTests(unittest.TestCase):
                 self.assertEqual(self.gather.called, answer == '')
                 self.connection.python.assert_not_called()  # Only the scripted scanner may use the connection.
                 self.assertEqual(set(self.api.calls), {'read'})
+
+    def service_process(self, pid, start, argv):
+        path = self.base / 'proc' / str(pid)
+        path.mkdir(parents=True)
+        (path / 'stat').write_text(f'{pid} (fixture with ) parentheses) S 0 ' + '0 ' * 17 + str(start))
+        (path / 'cmdline').write_bytes(argv)
+        return path
+
+    def execute_service_program(self, code, payload=b'', timeout=60):
+        self.assertGreaterEqual(timeout, 10 * len(json.loads(payload)['services']))
+        proc, output = self.base / 'proc', io.StringIO()
+        with patch('pathlib.Path', side_effect=lambda value: proc if value == '/proc' else Path(value)), \
+                patch('os.kill', side_effect=self.service_signal), \
+                patch('time.monotonic', side_effect=lambda: self.clock), \
+                patch('time.sleep', side_effect=self.advance), \
+                patch('sys.stdin', io.StringIO(payload.decode())), redirect_stdout(output):
+            exec(compile(code, '<end-services-fixture>', 'exec'), {})
+        return output.getvalue().encode()
+
+    def test_background_services_prompt_end_matches_identity_then_rescans(self):
+        services = tuple(('codex app-server', 100001 + i, 11 + i) for i in range(5)) + (
+            ('opencode serve', 100006, 17),)
+        self.service_process(100001, 11, b'codex\0app-server\0')
+        self.service_process(100002, 99, b'codex\0app-server\0')  # Reused PID.
+        self.service_process(100003, 13, b'codex\0')  # Now a session.
+        self.service_process(100005, 15, b'opencode\0serve\0--service\0')  # Different service.
+        self.service_process(100006, 17, b'opencode\0serve\0--service\0')
+        unlisted = self.service_process(100007, 18, b'codex\0app-server\0')
+        signals = []
+        def end(pid, sig):
+            signals.append((pid, sig))
+            path = self.base / 'proc' / str(pid)
+            (path / 'stat').unlink(); (path / 'cmdline').unlink(); path.rmdir()
+        self.service_signal = end
+        self.connection.python.side_effect = self.execute_service_program
+        self.scanner.side_effect = [replace(self.scan, services=services), self.scan, self.scan]
+        self.ask.side_effect = ['end']
+        code, out = self.run_cutover()
+        self.assertEqual(code, 0)
+        self.assertIn('On old-space: background services running: codex app-server (5), opencode serve (1). '
+                      'Type end to end them, press Enter to check again, or type stop.', out)
+        self.assertIn('Ended codex app-server (1), opencode serve (1) on old-space.', out)
+        self.assertEqual(signals, [(100001, signal.SIGTERM), (100006, signal.SIGTERM)])
+        self.assertTrue(unlisted.exists())
+        self.assertEqual(json.loads(self.connection.python.call_args.kwargs['payload'])['services'],
+                         [list(row) for row in services])
+        self.assertEqual(self.scanner.call_count, 3)
+        self.gather.assert_called_once()
+
+    def test_sessions_take_priority_over_services_and_end_never_signals_them(self):
+        running = replace(self.scan, agents=(('codex', 1),), services=(('codex app-server', 100001, 1),))
+        self.scanner.side_effect = [running, running]
+        self.ask.side_effect = ['end', 'stop']
+        code, out = self.run_cutover()
+        self.assertEqual(code, 1)
+        self.assertEqual(out.count('On old-space: codex (1) running. End them, then press Enter to check again, or type stop.'), 2)
+        self.assertNotIn('background services running', out)
+        self.connection.python.assert_not_called()
+        self.gather.assert_not_called()
+
+    def test_background_services_enter_rechecks_without_signalling(self):
+        self.scanner.side_effect = [replace(self.scan, services=(('opencode serve', 100001, 1),)), self.scan, self.scan]
+        self.ask.side_effect = ['']
+        code, out = self.run_cutover()
+        self.assertEqual(code, 0)
+        self.assertIn('background services running: opencode serve (1). Type end to end them', out)
+        self.assertNotIn('Ended ', out)
+        self.connection.python.assert_not_called()
+        self.assertEqual(self.scanner.call_count, 3)
+
+    def test_background_services_stop_moves_nothing(self):
+        self.scanner.side_effect = [replace(self.scan, services=(('codex app-server', 100001, 1),))]
+        self.ask.side_effect = ['stop']
+        code, out = self.run_cutover()
+        self.assertEqual(code, 1)
+        self.assertIn('Nothing moved.', out)
+        for leaf in (self.connection.python, self.gather, self.stop, self.sealer, self.remote):
+            leaf.assert_not_called()
+
+    def test_background_service_end_waits_ten_seconds_without_escalating(self):
+        service = ('codex app-server', 100001, 1)
+        self.service_process(100001, 1, b'codex\0app-server\0')
+        self.service_signal = Mock()
+        self.connection.python.side_effect = self.execute_service_program
+        self.scanner.side_effect = [replace(self.scan, services=(service,)), replace(self.scan, services=(service,))]
+        self.ask.side_effect = ['end', 'stop']
+        code, out = self.run_cutover()
+        self.assertEqual(code, 1)
+        self.service_signal.assert_called_once_with(100001, signal.SIGTERM)
+        self.assertEqual(self.clock, 1010.0)
+        self.assertEqual(out.count('background services running'), 2)
+        self.assertNotIn('Ended ', out)
+        self.sealer.assert_not_called()
+
+    def test_background_service_end_refuses_an_unlisted_result(self):
+        self.scanner.side_effect = [replace(self.scan, services=(('codex app-server', 100001, 1),))]
+        self.connection.python.return_value = b'[["codex app-server",100002,1]]'
+        self.ask.side_effect = ['end']
+        code, out = self.run_cutover()
+        self.assertEqual(code, 1)
+        self.assertNotIn('Ended ', out)
+        self.gather.assert_not_called()
+
+    def test_a_service_appearing_during_flush_returns_to_the_gate(self):
+        services = (('codex app-server', 100001, 1),)
+        self.gather.side_effect = [replace(self.evidence, scan=replace(self.scan, services=services)), self.evidence]
+        self.scanner.side_effect = [self.scan, replace(self.scan, services=services), self.scan, self.scan]
+        self.connection.python.return_value = b'[["codex app-server",100001,1]]'
+        self.ask.side_effect = ['end']
+        self.assertEqual(self.run_cutover()[0], 0)
+        self.assertEqual(self.gather.call_count, 2)
+        self.connection.python.assert_called_once()
+        self.sealer.assert_called_once()
+
+    def test_service_change_after_stop_refuses_the_move(self):
+        self.scanner.side_effect = [self.scan, replace(self.scan, services=(('opencode serve', 100001, 1),))]
+        code, out = self.run_cutover()
+        self.assertEqual(code, 1)
+        self.assertIn('old-space changed while its final flush was recorded; nothing moved.', out)
+        self.sealer.assert_not_called()
+        self.remote.assert_not_called()
 
     def test_flush_requires_scratch_history_and_agents_safe(self):
         changes = [dict(steady=False), dict(mac_scratch=None), dict(conflicts=('conflict',)),
