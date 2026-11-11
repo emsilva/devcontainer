@@ -279,6 +279,41 @@ class VerdictTests(unittest.TestCase):
                 self.assertIn(phrase, row.text)
                 self.assertIn('codex ' + SID, row.text)
 
+    def test_one_unfinished_capture_issue_names_the_unfinished_turn(self):
+        for agent, reason in (('codex', 'No validated completed native turn yet'),
+                              ('claude', 'No validated completed Claude turn yet')):
+            with self.subTest(agent=agent):
+                cycle = copy.deepcopy(self.cycle)
+                cycle['directions']['codespace_to_desktop']['capture_issues'] = [
+                    dict(agent=agent, session_id=SID, reason=reason)]
+                row = self.judge('History', replace(self.evidence, cycle=cycle))
+                self.assertEqual(row.verdict, 'unsafe')
+                self.assertEqual(row.text, 'Not safe: 1 conversation on space has an unfinished turn; '
+                                 'resume and finish it, then check again.')
+
+    def test_two_unfinished_capture_issues_use_plural_copy(self):
+        cycle = copy.deepcopy(self.cycle)
+        cycle['directions']['codespace_to_desktop']['capture_issues'] = [
+            dict(agent='codex', session_id=SID, reason='No validated completed native turn yet'),
+            dict(agent='claude', session_id='other', reason='No validated completed Claude turn yet')]
+        row = self.judge('History', replace(self.evidence, cycle=cycle))
+        self.assertEqual(row.verdict, 'unsafe')
+        self.assertEqual(row.text, 'Not safe: 2 conversations on space have unfinished turns; '
+                         'resume and finish them, then check again.')
+
+    def test_mixed_capture_issues_keep_the_unreadable_count(self):
+        issues = [dict(agent='codex', session_id=SID, reason='No validated completed native turn yet'),
+                  dict(agent='claude', session_id='other', reason='Unsupported native response_item variant')]
+        cycle = copy.deepcopy(self.cycle)
+        cycle['directions']['codespace_to_desktop']['capture_issues'] = issues[:1]
+        self.assertIn('has an unfinished turn', self.judge('History', replace(self.evidence, cycle=cycle)).text)
+        for rows in (issues, list(reversed(issues))):
+            with self.subTest(rows=rows):
+                cycle = copy.deepcopy(self.cycle)
+                cycle['directions']['codespace_to_desktop']['capture_issues'] = rows
+                row = self.judge('History', replace(self.evidence, cycle=cycle))
+                self.assertEqual((row.verdict, row.text), ('unsafe', 'Not safe: 2 conversations could not be read on space'))
+
     def test_cutoffs_read_own_and_dependency_files_one_way(self):
         entry = dict(agent='codex', session_id='child', files=[
             dict(path='child.jsonl', session_id='child', size=20, sha256='a' * 64),

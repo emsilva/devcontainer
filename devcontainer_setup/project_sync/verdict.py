@@ -334,6 +334,12 @@ def _history(target, evidence, now):
                          (' has' if pending == 1 else ' have') + ' not reached this Mac yet')
     issues = row.get('capture_issues', [])
     if issues:
+        unfinished = {'No validated completed native turn yet', 'No validated completed Claude turn yet'}
+        if all(issue.get('reason') in unfinished for issue in issues):
+            count = len(issues)
+            return _category('History', UNSAFE, _quantity(count, 'conversation') + ' on ' + target.name +
+                             (' has an unfinished turn; resume and finish it' if count == 1 else
+                              ' have unfinished turns; resume and finish them') + ', then check again.')
         return _category('History', UNSAFE, _quantity(len(issues), 'conversation') + ' could not be read on ' + target.name)
     if (row.get('outcome') != 'complete' or not sync_cycle.receipt_matches(row.get('receipt'), row.get('snapshot_id'))
             or row.get('receipt') != evidence.receipt or cycle.get('completed_at') is None):
