@@ -379,8 +379,8 @@ class VerdictTests(unittest.TestCase):
         self.assertIn('moved with --rebind', result.categories[1].text)
 
     def test_failed_process_read_is_unknown(self):
-        self.assertEqual(self.judge('Agents').items, ('herdr (1)',))
-        self.assertEqual(self.v.as_json(self.result())['categories'][3]['items'], ['herdr (1)'])
+        self.assertEqual(self.judge('Agents').items, ())
+        self.assertEqual(self.v.as_json(self.result())['categories'][3]['items'], [])
         row = self.judge('Agents', replace(self.evidence, scan=replace(self.evidence.scan, agents_complete=False)))
         self.assertEqual(row.verdict, 'unknown')
         self.assertIn('could not read processes on space', row.text)
@@ -393,6 +393,24 @@ class VerdictTests(unittest.TestCase):
         scan = replace(self.evidence.scan, services=(('codex app-server', 100001, 1), ('opencode serve', 100002, 2)))
         row = self.judge('Agents', replace(self.evidence, scan=scan))
         self.assertEqual((row.verdict, row.text), ('safe', 'none running'))
+
+    def test_agents_items_are_empty_with_only_services_and_herdr(self):
+        scan = replace(self.evidence.scan, services=(('codex app-server', 100001, 1), ('opencode serve', 100002, 2)))
+        evidence = replace(self.evidence, scan=scan)
+        row = self.judge('Agents', evidence)
+        self.assertEqual((row.verdict, row.text, row.items), ('safe', 'none running', ()))
+        self.assertEqual(self.v.as_json(self.result(evidence=evidence))['categories'][3]['items'], [])
+
+    def test_agents_items_list_only_counted_sessions(self):
+        scan = replace(self.evidence.scan, agents=(('claude', 2), ('codex', 1), ('grok', 1), ('herdr', 1), ('opencode', 1)),
+                       services=(('codex app-server', 100001, 1), ('opencode serve', 100002, 2)))
+        evidence = replace(self.evidence, scan=scan)
+        row = self.judge('Agents', evidence)
+        expected = ('claude (2)', 'codex (1)', 'grok (1)', 'opencode (1)')
+        self.assertEqual(row.verdict, 'unsafe')
+        self.assertEqual(row.items, expected)
+        self.assertEqual(row.text, 'Not safe: claude (2), codex (1), grok (1) and 1 more running: end them, then check again')
+        self.assertEqual(self.v.as_json(self.result(evidence=evidence))['categories'][3]['items'], list(expected))
 
     def test_verdict_lines_match_the_copy(self):
         result = replace(self.result(), kept=(('codex', 'session'), ('claude', 'other')))

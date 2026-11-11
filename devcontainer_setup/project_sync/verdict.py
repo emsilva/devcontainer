@@ -363,10 +363,9 @@ def _agents(target, scan):
     counts = dict(scan.agents)
     running = tuple(f'{agent} ({counts.get(agent, 0)})' for agent in ('claude', 'codex', 'grok', 'opencode')
                     if counts.get(agent, 0) > 0)
-    server = (f'herdr ({counts["herdr"]})',) if counts.get('herdr', 0) > 0 else ()
     if running:
-        return _category('Agents', UNSAFE, _listed(running) + ' running: end them, then check again', (*running, *server))
-    return _category('Agents', SAFE, 'none running', server)
+        return _category('Agents', UNSAFE, _listed(running) + ' running: end them, then check again', running)
+    return _category('Agents', SAFE, 'none running')
 
 
 def incomplete(scan) -> tuple[str, ...]:
