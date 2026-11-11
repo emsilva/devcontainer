@@ -509,6 +509,8 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
                     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                         raise ValueError('Native metadata requires a regular file without hard links')
                     first = source.readline(min(sessions.MAX_BYTES, 1024 * 1024) + 1)
+                    metadata_only = (first.endswith(b'\n') and info.st_size == len(first)
+                                     and not source.read(1))
             row = json.loads(first)
             if not isinstance(row, dict):
                 raise ValueError('Invalid native session metadata')
@@ -520,6 +522,8 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
             approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, first, store)))
             if meta.get('cwd') not in approved:
                 continue
+            if row.get('type') == 'session_meta' and metadata_only and sessions._parent(meta) is None:
+                continue  # An unopened turn is not a conversation or an origin yet.
             if ('codex', str(path)) not in imported:
                 origins['codex'].add(sid)
             retained, entry = _codex_entry(project, store, sid, index, state=state, scopes=scopes)
