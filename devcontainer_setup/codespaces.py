@@ -77,9 +77,12 @@ class Codespaces:
 
     def _read_ssh(self, name: str, command: str) -> str:
         """Wait for SSH transport on read-only probes; never repeat mutations."""
-        for attempt in range(4):
+        deadline = time.monotonic() + 600
+        delay, failure = 2, None
+        while (remaining := deadline - time.monotonic()) > 0:
             try:
-                return self.command('codespace', 'ssh', '--codespace', name, '--', command, timeout=20)
+                return self.command('codespace', 'ssh', '--codespace', name, '--', command,
+                                    timeout=min(20, remaining))
             except (ValueError, subprocess.TimeoutExpired) as error:
                 transport = isinstance(error, subprocess.TimeoutExpired) or any(
                     marker in str(error).lower() for marker in (
@@ -88,13 +91,15 @@ class Codespaces:
                     ))
                 if not transport:
                     raise
-                if attempt == 3:
-                    raise ValueError(f'SSH connection to {name} failed after 4 attempts: {error}') from error
-                delay = 2 ** (attempt + 1)
-                print(f'SSH tunnel for {name} is not ready; retrying in {delay}s '
-                      f'({attempt + 2}/4).', flush=True)
-                time.sleep(delay)
-        raise AssertionError('SSH retry loop exhausted')
+                failure = error
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                pause = min(delay, remaining)
+                print(f'SSH tunnel for {name} is not ready; retrying in {pause:g}s.', flush=True)
+                time.sleep(pause)
+                delay = min(delay * 2, 30)
+        raise ValueError(f'SSH connection to {name} failed after 10 minutes: {failure}') from failure
 
     def _container_identity(self, name: str) -> str:
         command = r'''printf '%s:%s\n' "$(cat /proc/sys/kernel/random/boot_id)" "$(awk '{sub(/^.*\) /, ""); print $20}' /proc/1/stat)"'''

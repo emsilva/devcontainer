@@ -202,15 +202,88 @@ class CodespacesTests(unittest.TestCase):
         self.assertTrue(all(timeout and 0 < timeout <= 30 for timeout in self.runner.ssh_timeouts))
 
     def test_persistent_ssh_failure_stops_and_keeps_same_codespace_receipt(self):
-        self.runner.ssh_failures = ['tunnel closed: error forwarding port: unexpected EOF'] * 10
-        with patch('devcontainer_setup.codespaces.time.sleep'):
+        self.runner.ssh_failures = ['tunnel closed: error forwarding port: unexpected EOF'] * 100
+        clock = FakeClock()
+        with patch('devcontainer_setup.codespaces.time.sleep', clock.sleep), \
+                patch('devcontainer_setup.codespaces.time.monotonic', clock.monotonic), \
+                contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(ValueError, '--resume new-space'):
                 self.launch()
         ssh_calls = [call for call in self.runner.calls if call[1:3] == ['codespace', 'ssh']]
-        self.assertEqual(len(ssh_calls), 4)
+        self.assertGreater(len(ssh_calls), 4)
+        self.assertEqual(clock.now, 1600)
         self.assertEqual(json.loads(self.receipt.read_text())['codespace'], 'new-space')
         self.assertEqual(sum(call[1:3] == ['codespace', 'create'] for call in self.runner.calls), 1)
         self.assertFalse(any(call[1:3] == ['codespace', 'code'] for call in self.runner.calls))
+
+    def test_ssh_read_succeeds_after_more_than_four_attempts(self):
+        self.runner.ssh_failures = [
+            'kex_exchange_identification: reset', 'ssh_exchange_identification: reset',
+            'tunnel closed: unexpected EOF', 'ssh: connect to host localhost: refused',
+            subprocess.TimeoutExpired(['gh', 'codespace', 'ssh'], 20),
+        ]
+        clock, output = FakeClock(), io.StringIO()
+        with patch('devcontainer_setup.codespaces.time.sleep', clock.sleep), \
+                patch('devcontainer_setup.codespaces.time.monotonic', clock.monotonic), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(self.api._read_ssh('new-space', 'git rev-parse HEAD'), 'a' * 40)
+        self.assertEqual(clock.slept, [2, 4, 8, 16, 30])
+        self.assertEqual(output.getvalue().splitlines(), [
+            f'SSH tunnel for new-space is not ready; retrying in {delay}s.' for delay in clock.slept])
+        self.assertEqual(len(self.runner.calls), 6)
+        self.assertTrue(all(call == self.runner.calls[0] for call in self.runner.calls))
+
+    def test_ssh_read_stops_at_the_ten_minute_budget(self):
+        for probe_seconds in (0, 7.25, 20):
+            with self.subTest(probe_seconds=probe_seconds):
+                clock, output, attempts = FakeClock(), io.StringIO(), []
+                error = 'tunnel closed: fixture transport failure'
+                def runner(args, **kwargs):
+                    timeout = kwargs['timeout']
+                    self.assertGreater(timeout, 0)
+                    self.assertLessEqual(timeout, 20)
+                    self.assertLessEqual(clock.now + timeout, 1600)
+                    attempts.append((clock.now, timeout))
+                    clock.now += min(probe_seconds, timeout)
+                    return subprocess.CompletedProcess(args, 255, '', error)
+                def sleep(seconds):
+                    self.assertGreater(seconds, 0)
+                    self.assertLessEqual(clock.now + seconds, 1600)
+                    clock.sleep(seconds)
+                api = Codespaces(run=runner)
+                with patch('devcontainer_setup.codespaces.time.sleep', sleep), \
+                        patch('devcontainer_setup.codespaces.time.monotonic', clock.monotonic), \
+                        contextlib.redirect_stdout(output), self.assertRaises(ValueError) as caught:
+                    api._read_ssh('new-space', 'git rev-parse HEAD')
+                self.assertEqual(str(caught.exception),
+                                 f'SSH connection to new-space failed after 10 minutes: {error}')
+                self.assertEqual(clock.now, 1600)
+                self.assertGreater(len(attempts), 4)
+                self.assertTrue(all(start < 1600 for start, _timeout in attempts))
+                self.assertEqual(clock.slept[:4], [2, 4, 8, 16])
+                self.assertTrue(all(delay <= 30 for delay in clock.slept[4:]))
+                self.assertEqual(output.getvalue().splitlines(), [
+                    f'SSH tunnel for new-space is not ready; retrying in {delay:g}s.'
+                    for delay in clock.slept])
+                if probe_seconds == 7.25:
+                    self.assertLess(attempts[-1][1], 20)
+                if probe_seconds == 20:
+                    self.assertLess(clock.slept[-1], 30)
+
+    def test_ssh_read_raises_non_transport_errors_unchanged(self):
+        for failures in (0, 5):
+            with self.subTest(failures=failures):
+                clock, output = FakeClock(), io.StringIO()
+                error = ValueError('Missing selected tool: fixture')
+                replies = [ValueError('tunnel closed: fixture')] * failures + [error]
+                with patch.object(self.api, 'command', side_effect=replies) as command, \
+                        patch('devcontainer_setup.codespaces.time.sleep', clock.sleep), \
+                        patch('devcontainer_setup.codespaces.time.monotonic', clock.monotonic), \
+                        contextlib.redirect_stdout(output), self.assertRaises(ValueError) as caught:
+                    self.api._read_ssh('new-space', 'git rev-parse HEAD')
+                self.assertIs(caught.exception, error)
+                self.assertEqual(command.call_count, failures + 1)
+                self.assertEqual(clock.slept, [2, 4, 8, 16, 30][:failures])
 
     def test_tool_validation_failure_is_not_retried_as_transport_failure(self):
         self.runner.fail_validation = True
