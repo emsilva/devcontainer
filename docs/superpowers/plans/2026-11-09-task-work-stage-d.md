@@ -1163,8 +1163,8 @@ main into `feature/task-work-cd`). It owns `devcontainer_setup/project_sync/sess
 - **L3** as call 23 is answered, at the classifier in `target_scan.py` (one rule for its two readers, the cutover's
   agents gate and the verdict's Agents category), with tests and the Copy for its lines.
 - **L4 (Copy).** `verdict.py`'s History line names an unfinished turn for what it is:
-  `1 conversation on OLD has an unfinished turn; resume and finish it, then check again.` (plural: `N conversations
-  on OLD have unfinished turns; resume and finish them, then check again.`) for capture issues whose reason is `No validated completed native turn yet` or `No validated completed Claude turn yet`; other reasons keep
+  `1 conversation on OLD has an unfinished turn; resume and finish it, then check again` (plural: `N conversations
+  on OLD have unfinished turns; resume and finish them, then check again`) for capture issues whose reason is `No validated completed native turn yet` or `No validated completed Claude turn yet`; other reasons keep
   `could not be read on OLD`.
 - **Agents items match the text.** The Agents category's `items` list only what its verdict counts (run 1: `herdr (1)`
   listed under `none running`).

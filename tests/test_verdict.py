@@ -289,7 +289,7 @@ class VerdictTests(unittest.TestCase):
                 row = self.judge('History', replace(self.evidence, cycle=cycle))
                 self.assertEqual(row.verdict, 'unsafe')
                 self.assertEqual(row.text, 'Not safe: 1 conversation on space has an unfinished turn; '
-                                 'resume and finish it, then check again.')
+                                 'resume and finish it, then check again')
 
     def test_two_unfinished_capture_issues_use_plural_copy(self):
         cycle = copy.deepcopy(self.cycle)
@@ -299,7 +299,7 @@ class VerdictTests(unittest.TestCase):
         row = self.judge('History', replace(self.evidence, cycle=cycle))
         self.assertEqual(row.verdict, 'unsafe')
         self.assertEqual(row.text, 'Not safe: 2 conversations on space have unfinished turns; '
-                         'resume and finish them, then check again.')
+                         'resume and finish them, then check again')
 
     def test_mixed_capture_issues_keep_the_unreadable_count(self):
         issues = [dict(agent='codex', session_id=SID, reason='No validated completed native turn yet'),
