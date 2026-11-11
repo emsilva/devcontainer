@@ -79,7 +79,7 @@ class NativeCheckpointTests(NativeFixture):
         metadata = path.read_bytes()
         state = self.root / 'capture-state'
         result = self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
-        self.assertEqual(result, dict(schema=1, entries=[], issues=[]))
+        self.assertEqual(result, dict(schema=1, entries=[], issues=[], completed_files=[]))
         self.assertEqual(self.store.objects, {})
         self.assertEqual(self.api._conversation_origins(state), dict(codex=set(), claude=set()))
         with path.open('ab') as writer:
