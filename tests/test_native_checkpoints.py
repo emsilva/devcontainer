@@ -74,6 +74,73 @@ class NativeFixture(unittest.TestCase):
 
 
 class NativeCheckpointTests(NativeFixture):
+    def test_codex_metadata_only_session_is_skipped_until_completed(self):
+        path = self.codex(rows=[])
+        metadata = path.read_bytes()
+        state = self.root / 'capture-state'
+        result = self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
+        self.assertEqual(result, dict(schema=1, entries=[], issues=[]))
+        self.assertEqual(self.store.objects, {})
+        self.assertEqual(self.api._conversation_origins(state), dict(codex=set(), claude=set()))
+        with path.open('ab') as writer:
+            writer.write(lines([
+                dict(ordinal=1, type='event_msg', payload=dict(type='task_started', turn_id=self.turn)),
+                dict(ordinal=2, type='response_item', payload=dict(type='message', role='assistant',
+                     content=[dict(type='output_text', text='Finished')])),
+                dict(ordinal=3, type='event_msg', payload=dict(type='task_complete', turn_id=self.turn)),
+            ]))
+        result = self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
+        self.assertEqual(result['issues'], [])
+        self.assertEqual([entry['session_id'] for entry in result['entries']], [self.sid])
+        entry = result['entries'][0]
+        self.assertEqual(entry['cutoff'], dict(turn_id=self.turn, bytes=path.stat().st_size))
+        self.assertEqual(self.store.read(entry['files'][0]['blob']), path.read_bytes())
+        self.assertTrue(path.read_bytes().startswith(metadata))
+        self.assertEqual(self.api._conversation_origins(state), dict(codex={self.sid}, claude=set()))
+
+    def test_codex_records_after_metadata_still_require_a_completed_turn(self):
+        empty = str(uuid.uuid4())
+        self.codex(empty, rows=[])
+        state = self.root / 'capture-state'
+        records = [
+            dict(type='event_msg', payload=dict(type='task_started', turn_id=self.turn)),
+            dict(type='event_msg', payload=dict(type='thread_settings_applied',
+                 thread_settings=dict(cwd=str(self.project.root)))),
+            dict(type='turn_context', payload=dict(cwd=str(self.project.root), turn_id=self.turn)),
+            dict(type='response_item', payload=dict(type='message', role='user',
+                 content=[dict(type='input_text', text='Unfinished')])),
+            b'{"type":"response_item","payload":',
+        ]
+        for record in records:
+            with self.subTest(record=record):
+                path = self.codex(rows=[] if isinstance(record, bytes) else [record])
+                if isinstance(record, bytes):
+                    with path.open('ab') as writer:
+                        writer.write(record)
+                result = self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
+                self.assertEqual(result['entries'], [])
+                self.assertEqual(result['issues'], [dict(agent='codex', session_id=self.sid,
+                                 reason='No validated completed native turn yet')])
+                self.assertEqual(self.store.objects, {})
+                self.assertEqual(self.api._conversation_origins(state), dict(codex={self.sid}, claude=set()))
+
+    def test_current_codex_response_variants_are_captured(self):
+        # Sample-derived keys/nesting only; all transcript text is synthetic.
+        fixture = Path(__file__).with_name('fixtures') / 'codex-current-records.jsonl'
+        data = fixture.read_bytes()
+        for placeholder, value in ((b'$SESSION_ID', self.sid),
+                                   (b'$PROJECT_ROOT', str(self.project.root)),
+                                   (b'$TURN_ID', self.turn)):
+            data = data.replace(placeholder, value.encode())
+        path = self.codex()
+        path.write_bytes(data)
+        result = self.capture()
+        self.assertEqual(result['issues'], [])
+        self.assertEqual([entry['session_id'] for entry in result['entries']], [self.sid])
+        entry = result['entries'][0]
+        self.assertEqual(entry['cutoff'], dict(turn_id=self.turn, bytes=len(data)))
+        self.assertEqual(self.store.read(entry['files'][0]['blob']), data)
+
     def test_completed_prefix_while_writer_appends_partial_next_turn(self):
         path = self.codex()
         completed = path.read_bytes()

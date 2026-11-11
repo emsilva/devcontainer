@@ -121,7 +121,7 @@ def _records(data, agent):
         if agent == 'codex' and not isinstance(row.get('payload'), dict):
             raise ValueError('Unsupported native record payload')
         if agent == 'codex' and row['type'] == 'response_item':
-            supported = {'message', 'reasoning', 'function_call', 'function_call_output', 'custom_tool_call', 'custom_tool_call_output', 'local_shell_call', 'web_search_call', 'image_generation_call', 'compaction', 'computer_call', 'computer_call_output', 'tool_search_call', 'tool_search_output'}
+            supported = {'message', 'additional_tools', 'agent_message', 'reasoning', 'function_call', 'function_call_output', 'custom_tool_call', 'custom_tool_call_output', 'local_shell_call', 'web_search_call', 'image_generation_call', 'compaction', 'computer_call', 'computer_call_output', 'tool_search_call', 'tool_search_output'}
             if row['payload'].get('type') not in supported:
                 raise ValueError('Unsupported native response_item variant')
         rows.append(row)
