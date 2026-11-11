@@ -74,6 +74,23 @@ class NativeFixture(unittest.TestCase):
 
 
 class NativeCheckpointTests(NativeFixture):
+    def test_current_codex_response_variants_are_captured(self):
+        # Sample-derived keys/nesting only; all transcript text is synthetic.
+        fixture = Path(__file__).with_name('fixtures') / 'codex-current-records.jsonl'
+        data = fixture.read_bytes()
+        for placeholder, value in ((b'$SESSION_ID', self.sid),
+                                   (b'$PROJECT_ROOT', str(self.project.root)),
+                                   (b'$TURN_ID', self.turn)):
+            data = data.replace(placeholder, value.encode())
+        path = self.codex()
+        path.write_bytes(data)
+        result = self.capture()
+        self.assertEqual(result['issues'], [])
+        self.assertEqual([entry['session_id'] for entry in result['entries']], [self.sid])
+        entry = result['entries'][0]
+        self.assertEqual(entry['cutoff'], dict(turn_id=self.turn, bytes=len(data)))
+        self.assertEqual(self.store.read(entry['files'][0]['blob']), data)
+
     def test_completed_prefix_while_writer_appends_partial_next_turn(self):
         path = self.codex()
         completed = path.read_bytes()
