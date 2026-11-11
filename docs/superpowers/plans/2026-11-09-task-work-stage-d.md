@@ -276,6 +276,19 @@ does not repeat.
     so the option could only fail. The coordinator's inspection still refuses an unreadable OLD for `--replace`
     and `task work`.
 
+23. **Background services on OLD** (live run 1 L3). PENDING THE OWNER (`stage-d/OWNER-BATCH.md` question 3); Task 8B
+    builds whichever answer comes back. The scan counts any process with an argv element named `codex` or `opencode`
+    (`target_scan.py` `process_inventory`), so Codex's `codex app-server` processes (a launchd- or init-parented
+    daemon that outlives the session that started it; on this Mac `app-server daemon pid-update-loop` has run for 8
+    days) and `opencode serve --service` (started on NEW by the sign-in step's checks, 02:54:16Z) block the replace's
+    agents gate and the checked delete forever: the owner never started them and has no session to end. The Codex
+    daemon writes session files (run 1: session 01a1c850 last written when its daemon was killed), so ignoring it
+    outright is not safe for the seal. Options: (a) the scan reports background services apart from sessions; the
+    replace offers `Type end to end them` and ends exactly those pids on consent, then scans again; the checked
+    delete does not block on them (History still catches any turn they write); (b) as (a) but the replace ends them
+    without asking; (c) keep counting them and print how to end them by hand. Recommended: (a). It keeps the
+    goal's "asking, never killing" for sessions.
+
 ## Copy (exact strings)
 
 `OLD` and `NEW` are Codespace names, `HH:MM` local time, `SHA12` the first 12 hex digits, and `CMD` a command built by
@@ -1112,6 +1125,53 @@ Source: the Fable C+D review (`stage-d/review-cd/REVIEW.md`, at 78fb906), every 
   - abandon after a lost reply is offered once reconcile has run.
 - Deferred (`tmp/codespace-lifecycle/task-work/issues.md`, "C+D review, deferred"): the remaining P3s and mutant
   tests.
+
+### Task 8: Fixes from live run 1
+
+Source: live run 1 (reconnaissance, 2026-11-10/11), `/Users/mannu/code/devcontainer/tmp/codespace-lifecycle/task-work/live-cd/LIVE.md`
+findings L1-L5 and "Run 1 verdict"; the run's state copied to `live-cd/run1-state/`, Codex samples in `live-cd/samples/`.
+Each fix is test first, shown failing before its change, in its own commit.
+
+**8A, built from `main`** (the code is the same on main and here; the lead merges 8A to main, pushes it, then merges
+main into `feature/task-work-cd`). It owns `devcontainer_setup/project_sync/sessions.py`,
+`devcontainer_setup/project_sync/conversations.py`, `_read_ssh` in `devcontainer_setup/codespaces.py`, and their tests.
+- **L5. Two current Codex `response_item` variants are refused.** `sessions._records`' supported set lacks
+  `additional_tools` (payload keys `id`, `role` = `developer`, `tools`, `type`) and `agent_message` (payload keys
+  `author`, `content`, `id`, `internal_chat_message_metadata_passthrough`, `recipient`, `type`). Measured by the lead
+  through `sessions._records` and a type tally over this Mac's newest 300 Codex sessions: `additional_tools` is in
+  253 of 253 sessions from 0.166.0, `agent_message` in 123 (0.163.0 and 0.166.0); both run-1 samples (0.167.1) fail
+  with `Unsupported native response_item variant`. Every interactive Codex conversation from 0.166.0 on never syncs,
+  and on this branch blocks the final flush and the checked delete. Add both to the set; they get the same row
+  checks as `message` (the memory check applies to every row; `_validate_codex_scope` reads only its structural row
+  kinds). Test: a small sanitized fixture (structure of `live-cd/samples/`, every text value replaced; never the raw
+  samples) with both variants and one completed turn goes through the real capture path in `conversations.py` and is
+  captured with no capture issue. Origin: the allowlist class is issue #53; the lead links the patch there.
+- **L4 (capture). A session holding only its `session_meta` is not a conversation yet.** Today `conversations.py`
+  raises `No validated completed native turn yet` for it, a capture issue that blocks the flush and the checked
+  delete permanently (run 1: TUI session 01a1c850, opened and quit with no turn, one line). Only a file whose single
+  record is `session_meta` (no parent, nothing after it) is skipped: no capture issue, counted nowhere, captured
+  once it has a completed turn. A file with any record after `session_meta` and no completed turn still raises the
+  same error (the call that an interrupted turn blocks deletion stands). Tests for both.
+- **L1. The launch SSH wait is a time budget, not four tries.** `_read_ssh` gives up after 4 attempts (about 94 s);
+  run 1's fresh NEW was still in postCreate (creation.log 02:07:24Z to 02:08:24Z) when it gave up at ~02:08Z. Retry
+  the same transport errors for up to 10 minutes from the first attempt, waiting 2, 4, 8, 16 s and then 30 s between
+  tries (never past the budget). Each wait prints `SSH tunnel for NAME is not ready; retrying in Ns.`; the end prints
+  `SSH connection to NAME failed after 10 minutes: ERROR`. Non-transport errors still raise at once; still read-only
+  probes only. Tests with a fake clock: success after the old limit, the budget's end, a non-transport error.
+
+**8B, on `feature/task-work-cd`** after main is merged in. Starts when the owner answers call 23.
+- **L3** as call 23 is answered, at the classifier in `target_scan.py` (one rule for its two readers, the cutover's
+  agents gate and the verdict's Agents category), with tests and the Copy for its lines.
+- **L4 (Copy).** `verdict.py`'s History line names an unfinished turn for what it is:
+  `1 conversation on OLD has an unfinished turn; resume and finish it, then check again.` (plural: `N conversations
+  on OLD have unfinished turns; resume and finish them, then check again.`) for capture issues whose reason is `No validated completed native turn yet` or `No validated completed Claude turn yet`; other reasons keep
+  `could not be read on OLD`.
+- **Agents items match the text.** The Agents category's `items` list only what its verdict counts (run 1: `herdr (1)`
+  listed under `none running`).
+- **Runbook** (`live-cd/RUNBOOK.md`, lead): record the check's `cycle_completed_at` to the second beside the write's
+  time (step 12); Plaud's sign-in first, with the owner at the browser (its CLI gives up after 2 minutes).
+- Deferred to `task-work/issues.md`: L2 (a resumed launch rebuilds a NEW whose validation was interrupted; safe,
+  slow, P3, setup on main).
 
 ## Existing guards that must stay green
 
