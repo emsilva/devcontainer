@@ -185,16 +185,34 @@ class LinksTests(unittest.TestCase):
             self.assertEqual(forwards.active(), set())
             killed.assert_called_once_with(4200, signal.SIGTERM)
             self.assertEqual(json.loads((self.state / 'links-forwards.json').read_text())['forwards'], {})
+            self.assertEqual(self.notices, [('project-one', 'plaud', 'web.plaud.ai', 'Port 8199')])
+
+    def test_deadline_notifies_once_to_close_expired_page(self):
+        with self.forwards() as (forwards, _, killed):
+            self.handle(self.links.parse_request(packet()), forwards)
+            self.notices.clear()
+            with mock.patch.object(self.links, 'remote_listening', side_effect=AssertionError('expired port probed')):
+                forwards.tend(self.connection, now=220)
+                forwards.tend(self.connection, now=221)
+            self.assertEqual(forwards.active(), set())
+            killed.assert_called_once_with(4200, signal.SIGTERM)
+            self.assertEqual(self.notices, [('project-one', 'plaud', 'web.plaud.ai',
+                                            'Sign-in page expired; close its tab')])
 
     def test_forward_end_reason_is_logged(self):
-        for reason in ('deadline', 'remote stopped listening', 'callback forward exited'):
+        for reason in ('deadline', 'remote stopped listening', 'callback forward exited', 'stopped by owner'):
             with self.subTest(reason=reason), self.forwards() as (forwards, _, _), \
                     self.assertLogs(self.links._LOG, level='INFO') as logs:
+                self.notices.clear()
                 request = self.links.parse_request(packet())
                 self.handle(request, forwards)
                 if reason == 'callback forward exited':
                     self.children[-1].returncode = 0
                     forwards.active()
+                elif reason == 'stopped by owner':
+                    forwards.stop(request.port)
+                    self.assertEqual(self.notices[-1][-1], 'Port 8199')
+                    self.assertEqual(len(self.notices), 1)
                 else:
                     with mock.patch.object(self.links, 'remote_listening', return_value=False):
                         forwards.tend(self.connection, now=221 if reason == 'deadline' else 102)
@@ -310,8 +328,8 @@ class LinksTests(unittest.TestCase):
         self.assertNotIn('shell', run.call_args.kwargs)
         with mock.patch.object(self.links.notify, 'notify') as mac, \
                 mock.patch.object(self.links.subprocess, 'run', return_value=mock.Mock(returncode=0)) as herdr:
-            self.links.notify_link('project-one', 'plaud', 'web.plaud.ai', '8199')
-            self.assertIn('project-one', mac.call_args.args[0])
+            self.links.notify_link('project-one', 'plaud', 'web.plaud.ai', 'Sign-in page expired; close its tab')
+            mac.assert_called_once_with('project-one: plaud', 'web.plaud.ai — Sign-in page expired; close its tab')
             self.assertEqual(herdr.call_args_list[0].args[0], ['herdr', 'status'])
             self.assertEqual(herdr.call_args_list[1].args[0][:3], ['herdr', 'notification', 'show'])
         with mock.patch.object(self.links.notify, 'notify', side_effect=OSError), \

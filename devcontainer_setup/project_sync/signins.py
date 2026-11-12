@@ -235,7 +235,7 @@ def _failure(tool, state, code):
         return 'not signed in (the connection to the Codespace dropped)'
     if code == 124:
         return (f'not signed in (no approval within {_span(tool.deadline)}; '
-                'if a Mac notice said the callback port is busy, free it first)')
+                'close that page: a retry opens a new one)')
     if code:
         return f'not signed in (the sign-in command exited with code {code})'
     if state == UNKNOWN:

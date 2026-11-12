@@ -419,7 +419,7 @@ class SequenceTests(unittest.TestCase):
         cases = [
             (255, 'unknown', 'Codex: not signed in (the connection to the Codespace dropped)'),
             (124, 'signed-out', 'Codex: not signed in (no approval within 10 minutes; '
-                                'if a Mac notice said the callback port is busy, free it first)'),
+                                'close that page: a retry opens a new one)'),
             (0, 'signed-out', 'Codex: not signed in (the sign-in finished, but Codex still reports signed out)'),
             (0, 'unknown', 'Codex: not confirmed (could not check the sign-in afterwards)'),
             (255, 'signed-in', 'Codex: signed in'),
@@ -444,11 +444,20 @@ class SequenceTests(unittest.TestCase):
                 self.assertEqual(code, 0)
         self.assertIn('Signed in: Plaud, Claude, OpenCode, Grok.', out)
 
+    def test_expired_page_failure_names_new_page_on_retry(self):
+        for tool in self.signins.TOOLS:
+            with self.subTest(tool=tool.key):
+                self.assertEqual(self.signins._failure(tool, 'signed-out', 124),
+                    f'not signed in (no approval within {self.signins._span(tool.deadline)}; '
+                    'close that page: a retry opens a new one)')
+                self.assertEqual(self.signins._failure(tool, 'signed-out', 4),
+                                 'not signed in (the sign-in command exited with code 4)')
+
     def test_deadline_line_counts_seconds_when_not_whole_minutes(self):
         code, out, _, _ = self.sequence(self.states(plaud='signed-out'),
                                         follow=[{'plaud': {'state': 'signed-out', 'identity': None}}], login=124)
         self.assertIn('Plaud: not signed in (no approval within 150 seconds; '
-                      'if a Mac notice said the callback port is busy, free it first)\n', out)
+                      'close that page: a retry opens a new one)\n', out)
 
     def test_cancel_stops_sequence_and_keeps_record(self):
         code, out, login, _ = self.sequence(self.states(plaud='signed-out', codex='signed-out', claude='signed-out'),
