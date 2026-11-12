@@ -745,8 +745,47 @@ class ReplacementTests(unittest.TestCase):
                    (('codex', 'failed'), ('claude', 'other-method'), ('grok', 'absent'))})
         self.assertEqual(self.run_replace(), 0)
         self.assertEqual(self.archives()[0]['signins']['retry'], ['codex'])
-        self.assertIn('Not signed in yet on new-space: codex.', self.output.getvalue())
+        self.assertNotIn('Not signed in yet on new-space:', self.output.getvalue())
+        self.assertNotIn('Sign-in on new-space did not finish;', self.output.getvalue())
         self.assertTrue(any('delete' in argv for argv, _, _ in self.steps))
+
+    def test_fresh_missing_signin_record_adds_no_summary(self):
+        for code in (0, 1, 124, 255):
+            with self.subTest(code=code):
+                self.active(phase='moved', new='new-space')
+                self.valid_launch()
+                self.output.seek(0)
+                self.output.truncate(0)
+                self.signin_code = code
+                self.signin_record = dict(codespace='new-space', updated_at=3000,
+                    tools={'plaud': {'state': 'signed-out'}, 'claude': {'state': 'other-method'},
+                           'grok': {'state': 'absent'}})
+                self.assertEqual(self.run_replace(), 0)
+                self.assertEqual(self.archives()[-1]['signins']['retry'], ['plaud'])
+                self.assertNotIn('Not signed in yet on new-space:', self.output.getvalue())
+                self.assertNotIn('Sign-in on new-space did not finish;', self.output.getvalue())
+
+    def test_missing_or_stale_signin_prints_one_line_for_any_exit(self):
+        for kind in ('missing', 'stale'):
+            for code in (0, 1, 124, 255):
+                with self.subTest(kind=kind, code=code):
+                    self.active(phase='moved', new='new-space')
+                    self.valid_launch()
+                    self.output.seek(0)
+                    self.output.truncate(0)
+                    (self.state / 'signins.json').unlink(missing_ok=True)
+                    def signin(argv):
+                        if '--signin-all' not in argv:
+                            return None
+                        if kind == 'stale':
+                            self.save('signins.json', dict(codespace='new-space', updated_at=0, tools={}))
+                        return subprocess.CompletedProcess(argv, code)
+                    self.runner_hook = signin
+                    self.assertEqual(self.run_replace(), 0)
+                    self.assertEqual(self.archives()[-1]['signins']['retry'], ['unknown'])
+                    lines = [line for line in self.output.getvalue().splitlines()
+                             if 'sign-in' in line.lower() or 'signed in' in line.lower()]
+                    self.assertEqual(lines, ['Sign-in on new-space did not finish; retry with task work:signin:all.'])
 
     def test_new_check_failure_stops_before_the_offer(self):
         self.check_ok = False

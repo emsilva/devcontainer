@@ -344,7 +344,7 @@ class _Coordinator:
 
     def sign_in(self):
         began = self.now()
-        code = self.runtime_step('work', '--signin-all')
+        self.runtime_step('work', '--signin-all')
         try:
             record = _optional(self.state / 'signins.json') or {}
         except (OSError, ValueError):
@@ -358,10 +358,7 @@ class _Coordinator:
         else:
             retry = ['unknown']
         self.phase('signed-in', signins=dict(retry=retry, at=self.now()))
-        if retry:
-            print(f"Not signed in yet on {self.journal['new']}: {', '.join(retry)}. "
-                  'Retry with task work:signin:all.', flush=True)
-        if code:
+        if retry == ['unknown']:
             print(f"Sign-in on {self.journal['new']} did not finish; retry with task work:signin:all.", flush=True)
 
     def check(self):
