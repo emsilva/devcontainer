@@ -8,7 +8,7 @@ import math
 from pathlib import Path
 import time
 
-from . import arming, forget, keeper, replacing, restore, scratch, seal, sync_cycle, workspace
+from . import arming, forget, keeper, replacing, restore, scratch, seal, sync_cycle, verdict, workspace
 from .checkpoint_store import Store
 from .replication import validate_manifest
 from .state import atomic_write, read_json, runtime_id
@@ -216,14 +216,17 @@ def _history_text(conversations, old, new, error):
     if error:
         return 'Not ready: ' + error
     failures = []
-    for category, text in [('missing', f'are not on {new}'), ('pending', 'are still being published'),
-                           ('diverged', 'have a different version on this Mac')]:
+    for category, singular, plural in [('missing', f'is not on {new}', f'are not on {new}'),
+                                       ('pending', 'is still being published', 'are still being published'),
+                                       ('diverged', 'has a different version on this Mac', 'have a different version on this Mac')]:
         keys = conversations[category]
         if keys:
             details = '' if category == 'pending' else ' (' + _listed(keys) + ')'
-            failures.append(f'{len(keys)} conversations from {old} {text}{details}')
+            text = singular if len(keys) == 1 else plural
+            failures.append(f'{verdict._quantity(len(keys), "conversation")} from {old} {text}{details}')
+    count = len(conversations['on_new'])
     return 'Not ready: ' + '; '.join(failures) if failures else (
-        f"{len(conversations['on_new'])} conversations from {old} are on {new}")
+        f'{verdict._quantity(count, "conversation")} from {old} ' + ('is' if count == 1 else 'are') + f' on {new}')
 
 
 def run(project, state, *, operation, receipt, now=time.time, sleep=time.sleep, wait=360) -> int:

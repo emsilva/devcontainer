@@ -275,6 +275,42 @@ class CutoverTests(unittest.TestCase):
             leaf.assert_not_called()
         self.assertFalse(read_json(self.receipt_path)['moved'])
 
+    def test_final_flush_uses_singular_for_one_file_and_conversation(self):
+        for count in (0, 1, 2):
+            with self.subTest(count=count):
+                self.bind('old-space')
+                (self.state / 'retired/old-space.json').unlink(missing_ok=True)
+                manifest = self.store.load(self.snapshot)
+                digest = self.store.put(b'completed\n')
+                entries = []
+                for index in range(count):
+                    sid = f'{index + 1:08d}-1111-4111-8111-111111111111'
+                    entries.append(dict(agent='codex', session_id=sid, files=[
+                        dict(session_id=sid, path='rollout-' + sid + '.jsonl',
+                             size=len(b'completed\n'), sha256=digest, blob=digest)]))
+                manifest['conversations']['entries'] = entries
+                self.snapshot = self.store.save(manifest)
+                receipt = self.store.acknowledge(self.snapshot, source='codespace')
+                inbound = sync_cycle.direction()
+                inbound.update(outcome='complete', snapshot_id=self.snapshot, receipt=receipt)
+                cycle = dict(self.evidence.cycle, directions=dict(codespace_to_desktop=inbound))
+                cutoffs = verdict.cutoffs(manifest)
+                files = tuple((f'note-{index}.md', digest) for index in range(count))
+                sessions = tuple(sorted(('codex/sessions/' + name, cutoff.sha256)
+                                        for (_, name), cutoff in cutoffs.items()))
+                self.scan = replace(self.scan, scratch=files, sessions=sessions,
+                                    checked=tuple(sorted(cutoffs)), cutoffs_sha256=target_scan.cutoffs_digest(cutoffs))
+                self.evidence = replace(self.evidence, scan=self.scan, mac_scratch=files, cycle=cycle,
+                                        receipt=receipt, sessions_by_file=verdict.sessions_by_file(manifest))
+                code, out = self.run_cutover()
+                self.assertEqual(code, 0, out)
+                when = self.c.overview._when(self.clock, self.clock)
+                noun = 'file' if count == 1 else 'files'
+                conversation = 'conversation' if count == 1 else 'conversations'
+                self.assertIn(f'Final flush of old-space recorded at {when} '
+                              f'({count} {noun}, {count} {conversation}).', out)
+                self.assertEqual(seal.read(self.state, 'old-space').scratch, files)
+
     def test_agents_are_asked_never_killed(self):
         running = replace(self.scan, agents=(('claude', 2), ('codex', 1), ('herdr', 1)))
         for answer in ('', 'stop', EOFError(), KeyboardInterrupt()):

@@ -273,8 +273,8 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
                        operation=operation, cycle_id=evidence.cycle['cycle_id'],
                        snapshot_id=evidence.receipt['snapshot_id'], now=sealed_at)
             print(f'Final flush of {old} recorded at {overview._when(sealed_at, sealed_at)} '
-                  f'({len(evidence.scan.scratch)} files, '
-                  f'{len({(agent, session) for agent, _, session in evidence.sessions_by_file})} conversations).')
+                  f'({verdict._quantity(len(evidence.scan.scratch), "file")}, '
+                  f'{verdict._quantity(len({(agent, session) for agent, _, session in evidence.sessions_by_file}), "conversation")}).')
             remote(rebind=new, move=decision, armed=recovery if decision is not None else None, expected_old=old)
         if moved():
             moved_line()

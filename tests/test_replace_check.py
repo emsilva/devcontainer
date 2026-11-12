@@ -137,10 +137,32 @@ class ReplaceCheckTests(unittest.TestCase):
         code, result, output = self.check()
         self.assertEqual((code, result['ok'], result['sync']), (0, True, 'ok'))
         self.assertEqual(result['conversations']['on_new'], [['codex', SID]])
-        self.assertIn('  History   1 conversations from old-space are on new-space', output)
+        self.assertIn('  History   1 conversation from old-space is on new-space', output)
         self.assertEqual(set(result), {'schema', 'operation', 'step', 'codespace', 'checked_at', 'sync',
             'cycle_completed_at', 'recovery', 'herdr', 'conversations', 'ok'})
         self.assertEqual(stat.S_IMODE((self.state / 'check.json').stat().st_mode), 0o600)
+
+    def test_history_copy_agrees_with_the_conversation_count(self):
+        verbs = dict(on_new=('is on new-space', 'are on new-space'),
+                     missing=('is not on new-space', 'are not on new-space'),
+                     pending=('is still being published', 'are still being published'),
+                     diverged=('has a different version on this Mac', 'have a different version on this Mac'))
+        identities = [('codex', 'first'), ('claude', 'second')]
+        for count in (0, 1, 2):
+            for category in verbs:
+                if count == 0 and category != 'on_new':
+                    continue
+                with self.subTest(count=count, category=category):
+                    conversations = {name: [] for name in verbs}
+                    conversations[category] = identities[:count]
+                    noun = 'conversation' if count == 1 else 'conversations'
+                    verb = verbs[category][0 if count == 1 else 1]
+                    expected = f'{count} {noun} from old-space {verb}'
+                    if category != 'on_new':
+                        expected = 'Not ready: ' + expected
+                        if category != 'pending':
+                            expected += ' (' + ', '.join(' '.join(key) for key in identities[:count]) + ')'
+                    self.assertEqual(self.checker._history_text(conversations, 'old-space', 'new-space', None), expected)
 
     def test_longer_revision_counts(self):
         code, result, _ = self.check(self.make_cycle([self.entry_for(b'completed\nnext turn\n')]))
