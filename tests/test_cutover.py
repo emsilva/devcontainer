@@ -383,9 +383,63 @@ class CutoverTests(unittest.TestCase):
         self.assertNotIn('Ended ', out)
         self.sealer.assert_not_called()
 
+    def test_service_timeout_reports_verified_survivors_but_skips_reused_pids(self):
+        for index, (actual_start, timed_out) in enumerate(((1, True), (99, False))):
+            with self.subTest(reused=not timed_out):
+                pid = 110001 + index
+                service = ('codex app-server', pid, 1)
+                self.service_process(pid, actual_start, b'codex\0app-server\0')
+                self.service_signal = Mock()
+                self.connection.python.side_effect = self.execute_service_program
+                running = replace(self.scan, services=(service,))
+                self.scanner.side_effect = [running, running]
+                self.ask.side_effect = ['end', 'stop']
+                code, out = self.run_cutover()
+                self.assertEqual(code, 1)
+                message = 'Did not end within 10 seconds on old-space: codex app-server (1).'
+                self.assertEqual(message in out, timed_out)
+                self.assertNotIn('Ended ', out)
+                self.assertNotIn('Started again', out)
+                if timed_out:
+                    self.service_signal.assert_called_once_with(pid, signal.SIGTERM)
+                else:
+                    self.service_signal.assert_not_called()
+
+    def test_ended_service_restarting_under_a_new_pid_is_named_once(self):
+        ended = ('codex app-server', 120001, 1)
+        survivor = ('codex app-server', 120002, 2)
+        restarted = ('codex app-server', 120003, 3)
+        self.service_process(120001, 1, b'codex\0app-server\0')
+        self.service_process(120002, 2, b'codex\0app-server\0')
+        def end(pid, sig):
+            self.assertEqual(sig, signal.SIGTERM)
+            if pid == ended[1]:
+                path = self.base / 'proc' / str(pid)
+                (path / 'stat').unlink()
+                (path / 'cmdline').unlink()
+                path.rmdir()
+        self.service_signal = Mock(side_effect=end)
+        self.connection.python.side_effect = self.execute_service_program
+        original = replace(self.scan, services=(ended, survivor))
+        after = replace(self.scan, services=(survivor, restarted, ('opencode serve', 120004, 4)))
+        self.scanner.side_effect = [original, after, after]
+        self.ask.side_effect = ['end', '', 'stop']
+        code, out = self.run_cutover()
+        self.assertEqual(code, 1)
+        message = ('Started again on old-space: codex app-server (1). '
+                   'Something restarts it; close that, then press Enter.')
+        self.assertEqual(out.count(message), 1)
+        self.assertIn('Ended codex app-server (1) on old-space.', out)
+        self.assertIn('Did not end within 10 seconds on old-space: codex app-server (1).', out)
+        lines = out.splitlines()
+        self.assertTrue(lines[lines.index(message) + 1].startswith('On old-space: background services running:'))
+        self.assertEqual(self.service_signal.call_args_list,
+                         [unittest.mock.call(120001, signal.SIGTERM), unittest.mock.call(120002, signal.SIGTERM)])
+        self.sealer.assert_not_called()
+
     def test_background_service_end_refuses_an_unlisted_result(self):
         self.scanner.side_effect = [replace(self.scan, services=(('codex app-server', 100001, 1),))]
-        self.connection.python.return_value = b'[["codex app-server",100002,1]]'
+        self.connection.python.return_value = b'{"ended":[["codex app-server",100002,1]],"did_not_end":[]}'
         self.ask.side_effect = ['end']
         code, out = self.run_cutover()
         self.assertEqual(code, 1)
@@ -396,7 +450,7 @@ class CutoverTests(unittest.TestCase):
         services = (('codex app-server', 100001, 1),)
         self.gather.side_effect = [replace(self.evidence, scan=replace(self.scan, services=services)), self.evidence]
         self.scanner.side_effect = [self.scan, replace(self.scan, services=services), self.scan, self.scan]
-        self.connection.python.return_value = b'[["codex app-server",100001,1]]'
+        self.connection.python.return_value = b'{"ended":[["codex app-server",100001,1]],"did_not_end":[]}'
         self.ask.side_effect = ['end']
         self.assertEqual(self.run_cutover()[0], 0)
         self.assertEqual(self.gather.call_count, 2)
