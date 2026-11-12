@@ -288,8 +288,9 @@ class VerdictTests(unittest.TestCase):
                     dict(agent=agent, session_id=SID, reason=reason)]
                 row = self.judge('History', replace(self.evidence, cycle=cycle))
                 self.assertEqual(row.verdict, 'unsafe')
-                self.assertEqual(row.text, 'Not safe: 1 conversation on space has an unfinished turn; '
+                self.assertEqual(row.text, f'Not safe: 1 conversation on space has an unfinished turn ({agent} {SID}); '
                                  'resume and finish it, then check again')
+                self.assertEqual(row.items, (agent + ' ' + SID,))
 
     def test_two_unfinished_capture_issues_use_plural_copy(self):
         cycle = copy.deepcopy(self.cycle)
@@ -298,8 +299,9 @@ class VerdictTests(unittest.TestCase):
             dict(agent='claude', session_id='other', reason='No validated completed Claude turn yet')]
         row = self.judge('History', replace(self.evidence, cycle=cycle))
         self.assertEqual(row.verdict, 'unsafe')
-        self.assertEqual(row.text, 'Not safe: 2 conversations on space have unfinished turns; '
+        self.assertEqual(row.text, f'Not safe: 2 conversations on space have unfinished turns (codex {SID}, claude other); '
                          'resume and finish them, then check again')
+        self.assertEqual(row.items, ('codex ' + SID, 'claude other'))
 
     def test_mixed_capture_issues_keep_the_unreadable_count(self):
         issues = [dict(agent='codex', session_id=SID, reason='No validated completed native turn yet'),
@@ -312,7 +314,41 @@ class VerdictTests(unittest.TestCase):
                 cycle = copy.deepcopy(self.cycle)
                 cycle['directions']['codespace_to_desktop']['capture_issues'] = rows
                 row = self.judge('History', replace(self.evidence, cycle=cycle))
-                self.assertEqual((row.verdict, row.text), ('unsafe', 'Not safe: 2 conversations could not be read on space'))
+                items = tuple(issue['agent'] + ' ' + issue['session_id'] for issue in rows)
+                self.assertEqual((row.verdict, row.text),
+                                 ('unsafe', 'Not safe: 2 conversations could not be read on space (' + ', '.join(items) + ')'))
+                self.assertEqual(row.items, items)
+
+    def test_capture_issue_names_omit_missing_fields_and_keep_all_missing_copy(self):
+        unfinished = 'No validated completed native turn yet'
+        incomplete = [dict(agent='codex'), dict(agent='claude', session_id=None),
+                      dict(session_id=SID), dict(agent=None, session_id=SID)]
+        for named in (True, False):
+            for mixed in (False, True):
+                with self.subTest(named=named, mixed=mixed):
+                    issues = [dict(issue, reason=unfinished) for issue in incomplete]
+                    if named:
+                        issues.insert(0, dict(agent='codex', session_id=SID, reason=unfinished))
+                    if mixed:
+                        issues[-1]['reason'] = 'Malformed native JSONL record'
+                    cycle = copy.deepcopy(self.cycle)
+                    cycle['directions']['codespace_to_desktop']['capture_issues'] = issues
+                    row = self.judge('History', replace(self.evidence, cycle=cycle))
+                    names = f' (codex {SID})' if named else ''
+                    expected = (f'{len(issues)} conversations could not be read on space' + names if mixed else
+                                f'{len(issues)} conversations on space have unfinished turns' + names +
+                                '; resume and finish them, then check again')
+                    self.assertEqual(row.text, 'Not safe: ' + expected)
+                    self.assertEqual(row.items, ('codex ' + SID,) if named else ())
+
+    def test_capture_issue_names_strip_terminal_controls(self):
+        cycle = copy.deepcopy(self.cycle)
+        cycle['directions']['codespace_to_desktop']['capture_issues'] = [
+            dict(agent='co\x1b[31mdex', session_id='\n' + SID + '\x00',
+                 reason='No validated completed native turn yet')]
+        row = self.judge('History', replace(self.evidence, cycle=cycle))
+        self.assertEqual(row.items, ('codex ' + SID,))
+        self.assertIn(f' (codex {SID}); resume and finish it', row.text)
 
     def test_cutoffs_read_own_and_dependency_files_one_way(self):
         entry = dict(agent='codex', session_id='child', files=[
