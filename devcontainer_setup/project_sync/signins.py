@@ -10,6 +10,7 @@ import re
 import shlex
 import signal
 import subprocess
+import sys
 import time
 
 from .links import _defer_signals, watcher_live
@@ -270,8 +271,10 @@ def _summary(results):
     return bool(missing)
 
 
-def run(project, state: Path, codespace: str) -> int:
+def run(project, state: Path, codespace: str, *, ask=input, interactive=None) -> int:
     state = Path(state)
+    if interactive is None:
+        interactive = sys.stdin.isatty()
     # Catch contention only at acquisition, not a BlockingIOError from a tool.
     lock = locked(state / 'signins.lock')
     try:
@@ -301,26 +304,53 @@ def run(project, state: Path, codespace: str) -> int:
                 print(refusal)
                 return 1
             results = probe(state, [tool.key for tool in TOOLS])
-            for tool in TOOLS:
+            wait_for_owner = interactive
+            for index, tool in enumerate(TOOLS):
                 current = tool
                 if results[tool.key]['state'] != SIGNED_OUT:
                     _line(tool, results[tool.key])
                     continue
-                # A previous approval can take ten minutes: recheck both heartbeats.
-                refusal = ready(state)
-                if refusal:
-                    print(refusal)
+                if wait_for_owner:
+                    current = None
+                    print('Sign-in pages open one at a time on this Mac. Press Enter when you are at the browser, '
+                          'or type skip to sign in later.', flush=True)
+                    try:
+                        answer = ask('> ')
+                    except EOFError:
+                        answer = 'skip'
+                    if answer.strip().lower() == 'skip':
+                        break
+                    wait_for_owner = False
+                    current = tool
+                while True:
+                    # An approval or owner prompt can take minutes: recheck both heartbeats.
+                    refusal = ready(state)
+                    if refusal:
+                        print(refusal)
+                        break
+                    text = f'Signing in to {tool.label}. Approve the page that opens on this Mac.'
+                    if tool.key == 'grok':
+                        text += ' Enter the code shown here.'
+                    print(text, flush=True)
+                    code = login(state, tool)
+                    if code in (128 + signal.SIGINT, 128 + signal.SIGTERM, 128 + signal.SIGHUP):
+                        cancelled = code
+                        break
+                    results[tool.key] = probe(state, [tool.key])[tool.key]
+                    _line(tool, results[tool.key], after=True, code=code)
+                    if not interactive or results[tool.key]['state'] != SIGNED_OUT or code == 255:
+                        break
+                    follows = any(results[later.key]['state'] == SIGNED_OUT for later in TOOLS[index + 1:])
+                    print(f"Press Enter to open {tool.label}'s page again, or type next to "
+                          + ('go on.' if follows else 'finish.'), flush=True)
+                    try:
+                        answer = ask('> ')
+                    except EOFError:
+                        answer = 'next'
+                    if answer.strip().lower() == 'next':
+                        break
+                if refusal or cancelled:
                     break
-                text = f'Signing in to {tool.label}. Approve the page that opens on this Mac.'
-                if tool.key == 'grok':
-                    text += ' Enter the code shown here.'
-                print(text, flush=True)
-                code = login(state, tool)
-                if code in (128 + signal.SIGINT, 128 + signal.SIGTERM, 128 + signal.SIGHUP):
-                    cancelled = code
-                    break
-                results[tool.key] = probe(state, [tool.key])[tool.key]
-                _line(tool, results[tool.key], after=True, code=code)
         except (KeyboardInterrupt, _SigninStop) as error:
             cancelled = 128 + (error.number if isinstance(error, _SigninStop) else signal.SIGINT)
         cancellation = 'Sign-in cancelled' + (' during ' + current.label if current else '') + '.'

@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 class ProbeTests(unittest.TestCase):
@@ -154,13 +154,207 @@ class SequenceTests(unittest.TestCase):
         return {t.key: {'state': changes.get(t.key, 'signed-in'),
                         'identity': 'a@b.c' if t.key == 'claude' else None} for t in self.signins.TOOLS}
 
-    def sequence(self, initial=None, *, follow=None, login=0, ready=None):
+    def sequence(self, initial=None, *, follow=None, login=0, ready=None, interactive=False, ask=None):
+        if ask is None:
+            ask = Mock(side_effect=AssertionError('unexpected prompt'))
         with patch.object(self.signins, 'ready', return_value=ready), \
                 patch.object(self.signins, 'probe', side_effect=[initial or self.states(), *list(follow or [])]) as probe, \
                 patch.object(self.signins, 'login', side_effect=login if isinstance(login, list) else None,
                              return_value=login) as sign_in, contextlib.redirect_stdout(io.StringIO()) as out:
-            code = self.signins.run(self.state, self.state, 'paired')
+            code = self.signins.run(self.state, self.state, 'paired', ask=ask, interactive=interactive)
         return code, out.getvalue(), sign_in, probe
+
+    def test_noninteractive_never_prompts(self):
+        for exit_code in (0, 4, 124):
+            with self.subTest(exit_code=exit_code):
+                initial = self.states(plaud='signed-out')
+                ask = Mock(side_effect=AssertionError('noninteractive prompt'))
+                code, out, login, probe = self.sequence(initial, follow=[{'plaud': initial['plaud']}],
+                                                       login=exit_code, ask=ask, interactive=False)
+                self.assertEqual(code, 1)
+                ask.assert_not_called()
+                self.assertEqual(login.call_count, 1)
+                self.assertEqual(probe.call_count, 2)
+                self.assertNotIn('Press Enter', out)
+
+    def test_first_prompt_waits_before_login(self):
+        def answer(prompt):
+            self.assertNotIn('Signing in to', sys.stdout.getvalue())
+            return ''
+        ask = Mock(side_effect=answer)
+        code, out, login, _ = self.sequence(self.states(plaud='signed-out'),
+            follow=[{'plaud': self.states()['plaud']}], ask=ask, interactive=True)
+        self.assertEqual(code, 0)
+        ask.assert_called_once_with('> ')
+        self.assertEqual(login.call_count, 1)
+        self.assertIn('Sign-in pages open one at a time on this Mac. Press Enter when you are at the browser, '
+                      'or type skip to sign in later.\n', out)
+
+    def test_first_prompt_skip_keeps_signed_out_record(self):
+        ask = Mock(return_value='  SkIP  ')
+        code, out, login, probe = self.sequence(self.states(plaud='signed-out', grok='signed-out'),
+                                               ask=ask, interactive=True)
+        self.assertEqual(code, 1)
+        ask.assert_called_once()
+        login.assert_not_called()
+        self.assertEqual(probe.call_count, 1)
+        self.assertIn('Not signed in: Plaud, Grok. Retry with task work:signin:all.', out)
+        record = json.loads((self.state / 'signins.json').read_text())
+        self.assertEqual([record['tools'][key]['state'] for key in ('plaud', 'grok')],
+                         ['signed-out', 'signed-out'])
+
+    def test_retry_until_probe_confirms_signin(self):
+        for exit_code in (0, 1, 4, 124):
+            with self.subTest(exit_code=exit_code):
+                initial = self.states(plaud='signed-out', grok='signed-out')
+                ask = Mock(side_effect=['', '', ''])
+                code, out, login, probe = self.sequence(initial, login=[exit_code, exit_code, 0, 0],
+                    follow=[{'plaud': initial['plaud']}, {'plaud': initial['plaud']},
+                            {'plaud': self.states()['plaud']}, {'grok': self.states()['grok']}],
+                    ask=ask, interactive=True)
+                self.assertEqual(code, 0)
+                self.assertEqual(ask.call_count, 3)
+                self.assertEqual(probe.call_count, 5)
+                self.assertEqual([call.args[1] for call in login.call_args_list],
+                                 [self.signins.TOOLS[0]] * 3 + [self.signins.TOOLS[-1]])
+                retry = "Press Enter to open Plaud's page again, or type next to go on."
+                self.assertEqual(out.count(retry), 2)
+                self.assertLess(out.index('Plaud: not signed in'), out.index(retry))
+                self.assertIn('Signed in: Plaud, Codex, Claude, OpenCode, Grok.', out)
+
+    def test_retry_next_moves_to_following_tool(self):
+        initial = self.states(plaud='signed-out', grok='signed-out')
+        ask = Mock(side_effect=['', '  NeXt  '])
+        code, out, login, _ = self.sequence(initial, login=[4, 0],
+            follow=[{'plaud': initial['plaud']}, {'grok': self.states()['grok']}], ask=ask, interactive=True)
+        self.assertEqual(code, 1)
+        self.assertEqual([call.args[1].key for call in login.call_args_list], ['plaud', 'grok'])
+        self.assertEqual(ask.call_count, 2)
+        self.assertIn('Not signed in: Plaud. Retry with task work:signin:all.', out)
+
+    def test_retry_finish_when_no_signed_out_tool_follows(self):
+        initial = self.states(plaud='signed-out', codex='other-method', opencode='unknown', grok='absent')
+        code, out, login, _ = self.sequence(initial, login=4, follow=[{'plaud': initial['plaud']}],
+                                           ask=Mock(side_effect=['', 'next']), interactive=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(login.call_count, 1)
+        self.assertIn("Press Enter to open Plaud's page again, or type next to finish.\n", out)
+        self.assertNotIn('type next to go on', out)
+
+    def test_connection_drop_does_not_offer_retry(self):
+        for after in ('signed-out', 'unknown'):
+            with self.subTest(after=after):
+                ask = Mock(side_effect=[''])
+                code, out, login, _ = self.sequence(self.states(plaud='signed-out'), login=255,
+                    follow=[{'plaud': {'state': after}}], ask=ask, interactive=True)
+                self.assertEqual(code, 1)
+                self.assertEqual(login.call_count, 1)
+                self.assertEqual(ask.call_count, 1)
+                self.assertNotIn('page again', out)
+
+    def test_other_probe_states_do_not_offer_retry(self):
+        for after in ('signed-in', 'other-method', 'unknown', 'absent'):
+            with self.subTest(after=after):
+                ask = Mock(side_effect=[''])
+                code, out, login, _ = self.sequence(self.states(plaud='signed-out'), login=4,
+                    follow=[{'plaud': {'state': after}}], ask=ask, interactive=True)
+                self.assertEqual(code, int(after == 'unknown'))
+                self.assertEqual(login.call_count, 1)
+                self.assertEqual(ask.call_count, 1)
+                self.assertNotIn('page again', out)
+
+    def test_cancelled_login_does_not_offer_retry(self):
+        for exit_code in (130, 143, 129):
+            with self.subTest(exit_code=exit_code):
+                ask = Mock(side_effect=[''])
+                code, out, login, probe = self.sequence(self.states(plaud='signed-out', grok='signed-out'),
+                                                       login=exit_code, ask=ask, interactive=True)
+                self.assertEqual(code, exit_code)
+                self.assertEqual(ask.call_count, 1)
+                self.assertEqual(login.call_count, 1)
+                self.assertEqual(probe.call_count, 1)
+                self.assertIn('Sign-in cancelled during Plaud.', out)
+                self.assertNotIn('page again', out)
+
+    def test_ctrl_c_at_first_prompt_keeps_record(self):
+        code, out, login, _ = self.sequence(self.states(plaud='signed-out'),
+            ask=Mock(side_effect=KeyboardInterrupt), interactive=True)
+        self.assertEqual(code, 130)
+        login.assert_not_called()
+        self.assertIn('Sign-in cancelled.\n', out)
+        self.assertIn('Signed in: Codex, Claude, OpenCode, Grok.', out)
+        self.assertEqual(json.loads((self.state / 'signins.json').read_text())['tools']['plaud']['state'], 'signed-out')
+
+    def test_ctrl_c_at_retry_prompt_keeps_record(self):
+        initial = self.states(plaud='signed-out')
+        code, out, login, _ = self.sequence(initial, login=4, follow=[{'plaud': initial['plaud']}],
+            ask=Mock(side_effect=['', KeyboardInterrupt]), interactive=True)
+        self.assertEqual(code, 130)
+        self.assertEqual(login.call_count, 1)
+        self.assertIn('Sign-in cancelled during Plaud.\n', out)
+        self.assertIn('Not signed in: Plaud. Retry with task work:signin:all.', out)
+        self.assertEqual(json.loads((self.state / 'signins.json').read_text())['tools']['plaud']['state'], 'signed-out')
+
+    def test_eof_at_first_prompt_skips_logins(self):
+        code, out, login, _ = self.sequence(self.states(plaud='signed-out'),
+            ask=Mock(side_effect=EOFError), interactive=True)
+        self.assertEqual(code, 1)
+        login.assert_not_called()
+        self.assertIn('Not signed in: Plaud. Retry with task work:signin:all.', out)
+        self.assertNotIn('cancelled', out)
+        self.assertTrue((self.state / 'signins.json').exists())
+
+    def test_eof_at_retry_prompt_moves_on(self):
+        initial = self.states(plaud='signed-out', grok='signed-out')
+        ask = Mock(side_effect=['', EOFError])
+        code, out, login, _ = self.sequence(initial, login=[4, 0],
+            follow=[{'plaud': initial['plaud']}, {'grok': self.states()['grok']}], ask=ask, interactive=True)
+        self.assertEqual(code, 1)
+        self.assertEqual([call.args[1].key for call in login.call_args_list], ['plaud', 'grok'])
+        self.assertEqual(ask.call_count, 2)
+        self.assertNotIn('cancelled', out)
+        self.assertEqual(json.loads((self.state / 'signins.json').read_text())['tools']['grok']['state'], 'signed-in')
+
+    def test_no_prompt_when_no_tool_needs_login(self):
+        for initial in (self.states(), self.states(codex='other-method', opencode='unknown', grok='absent')):
+            with self.subTest(initial=initial):
+                ask = Mock(side_effect=AssertionError('nothing needs a login'))
+                _, out, login, _ = self.sequence(initial, ask=ask, interactive=True)
+                ask.assert_not_called()
+                login.assert_not_called()
+                self.assertNotIn('Press Enter', out)
+
+    def test_default_interactivity_follows_stdin(self):
+        for tty in (True, False):
+            with self.subTest(tty=tty), patch.object(sys.stdin, 'isatty', return_value=tty) as isatty:
+                ask = Mock(return_value='')
+                code, _, login, _ = self.sequence(self.states(plaud='signed-out'),
+                    follow=[{'plaud': self.states()['plaud']}], ask=ask, interactive=None)
+                self.assertEqual(code, 0)
+                self.assertEqual(ask.call_count, int(tty))
+                self.assertEqual(login.call_count, 1)
+                isatty.assert_called_once()
+
+    def test_termination_at_either_prompt_keeps_record(self):
+        previous = {n: signal.getsignal(n) for n in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+        for number in (signal.SIGTERM, signal.SIGHUP):
+            for retry in (False, True):
+                with self.subTest(signal=number, retry=retry):
+                    calls = []
+                    def answer(prompt):
+                        calls.append(prompt)
+                        if len(calls) == (2 if retry else 1):
+                            signal.raise_signal(number)
+                        return ''
+                    initial = self.states(plaud='signed-out')
+                    code, out, login, _ = self.sequence(initial, login=4,
+                        follow=[{'plaud': initial['plaud']}] if retry else [], ask=answer, interactive=True)
+                    self.assertEqual(code, 128 + number)
+                    self.assertEqual(login.call_count, int(retry))
+                    self.assertIn('Sign-in cancelled' + (' during Plaud' if retry else '') + '.\n', out)
+                    self.assertIn('Signed in:', out)
+                    self.assertTrue((self.state / 'signins.json').exists())
+                    self.assertEqual({n: signal.getsignal(n) for n in previous}, previous)
 
     def test_not_connected_refuses_without_ssh(self):
         with patch.object(self.signins, 'watcher_live', return_value=False), \
