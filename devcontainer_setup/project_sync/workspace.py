@@ -708,7 +708,12 @@ def recovery_lines(value):
 
 def status_text(value):
     worker, scratch_status, history = value['worker'], value['scratch'], value['conversations']
-    lines = ['Sync worker: ' + ('running' if worker.get('running') else 'stopped'),
+    worker_text = 'running' if worker.get('running') else 'stopped'
+    error = worker.get('error')
+    if worker.get('running') and worker.get('phase') == 'waiting' and isinstance(error, str) and error:
+        from .sessions import display_text
+        worker_text += ', waiting: ' + display_text(error, 200)
+    lines = ['Sync worker: ' + worker_text,
              'Scratch: ' + scratch_status.get('phase', 'unknown'),
              'History: ' + history['outcome'] + ' (' + history['stage'] + ')']
     for name, label in zip(sync_cycle.DIRECTIONS, ('Desktop → Codespace', 'Codespace → Desktop')):

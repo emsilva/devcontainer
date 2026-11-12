@@ -1061,6 +1061,28 @@ class ProjectSyncCLITests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertFalse(self.state.exists())
 
+    def test_status_names_only_a_running_waiting_workers_error(self):
+        from devcontainer_setup.project_sync import sessions, sync_cycle, workspace
+        history = sync_cycle.summary({}, current=False, local_receipt=None)
+        history['retained_receipts'] = {}
+        error = 'SSH host key verification failed;\nverify identity.\x1b[31m ' + 'x' * 220
+        cases = [
+            (dict(running=True, phase='waiting', error=error),
+             'running, waiting: ' + sessions.display_text(error, 200)),
+            (dict(running=True, phase='waiting', error='Codespace is stopped'),
+             'running, waiting: Codespace is stopped'),
+            (dict(running=True, phase='syncing', error=error), 'running'),
+            (dict(running=False, phase='waiting', error=error), 'stopped'),
+            (dict(running=True, phase='waiting', error=''), 'running'),
+            (dict(running=True, phase='waiting', error=None), 'running'),
+            (dict(running=True, phase='waiting'), 'running'),
+        ]
+        for worker, expected in cases:
+            with self.subTest(worker=worker):
+                text = workspace.status_text(dict(worker=worker, scratch=dict(phase='waiting'),
+                                                  conversations=history))
+                self.assertEqual(text.splitlines()[0], 'Sync worker: ' + expected)
+
     def test_work_status_is_offline_and_does_not_create_state(self):
         result = self.run_cli('work', '--status')
         self.assertEqual(result.returncode, 0, result.stderr)
