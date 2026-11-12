@@ -337,8 +337,9 @@ Connect with task work:cs.
   `NAME (MACHINE, created at HH:MM)` per row, then `cancel`. Cancel with an uncertain row listed: `Replace stopped
   at create: NAME cannot be fully read from GitHub, and it may be the Codespace this replace asked for. Check it on
   GitHub, then run REPLACE again.`
-- Sign-ins: `Not signed in yet on NEW: TOOLS. Retry with task work:signin:all.` · `Sign-in on NEW did not finish;
-  retry with task work:signin:all.`
+- Sign-ins (Task 9A): the sign-in step's own summary names what is missing (`Not signed in: TOOLS. Retry with
+  task work:signin:all.`); the replace adds only `Sign-in on NEW did not finish; retry with task work:signin:all.`,
+  once, when the step wrote no fresh record.
 - NEW not ready: `NEW is not ready: fix the lines marked Not ready, then run REPLACE to check it again. OLD stays.`
 - An ended journal found on a rerun: `The replace of OLD ended: NAME was deleted.`
 
@@ -348,7 +349,7 @@ On OLD: claude (2), codex (1) running. End them, then press Enter to check again
 OLD's final flush is not complete; nothing moved:
   Scratch  …
 Fix the lines above, then run the replace again.
-Final flush of OLD recorded at HH:MM (N files, M conversations).
+Final flush of OLD recorded at HH:MM (N files, M conversations).  (singular for 1: `1 file`, `1 conversation`, Task 9B)
 Moved sync, recovery and Herdr to NEW.
 ```
 - Not armed: `Moved sync and Herdr to NEW.` · Herdr failed: `Moved sync to NEW; Herdr could not connect it. The
@@ -365,7 +366,7 @@ Checked NEW at HH:MM:
   Sync      a cycle completed at HH:MM
   Recovery  armed; its keeper is running
   Herdr     reachable
-  History   N conversations from OLD are on NEW
+  History   N conversations from OLD are on NEW  (one: `1 conversation from OLD is on NEW`, Task 9B)
 Kept on this Mac only: codex SESSION_ID
 ```
 - Recovery not armed: `not armed`. A failing line starts `Not ready: `: `Not ready: no sync cycle completed in 6
@@ -1172,6 +1173,38 @@ main into `feature/task-work-cd`). It owns `devcontainer_setup/project_sync/sess
   time (step 12); Plaud's sign-in first, with the owner at the browser (its CLI gives up after 2 minutes).
 - Deferred to `task-work/issues.md`: L2 (a resumed launch rebuilds a NEW whose validation was interrupted; safe,
   slow, P3, setup on main).
+
+### Task 9: Fixes from live run 2
+
+Source: live run 2 (2026-11-11/12, passed with three items not shown), `live-cd/LIVE.md` "Run 2b" and "Run 2 verdict";
+owner rulings R-A..R-D in `stage-d/OWNER-BATCH.md`. Design and briefs: `stage-d/build/task9/DESIGN.md`,
+`task9a/BRIEF.md`, `task9b/BRIEF.md` (the briefs win), lead ruling `task9b/RULING-1.md`. Deferred items are issues
+#108-#115. Each fix test first, shown failing before its change, in its own commit.
+
+**9A, sign-ins** (`signins.py`, `links.py`, `replacement.sign_in`).
+- **S1.** `signins.run(..., ask=input, interactive=None)`; interactive means stdin is a TTY (all three callers:
+  `task work:signin:all`, setup's create, the replace). Before the first tool that needs a login:
+  `Sign-in pages open one at a time on this Mac. Press Enter when you are at the browser, or type skip to sign in later.`
+  After a login whose probe still says signed out (not cancelled, not exit 255):
+  `Press Enter to open LABEL's page again, or type next to go on.` (`… or type next to finish.` when no signed-out
+  tool follows). EOF counts as skip / next. Not interactive: no prompts.
+- **S2.** A forward stopped at its deadline sends the Mac notice `Sign-in page expired; close its tab`. Exit 124:
+  `LABEL: not signed in (no approval within SPAN; close that page: a retry opens a new one)`.
+- **One line.** The replace prints nothing more after a fresh sign-in record (the summary named what is missing).
+
+**9B** (`workspace.status_text`, `cutover.py`, `replace_check.py`, `verdict.py`, `sessions.py`).
+- **L7.** A running worker in phase `waiting` with an error: `Sync worker: running, waiting: ERROR`.
+- **B3.** After `end`: `Did not end within 10 seconds on OLD: LIST.` (same pid, command and start after 10 s); on the
+  next pass, a just-ended service under a new pid: `Started again on OLD: LIST. Something restarts it; close that,
+  then press Enter.`
+- **B6.** The unfinished-turn line names them: `1 conversation on OLD has an unfinished turn (agent SESSION_ID);
+  resume and finish it, then check again` (plural as before, with the list); `could not be read on OLD (LIST)` the
+  same way; an issue missing either field is left out of the list.
+- **O1 (#53).** `_records` accepts any Codex record type and `response_item` variant (rows stay dicts with a string
+  type, memory checked on every row, payload a dict); a type or variant outside today's known sets
+  (`CODEX_RECORDS`, `CODEX_RESPONSE_ITEMS`) gets the structural scope walk over its whole payload. Kept by ruling 1:
+  `conversations._codex_metadata_only` treats an unknown appended record as local activity (projection deferred).
+- **Plurals.** The seal and `replace_check` History lines use the singular for 1.
 
 ## Existing guards that must stay green
 
