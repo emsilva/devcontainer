@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import shlex
 
-from . import forget, overview, pushed, replacing, seal, standing, sync_cycle, target_scan
+from . import forget, overview, pushed, replacing, seal, sessions, standing, sync_cycle, target_scan
 from .seal import Seal
 from .state import read_json
 from .transport import _name
@@ -334,13 +334,22 @@ def _history(target, evidence, now):
                          (' has' if pending == 1 else ' have') + ' not reached this Mac yet')
     issues = row.get('capture_issues', [])
     if issues:
+        items = []
+        for issue in issues:
+            agent = sessions.display_text(issue.get('agent'))
+            session = sessions.display_text(issue.get('session_id'))
+            if agent and session:
+                items.append(agent + ' ' + session)
+        names = ' (' + _listed(items) + ')' if items else ''
         unfinished = {'No validated completed native turn yet', 'No validated completed Claude turn yet'}
         if all(issue.get('reason') in unfinished for issue in issues):
             count = len(issues)
             return _category('History', UNSAFE, _quantity(count, 'conversation') + ' on ' + target.name +
-                             (' has an unfinished turn; resume and finish it' if count == 1 else
-                              ' have unfinished turns; resume and finish them') + ', then check again')
-        return _category('History', UNSAFE, _quantity(len(issues), 'conversation') + ' could not be read on ' + target.name)
+                             (' has an unfinished turn' if count == 1 else ' have unfinished turns') + names +
+                             ('; resume and finish it' if count == 1 else '; resume and finish them') +
+                             ', then check again', items)
+        return _category('History', UNSAFE, _quantity(len(issues), 'conversation') +
+                         ' could not be read on ' + target.name + names, items)
     if (row.get('outcome') != 'complete' or not sync_cycle.receipt_matches(row.get('receipt'), row.get('snapshot_id'))
             or row.get('receipt') != evidence.receipt or cycle.get('completed_at') is None):
         return _category('History', UNKNOWN, _NO_CYCLE)

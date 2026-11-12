@@ -22,12 +22,17 @@ def _end_services(connection, services):
     raw = connection.python(_END_SERVICES, payload=json.dumps(dict(services=services)).encode(),
                             timeout=10 * len(services) + 30)
     try:
-        ended = target_scan._services(json.loads(raw))
-        if not set(ended) <= set(services):
+        result = json.loads(raw)
+        if not isinstance(result, dict) or set(result) != {'ended', 'did_not_end'}:
+            raise ValueError()
+        ended = target_scan._services(result['ended'])
+        did_not_end = target_scan._services(result['did_not_end'])
+        if (not (set(ended) | set(did_not_end)) <= set(services)
+                or set(ended) & set(did_not_end)):
             raise ValueError()
     except (ValueError, TypeError, UnicodeError):
         raise ValueError('Could not verify which background services ended.') from None
-    return ended
+    return ended, did_not_end
 
 
 _END_SERVICES = target_scan._PROCESS_HELPERS + r'''
@@ -41,6 +46,7 @@ import time
 request = json.load(sys.stdin)
 root = Path('/proc')
 ended = []
+did_not_end = []
 
 
 def read(pid, filename):
@@ -56,7 +62,8 @@ for name, pid, start in request['services']:
     try:
         if process_stat(read(pid, 'stat'))[0] != start:
             continue
-        if service_name(read(pid, 'cmdline')) != name:
+        command = read(pid, 'cmdline')
+        if service_name(command) != name:
             continue
         # Recheck after cmdline so a PID reused during that read is skipped too.
         if process_stat(read(pid, 'stat'))[0] != start:
@@ -78,9 +85,16 @@ for name, pid, start in request['services']:
             break
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            try:
+                same_command = read(pid, 'cmdline') == command
+                current, status = process_stat(read(pid, 'stat'))
+                if same_command and current == start and status not in (b'Z', b'X'):
+                    did_not_end.append([name, pid, start])
+            except (OSError, ValueError, IndexError):
+                pass
             break
         time.sleep(min(0.1, remaining))
-print(json.dumps(ended))
+print(json.dumps(dict(ended=ended, did_not_end=did_not_end)))
 '''
 
 
@@ -198,11 +212,18 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
         if target.kind != 'paired':
             raise ValueError(f'{old} is no longer the paired Codespace; nothing moved.')
         with connect(old, state=state) as connection:
+            restart_watch = {}
             while True:
                 scan = target_scan.scan(connection, old, target.remote_root, now=now)
                 if not scan.agents_complete:
                     print(f'  Agents   Unknown: could not read processes on {old}')
                     return 1
+                restarted = tuple(service for service in scan.services
+                                  if service[0] in restart_watch and service[1] not in restart_watch[service[0]])
+                restart_watch = {}
+                if restarted:
+                    print(f'Started again on {old}: {_listed_services(restarted)}. '
+                          'Something restarts it; close that, then press Enter.')
                 counts = dict(scan.agents)
                 agents = [f'{agent} ({counts[agent]})' for agent in ('claude', 'codex', 'grok', 'opencode')
                           if counts.get(agent, 0) > 0]
@@ -217,9 +238,13 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
                         print('Nothing moved.')
                         return 1
                     if not agents and answer == 'end':
-                        ended = _end_services(connection, scan.services)
+                        ended, did_not_end = _end_services(connection, scan.services)
                         if ended:
                             print(f'Ended {_listed_services(ended)} on {old}.')
+                            restart_watch = {name: {pid for kind, pid, _ in scan.services if kind == name}
+                                             for name, _, _ in ended}
+                        if did_not_end:
+                            print(f'Did not end within 10 seconds on {old}: {_listed_services(did_not_end)}.')
                     continue
                 evidence = deletion.gather(project, state, target, connection, now=now, sleep=sleep)
                 if not evidence.scan.services:
@@ -248,8 +273,8 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
                        operation=operation, cycle_id=evidence.cycle['cycle_id'],
                        snapshot_id=evidence.receipt['snapshot_id'], now=sealed_at)
             print(f'Final flush of {old} recorded at {overview._when(sealed_at, sealed_at)} '
-                  f'({len(evidence.scan.scratch)} files, '
-                  f'{len({(agent, session) for agent, _, session in evidence.sessions_by_file})} conversations).')
+                  f'({verdict._quantity(len(evidence.scan.scratch), "file")}, '
+                  f'{verdict._quantity(len({(agent, session) for agent, _, session in evidence.sessions_by_file}), "conversation")}).')
             remote(rebind=new, move=decision, armed=recovery if decision is not None else None, expected_old=old)
         if moved():
             moved_line()

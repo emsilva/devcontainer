@@ -275,6 +275,42 @@ class CutoverTests(unittest.TestCase):
             leaf.assert_not_called()
         self.assertFalse(read_json(self.receipt_path)['moved'])
 
+    def test_final_flush_uses_singular_for_one_file_and_conversation(self):
+        for count in (0, 1, 2):
+            with self.subTest(count=count):
+                self.bind('old-space')
+                (self.state / 'retired/old-space.json').unlink(missing_ok=True)
+                manifest = self.store.load(self.snapshot)
+                digest = self.store.put(b'completed\n')
+                entries = []
+                for index in range(count):
+                    sid = f'{index + 1:08d}-1111-4111-8111-111111111111'
+                    entries.append(dict(agent='codex', session_id=sid, files=[
+                        dict(session_id=sid, path='rollout-' + sid + '.jsonl',
+                             size=len(b'completed\n'), sha256=digest, blob=digest)]))
+                manifest['conversations']['entries'] = entries
+                self.snapshot = self.store.save(manifest)
+                receipt = self.store.acknowledge(self.snapshot, source='codespace')
+                inbound = sync_cycle.direction()
+                inbound.update(outcome='complete', snapshot_id=self.snapshot, receipt=receipt)
+                cycle = dict(self.evidence.cycle, directions=dict(codespace_to_desktop=inbound))
+                cutoffs = verdict.cutoffs(manifest)
+                files = tuple((f'note-{index}.md', digest) for index in range(count))
+                sessions = tuple(sorted(('codex/sessions/' + name, cutoff.sha256)
+                                        for (_, name), cutoff in cutoffs.items()))
+                self.scan = replace(self.scan, scratch=files, sessions=sessions,
+                                    checked=tuple(sorted(cutoffs)), cutoffs_sha256=target_scan.cutoffs_digest(cutoffs))
+                self.evidence = replace(self.evidence, scan=self.scan, mac_scratch=files, cycle=cycle,
+                                        receipt=receipt, sessions_by_file=verdict.sessions_by_file(manifest))
+                code, out = self.run_cutover()
+                self.assertEqual(code, 0, out)
+                when = self.c.overview._when(self.clock, self.clock)
+                noun = 'file' if count == 1 else 'files'
+                conversation = 'conversation' if count == 1 else 'conversations'
+                self.assertIn(f'Final flush of old-space recorded at {when} '
+                              f'({count} {noun}, {count} {conversation}).', out)
+                self.assertEqual(seal.read(self.state, 'old-space').scratch, files)
+
     def test_agents_are_asked_never_killed(self):
         running = replace(self.scan, agents=(('claude', 2), ('codex', 1), ('herdr', 1)))
         for answer in ('', 'stop', EOFError(), KeyboardInterrupt()):
@@ -383,9 +419,63 @@ class CutoverTests(unittest.TestCase):
         self.assertNotIn('Ended ', out)
         self.sealer.assert_not_called()
 
+    def test_service_timeout_reports_verified_survivors_but_skips_reused_pids(self):
+        for index, (actual_start, timed_out) in enumerate(((1, True), (99, False))):
+            with self.subTest(reused=not timed_out):
+                pid = 110001 + index
+                service = ('codex app-server', pid, 1)
+                self.service_process(pid, actual_start, b'codex\0app-server\0')
+                self.service_signal = Mock()
+                self.connection.python.side_effect = self.execute_service_program
+                running = replace(self.scan, services=(service,))
+                self.scanner.side_effect = [running, running]
+                self.ask.side_effect = ['end', 'stop']
+                code, out = self.run_cutover()
+                self.assertEqual(code, 1)
+                message = 'Did not end within 10 seconds on old-space: codex app-server (1).'
+                self.assertEqual(message in out, timed_out)
+                self.assertNotIn('Ended ', out)
+                self.assertNotIn('Started again', out)
+                if timed_out:
+                    self.service_signal.assert_called_once_with(pid, signal.SIGTERM)
+                else:
+                    self.service_signal.assert_not_called()
+
+    def test_ended_service_restarting_under_a_new_pid_is_named_once(self):
+        ended = ('codex app-server', 120001, 1)
+        survivor = ('codex app-server', 120002, 2)
+        restarted = ('codex app-server', 120003, 3)
+        self.service_process(120001, 1, b'codex\0app-server\0')
+        self.service_process(120002, 2, b'codex\0app-server\0')
+        def end(pid, sig):
+            self.assertEqual(sig, signal.SIGTERM)
+            if pid == ended[1]:
+                path = self.base / 'proc' / str(pid)
+                (path / 'stat').unlink()
+                (path / 'cmdline').unlink()
+                path.rmdir()
+        self.service_signal = Mock(side_effect=end)
+        self.connection.python.side_effect = self.execute_service_program
+        original = replace(self.scan, services=(ended, survivor))
+        after = replace(self.scan, services=(survivor, restarted, ('opencode serve', 120004, 4)))
+        self.scanner.side_effect = [original, after, after]
+        self.ask.side_effect = ['end', '', 'stop']
+        code, out = self.run_cutover()
+        self.assertEqual(code, 1)
+        message = ('Started again on old-space: codex app-server (1). '
+                   'Something restarts it; close that, then press Enter.')
+        self.assertEqual(out.count(message), 1)
+        self.assertIn('Ended codex app-server (1) on old-space.', out)
+        self.assertIn('Did not end within 10 seconds on old-space: codex app-server (1).', out)
+        lines = out.splitlines()
+        self.assertTrue(lines[lines.index(message) + 1].startswith('On old-space: background services running:'))
+        self.assertEqual(self.service_signal.call_args_list,
+                         [unittest.mock.call(120001, signal.SIGTERM), unittest.mock.call(120002, signal.SIGTERM)])
+        self.sealer.assert_not_called()
+
     def test_background_service_end_refuses_an_unlisted_result(self):
         self.scanner.side_effect = [replace(self.scan, services=(('codex app-server', 100001, 1),))]
-        self.connection.python.return_value = b'[["codex app-server",100002,1]]'
+        self.connection.python.return_value = b'{"ended":[["codex app-server",100002,1]],"did_not_end":[]}'
         self.ask.side_effect = ['end']
         code, out = self.run_cutover()
         self.assertEqual(code, 1)
@@ -396,7 +486,7 @@ class CutoverTests(unittest.TestCase):
         services = (('codex app-server', 100001, 1),)
         self.gather.side_effect = [replace(self.evidence, scan=replace(self.scan, services=services)), self.evidence]
         self.scanner.side_effect = [self.scan, replace(self.scan, services=services), self.scan, self.scan]
-        self.connection.python.return_value = b'[["codex app-server",100001,1]]'
+        self.connection.python.return_value = b'{"ended":[["codex app-server",100001,1]],"did_not_end":[]}'
         self.ask.side_effect = ['end']
         self.assertEqual(self.run_cutover()[0], 0)
         self.assertEqual(self.gather.call_count, 2)

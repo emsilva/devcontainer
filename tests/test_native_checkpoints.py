@@ -242,14 +242,16 @@ class NativeCheckpointTests(NativeFixture):
         self.assertEqual(result['entries'], [])
         self.assertEqual(result['issues'], [])
 
-    def test_incomplete_turn_and_unknown_record_are_explicit_issues(self):
+    def test_incomplete_turn_is_an_issue_but_unknown_record_is_captured(self):
         self.codex(rows=[dict(type='event_msg', payload=dict(type='task_started', turn_id=self.turn))])
         result = self.capture()
         self.assertEqual(result['entries'], [])
         self.assertIn('completed', result['issues'][0]['reason'])
-        self.codex(rows=[dict(type='not-yet-supported', payload={}), dict(type='event_msg', payload=dict(type='task_started', turn_id=self.turn)), dict(type='event_msg', payload=dict(type='task_complete', turn_id=self.turn))])
+        path = self.codex(rows=[dict(type='not-yet-supported', payload={}), dict(type='event_msg', payload=dict(type='task_started', turn_id=self.turn)), dict(type='event_msg', payload=dict(type='task_complete', turn_id=self.turn))])
         result = self.capture()
-        self.assertIn('Unsupported', result['issues'][0]['reason'])
+        self.assertEqual(result['issues'], [])
+        self.assertEqual([entry['session_id'] for entry in result['entries']], [self.sid])
+        self.assertEqual(self.store.read(result['entries'][0]['files'][0]['blob']), path.read_bytes())
 
     def test_sdk_and_exec_runs_are_not_conversations(self):
         # Nobody resumes these from the native picker, and Codex hides exec runs

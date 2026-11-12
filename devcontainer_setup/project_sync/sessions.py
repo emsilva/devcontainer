@@ -15,6 +15,7 @@ from .state import _parent as _state_parent
 
 MAX_BYTES = 256 * 1024 * 1024
 CODEX_RECORDS = {'session_meta', 'response_item', 'event_msg', 'turn_context', 'compacted', 'world_state', 'token_usage_record'}
+CODEX_RESPONSE_ITEMS = {'message', 'additional_tools', 'agent_message', 'reasoning', 'function_call', 'function_call_output', 'custom_tool_call', 'custom_tool_call_output', 'local_shell_call', 'web_search_call', 'image_generation_call', 'compaction', 'computer_call', 'computer_call_output', 'tool_search_call', 'tool_search_output'}
 MEMORY_MARKERS = (b'<memory_summary>', b'<memory_context>', b'<memory_citation>', b'<oai-mem-citation>', b'========= MEMORY_SUMMARY BEGINS', b'/.codex/memories/', b'\\.codex\\memories\\')
 
 
@@ -111,19 +112,14 @@ def _records(data, agent):
             row = json.loads(line)
         except (ValueError, UnicodeError) as exc:
             raise ValueError('Malformed native JSONL record') from exc
-        # Claude Code adds record types with most releases, so any type passes;
-        # the memory check here and the scope check on every cwd apply to all rows.
-        if (not isinstance(row, dict) or not isinstance(row.get('type'), str)
-                or (agent == 'codex' and row['type'] not in CODEX_RECORDS)):
+        # Native agents add record types with new releases. Preserve those rows;
+        # memory and structural project scope are checked independently of type.
+        if not isinstance(row, dict) or not isinstance(row.get('type'), str):
             raise ValueError('Unsupported native record type')
         if personal_memory(row):
             raise ValueError('Native global memory context prevents strict project-only export')
         if agent == 'codex' and not isinstance(row.get('payload'), dict):
             raise ValueError('Unsupported native record payload')
-        if agent == 'codex' and row['type'] == 'response_item':
-            supported = {'message', 'additional_tools', 'agent_message', 'reasoning', 'function_call', 'function_call_output', 'custom_tool_call', 'custom_tool_call_output', 'local_shell_call', 'web_search_call', 'image_generation_call', 'compaction', 'computer_call', 'computer_call_output', 'tool_search_call', 'tool_search_output'}
-            if row['payload'].get('type') not in supported:
-                raise ValueError('Unsupported native response_item variant')
         rows.append(row)
     return rows
 
@@ -161,6 +157,11 @@ def _validate_codex_scope(rows, roots):
             structural(payload.get('state', {}))
         elif kind == 'event_msg' and payload.get('type') == 'thread_settings_applied':
             structural(payload.get('thread_settings', {}))
+        elif (kind not in CODEX_RECORDS or (kind == 'response_item' and
+                (not isinstance(payload.get('type'), str) or payload['type'] not in CODEX_RESPONSE_ITEMS))):
+            # New kinds have no known text/tool schema: inspect their structure
+            # without extending the historical-text walk for established kinds.
+            structural(payload)
 
 
 def _validate_claude(rows, sid, roots):
