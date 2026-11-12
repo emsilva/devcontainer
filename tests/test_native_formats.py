@@ -112,8 +112,8 @@ class NativeFormatTests(unittest.TestCase):
         for data in (b'{"note":"no type"}\n', b'["not a record"]\n'):
             with self.subTest(data=data), self.assertRaisesRegex(ValueError, 'record type'):
                 sessions._records(data, 'claude')
-        with self.assertRaisesRegex(ValueError, 'record type'):
-            sessions._records(b'{"type":"future-record","payload":{}}\n', 'codex')
+        self.assertEqual(sessions._records(b'{"type":"future-record","payload":{}}\n', 'codex'),
+                         [dict(type='future-record', payload={})])
 
     def test_claude_sessions_may_work_below_the_project_root_but_not_beside_it(self):
         worktree = self.root + '/.claude/worktrees/feature'
@@ -190,14 +190,61 @@ class NativeFormatTests(unittest.TestCase):
             with self.subTest(row=row), self.assertRaises(ValueError):
                 sessions._validate_codex_scope([row], [self.root])
 
-    def test_unknown_native_record_payload_and_subagent_are_explicit_refusals(self):
-        bad = [dict(type='future-record', payload={}), dict(type='response_item', payload=['unsupported']), dict(type='response_item', payload=dict(type='future-response'))]
+    def test_malformed_native_records_and_subagent_are_explicit_refusals(self):
+        bad = [{}, [], dict(type=None, payload={}), dict(type=1, payload={}),
+               dict(type='future-record', payload=None), dict(type='response_item', payload=['unsupported'])]
         for row in bad:
             with self.subTest(row=row), self.assertRaises(ValueError):
                 sessions._records(json.dumps(row).encode() + b'\n', 'codex')
         for name in ('spawn_agent', 'functions.spawn_agent', 'spawn_agents_on_csv'):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'subagent'):
                 sessions._validate_codex_dependencies([dict(type='response_item', payload=dict(type='function_call', name=name))], dict(id=self.sid), self.sid)
+
+    def test_unknown_codex_records_pass_but_memory_markers_still_refuse(self):
+        for row in (dict(type='future-record', payload=dict(note='preserved')),
+                    dict(type='response_item', payload=dict(type='future-response', note='preserved'))):
+            with self.subTest(record=row):
+                original = copy.deepcopy(row)
+                self.assertEqual(sessions._records(json.dumps(row).encode() + b'\n', 'codex'), [original])
+                self.assertEqual(row, original)
+                for marker in sessions.MEMORY_MARKERS:
+                    for in_key in (False, True):
+                        memory = copy.deepcopy(row)
+                        memory['payload']['future'] = {marker.decode(): 'private'} if in_key else [marker.decode()]
+                        encoded = (json.dumps(memory) + '\n').encode().replace(b'<', b'\\u003c')
+                        with self.subTest(marker=marker, in_key=in_key), self.assertRaisesRegex(ValueError, 'memory'):
+                            sessions._records(encoded, 'codex')
+
+    def test_unknown_codex_payloads_walk_scope_and_known_message_payloads_do_not(self):
+        for row in (dict(type='future-record', payload={}),
+                    dict(type='response_item', payload=dict(type='future-response')),
+                    dict(type='response_item', payload=dict(type=None)),
+                    dict(type='response_item', payload=dict(type=['future-response']))):
+            for root in (self.root, self.root + '/web', self.root + '-other'):
+                scopes = [dict(cwd=root), dict(runtime_workspace_roots=[root]),
+                          dict(runtimeWorkspaceRoots=[root]), dict(workspace_roots=[root]),
+                          dict(filesystem='<filesystem><workspace_roots><root>' + root +
+                               '</root></workspace_roots></filesystem>')]
+                for scope in scopes:
+                    with self.subTest(record=row, scope=scope):
+                        scoped = copy.deepcopy(row)
+                        scoped['payload']['nested'] = [scope]
+                        original = copy.deepcopy(scoped)
+                        if root.endswith('-other'):
+                            with self.assertRaisesRegex(ValueError, 'another project checkout'):
+                                sessions._validate_codex_scope([scoped], [self.root])
+                        else:
+                            parsed = sessions._records(json.dumps(scoped).encode() + b'\n', 'codex')
+                            sessions._validate_codex_scope(parsed, [self.root])
+                            self.assertEqual(parsed, [original])
+                        self.assertEqual(scoped, original)
+        for row in (dict(type='response_item', payload=dict(type='message')),
+                    dict(type='response_item', payload=dict(type='function_call')),
+                    dict(type='event_msg', payload=dict(type='future-event'))):
+            row['payload']['historical'] = dict(cwd='/unrelated', workspace_roots=['/unrelated'])
+            original = copy.deepcopy(row)
+            sessions._validate_codex_scope([row], [self.root])
+            self.assertEqual(row, original)
 
     def test_version_boundary_and_global_memory_are_explicit(self):
         accepted = {
@@ -280,13 +327,13 @@ class NativeVersionCaptureTests(NativeFixture):
         self.assertEqual(self.store.read(entry['files'][0]['blob']), original)
         self.assertEqual(path.read_bytes(), original)
 
-    def test_codex_0166_dynamic_tools_update_is_refused(self):
+    def test_codex_0166_dynamic_tools_update_is_captured(self):
         path = self.codex_release(dynamic_tools=True)
         original = path.read_bytes()
         result = self.capture()
-        self.assertEqual(result['entries'], [])
-        self.assertEqual([issue['reason'] for issue in result['issues']], ['Unsupported native record type'])
-        self.assertEqual(self.store.objects, {})
+        self.assertEqual(result['issues'], [])
+        self.assertEqual([entry['session_id'] for entry in result['entries']], [self.sid])
+        self.assertEqual(self.store.read(result['entries'][0]['files'][0]['blob']), original)
         self.assertEqual(path.read_bytes(), original)
 
     def test_codex_attached_thread_is_refused(self):

@@ -623,6 +623,65 @@ class PublicationTests(NativeFixture):
         self.assertEqual(target.stat().st_ino, inode)
         self.assertEqual(resumes, [child, child])
 
+    def test_codex_retry_defers_unknown_local_suffix_without_a_native_writer(self):
+        entry, env, target, resumes, originals = self.codex_interrupted_leaf_fixture()
+        child, inode = resumes[-1], target.stat().st_ino
+        with target.open('ab') as out:
+            out.write(lines([dict(type='future-record', payload=dict(cwd=str(self.project.root), note='preserved'))]))
+        before = target.read_bytes()
+        with patch.object(self.api.agents, 'CodexClient', wraps=self.api.agents.CodexClient) as native:
+            result = self.publish(entry, env=env)
+        self.assertEqual([issue['reason'] for issue in result['issues']],
+                         ['Native import has local user activity; projection deferred'])
+        native.assert_not_called()
+        self.assertEqual(resumes, [child])
+        self.assertEqual((target.read_bytes(), target.stat().st_ino), (before, inode))
+        for path, original in originals.items():
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_unknown_codex_record_capture_and_import_preserve_its_bytes(self):
+        class Client:
+            def __init__(inner, *args, **kwargs): pass
+            def __enter__(inner): return inner
+            def __exit__(inner, *args): pass
+            def call(inner, method, params):
+                if method == 'thread/resume':
+                    inner.sid = params['threadId']
+                    return dict(thread=dict(id=inner.sid))
+                if method == 'thread/list':
+                    return dict(data=[dict(id=inner.sid)], nextCursor=None)
+                return {}
+        for index, row in enumerate((dict(type='future-record', payload=dict(note='opaque record')),
+                                     dict(type='response_item', payload=dict(type='future-response', note='opaque variant')))):
+            with self.subTest(record=row):
+                source = self.codex()
+                row.update(ordinal=4, future_envelope=dict(preserved=True))
+                row['payload']['nested'] = [dict(cwd=str(self.project.root))]
+                record = b'  ' + json.dumps(row, ensure_ascii=False).encode() + b' \n'
+                with source.open('ab') as out:
+                    out.write(record)
+                original = source.read_bytes()
+                captured = self.capture()
+                self.assertEqual(captured['issues'], [])
+                entry = captured['entries'][0]
+                self.assertEqual(self.store.read(entry['files'][0]['blob']), original)
+                env = dict(self.env, CODEX_HOME=str(self.root / f'unknown-record-destination-{index}'))
+                with patch.object(self.api.agents, 'CodexClient', Client), \
+                        patch.object(self.api.agents, '_history',
+                                     return_value=dict(turns=[dict(id=self.turn, status='completed')], items=[])):
+                    result = self.publish(entry, env=env)
+                    again = self.publish(entry, env=env)
+                self.assertEqual(result['issues'], [])
+                self.assertEqual(again['issues'], [])
+                self.assertEqual(len(again['unchanged']), 1)
+                child = result['imported'][0]['session_id']
+                self.assertNotEqual(child, self.sid)
+                target = next(Path(env['CODEX_HOME']).rglob('*' + child + '.jsonl'))
+                self.assertEqual(target.read_bytes().splitlines(keepends=True)[1:],
+                                 original.splitlines(keepends=True)[1:])
+                self.assertEqual(target.read_bytes().splitlines(keepends=True)[-1], record)
+                self.assertEqual(source.read_bytes(), original)
+
     def test_selected_codex_publication_recovers_link_before_unlink(self):
         _, _, entry, env, _, resumes = self.codex_ancestor_fixture()
         link = os.link
