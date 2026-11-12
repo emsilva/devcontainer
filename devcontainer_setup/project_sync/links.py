@@ -236,10 +236,11 @@ class Forwards:
         ports = self.active()
         # Local deadlines remain enforceable even while a remote probe fails.
         for port in ports:
-            request, _, _ = self.requests[port]
+            request, project, notifier = self.requests[port]
             limit = deadline(request)
             if limit is not None and now >= limit:
                 self.stop(port, reason='deadline')
+                notifier(project, request.program, request.host, 'Sign-in page expired; close its tab')
         for port in ports:
             if port in self.children and not remote_listening(connection, port):
                 self.stop(port, reason='remote stopped listening')
