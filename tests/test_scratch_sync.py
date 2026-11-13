@@ -362,8 +362,9 @@ class ScratchTests(unittest.TestCase):
                 return m.status(state)
             observations = []
             def open_herdr(project, owner, selected_root, **options):
-                self.assertEqual(set(options), {'remote_herdr', 'prepared', 'enter'})
+                self.assertEqual(set(options), {'remote_herdr', 'prepared', 'expected_codespace', 'enter'})
                 self.assertEqual(options['remote_herdr'], 'herdr fixture')
+                self.assertEqual(options['expected_codespace'], 'fixture')
                 self.assertTrue(callable(options['prepared']))
                 self.assertEqual(selected_root, str(remote))
                 self.assertEqual(m.inspect_sync(root, state)['phase'], 'synchronized')
