@@ -135,7 +135,14 @@ def _task_inventory(root: Path, name: str) -> set[str]:
     except (OSError, subprocess.TimeoutExpired) as error:
         raise ValueError('Cannot inspect Taskfile inventory: ' + str(error)) from error
     if result.returncode:
-        raise ValueError('Taskfile inventory failed: ' + result.stderr.strip())
+        # go-task exits 1 for a Taskfile with no tasks at all, after listing them as [].
+        try:
+            empty = json.loads(result.stdout)['tasks'] == []
+        except (ValueError, KeyError, TypeError):
+            empty = False
+        if not empty:
+            raise ValueError('Taskfile inventory failed: ' + result.stderr.strip())
+        return set()
     try:
         return {entry['name'] for entry in json.loads(result.stdout)['tasks']}
     except (ValueError, KeyError, TypeError) as error:

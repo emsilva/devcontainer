@@ -1017,6 +1017,16 @@ class WizardCliTests(unittest.TestCase):
             result = subprocess.run(['task', '--dry', operation], cwd=self.root, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_task_inventory_of_a_taskfile_with_no_tasks_is_empty(self):
+        from devcontainer_setup.__main__ import _task_inventory
+        # go-task lists no tasks as [] and still exits 1; a re-run of a setup with continuity off meets this
+        # when its candidate check empties the included devcontainer Taskfile.
+        (self.root / 'Taskfile.yml').write_text("version: '3'\ntasks:\n")
+        self.assertEqual(_task_inventory(self.root, 'Taskfile.yml'), set())
+        (self.root / 'Taskfile.yml').write_text("version: '3'\ntasks:\n  broken: [\n")
+        with self.assertRaisesRegex(ValueError, 'Taskfile inventory failed: .*parse'):
+            _task_inventory(self.root, 'Taskfile.yml')
+
     def test_unresolved_manager_versions_cannot_silently_dry_run_default(self):
         (self.root / 'package.json').write_text('{"packageManager":"pnpm@9.15.4"}')
         (self.root / 'nested').mkdir()
