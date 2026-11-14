@@ -355,7 +355,8 @@ class _Coordinator:
             answer = self.choose(title, [*labels, 'cancel'])
             if answer not in labels:
                 if uncertain:
-                    print(f"Replace stopped at create: {uncertain[0]['name']} cannot be fully read from GitHub, "
+                    phase = replacing.PHASE_WORDS[self.journal['phase']]
+                    print(f"Replace stopped at {phase}: {uncertain[0]['name']} cannot be fully read from GitHub, "
                           'and it may be the Codespace this replace asked for. Check it on GitHub, '
                           f'then run {self.replace} again.', flush=True)
                     return 1

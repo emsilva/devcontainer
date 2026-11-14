@@ -697,7 +697,8 @@ class ReplacementTests(unittest.TestCase):
             self.ui.answers = ['cancel']
             self.assertEqual(self.run_replace(), 1)
             self.assertEqual(replacing.read(self.state)['phase'], 'create-requested')
-            self.assertIn('uncertain-space cannot be fully read from GitHub', self.output.getvalue())
+            self.assertIn(f"Replace stopped at {replacing.PHASE_WORDS['create-requested']}: uncertain-space cannot be "
+                          'fully read from GitHub', self.output.getvalue())
             self.assertEqual(len(self.ui.calls[-1][1]), 2)
             self.assertFalse(self.prompts)
         self.api.details['uncertain-space'] = self.api.row('uncertain-space', git_status={'ref': 'other'})
