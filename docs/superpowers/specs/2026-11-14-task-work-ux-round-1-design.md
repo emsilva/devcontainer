@@ -1,0 +1,226 @@
+# task work and setup wizard: UX round 1
+
+Date: 2026-11-14. Base: `main` at af769fc. Inputs: the Fable UX review
+(`tmp/codespace-lifecycle/task-work/ux-review-2026-11-13/REVIEW.md`, items 1-12) and the owner's items (a)-(e)
+from 2026-11-13/14 (`tmp/codespace-lifecycle/task-work/stage-c/LEAD-STATE.md`, entries of 2026-11-13T23:5xZ and
+2026-11-14).
+
+## Intent
+
+The owner wants to set up a project, connect, arm and replace by driving `task work` and the setup wizard alone,
+without a lead explaining the screen. On 2026-11-13 that failed four ways, and each one cost a conversation:
+
+- strata-mf and ai-hub-demo ran the install one-liner from Mac checkouts holding the project while GitHub's `main`
+  held only the org template. The wizard scans and publishes from `origin/main`, so the setup merged onto the
+  template, both Codespaces held no project code, and both import PRs then conflicted on `Taskfile.yml`.
+- The wizard's new `Taskfile.yml` claimed `up`, `down`, `status` and `build` as aliases of the devcontainer tasks.
+  Those names belong to the project's own stack (owner's global rule), and they caused the conflicts.
+- A prompt titled only `Codespace` offered `create like last time` on a first setup. The owner could not tell
+  what was being asked.
+- `task work` on strata-mf showed `Setup did not finish; run setup again` for a validated Codespace that only
+  lacked a pairing, and offered a wizard rerun instead of Connect. `task work:signin` on ai-hub-demo failed with
+  `The connected worker is already handling links.` and exit 1, pointing nowhere.
+
+The review adds what costs time around the daily screen: Replace sits second and starts without a question, the
+Codespace name crowds out times and causes, and several screens use internal words.
+
+The work is split in two (owner, 2026-11-14: "follow your recommendation"). **Round 1, this document:** everything
+that cannot create, bill or delete a Codespace. **Round 2, later:** review items 2 (delete progress and finishing
+an interrupted delete), 3 (recovery after a Mac restart, other projects, the Herdr sidebar marker from #87 step 10)
+and 5 (calling the owner back during a replace), plus the replace preview's "what is running there now" row,
+which needs the early scan of the old Codespace from #113.
+
+## Goals
+
+Success: on a fresh project and on the three live projects, the owner can read each screen and pick the right
+action without help, and today's four failures cannot recur.
+
+### A. Setup wizard (`devcontainer_setup/__main__.py`)
+
+**A1. Stop when GitHub's default branch does not hold the project (owner item a).** After the fetch that
+`setup_checkout` already does and before the first question, compare the files tracked at this checkout's `HEAD`
+with those at `origin/<default>`. When the default branch holds fewer than half of them, print one refusal and exit
+non-zero, having asked nothing, written nothing and pushed nothing:
+
+```
+GitHub's main holds 3 of the 212 files tracked on docs/design-20261023.
+A Codespace starts from main, so it would hold almost none of this project.
+Merge the project into main first, then run the setup from a checkout on main.
+```
+
+This is the same test as the leads' `codespace-ready` step 0 (`ready.py`, check 1), so the two agree. Running from
+a checkout on `main` always passes it. A checkout with no `origin` keeps today's behavior (commit-only setup).
+
+**A2. Never write `up`, `down`, `status` or `build` (owner item b).** When the project has no Taskfile, the wizard
+still creates `Taskfile.yml` (the devcontainer include and the `work` task block need one), with no tasks of its
+own. Existing Taskfiles are handled as today. Projects that already have the four aliases keep them; nothing
+removes lines from a project's Taskfile.
+
+**A3. Every prompt is a question, and the answers stay on screen (owner item c).** Gum clears a prompt once it
+is answered, which is why Review was hard to read against what had been asked. After each wizard prompt, one line
+stays: the question and the answer. Every prompt title becomes a plain question, for example:
+
+| Today | Round 1 |
+|---|---|
+| `Publish` | `How should the setup reach GitHub?` |
+| `Codespace` | `Create a Codespace now?` (unpaired) / `Which Codespace should this use?` (several listed) |
+| `create like last time` | `create a new Codespace` when this repository has no launch history; with history, name what is reused: `create one like <name> (<machine>, idle <timeout>)` |
+| `Codespaces machine` | `Which machine size?` |
+| `Stop when idle for` | `Stop it after how long idle?` |
+| `Editor after create` | `Open an editor once it is created?` |
+| `Review setup` | `Review: go ahead with these answers?` |
+
+The wording in the right column is the lead's call; the builder may refine it with the `ux-writing` skill as long as
+each title is a question and no label assumes a history the project does not have.
+
+### B. The `task work` screen (`project_sync/overview.py`, `standing.py`)
+
+**B1. A set-up project that is not paired offers Connect (owner item d).** Today `standing._setup` returns
+`partial` when the managed `devcontainer.json` is present but this Mac has no `workspace.json` or `scratch.json`.
+Those files appear only when the project is paired at the first connect. So every new Codespace, and every second
+Mac, reads "Setup did not finish". Round 1: managed metadata present means set up. A project with no pairing takes
+the existing `unpaired` situation (`No Codespace is paired with this checkout`, Connect when GitHub lists one,
+Create). An unfinished launch keeps the existing `launch` situation (`Setup of Codespace NAME did not finish
+validation`, Resume). The `partial` value and its "Setup did not finish" line go away.
+
+**B2. The screen says when the checkout is not on the default branch (owner item a).** Today only `behind` and
+`diverged` on the default branch get a line. Add one for a checkout on another branch: `This checkout is on
+docs/x; Codespaces start from main`.
+
+**B3. Name the Codespace once, then labelled rows (review item 4).** Line one is `<project folder> · <Codespace>`
+(or `<project folder> · no Codespace paired`). The rest are rows with a label column:
+
+```
+consult-sm-innovate · literate-pancake-jjjrq4j9rqwrc5qp6
+Codespace  stopped by GitHub's 12-hour limit at 07:55
+Recovery   armed; next 12-hour stop about 17:45
+Sync       last completed 07:54
+Sign-ins   Plaud is not signed in
+Checkout   on docs/x; Codespaces start from main
+```
+
+The screen keeps the owner's #87 limits: at most 6 lines of 78 cells, a Gum menu of 3-6 actions. Menu labels drop
+the Codespace name and the command (`Replace this Codespace`, `Finish the replace`, `Check and delete the replaced
+Codespace`). The command still prints as `Running: …` once chosen and in the `Next:` lines without a terminal.
+Tests render with a 36-character Codespace name (run 3's `literate-pancake-jjjrq4j9rqwrc5qp6` length), not
+`paired-cs`.
+
+**B4. Replace moves down (review item 1, order).** Replace is the last item before `Show details`, below Connect,
+Connect and arm recovery, Start and connect, and Stop. Its argv is unchanged.
+
+**B5. The Recovery row says what the owner plans around (review item 7).** Armed and running: `armed; next 12-hour
+stop about 17:45` (the figure `task work:status` already prints as `12-hour stop expected`). During a stop:
+`restarting it now`, `on hold until 09:30` or `out of restarts until 20:12`, from the keeper's own state.
+
+**B6. After a replace, say the old Codespace is still there (review item 8).** When a replaced Codespace is still
+listed on GitHub: `The replaced Codespace is still on GitHub; check and delete it when ready`.
+
+**B7. Sign-in state reaches the screen (review item 11).** From the sign-in record: `Sign-ins   Plaud is not
+signed in`, with the action `Sign in` (`task work:signin:all`).
+
+**B8. `Show recovery and sync logs` appears only when a log exists (review item 12).**
+
+**B9. `Show details` leads with the one fix (review item 9).** After a Mac restart it says `Recovery is off:
+connect with task work:cs` once, not `run task work:cs` then twice `run task work:cs:armed`. No row wider than 78
+cells.
+
+### C. Starting a replace (`devcontainer_setup/replacement.py`)
+
+**C1. A fresh replace asks first, and the default is no (review item 1).** When there is no replace journal,
+after the read-only checks `inspect()` already makes and before anything is written or created:
+
+```
+Replace literate-pancake-jjjrq4j9rqwrc5qp6?
+  New one  basicLinux32gb (2 cores), stops after 240 min idle, main at 9f2fae2
+  Billing  kyndryl-agentic-ai, from the moment it is created
+  You      end agents when asked, approve the sign-ins, decide the delete
+> Not now
+  Replace it
+```
+
+`Not now`, Esc and Ctrl-C leave no journal and print `Nothing was replaced.`, exit 0. A replace that already has a
+journal (a rerun after an interruption) does not ask this again. The `Now` row the review drew (agents running on
+the old Codespace) waits for round 2.
+
+**C2. Continue or abandon says what abandon does (review item 10).** `Continue the replace` and `Abandon it:
+<old> stays paired; <new> stays until you delete it` (or `nothing was created`, when nothing was).
+
+**C3. Small copy (review item 12).** Refusals say `task devcontainer:setup`, not `task setup`
+(`replacement.py:127`, `:135`). The agents gate says where to end them (`in their Herdr panes`) and answers an
+unknown word with `Not understood: press Enter, or type stop.`
+
+### D. Connect and sign-in (`project_sync/__main__.py`, `links.py`, `workspace.py`)
+
+**D1. `task work:signin` while connected points to the right command (owner item e).** Both places in
+`links.signin_main` that print `The connected worker is already handling links.` say instead that the connected
+sync already finishes sign-ins and that `task work:signin:all` starts them, and exit 0.
+
+**D2. A wrong word at `arm` no longer aborts the connect (review item 6).** In `task work:cs:armed`, anything but
+`arm` prints `Not armed. Connecting without recovery; arm later from task work.` and the connect goes on to Herdr.
+
+**D3. No pending-history line on a healthy connect (review item 12).** `Conversation history is pending; inspect
+task work:status.` (`workspace.py:532-534`) prints only when the history is still pending once the connect has
+finished; the History row in `task work:status` keeps the detail.
+
+### E. Words (review, question 2)
+
+On every screen round 1 touches, use one name per thing: Mac (not local, your Mac, Desktop), final sync (not final
+flush, final capture, flush and move), Recovery plus a state (not keeper, keep-alive, heartbeat), sync (not sync
+worker, Mac worker), paired (not binding), Connect. Internal terms (`the lead`, operation ids, `pending
+(desktop_to_codespace:transfer)`, phase names) stay out of screens and stay in `--json` and logs. A full sweep of
+screens round 1 does not touch is not required.
+
+## Non-goals
+
+- Round 2's items (above).
+- Any change to what a command does beyond what is listed. Every menu action keeps its argv.
+- Migrating projects that already have the four aliases.
+- New owner-facing commands or flags.
+
+## Anti-goals (a failure even if every test passes)
+
+- Anything that lets a Codespace be created, rebuilt or deleted with fewer confirmations than today.
+- A `task work` screen over 6 lines or 78 cells, or a menu without the command it will run printed once chosen.
+- A test that passes on a short fixture name but cuts a real one.
+- A refusal (A1) that fires on a checkout on `main`, or on a project with no `origin`.
+- Losing a line from a project's own Taskfile.
+
+## Constraints
+
+- The owner's #87 rulings: at most 6 lines of 78 columns, a Gum menu of 3-6 actions, the likely one first;
+  without a terminal, print the state and the `Next:` commands and exit 0. Ruling 5: only a connect turns
+  recovery on.
+- Never rebuild a paired Codespace; replacing one needs its own yes (C1 is that yes).
+- Gates: `task check` and `task test` green on the branch, in the default environment.
+- Copy follows the `ux-writing` skill. No AI attribution in commits or PRs.
+
+## Approaches
+
+**Scope.** One round of all 17 items, or two rounds. Two rounds won (owner, 2026-11-14): round 1 holds nothing
+that can delete or bill, so it ships sooner, and round 2's interrupted-delete finish gets the safety review it
+needs on its own.
+
+**A1's test.** Three ways were considered:
+
+- *No shared history* (`git merge-base HEAD origin/main` prints nothing). It catches strata-mf (its old branch,
+  `0f5524c`, shares no history with the template's `b3c90ad`), but it misses a branch that merged the template
+  main in: that branch shares history while `main` still lacks the code. It also cannot run in a shallow clone.
+- *Most of the checkout's files are on the default branch* (picked). It measures what the Codespace would actually
+  hold, catches both cases, and is the test the leads' `ready.py` already uses. Its false positive, a feature
+  branch that adds more files than `main` has, has a clean way out: run the setup from `main`, which the wizard
+  builds from anyway.
+- *Look for an open import PR.* Rejected: it needs GitHub, covers only the org-template path, and A1's test
+  already covers it.
+
+**Where the replace question lives (C1).** In the replace command, not the `task work` menu, so the typed command
+asks too and a menu change cannot bypass it.
+
+## Left to the builder
+
+- Exact wording beyond the examples, within the rules above.
+- How the answer trail (A3) is printed (in the Gum wrapper or at each call), as long as every wizard prompt leaves
+  one line and `task work`'s own menu does not print its choice twice.
+- How B3's rows are ranked when more than six facts apply, keeping today's ranking intent (problems and anything
+  needing action first).
+- Where B5's figures come from (the keeper's state, as `task work:status` reads it).
+- Test layout, provided each new test fails with its change removed.
