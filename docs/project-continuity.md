@@ -161,11 +161,12 @@ without creating duplicate imports.
 On your Mac, run `task setup -- --replace` in this repository, or
 `task devcontainer:setup -- --replace` in a generated project. Both commands need
 a terminal and a real gh account, with `GH_TOKEN` and `GITHUB_TOKEN` unset.
-`task work` offers `Replace this Codespace` wherever it offers a connect or start
-and no replace is unfinished, just above the replaced Codespace's delete and `Show details`. The setup wizard
-offers `replace NAME` for a paired Codespace it can read, including one on a
-feature branch; it publishes any reviewed setup changes, then the replace asks its
-own question before anything is created.
+`task work` offers `Replace this Codespace` for a paired Codespace wherever it
+offers a connect or start and no replace is unfinished, just above the replaced
+Codespace's delete and `Show details`. The setup wizard offers `replace NAME` for
+a paired Codespace it can read, including one on a feature branch; it publishes
+any reviewed setup changes, then the replace asks its own question before anything
+is created.
 
 Replacement runs in this order:
 
