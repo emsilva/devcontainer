@@ -203,6 +203,12 @@ class StandingTests(unittest.TestCase):
         self.bind()
         self.cycle()
         self.metadata()
+        self.signins(dict(schema=1, codespace='new-cs', updated_at=1.0, tools={'plaud': {'state': 'signed-out'}}))
+        self.write('arming.json', dict(schema=1, armed=True, codespace='new-cs', gh_user='fixture'))
+        self.live_keeper(phase='watching', anchor={'at': time.time()},
+                         reading={'ok': True, 'state': 'Shutdown', 'at': time.time()})
+        self.ledger(('r-1', time.time() - 7200), ('r-2', time.time() - 3600))
+        (self.state / 'scratch.log').write_text('line\n')
         (Path(self.env['XDG_CACHE_HOME'])).mkdir()
         (Path(self.env['XDG_CACHE_HOME']) / 'sentinel').write_text('keep')
         before = self.snapshot()
@@ -218,13 +224,147 @@ class StandingTests(unittest.TestCase):
             path.write_text(bad)
             self.assertEqual(self.read().setup, 'unknown')
         self.metadata()
-        self.assertEqual(self.read().setup, 'partial')
+        # Valid managed metadata means set up, whatever this Mac's state directory holds.
+        self.assertFalse(self.state.exists())
+        self.assertEqual(self.read().setup, 'installed')
         for name in ('workspace.json', 'scratch.json'):
             self.write(name, {})
             self.assertEqual(self.read().setup, 'installed')
             (self.state / name).unlink()
+        self.assertEqual(self.read().setup, 'installed')
+        with patch.object(state, 'state_dir', side_effect=ValueError('fixture state refusal')):
+            self.assertEqual(self.read().setup, 'installed')
+        self.assertNotIn("'partial'", Path(self.standing.__spec__.origin).read_text())
         with patch.object(self.standing, '__file__', str(self.base / 'source/standing.py')):
             self.assertEqual(self.read().setup, 'source')
+
+    def test_a_set_up_project_without_a_pairing_is_unpaired(self):
+        from devcontainer_setup.project_sync import overview
+        from devcontainer_setup.project_sync.probe import Observation, Remote, Space
+        self.metadata()
+        local = self.read()
+        self.assertIsNone(local.pairing)
+        ok = lambda value: Observation('ok', value, time.time(), None)
+        remote = Remote(ok('fixture'), ok(frozenset(('listed-cs',))),
+                        ok((Space('listed-cs', 'Available', None),)), ok(()), ok('a' * 40))
+        frame = overview.view(local, remote)
+        self.assertTrue(frame.lines[0].endswith(' · no Codespace paired'), frame.lines)
+        self.assertFalse(any('did not finish' in line for line in frame.lines), frame.lines)
+        self.assertEqual(frame.actions[0].key, 'connect')
+
+    def recovery(self, **extra):
+        """A live, armed keeper for new-cs whose record carries the fields the screen plans around."""
+        self.bind()
+        self.write('arming.json', dict(schema=1, armed=True, codespace='new-cs', gh_user='fixture'))
+        value = dict(phase='restarting', anchor={'at': 5000.0},
+                     reading={'ok': True, 'state': 'Available', 'at': 6000.0},
+                     down={'count': 0, 'first_at': None, 'hold_at_stop': 7000.0})
+        value.update(extra)
+        return self.live_keeper(**value)
+
+    def test_recovery_facts_come_from_the_recovery_record(self):
+        self.recovery()
+        local = self.read()
+        self.assertEqual(local.keeper, 'running')
+        self.assertEqual(local.next_stop_at, 5000.0 + 43200)
+        self.assertEqual(local.keeper_phase, 'restarting')
+        self.assertEqual(local.hold_at_stop, 7000.0)
+        stopped = lambda: setattr(state.process_identity, 'return_value', None)
+        cases = (
+            ('keeper_phase', 'another Codespace', dict(codespace='old-cs'), None),
+            ('keeper_phase', 'recovery not running', {}, stopped),
+            ('next_stop_at', 'recovery not running', {}, stopped),
+            ('next_stop_at', 'reading not ok', dict(reading={'ok': False, 'state': 'Available', 'at': 6000.0}), None),
+            ('next_stop_at', 'reading not Available', dict(reading={'ok': True, 'state': 'Shutdown', 'at': 6000.0}),
+             None),
+            ('next_stop_at', 'anchor without a number', dict(anchor={'at': 'soon'}), None),
+            ('next_stop_at', 'no anchor', dict(anchor=None), None),
+            ('hold_at_stop', 'recovery not running', {}, stopped),
+            ('hold_at_stop', 'not a number', dict(down={'count': 0, 'first_at': None, 'hold_at_stop': 'x'}), None),
+        )
+        for field, case, extra, after in cases:
+            with self.subTest(field=field, case=case):
+                self.recovery(**extra)
+                if after:
+                    after()
+                self.assertIsNone(getattr(self.read(), field))
+
+    def ledger(self, *rows):
+        from devcontainer_setup.project_sync import lifecycle
+        for rid, at in rows:
+            lifecycle.Ledger(self.state / keeper.LEDGER, now=lambda: at).append('intent', rid)
+
+    def test_restart_budget_is_read_from_the_ledger(self):
+        self.recovery()
+        self.assertIsNone(self.read().restarts_free_at)
+        self.assertNotIn(keeper.LEDGER + ' cannot be read', self.read().problems)
+        self.assertEqual(self.read().problems, ())
+        now = time.time()
+        self.ledger(('r-1', now - 7200))
+        self.assertIsNone(self.read().restarts_free_at)
+        self.ledger(('o-1', now - 5000))
+        self.assertIsNone(self.read().restarts_free_at)
+        self.ledger(('r-2', now - 3600))
+        self.assertEqual(self.read().restarts_free_at, now - 7200 + 86400)
+        self.write('arming.json', dict(schema=1, armed=False, codespace='new-cs'))
+        self.assertIsNone(self.read().restarts_free_at)
+        self.write('arming.json', dict(schema=1, armed=True, codespace='old-cs'))
+        self.assertIsNone(self.read().restarts_free_at)
+
+    def signins(self, value):
+        state.atomic_write(self.state / 'signins.json',
+                           value if isinstance(value, bytes) else json.dumps(value).encode())
+
+    def test_signed_out_tools_come_from_the_paired_record(self):
+        self.bind()
+        self.assertEqual(self.read().signed_out, ())
+        tools = {'plaud': {'state': 'signed-out'}, 'codex': {'state': 'signed-in'},
+                 'claude': {'state': 'unknown'}, 'grok': {'state': 'absent'}}
+        self.signins(dict(schema=1, codespace='new-cs', updated_at=1.0, tools=tools))
+        self.assertEqual(self.read().signed_out, ('Plaud', 'Claude'))
+        self.signins(dict(schema=1, codespace='old-cs', updated_at=1.0, tools=tools))
+        self.assertEqual(self.read().signed_out, ())
+        self.signins(dict(schema=1, codespace='new-cs', updated_at=1.0, tools=['plaud']))
+        self.assertEqual(self.read().signed_out, ())
+        self.signins(b'not json')
+        local = self.read()
+        self.assertEqual(local.signed_out, ())
+        self.assertIn('signins.json cannot be read', local.problems)
+
+    def live_sync(self, runtime):
+        value = dict(runtime, pid=4343, nonce='s' * 48)
+        value['process_identity'] = f'fixture .scratch --supervise {self.state} ' + value['nonce']
+        self.write('scratch-runtime.json', value)
+        state.process_identity.return_value = value['process_identity']
+
+    def test_pending_history_is_read_from_the_sync_record(self):
+        self.bind()
+        pending = sync_cycle.begin(self.project, self.binding['remote_root'])
+        pending['started_at'] = 3000.0
+        self.live_sync(dict(binding=self.binding, conversations=pending))
+        self.assertEqual(self.read().worker, 'running')
+        self.assertEqual(self.read().history_pending_since, 3000.0)
+        cases = (
+            ('completed', dict(pending, completed_at=3100.0, outcome='complete'), self.binding, True),
+            ('another project', dict(pending, project_id='other'), self.binding, True),
+            ('another binding', pending, dict(self.binding, codespace='old-cs'), True),
+            ('sync stopped', pending, self.binding, False),
+        )
+        for case, cycle, binding, live in cases:
+            with self.subTest(case=case):
+                self.live_sync(dict(binding=binding, conversations=cycle))
+                if not live:
+                    state.process_identity.return_value = None
+                self.assertIsNone(self.read().history_pending_since)
+
+    def test_logs_fact_needs_a_log_file(self):
+        self.bind()
+        self.assertFalse(self.read().logs)
+        (self.state / 'scratch.log').write_text('line\n')
+        self.assertTrue(self.read().logs)
+        (self.state / 'scratch.log').unlink()
+        (self.state / keeper.LOG).write_text('line\n')
+        self.assertTrue(self.read().logs)
 
     def test_records_for_another_codespace_are_ignored(self):
         self.bind()
@@ -475,6 +615,10 @@ class StandingTests(unittest.TestCase):
         self.assertIn('fixture state refusal', local.problems)
 
     def test_subprocesses_are_bounded_and_read_only(self):
+        self.recovery()
+        self.metadata()
+        self.signins(dict(schema=1, codespace='new-cs', updated_at=1.0, tools={'plaud': {'state': 'signed-out'}}))
+        self.ledger(('r-1', time.time() - 7200), ('r-2', time.time() - 3600))
         run = subprocess.run
         calls = []
         def observe(argv, **kwargs):

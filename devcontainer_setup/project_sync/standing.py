@@ -12,7 +12,7 @@ import re
 import subprocess
 import time
 
-from . import keeper, replacing, scratch, state as project_state, sync_cycle
+from . import keeper, lifecycle, replacing, scratch, state as project_state, sync_cycle
 
 
 @dataclass(frozen=True)
@@ -70,6 +70,13 @@ class Local:
     replacing: dict | None = None
     launch: Launch | None = None
     checkout: Checkout = Checkout()
+    keeper_phase: str | None = None
+    next_stop_at: float | None = None
+    hold_at_stop: float | None = None
+    restarts_free_at: float | None = None
+    signed_out: tuple[str, ...] = ()
+    history_pending_since: float | None = None
+    logs: bool = False
     problems: tuple[str, ...] = ()
 
 
@@ -257,7 +264,7 @@ def _taskfile(root, reader):
         return None, None
 
 
-def _setup(root, generated, state, reader):
+def _setup(root, generated, reader):
     if not generated:
         return 'source', None
     path = root / '.devcontainer/devcontainer.json'
@@ -277,10 +284,8 @@ def _setup(root, generated, state, reader):
     if not isinstance(ref, str) or not re.fullmatch(r'[0-9a-fA-F]{40}', ref):
         reader.problem('devcontainer.json sourceRef cannot be read')
         return 'unknown', None
-    if state is None:
-        return 'unknown', ref
-    return ('installed' if any((state / name).exists() for name in ('workspace.json', 'scratch.json'))
-            else 'partial'), ref
+    # This Mac's pairing files appear only at the first connect; they say nothing about the setup.
+    return 'installed', ref
 
 
 def _launch(repo, default, env, reader):
@@ -301,10 +306,10 @@ def _launch(repo, default, env, reader):
     return Launch(name, complete)
 
 
-def _cycle(runtime, project, binding):
+def _cycle(runtime, project, binding, completed=True):
     cycle = _object(runtime.get('conversations'))
     if (not binding or runtime.get('binding') != binding or cycle.get('schema') != 3
-            or _number(cycle.get('completed_at')) is None
+            or (completed and _number(cycle.get('completed_at')) is None)
             or cycle.get('project_id') != project.project_id or cycle.get('identity') != project.identity
             or cycle.get('local_root') != str(project.root)
             or cycle.get('remote_root') != binding.get('remote_root')):
@@ -392,6 +397,15 @@ def _retirement_facts(state, reader):
                 cleanup=tuple(name for _, name in sorted(pending)))
 
 
+def _signed_out(state, pairing, reader):
+    record = reader.json(state / 'signins.json', private=True)
+    if not record or record.get('codespace') != pairing or not isinstance(record.get('tools'), dict):
+        return ()
+    # Imported here: signins pulls in the link watcher, about 90 ms task work does not otherwise pay.
+    from . import signins
+    return signins.missing(record['tools'], unlisted=False)
+
+
 def _state_facts(state, project, reader, timeout):
     binding = reader.json(state / scratch.CONFIG, private=True)
     pairing = (binding or {}).get('codespace')
@@ -445,6 +459,18 @@ def _state_facts(state, project, reader, timeout):
         at = _number(down.get('first_at'))
         if status == 'running' and at is not None and down.get('kind') in ('OWNER', 'LIFETIME', 'OTHER'):
             values.update(down_kind=down['kind'], down_at=at)
+        if status == 'running':
+            values.update(keeper_phase=_text(runtime.get('phase')), hold_at_stop=_number(down.get('hold_at_stop')))
+            # The condition task work:status uses for its "12-hour stop expected" line.
+            anchor = _number(_object(runtime.get('anchor')).get('at'))
+            if reading.get('ok') is True and reading.get('state') == 'Available' and anchor is not None:
+                values['next_stop_at'] = anchor + lifecycle.LIFETIME
+    if values.get('armed') is True:
+        try:
+            rows = lifecycle.Ledger(state / keeper.LEDGER).rows()
+            values['restarts_free_at'] = lifecycle.budget_free_at(rows, time.time())
+        except (OSError, ValueError):
+            pass  # The budget is a hint here; task work:status reports the ledger itself.
     worker = reader.json(state / scratch.RUNTIME, private=True)
     if worker is None:
         values['worker'] = 'unknown'
@@ -453,6 +479,13 @@ def _state_facts(state, project, reader, timeout):
         cycle = _cycle(worker, project, binding)
         values['cycle_at'] = _number(cycle.get('completed_at'))
         values['refusals'] = _refusals(worker, project, binding, reader)
+        pending = _cycle(worker, project, binding, completed=False)
+        if (values['worker'] == 'running' and pending.get('completed_at') is None
+                and pending.get('outcome') == 'pending'):
+            values['history_pending_since'] = _number(pending.get('started_at'))
+    if pairing:
+        values['signed_out'] = _signed_out(state, pairing, reader)
+    values['logs'] = any((state / name).exists() for name in (keeper.LOG, 'scratch.log'))
     evidence = reader.json(state / 'start-evidence.json', private=True)
     if evidence and pairing:
         values['started_at'] = _number(_object(evidence.get(pairing)).get('started_at'))
@@ -481,7 +514,7 @@ def read(root: Path, *, env: Mapping[str, str] = os.environ, timeout: float = 1.
         except (OSError, ValueError) as error:
             reader.problem(str(error))
         values['state'] = state
-        values['setup'], values['source_ref'] = _setup(root, values['generated'], state, reader)
+        values['setup'], values['source_ref'] = _setup(root, values['generated'], reader)
         values['taskfile'], values['managed'] = _taskfile(root, reader)
         values['launch'] = _launch(values['repository'], values['checkout'].default, env, reader)
         if state is not None:

@@ -242,6 +242,22 @@ def restart_rids(rows, now):
     return found
 
 
+def budget_free_at(rows, now):
+    """When gate's restart budget next has room, or None when it has room now.
+
+    A rid stays in the budget while its latest intent is inside RESTART_PERIOD, so the
+    budget frees when the MAX_RESTARTS-th newest rid's latest intent leaves it.
+    """
+    latest = {}
+    for row in rows:
+        if _budgeted(row) and now - row['at'] <= RESTART_PERIOD:
+            latest[row['rid']] = max(row['at'], latest.get(row['rid'], row['at']))
+    times = sorted(latest.values())
+    if len(times) < MAX_RESTARTS:
+        return None
+    return times[len(times) - MAX_RESTARTS] + RESTART_PERIOD
+
+
 def gate(*, arming, rows, now):
     """Spec 6.4 step 4: None when a restart is allowed, else the reason it is not."""
     from .arming import format_time  # arming imports this module
