@@ -17,9 +17,16 @@ import time
 from . import git_ops, replace_inputs
 from .codespaces import Codespaces, find_receipt, receipt_path
 from .preferences import load_preferences
-from .project_sync import arming, evidence, replacing, workspace
+from .project_sync import arming, evidence, overview, replacing, workspace
 from .project_sync.state import discover_project, locked, read_json, state_dir
 from .ui import Cancelled, Gum
+
+
+NOT_NOW = 'Not now'
+REPLACE_IT = 'Replace it'
+CONTINUE = 'Continue the replace'
+ABANDON_KEEPING = 'Abandon it: the old one stays paired; the new one stays until you delete it'
+ABANDON_NOTHING = 'Abandon it: the old one stays paired; nothing was created'
 
 
 def launch_options(*args):
@@ -61,8 +68,10 @@ class _Coordinator:
         self.api, self.ui, self.ask, self.env = api, ui, ask, env
         self.runner, self.now, self.sleep = runner, now, sleep
         self.journal = None
+        self.consent_line = None
         generated = (project / '.devcontainer/scripts/project-sync.sh').is_file()
         self.runtime = project / ('.devcontainer/scripts/project-sync.sh' if generated else 'scripts/project-sync.sh')
+        self.setup = 'task devcontainer:setup' if generated else 'task setup'
         self.replace = shlex.join(['task', 'devcontainer:setup' if generated else 'setup', '--', '--replace'])
         self.options = None
 
@@ -124,15 +133,16 @@ class _Coordinator:
         reason = replace_inputs.setup_differs(self.project, commit)
         if reason:
             raise ValueError(f"{branch} at {commit[:12]} does not carry this checkout's setup ({reason}); "
-                             'nothing was created. Run task setup first.')
+                             f'nothing was created. Run {self.setup} first.')
         if not replace_inputs.offered(self.api.machines(repo, commit), resources):
             raise ValueError(f"{self.old}'s machine {resources.machine} ({resources.cpus} cores) is not offered "
                              f'for {branch} at {commit[:12]}; nothing was created.')
 
-    def inspect(self):
+    def survey(self):
+        """Make the read-only checks and return the journal a yes would write; write and print nothing."""
         config = _optional(self.state / 'scratch.json') or {}
         if not config.get('codespace'):
-            raise ValueError('No Codespace is paired, so there is nothing to replace. Create one with task setup.')
+            raise ValueError(f'No Codespace is paired, so there is nothing to replace. Create one with {self.setup}.')
         if config.get('identity') != self.identity.identity or config.get('root') != str(self.project):
             raise ValueError('The pairing belongs to another project; nothing was created.')
         self.old = config['codespace']
@@ -148,14 +158,15 @@ class _Coordinator:
         self.check_setup(repo, branch, commit, resources)
         account = self.api.user()
         consent = arming.read(self.state)
+        self.consent_line = None
         if consent.get('armed'):
             user = consent.get('gh_user', 'unknown')
             if user == account:
                 date = datetime.fromtimestamp(consent['consented_at']).strftime('%Y-%m-%d')
-                print(f'Recovery moves with your consent from {date} ({user}).', flush=True)
+                self.consent_line = f'Recovery moves with your consent from {date} ({user}).'
             else:
-                print(f'Recovery on NEW will need a typed arm: consent was given as {user}, '
-                      f'gh is signed in as {account}.', flush=True)
+                self.consent_line = (f'Recovery on the new Codespace will need a typed arm: consent was given as '
+                                     f'{user}, gh is signed in as {account}.')
         options = self.launch_values()
         state_root = Path(options['state_root'])
         branch_record = _launch_receipt(receipt_path(state_root, repo, branch))
@@ -164,15 +175,46 @@ class _Coordinator:
         if not old_record or old_record.get('codespace') != self.old:
             found = find_receipt(state_root, repo, self.old)
             old_record = _launch_receipt(found) if found else None
-        self.journal = dict(schema=1, operation=secrets.token_hex(6), old=self.old, new=None, account=account,
+        return dict(schema=1, operation=secrets.token_hex(6), old=self.old, new=None, account=account,
             repository=repo, branch=branch, commit=commit,
             remote_root=options.get('workspace') or f'/workspaces/{repo.split("/")[-1]}',
             resources=asdict(resources), old_receipt=old_record, branch_receipt=branch_record,
             request=None, phase='inspected', at={'inspected': self.now()}, signins=None, check=None,
             moving=None, ended=None, ended_at=None)
-        replacing.write(self.state, self.journal)
-        print(f'Replacing {self.old} ({resources.machine}, {resources.cpus} cores, '
-              f'idle timeout {resources.idle_timeout_minutes} minutes).', flush=True)
+
+    def preview(self, journal):
+        resources = journal['resources']
+        lines = (f"Replace {journal['old']}?",
+                 f"  New one  {resources['machine']} ({resources['cpus']} cores), "
+                 f"stops after {resources['idle_timeout_minutes']} min idle",
+                 f"  From     {journal['branch']} at {journal['commit'][:7]}",
+                 f"  Billing  {resources['billable_owner']}, from the moment it is created",
+                 '  You      end agents when asked, approve the sign-ins, decide the delete')
+        return '\n'.join(overview.fit(line, 78) for line in lines)
+
+    def confirm(self, journal):
+        """The yes C1 asks for; Esc, Ctrl-C and end of input are a no."""
+        try:
+            return self.choose(self.preview(journal), [NOT_NOW, REPLACE_IT]) == REPLACE_IT
+        except (Cancelled, KeyboardInterrupt, EOFError):
+            return False
+
+    def unfinished(self, journal):
+        """The continue-or-abandon question for a replace that stopped before the move."""
+        new = journal['new']
+        lines = (f"The replace is unfinished: it stopped at {replacing.PHASE_WORDS[journal['phase']]}.",
+                 f"  Old one  {journal['old']}, still paired",
+                 f'  New one  {new}, created' if new else '  New one  not created')
+        return '\n'.join(overview.fit(line, 78) for line in lines), [CONTINUE, ABANDON_KEEPING if new else ABANDON_NOTHING]
+
+    def begin(self, journal):
+        self.journal = journal  # Set first: an interrupt during the write must not read as nothing replaced.
+        replacing.write(self.state, journal)
+        if self.consent_line:
+            print(self.consent_line, flush=True)
+        resources = journal['resources']
+        print(f"Replacing {journal['old']} ({resources['machine']}, {resources['cpus']} cores, "
+              f"idle timeout {resources['idle_timeout_minutes']} minutes).", flush=True)
 
     def receipt(self):
         return receipt_path(Path(self.launch_values()['state_root']), self.journal['repository'], self.journal['branch'])
@@ -313,7 +355,8 @@ class _Coordinator:
             answer = self.choose(title, [*labels, 'cancel'])
             if answer not in labels:
                 if uncertain:
-                    print(f"Replace stopped at create: {uncertain[0]['name']} cannot be fully read from GitHub, "
+                    phase = replacing.PHASE_WORDS[self.journal['phase']]
+                    print(f"Replace stopped at {phase}: {uncertain[0]['name']} cannot be fully read from GitHub, "
                           'and it may be the Codespace this replace asked for. Check it on GitHub, '
                           f'then run {self.replace} again.', flush=True)
                     return 1
@@ -426,8 +469,8 @@ class _Coordinator:
                         result = self.reconcile(resume=False)
                         if result is not None:
                             return result
-                    answer = self.choose(f'A replace of {self.old} is unfinished.', ['continue', 'abandon'])
-                    if answer == 'abandon':
+                    answer = self.choose(*self.unfinished(self.journal))
+                    if answer in (ABANDON_KEEPING, ABANDON_NOTHING):
                         seal_path = self.state / 'retired' / (self.old + '.json')
                         seal = _optional(seal_path)
                         if seal and seal.get('operation') == self.journal['operation']:
@@ -441,10 +484,19 @@ class _Coordinator:
                         else:
                             print(f'Replace abandoned. {self.old} stays paired; nothing was created.', flush=True)
                         return 0
-                    if answer != 'continue':
+                    if answer != CONTINUE:
                         return self.stop('cancelled')
-            if self.journal is None or self.journal['phase'] == 'inspected':
-                self.inspect()
+            if self.journal is None:
+                journal = self.survey()
+                if not self.confirm(journal):
+                    print('Nothing was replaced.', flush=True)
+                    return 0
+                self.begin(journal)
+                result = self.launch()
+                if result is not None:
+                    return result
+            elif self.journal['phase'] == 'inspected':
+                self.begin(self.survey())  # Confirmed before the interruption; the continue question came first.
                 result = self.launch()
                 if result is not None:
                     return result
@@ -468,6 +520,9 @@ class _Coordinator:
                     return result
             return self.finish()
         except (KeyboardInterrupt, EOFError, Cancelled):
+            if self.journal is None:
+                print('Nothing was replaced.', flush=True)
+                return 0
             return self.stop('cancelled')
         except (ValueError, OSError, subprocess.TimeoutExpired) as error:
             return self.stop(str(error))
