@@ -567,11 +567,11 @@ def _answer_findings(ui, found, chosen, decisions):
         elif kind == 'runtime-conflict':
             print('\n'.join(value['declarations']), flush=True)
             name = value['runtime']
-            answer = ui.input(f'{name} version (resolve declarations above)', chosen['runtimes'][name])
+            answer = ui.input(f'Which {name} version? (the declarations above disagree)', chosen['runtimes'][name])
             chosen['runtimes'][name] = answer
         elif kind == 'manager':
             family = value['family']
-            answer = ui.choose(f'{family} package manager', ['Keep saved choice', *value['choices']])
+            answer = ui.choose(f'Which {family} package manager?', ['Keep saved choice', *value['choices']])
             if answer == 'Keep saved choice':
                 answer = False
             else:
@@ -580,7 +580,7 @@ def _answer_findings(ui, found, chosen, decisions):
         else:
             print('\n'.join(value['declarations']), flush=True)
             family, manager = value['family'], value['manager']
-            answer = ui.input(f'{manager} version (resolve declarations above; exact x.y.z)',
+            answer = ui.input(f'Which {manager} version? (exact x.y.z; the declarations above disagree)',
                               chosen['package_manager_versions'].get(family, ''))
             chosen['package_manager_versions'][family] = answer
         decisions.append(dict(finding, answer=answer))
@@ -591,10 +591,10 @@ def _answer_findings(ui, found, chosen, decisions):
 def _dotfiles_answer(ui, preferences):
     while True:
         try:
-            repo = dotfiles_repository(ui.input('Dotfiles repository', preferences['dotfiles_repo']))
+            repo = dotfiles_repository(ui.input('Which dotfiles repository?', preferences['dotfiles_repo']))
             if repo != preferences['dotfiles_repo']:
                 print('Checking dotfiles repository access...', flush=True)
-                if not repository_access(repo) and not ui.confirm('Could not verify access. Continue with this repository?', False):
+                if not repository_access(repo) and not ui.confirm('Could not verify access. Use this repository anyway?', False):
                     continue
             preferences['dotfiles_repo'] = repo
             return
@@ -614,21 +614,23 @@ def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
             print(f'  {TOOL_LABELS.get(name, name)}: ' + '; '.join(entry['evidence'][:2]))
     for warning in found['warnings']:
         print(f'  Note: {warning}')
-    runtime_names = ui.multi('Project runtimes (Python, Node and uv included)', ['node', 'ruby', 'go', 'rust'],
-                             [name for name in chosen['runtimes'] if name != 'python'])
+    runtime_names = ui.multi('Which other runtimes? (Python, Node and uv are included)',
+                             ['node', 'ruby', 'go', 'rust'], [name for name in chosen['runtimes'] if name != 'python'])
     runtimes = {'python': chosen['runtimes'].get('python', '3.13')}
     for name in ['python', *runtime_names]:
         entry = found['runtimes'][name]
         value = chosen['runtimes'].get(name, entry['version'] or RUNTIME_DEFAULTS[name])
         if name in runtime_names and name not in chosen['runtimes'] or entry['conflicts']:
+            question = f'Which {name} version?'
             if entry['conflicts']:
                 print('\n'.join(entry['conflicts']), flush=True)
-            value = ui.input(f'{name} version (resolve declarations above)', value)
+                question += ' (the declarations above disagree)'
+            value = ui.input(question, value)
         runtimes[name] = value
     chosen['runtimes'] = runtimes
     labels = list(TOOL_LABELS.values())
     reverse = {label: name for name, label in TOOL_LABELS.items()}
-    chosen['tools'] = [reverse[label] for label in ui.multi('Project tools', labels,
+    chosen['tools'] = [reverse[label] for label in ui.multi('Which tools does the project need?', labels,
                       [TOOL_LABELS[name] for name in chosen['tools'] if name in TOOL_LABELS])]
     chosen['continuity'] = ui.confirm('Sync scratch files and project notes with your Mac?',
                                       chosen.get('continuity', True))
@@ -640,13 +642,13 @@ def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
             print('\n'.join(entry['conflicts']), flush=True)
             options = {'node': ['npm', 'pnpm', 'yarn', 'bun'], 'python': ['uv', 'pip', 'poetry', 'pipenv']}.get(family)
             if options:
-                chosen['package_managers'][family] = ui.choose(f'{family} package manager', options)
+                chosen['package_managers'][family] = ui.choose(f'Which {family} package manager?', options)
         manager = chosen['package_managers'].get(family)
         version_entry = entry.get('versions', {}).get(manager, {})
         if version_entry.get('conflicts'):
             print('\n'.join(version_entry['conflicts']), flush=True)
             chosen['package_manager_versions'][family] = ui.input(
-                f'{manager} version (resolve declarations above; exact x.y.z)',
+                f'Which {manager} version? (exact x.y.z; the declarations above disagree)',
                 chosen['package_manager_versions'].get(family, ''))
         elif version_entry.get('version'):
             chosen['package_manager_versions'][family] = version_entry['version']
@@ -657,10 +659,10 @@ def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
         _dotfiles_answer(ui, preferences)
     chosen['agents'] = True
     preferences['apply_dotfiles'], preferences['agentic_tools'] = chosen['dotfiles'], chosen['agents']
-    if ui.confirm('Advanced environment options?', False):
+    if ui.confirm('Change advanced environment options?', False):
         for name, version in chosen['runtimes'].items():
-            chosen['runtimes'][name] = ui.input(f'{name} version', version)
-        ports = ui.input('Forwarded ports (comma-separated)', ','.join(map(str, chosen['ports'])))
+            chosen['runtimes'][name] = ui.input(f'Which {name} version?', version)
+        ports = ui.input('Which ports should be forwarded? (comma-separated)', ','.join(map(str, chosen['ports'])))
         try:
             chosen['ports'] = sorted({int(value.strip()) for value in ports.split(',') if value.strip()})
         except ValueError as error:
@@ -669,7 +671,23 @@ def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
     return chosen
 
 
-CREATE_CODESPACE = 'create like last time'
+PUBLISH_Q = 'How should the setup reach GitHub?'
+CODESPACE_NEW_Q = 'Create a Codespace now?'
+CODESPACE_WHICH_Q = 'Which Codespace?'
+MACHINE_Q = 'Which machine size?'
+IDLE_Q = 'Stop it after how long idle?'
+EDITOR_Q = 'Open an editor once it is created?'
+REVIEW_Q = 'Review: go ahead with these answers?'
+CREATE_NEW = 'create a new Codespace'
+
+
+def create_label(history: dict) -> str:
+    """Name the Codespace a create copies; never claim a history this repository does not have."""
+    # No machine or idle tail: Gum cannot preselect a label with a comma, and this one is preselected.
+    codespace = history.get('codespace')
+    if isinstance(codespace, str) and codespace and history.get('machine') and not history.get('warning'):
+        return f'create one like {codespace}'
+    return CREATE_NEW
 
 
 def _paired_codespace(project: Path) -> str | None:
@@ -689,7 +707,7 @@ def _publish_choice(ui: Gum, has_origin: bool, changed: bool, default: str = 'ma
     if has_origin and not changed:
         return 'nothing'
     merge, local = f'merge into {default}', 'local commit only'
-    choice = ui.choose('Publish', [merge, local] if has_origin else [local], merge if has_origin else local)
+    choice = ui.choose(PUBLISH_Q, [merge, local] if has_origin else [local], merge if has_origin else local)
     return 'merge' if has_origin and choice == merge else 'local'
 
 
@@ -783,9 +801,9 @@ def _ask_launch_resources(ui, api, project, options):
                   f'{m["storage_in_bytes"] // (1024**3)} GB disk ({m["name"]})': m['name'] for m in machines}
         if not labels:
             raise ValueError('No available Codespaces machines for this repository/account.')
-        options['machine'] = labels[ui.choose('Codespaces machine', list(labels))]
+        options['machine'] = labels[ui.choose(MACHINE_Q, list(labels))]
     if options['action'] != 'none' and not options.get('idle_timeout'):
-        options['idle_timeout'] = ui.choose('Stop when idle for', ['15m', '30m', '1h', '2h'])
+        options['idle_timeout'] = ui.choose(IDLE_Q, ['15m', '30m', '1h', '2h'])
     return options
 
 
@@ -799,7 +817,7 @@ class _LaunchEditor:
         return getattr(self.ui, name)
 
     def choose(self, title, options, selected=None):
-        if title == 'Codespaces machine':
+        if title == MACHINE_Q:
             self.history = _launch_history(self.project, self.branch)
             if warning := self.history.get('warning'):
                 print(f'Launch: {warning}', flush=True)
@@ -808,7 +826,7 @@ class _LaunchEditor:
                 selected = next((label for label in options if label.endswith(f'({self.history["machine"]})')), None)
                 if selected is None:
                     print(f'Launch: recorded machine {self.history["machine"]} is no longer offered. Choose a machine.', flush=True)
-        elif title == 'Stop when idle for' and self.history and self.history.get('idle_timeout_minutes') is not None:
+        elif title == IDLE_Q and self.history and self.history.get('idle_timeout_minutes') is not None:
             selected = f'{self.history["idle_timeout_minutes"]}m'
             if selected not in options:
                 options = [*options, selected]
@@ -820,7 +838,7 @@ def _codespace_choice(ui: Gum, api: Codespaces, project: Path, branch: str, *, p
     if not published:
         print('Codespace actions need the setup and SSH on the default branch. '
               'With unpublished local changes, choose merge to publish them first.', flush=True)
-        ui.choose('Codespace', ['none'], 'none')
+        ui.choose(CODESPACE_WHICH_Q, ['none'], 'none')
         return _no_codespace()
     try:
         repo = _repository(project)
@@ -845,8 +863,11 @@ def _codespace_choice(ui: Gum, api: Codespaces, project: Path, branch: str, *, p
         for name, ref in refs.items():
             if not (usable and name == paired):
                 choices[_reuse_label(name, ref, branch, paired)] = ('reuse', name)
+        create = None
         if not usable:
-            choices[CREATE_CODESPACE] = ('create', None)
+            # Only a create reads the receipt: a rebuild keeps the paired Codespace's own resources.
+            create = create_label(_launch_history(project, branch))
+            choices[create] = ('create', None)
         matching = next((label for label, (action, name) in choices.items()
                          if action == 'reuse' and name != paired and refs[name] == branch and ',' not in label), None)
         # The owner's feature branch may have different or malformed setup files.
@@ -855,8 +876,9 @@ def _codespace_choice(ui: Gum, api: Codespaces, project: Path, branch: str, *, p
         metadata = (json.loads(published_config).get('customizations', {}).get('devcontainerSetup', {})
                     if published_config else {})
         selected = ('none' if usable else matching or
-                    ('none' if metadata.get('selections') else CREATE_CODESPACE))
-        choice = ui.choose('Codespace', list(choices), selected)
+                    ('none' if metadata.get('selections') else create))
+        only_create = [action for action, _ in choices.values()] == ['none', 'create']
+        choice = ui.choose(CODESPACE_NEW_Q if only_create else CODESPACE_WHICH_Q, list(choices), selected)
         action, name = choices[choice]
         if action == 'none':
             return _no_codespace()
@@ -886,14 +908,14 @@ def _codespace_choice(ui: Gum, api: Codespaces, project: Path, branch: str, *, p
     labels = {f'{m["cpus"]} cores / {m["memory_in_bytes"] // (1024**3)} GB RAM / '
               f'{m["storage_in_bytes"] // (1024**3)} GB disk ({m["name"]})': m for m in machines}
     selected = next((label for label, machine in labels.items() if machine['cpus'] == 4), next(iter(labels)))
-    machine = labels[ui.choose('Codespaces machine', list(labels), selected)]
-    timeout = ui.choose('Stop when idle for', ['15m', '30m', '1h', '2h'], '30m')
+    machine = labels[ui.choose(MACHINE_Q, list(labels), selected)]
+    timeout = ui.choose(IDLE_Q, ['15m', '30m', '1h', '2h'], '30m')
     options = {'action': 'create', 'name': None, 'machine': machine['name'], 'idle_timeout': timeout}
     if ui.confirm('Show advanced launch options?', False):
-        region = ui.choose('Region', ['Automatic', 'EastUs', 'WestUs2', 'WestEurope', 'SouthEastAsia'])
+        region = ui.choose('Which region?', ['Automatic', 'EastUs', 'WestUs2', 'WestEurope', 'SouthEastAsia'])
         if region != 'Automatic':
             options['location'] = region
-        options['retention'] = ui.choose('Delete stopped codespace after', ['24h', '72h', '168h', '720h'], '168h')
+        options['retention'] = ui.choose('Delete it after how long stopped?', ['24h', '72h', '168h', '720h'], '168h')
     return options
 
 
@@ -902,7 +924,7 @@ def _launch_options(ui: Gum, api: Codespaces, project: Path, branch: str, resume
     if not resume or not published:
         return _codespace_choice(ui, api, project, branch, published=published)
     # --resume is an explicit reuse, never a forced rebuild or an invitation to create another.
-    choice = ui.choose('Codespace', ['none', f'reuse {resume}'], f'reuse {resume}')
+    choice = ui.choose(CODESPACE_WHICH_Q, ['none', f'reuse {resume}'], f'reuse {resume}')
     if choice == 'none':
         return _no_codespace()
     try:
@@ -1181,8 +1203,8 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
                                          published=bool(default) and (publish != 'local' or
                                                                      (not plan.changed and chosen['ssh'])))
                 if change_answers:
-                    editor_preference = ui.choose('Editor after create', ['none', 'browser', 'vscode'],
-                                                   editor_preference or load_open_after_create())
+                    editor_preference = ui.choose(EDITOR_Q, ['none', 'browser', 'vscode'],
+                                                  editor_preference or load_open_after_create())
             else:
                 publish = ('nothing' if not plan.changed else 'merge') if default else 'local'
                 launch = _no_codespace()
@@ -1228,7 +1250,7 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
                 print(f'Launch: {launch["machine"]}, idle {launch["idle_timeout"]}; '
                       f'editor after create: {editor_preference or load_open_after_create()}', flush=True)
             while True:
-                action = ui.choose('Review setup', ['View diff', 'Change answers', 'Continue', 'Cancel'], 'Continue')
+                action = ui.choose(REVIEW_Q, ['View diff', 'Change answers', 'Continue', 'Cancel'], 'Continue')
                 if action == 'View diff':
                     print(plan.diff() or 'No project changes.', flush=True)
                 else:
