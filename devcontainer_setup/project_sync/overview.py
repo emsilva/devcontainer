@@ -249,6 +249,8 @@ def view(local: Local, remote: Remote | None, *,
     name = local.pairing
     recovery_off = (local.armed is True and local.keeper == 'stopped'
                     and pair.kind not in _GONE)
+    # The sync runs for the paired Codespace (standing reads it for that binding only).
+    connected = bool(name) and local.worker == 'running'
     if recovery_off:
         row(1, 1, 'Recovery', 'off until you connect')
     if local.replacing is not None:
@@ -320,7 +322,8 @@ def view(local: Local, remote: Remote | None, *,
                 text = f'in state {pair.raw} ({pair.suffix})'
             else:
                 text = pair.reason
-            action('connect', 'Connect', 'work:cs')
+            # Recovery off keeps Connect: only a connect turns it back on.
+            action('connect', 'Open in Herdr' if connected and not recovery_off else 'Connect', 'work:cs')
             if situation == 'available':
                 if local.armed is False:
                     action('arm', 'Connect and arm recovery', 'work:cs:armed')

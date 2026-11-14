@@ -588,7 +588,7 @@ class OverviewTests(unittest.TestCase):
                 self.assertNotIn('(task', action.item)
                 self.assertNotIn(CS, action.item)
         labels = {action.key: action.label for frame in frames for action in frame.actions}
-        self.assertEqual(labels['connect'], 'Connect')
+        self.assertEqual(labels['connect'], 'Open in Herdr')  # connected; Connect otherwise (FR2)
         self.assertEqual(labels['start'], 'Start and connect')
         self.assertEqual(labels['arm'], 'Connect and arm recovery')
         self.assertEqual(labels['stop'], 'Stop the Codespace')
@@ -597,6 +597,31 @@ class OverviewTests(unittest.TestCase):
         self.assertEqual(labels['cleanup:cleanup-cs'], 'Finish cleaning up after the delete')
         resume = self.frame(replace(self.local, launch=Launch(CS, False)))
         self.assertEqual(next(a.label for a in resume.actions if a.key == 'resume'), 'Resume the Codespace setup')
+
+    def test_connect_reads_open_in_herdr_while_connected(self):
+        # FR2: a running sync means connected; recovery off keeps Connect, since only a connect turns it on.
+        connect = ('task', 'work:cs')
+        cases = [
+            ('armed', replace(self.local, armed=True), self.remote, 'Open in Herdr'),
+            ('not armed', self.local, self.remote, 'Open in Herdr'),
+            ('starting', replace(self.local, armed=True), self.remote_state('Starting'), 'Open in Herdr'),
+            ('sync stopped', replace(self.local, worker='stopped'), self.remote, 'Connect'),
+            ('sync unknown', replace(self.local, worker='unknown'), self.remote, 'Connect'),
+            ('recovery off', replace(self.local, armed=True, keeper='stopped'), self.remote, 'Connect'),
+        ]
+        for name, local, remote, expected in cases:
+            with self.subTest(name=name):
+                frame = self.frame(local, remote)
+                found, = (action for action in frame.actions if action.key == 'connect')
+                self.assertEqual((found.label, found.argv), (expected, connect))
+                self.assertLessEqual(self.overview.cells(found.item), 78)
+        armed = self.frame(replace(self.local, armed=False))
+        self.assertEqual([action.label for action in armed.actions][:3],
+                         ['Open in Herdr', 'Connect and arm recovery', 'Stop the Codespace'])
+        stopped = self.frame(remote=self.remote_state('Shutdown'))
+        self.assertEqual(stopped.actions[0].label, 'Start and connect')
+        unpaired = self.frame(replace(self.local, pairing=None))
+        self.assertEqual(unpaired.actions[0].label, 'Connect')
 
     def test_menu_labels_are_unique(self):
         refusals = (Refusal('codex', 'abcdefgh-1', 'refused'), Refusal('codex', 'abcdefgh-2', 'refused'))
