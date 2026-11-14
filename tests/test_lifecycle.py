@@ -630,5 +630,23 @@ class GateTests(unittest.TestCase):
         self.assertTrue(lifecycle.owner_rid(self.NOW).startswith(lifecycle.OWNER_RID))
         self.assertEqual(lifecycle.owner_rid(self.NOW)[2:], lifecycle.new_rid(self.NOW)[2:])
 
+    def test_budget_free_at_names_when_the_oldest_restart_leaves(self):
+        two = [self.row('intent', 'r-1', 7200), self.row('result', 'r-1', 7100), self.row('intent', 'r-2', 3600)]
+        free_at = lifecycle.budget_free_at(two, self.NOW)
+        self.assertEqual(free_at, self.NOW - 7200 + lifecycle.RESTART_PERIOD)
+        self.assertIsNone(lifecycle.budget_free_at([self.row('intent', 'r-1', 7200)], self.NOW))
+        owner = [self.row('intent', 'r-1', 7200), self.row('intent', 'o-1', 3600)]
+        self.assertIsNone(lifecycle.budget_free_at(owner, self.NOW))
+        self.assertIsNone(lifecycle.budget_free_at([], self.NOW))
+        # A rid's latest intent is the one that keeps it in the budget.
+        repeated = [self.row('intent', 'r-1', 9000), self.row('intent', 'r-2', 7200),
+                    self.row('intent', 'r-1', 3600)]
+        self.assertEqual(lifecycle.budget_free_at(repeated, self.NOW), self.NOW - 7200 + lifecycle.RESTART_PERIOD)
+        refusal = f'{lifecycle.MAX_RESTARTS} restarts already in 24 hours'
+        armed = {'armed': True}
+        self.assertEqual(lifecycle.gate(arming=armed, rows=two, now=free_at - 1), refusal)
+        self.assertNotEqual(lifecycle.gate(arming=armed, rows=two, now=free_at + 1), refusal)
+        self.assertIsNone(lifecycle.budget_free_at(two, free_at + 1))
+
 if __name__ == '__main__':
     unittest.main()

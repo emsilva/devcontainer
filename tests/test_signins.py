@@ -444,6 +444,30 @@ class SequenceTests(unittest.TestCase):
                 self.assertEqual(code, 0)
         self.assertIn('Signed in: Plaud, Claude, OpenCode, Grok.', out)
 
+    def test_summary_and_screen_share_the_signed_out_rule(self):
+        tools = {'plaud': {'state': 'signed-out', 'checked_at': 1.0}, 'codex': {'state': 'signed-in'},
+                 'claude': {'state': 'unknown'}, 'opencode': {'state': 'other-method'}, 'grok': {'state': 'absent'}}
+        missing = self.signins.missing(tools, unlisted=True)
+        self.assertEqual(missing, ('Plaud', 'Claude'))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.signins._summary(tools)
+        self.assertIn('Not signed in: ' + ', '.join(missing) + '. Retry with task work:signin:all.\n',
+                      out.getvalue())
+        self.assertEqual(self.signins.missing(tools, unlisted=False), missing)
+        # A malformed row cannot crash the screen that reads the record.
+        self.assertEqual(self.signins.missing({'plaud': 'x', 'codex': None}, unlisted=False), ())
+
+    def test_summary_still_counts_a_tool_with_no_result(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.signins._summary({})
+        self.assertIn('Not signed in: Plaud, Codex, Claude, OpenCode, Grok. Retry with task work:signin:all.\n',
+                      out.getvalue())
+        self.assertEqual(self.signins.missing({}, unlisted=False), ())
+        self.assertEqual(self.signins.missing({}, unlisted=True),
+                         ('Plaud', 'Codex', 'Claude', 'OpenCode', 'Grok'))
+
     def test_expired_page_failure_names_new_page_on_retry(self):
         for tool in self.signins.TOOLS:
             with self.subTest(tool=tool.key):

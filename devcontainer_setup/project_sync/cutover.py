@@ -204,7 +204,7 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
             deadline = now() + 120
             while not workspace._current_worker(scratch.status(state)):
                 if now() >= deadline:
-                    print(f'Replace stopped at flush and move: sync with {old} did not start.')
+                    print(f'Replace stopped at the final sync: sync with {old} did not start.')
                     return 1
                 sleep(min(2, deadline - now()))
         decision = move.decide(project, state, new, ask=ask)

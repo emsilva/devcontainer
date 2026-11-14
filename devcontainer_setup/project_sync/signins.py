@@ -257,18 +257,28 @@ def _line(tool, result, *, after=False, code=0):
     print(tool.label + ': ' + text, flush=True)
 
 
-def _summary(results):
-    signed, missing = [], []
+def missing(tools: dict, *, unlisted: bool) -> tuple[str, ...]:
+    """Labels of the tools not signed in, in TOOLS order; a tool with no row counts only when unlisted."""
+    result = []
     for tool in TOOLS:
-        state = results.get(tool.key, {}).get('state', UNKNOWN)
-        if state in (SIGNED_IN, OTHER_METHOD):
-            signed.append(tool.label)
-        elif state != ABSENT:
-            missing.append(tool.label)
+        row = tools.get(tool.key)
+        if not isinstance(row, dict):
+            if unlisted:
+                result.append(tool.label)
+        elif row.get('state', UNKNOWN) not in (SIGNED_IN, OTHER_METHOD, ABSENT):
+            result.append(tool.label)
+    return tuple(result)
+
+
+def _summary(results):
+    signed = [tool.label for tool in TOOLS
+              if results.get(tool.key, {}).get('state', UNKNOWN) in (SIGNED_IN, OTHER_METHOD)]
+    # A tool with no result (a cancel before its probe) counts as not signed in here.
+    signed_out = missing(results, unlisted=True)
     print('Signed in: ' + (', '.join(signed) or 'none') + '.', flush=True)
-    if missing:
-        print('Not signed in: ' + ', '.join(missing) + '. Retry with task work:signin:all.', flush=True)
-    return bool(missing)
+    if signed_out:
+        print('Not signed in: ' + ', '.join(signed_out) + '. Retry with task work:signin:all.', flush=True)
+    return bool(signed_out)
 
 
 def run(project, state: Path, codespace: str, *, ask=input, interactive=None) -> int:

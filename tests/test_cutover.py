@@ -939,7 +939,8 @@ class CutoverTests(unittest.TestCase):
         self.remote.side_effect = lambda *a, **k: 0
         code, out = self.run_cutover()
         self.assertEqual(code, 1)
-        self.assertIn('Replace stopped at flush and move: sync with old-space did not start.', out)
+        words = replacing.PHASE_WORDS['ready']
+        self.assertIn(f'Replace stopped at {words}: sync with old-space did not start.', out)
         self.assertEqual(self.clock, 1120)
         self.assertFalse(read_json(self.receipt_path)['moved'])
         self.runtime = dict(running=True, phase='syncing', checkpoint_version=sync_cycle.SCHEMA,
