@@ -21,6 +21,9 @@ from devcontainer_setup.releases import fetch_release
 
 DEADLINE = 2.0
 REAP_BOUND = 1.0
+# assert_dead's budget for a loaded Mac, not the product's promise (REAP_BOUND, asserted beside each call).
+# Shorter than the fake's 30 s and 60 s sleeps, so a child the probe never killed still fails.
+DEAD_WITHIN = 20.0
 
 
 FAKE = r'''
@@ -150,16 +153,17 @@ class ProbeTests(unittest.TestCase):
 
     def assert_dead(self):
         pids = json.loads(self.pids.read_text())
-        limit = time.monotonic() + REAP_BOUND
+        limit = time.monotonic() + DEAD_WITHIN
         for pid in pids:
-            while time.monotonic() < limit:
+            # Look first, then check the budget: a slow ps must not leave a pid unexamined.
+            while True:
                 result = subprocess.run(['ps', '-o', 'stat=', '-p', str(pid)],
-                                        capture_output=True, text=True, timeout=1)
+                                        capture_output=True, text=True, timeout=DEAD_WITHIN)
                 if result.returncode or not result.stdout.strip() or result.stdout.strip().startswith('Z'):
                     break
+                if time.monotonic() >= limit:
+                    self.fail(f'fixture child {pid} is still running')
                 time.sleep(0.01)
-            else:
-                self.fail(f'fixture child {pid} is still running')
         for child in self.children:
             self.assertIsNotNone(child.returncode)
 
