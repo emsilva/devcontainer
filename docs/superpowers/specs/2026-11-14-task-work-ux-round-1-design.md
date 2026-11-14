@@ -115,7 +115,7 @@ the Codespace name and the command (`Replace this Codespace`, `Finish the replac
 Codespace`). The command still prints as `Running: …` once chosen and in the `Next:` lines without a terminal.
 This changes #87's "each item prints the command it runs": the owner chose labels only on 2026-11-14 ("follow your
 recommendation"), over keeping commands where they fit or everywhere.
-Tests render with a 36-character Codespace name (run 3's `literate-pancake-jjjrq4j9rqwrc5qp6` length), not
+Tests render with a 36-character Codespace name (run 3's `bookish-space-meme-v66pqg6wpvvqcpw7j`; `literate-pancake-jjjrq4j9rqwrc5qp6` is 34), not
 `paired-cs`.
 
 **B4. Replace moves down (review item 1, order).** Replace sits below Connect, Connect and arm recovery, Start
