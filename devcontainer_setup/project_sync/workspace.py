@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import re
 import secrets
-import textwrap
 import time
 
 from . import scratch, sync_cycle
@@ -618,12 +617,25 @@ LABEL, WIDTH = 13, 78
 RECOVERY_OFF = 'Recovery is off: connect with task work:cs'
 
 
+def _wrap(text: str, width: int, indent: str = '') -> list[str]:
+    """Wrap at spaces by terminal cells, indenting every line after the first; a word wider than the room stays whole."""
+    from .overview import cells
+    lines, line = [], None
+    for word in text.split():
+        if line is not None and cells(line + ' ' + word) <= width:
+            line += ' ' + word
+            continue
+        if line is not None:
+            lines.append(line)
+        line = (indent if lines else '') + word
+    return lines + [line] if line is not None else ['']
+
+
 def _fit_row(label: str, text: str) -> list[str]:
     """One row as terminal lines; a word wider than the room, such as a path, is not broken."""
-    options = dict(break_long_words=False, break_on_hyphens=False)
     if not label:
-        return textwrap.wrap(text, WIDTH, subsequent_indent='  ', **options) or ['']
-    parts = textwrap.wrap(text, WIDTH - LABEL, **options) or ['']
+        return _wrap(text, WIDTH, '  ')
+    parts = _wrap(text, WIDTH - LABEL)
     return [label.ljust(LABEL) + parts[0]] + [' ' * LABEL + part for part in parts[1:]]
 
 

@@ -422,6 +422,40 @@ class ShowDetailsTests(unittest.TestCase):
                 rows = ' '.join(label + ' ' + text for label, text in workspace._status_rows(value))
                 self.assertEqual(self.text(value).split(), rows.split())
 
+    def test_rows_wrap_by_terminal_cells(self):
+        # FR1: short wide words, as a gh error in Japanese brings, wrap by cells, not by characters.
+        import textwrap
+        from devcontainer_setup.project_sync import workspace
+        from devcontainer_setup.project_sync.overview import cells
+        wide = '接続 エラー ' * 12
+        reading = {'at': self.now - 3, 'ok': True, 'state': 'Available', 'pending': False}
+        value = self.value('wide', running=True, phase='waiting', error=wide, reading=reading)
+        value = dict(value, worker={'running': True, 'phase': 'waiting', 'error': wide})
+        for name, lines, rows in (
+                ('status', self.text(value).splitlines(), workspace._status_rows(value)),
+                ('connect', workspace.recovery_lines(value['recovery']), workspace._recovery_rows(value['recovery']))):
+            with self.subTest(name=name):
+                self.assertTrue(any('接続 エラー' in line for line in lines), lines)
+                for line in lines:
+                    self.assertLessEqual(cells(line), 78, line)
+                self.assertEqual(' '.join(lines).split(), ' '.join(a + ' ' + b for a, b in rows).split())
+        # A word wider than the room, such as a path, stays whole on its own line.
+        word = '界' * 50
+        self.assertEqual(workspace._fit_row('Running', 'x ' + word + ' y'),
+                         ['Running      x', ' ' * 13 + word, ' ' * 13 + 'y'])
+        self.assertEqual(workspace._fit_row('', 'x ' + word + ' y'), ['x', '  ' + word, '  y'])
+        # ASCII rows wrap exactly as textwrap wrapped them by characters.
+        options = dict(break_long_words=False, break_on_hyphens=False)
+        for name, value in self.states().items():
+            for label, text in workspace._status_rows(value):
+                with self.subTest(name=name, row=text[:20]):
+                    if label:
+                        parts = textwrap.wrap(text, 65, **options) or ['']
+                        expected = [label.ljust(13) + parts[0]] + [' ' * 13 + part for part in parts[1:]]
+                    else:
+                        expected = textwrap.wrap(text, 78, subsequent_indent='  ', **options) or ['']
+                    self.assertEqual(workspace._fit_row(label, text), expected)
+
     def test_paths_print_home_relative(self):
         from devcontainer_setup.project_sync import workspace
         from devcontainer_setup.project_sync.state import atomic_write
