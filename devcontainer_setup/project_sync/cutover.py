@@ -229,7 +229,8 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
                           if counts.get(agent, 0) > 0]
                 if agents or scan.services:
                     if agents:
-                        print(f'On {old}: {", ".join(agents)} running. End them, then press Enter to check again, or type stop.')
+                        print(f'On {old}: {", ".join(agents)} running.')
+                        print('End them in their Herdr panes, then press Enter to check again, or type stop.')
                     else:
                         print(f'On {old}: background services running: {_listed_services(scan.services)}. '
                               'Type end to end them, press Enter to check again, or type stop.')
@@ -237,6 +238,8 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
                     if answer == 'stop':
                         print('Nothing moved.')
                         return 1
+                    if answer and (agents or answer != 'end'):
+                        print('Not understood: press Enter, or type ' + ('stop.' if agents else 'end or stop.'))
                     if not agents and answer == 'end':
                         ended, did_not_end = _end_services(connection, scan.services)
                         if ended:

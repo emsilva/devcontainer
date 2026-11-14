@@ -24,6 +24,9 @@ from .ui import Cancelled, Gum
 
 NOT_NOW = 'Not now'
 REPLACE_IT = 'Replace it'
+CONTINUE = 'Continue the replace'
+ABANDON_KEEPING = 'Abandon it: the old one stays paired; the new one stays until you delete it'
+ABANDON_NOTHING = 'Abandon it: the old one stays paired; nothing was created'
 
 
 def launch_options(*args):
@@ -68,6 +71,7 @@ class _Coordinator:
         self.consent_line = None
         generated = (project / '.devcontainer/scripts/project-sync.sh').is_file()
         self.runtime = project / ('.devcontainer/scripts/project-sync.sh' if generated else 'scripts/project-sync.sh')
+        self.setup = 'task devcontainer:setup' if generated else 'task setup'
         self.replace = shlex.join(['task', 'devcontainer:setup' if generated else 'setup', '--', '--replace'])
         self.options = None
 
@@ -129,7 +133,7 @@ class _Coordinator:
         reason = replace_inputs.setup_differs(self.project, commit)
         if reason:
             raise ValueError(f"{branch} at {commit[:12]} does not carry this checkout's setup ({reason}); "
-                             'nothing was created. Run task setup first.')
+                             f'nothing was created. Run {self.setup} first.')
         if not replace_inputs.offered(self.api.machines(repo, commit), resources):
             raise ValueError(f"{self.old}'s machine {resources.machine} ({resources.cpus} cores) is not offered "
                              f'for {branch} at {commit[:12]}; nothing was created.')
@@ -138,7 +142,7 @@ class _Coordinator:
         """Make the read-only checks and return the journal a yes would write; write and print nothing."""
         config = _optional(self.state / 'scratch.json') or {}
         if not config.get('codespace'):
-            raise ValueError('No Codespace is paired, so there is nothing to replace. Create one with task setup.')
+            raise ValueError(f'No Codespace is paired, so there is nothing to replace. Create one with {self.setup}.')
         if config.get('identity') != self.identity.identity or config.get('root') != str(self.project):
             raise ValueError('The pairing belongs to another project; nothing was created.')
         self.old = config['codespace']
@@ -194,6 +198,14 @@ class _Coordinator:
             return self.choose(self.preview(journal), [NOT_NOW, REPLACE_IT]) == REPLACE_IT
         except (Cancelled, KeyboardInterrupt, EOFError):
             return False
+
+    def unfinished(self, journal):
+        """The continue-or-abandon question for a replace that stopped before the move."""
+        new = journal['new']
+        lines = (f"The replace is unfinished: it stopped at {replacing.PHASE_WORDS[journal['phase']]}.",
+                 f"  Old one  {journal['old']}, still paired",
+                 f'  New one  {new}, created' if new else '  New one  not created')
+        return '\n'.join(overview.fit(line, 78) for line in lines), [CONTINUE, ABANDON_KEEPING if new else ABANDON_NOTHING]
 
     def begin(self, journal):
         self.journal = journal  # Set first: an interrupt during the write must not read as nothing replaced.
@@ -456,8 +468,8 @@ class _Coordinator:
                         result = self.reconcile(resume=False)
                         if result is not None:
                             return result
-                    answer = self.choose(f'A replace of {self.old} is unfinished.', ['continue', 'abandon'])
-                    if answer == 'abandon':
+                    answer = self.choose(*self.unfinished(self.journal))
+                    if answer in (ABANDON_KEEPING, ABANDON_NOTHING):
                         seal_path = self.state / 'retired' / (self.old + '.json')
                         seal = _optional(seal_path)
                         if seal and seal.get('operation') == self.journal['operation']:
@@ -471,7 +483,7 @@ class _Coordinator:
                         else:
                             print(f'Replace abandoned. {self.old} stays paired; nothing was created.', flush=True)
                         return 0
-                    if answer != 'continue':
+                    if answer != CONTINUE:
                         return self.stop('cancelled')
             if self.journal is None:
                 journal = self.survey()

@@ -320,11 +320,58 @@ class CutoverTests(unittest.TestCase):
                 self.ask.side_effect = answer if isinstance(answer, BaseException) else lambda _: answer
                 self.gather.reset_mock()
                 code, out = self.run_cutover()
-                self.assertIn('On old-space: claude (2), codex (1) running. End them, then press Enter to check again, or type stop.', out)
+                self.assertIn('On old-space: claude (2), codex (1) running.\n'
+                              'End them in their Herdr panes, then press Enter to check again, or type stop.\n', out)
                 self.assertEqual(code, 0 if answer == '' else 1)
                 self.assertEqual(self.gather.called, answer == '')
                 self.connection.python.assert_not_called()  # Only the scripted scanner may use the connection.
                 self.assertEqual(set(self.api.calls), {'read'})
+
+    def test_agents_gate_says_where_to_end_them(self):
+        from devcontainer_setup.project_sync.overview import cells
+        old = 'bookish-space-meme-v66pqg6wpvvqcpw7j'
+        self.assertEqual(len(old), 36)
+        self.bind(old)
+        self.write('workspace.json', dict(read_json(self.state / 'workspace.json'), codespace=old))
+        replacing.write(self.state, journal(old=old))
+        self.scanner.side_effect = [replace(self.scan, codespace=old, agents=(('codex', 1),))]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = self.c.run(self.project, self.state, operation=self.operation, old=old, new='new-space',
+                              receipt=self.receipt_path, recovery=self.recovery, ask=self.ask, tty=lambda: True,
+                              api_factory=self.factory, connect=self.connect, now=lambda: self.clock,
+                              sleep=self.advance)
+        self.assertEqual(code, 1, out.getvalue())
+        lines = out.getvalue().splitlines()
+        gate = [f'On {old}: codex (1) running.',
+                'End them in their Herdr panes, then press Enter to check again, or type stop.']
+        self.assertEqual(lines[lines.index(gate[0]):lines.index(gate[0]) + 2], gate)
+        for line in gate:
+            self.assertLessEqual(cells(line), 78, line)
+
+    def test_an_unknown_word_at_the_gate_is_answered(self):
+        agents = replace(self.scan, agents=(('codex', 1),))
+        services = replace(self.scan, services=(('opencode serve', 100001, 1),))
+        for scan, word in ((agents, 'stop'), (services, 'end or stop')):
+            with self.subTest(services=scan is services):
+                self.bind('old-space')
+                self.scanner.side_effect = [scan, scan]
+                self.ask.side_effect = ['yes', 'stop']
+                code, out = self.run_cutover()
+                self.assertEqual(code, 1)
+                answer = f'Not understood: press Enter, or type {word}.'
+                self.assertEqual(out.count('Not understood'), 1, out)
+                lines = out.splitlines()
+                self.assertEqual(lines[lines.index(answer) + 1:][-1:], ['Nothing moved.'])
+                self.assertLess(lines.index(answer), lines.index('Nothing moved.'))
+        for scan in (agents, services):
+            with self.subTest(enter=True, services=scan is services):
+                self.bind('old-space')
+                self.scanner.side_effect = [scan, scan]
+                self.ask.side_effect = ['', 'stop']
+                code, out = self.run_cutover()
+                self.assertEqual(code, 1)
+                self.assertNotIn('Not understood', out)
 
     def service_process(self, pid, start, argv):
         path = self.base / 'proc' / str(pid)
@@ -380,7 +427,9 @@ class CutoverTests(unittest.TestCase):
         self.ask.side_effect = ['end', 'stop']
         code, out = self.run_cutover()
         self.assertEqual(code, 1)
-        self.assertEqual(out.count('On old-space: codex (1) running. End them, then press Enter to check again, or type stop.'), 2)
+        self.assertEqual(out.count('On old-space: codex (1) running.\n'
+                                   'End them in their Herdr panes, then press Enter to check again, or type stop.\n'), 2)
+        self.assertEqual(out.count('Not understood: press Enter, or type stop.\n'), 1)  # end is not offered here
         self.assertNotIn('background services running', out)
         self.connection.python.assert_not_called()
         self.gather.assert_not_called()

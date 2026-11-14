@@ -44,7 +44,7 @@ class UI:
     def default(self, options):
         """Answer yes to a fresh replace's question; continue an unfinished one."""
         fresh = [getattr(self.module, 'NOT_NOW', None), getattr(self.module, 'REPLACE_IT', None)]
-        return fresh[1] if options == fresh else 'continue'
+        return fresh[1] if options == fresh else getattr(self.module, 'CONTINUE', None)
 
     def choose(self, title, options):
         self.calls.append((title, options))
@@ -345,7 +345,7 @@ class ReplacementTests(unittest.TestCase):
         self.api.catalogue = [{'name': 'premium', 'cpus': 8}]
         self.differs.return_value = 'different selections'
         self.assertEqual(self.run_replace(), 1)
-        self.assertIn('Run task setup first.', self.output.getvalue())
+        self.assertIn('Run task devcontainer:setup first.', self.output.getvalue())
         self.assertEqual(self.creates(), [])
 
     # C1: a fresh replace asks before it writes or creates anything.
@@ -487,6 +487,26 @@ class ReplacementTests(unittest.TestCase):
             self.assertLessEqual(cells(line), 78, line)
             self.assertNotIn('…', line)
 
+    def test_refusals_name_the_projects_setup_command(self):
+        wrapper = self.project / '.devcontainer/scripts/project-sync.sh'
+        for generated, command in ((True, 'task devcontainer:setup'), (False, 'task setup')):
+            with self.subTest(command=command):
+                if not generated:
+                    wrapper.unlink()
+                self.output = io.StringIO()
+                self.differs.return_value = 'different selections'
+                self.assertEqual(self.run_replace(), 1)
+                self.assertIn(f'nothing was created. Run {command} first.\n', self.output.getvalue())
+                self.differs.return_value = None
+                paired = read_json(self.state / 'scratch.json')
+                self.save('scratch.json', dict(paired, codespace=None))
+                self.assertEqual(self.run_replace(), 1)
+                self.assertIn('No Codespace is paired, so there is nothing to replace. '
+                              f'Create one with {command}.\n', self.output.getvalue())
+                self.save('scratch.json', paired)
+                self.assertEqual(self.creates(), [])
+                self.assertFalse((self.state / 'replace.json').exists())
+
     def test_a_tip_that_moves_before_create_is_checked_again(self):
         self.pin.side_effect = ['a' * 40, 'b' * 40]
         self.api.gh.remote_sha = 'b' * 40
@@ -561,7 +581,7 @@ class ReplacementTests(unittest.TestCase):
         self.save('accounts.json', {'schema': 1, 'codespaces': {'known-space': 'another-account'}})
         self.api.rows.extend([{'name': 'known-space'}, self.api.row()])
         self.api.details['known-space'] = ValueError('must not read a known Codespace')
-        self.ui.answers = ['abandon']
+        self.ui.answers = [self.module.ABANDON_KEEPING]
         self.assertEqual(self.run_replace(), 0)
         self.assertEqual(self.archives()[-1]['new'], 'new-space')
         self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'old-space')
@@ -573,7 +593,7 @@ class ReplacementTests(unittest.TestCase):
     def test_malformed_connected_accounts_keeps_create_requested_without_a_choice(self):
         before = self.active()
         self.save('accounts.json', {'schema': 1, 'codespaces': []})
-        self.ui.answers = ['abandon']
+        self.ui.answers = [self.module.ABANDON_NOTHING]
         self.assertEqual(self.run_replace(), 1)
         self.assertIn('The connected Codespace accounts cannot be read', self.output.getvalue())
         self.assertEqual(replacing.read(self.state), before)
@@ -587,7 +607,7 @@ class ReplacementTests(unittest.TestCase):
     def test_lost_reply_adopts_before_offering_abandon(self):
         self.active()
         self.api.rows.append(self.api.row())
-        self.ui.answers = ['abandon']
+        self.ui.answers = [self.module.ABANDON_KEEPING]
         self.assertEqual(self.run_replace(), 0)
         archived = self.archives()[-1]
         self.assertEqual((archived['phase'], archived['new'], archived['ended']),
@@ -611,7 +631,8 @@ class ReplacementTests(unittest.TestCase):
                 self.assertEqual(self.run_replace(), 1)
                 self.assertEqual(len(self.ui.calls), 1)
                 self.assertEqual(self.ui.calls[0][1][-1], 'cancel')
-                self.assertNotIn('abandon', self.ui.calls[0][1])
+                self.assertFalse({self.module.CONTINUE, self.module.ABANDON_KEEPING,
+                                  self.module.ABANDON_NOTHING} & set(self.ui.calls[0][1]))
                 self.assertEqual(replacing.read(self.state)['phase'], 'create-requested')
                 self.assertFalse(self.api.launches)
                 self.assertEqual(self.creates(), [])
@@ -625,14 +646,14 @@ class ReplacementTests(unittest.TestCase):
             self.assertFalse(self.prompts)
             return choose(title, options)
         with patch.object(self.ui, 'choose', side_effect=after_recheck):
-            self.ui.answers = ['abandon']
+            self.ui.answers = [self.module.ABANDON_NOTHING]
             self.assertEqual(self.run_replace(), 0)
         self.assertIsNone(self.archives()[-1]['new'])
         self.assertIn('nothing was created', self.output.getvalue())
         self.assertEqual(self.creates(), [])
         self.active()
         self.clock.waits.clear()
-        self.ui.answers, self.answers = ['continue'], ['create']
+        self.ui.answers, self.answers = [self.module.CONTINUE], ['create']
         with patch.object(self.ui, 'choose', side_effect=after_recheck):
             self.assertEqual(self.run_replace(), 0)
         self.assertEqual(len(self.prompts), 1)
@@ -646,7 +667,7 @@ class ReplacementTests(unittest.TestCase):
                 error = OSError('unreadable inventory') if failure == 'unreadable' else ValueError('incomplete inventory')
                 self.api.inventory = lambda: (_ for _ in ()).throw(error)
                 self.ui.calls.clear()
-                self.ui.answers = ['abandon']
+                self.ui.answers = [self.module.ABANDON_NOTHING]
                 self.assertEqual(self.run_replace(), 1)
                 self.assertFalse(self.ui.calls)
                 self.assertEqual(replacing.read(self.state)['phase'], 'create-requested')
@@ -658,7 +679,7 @@ class ReplacementTests(unittest.TestCase):
         self.active()
         self.api.rows += [self.api.row(), self.api.row('competing-space')]
         self.valid_launch()
-        self.ui.answers = [1, 'continue']
+        self.ui.answers = [1, self.module.CONTINUE]
         self.cutover_ok = False
         self.assertEqual(self.run_replace(), 1)
         self.assertEqual(self.api.launches[0][1]['resume'], 'competing-space')
@@ -832,7 +853,7 @@ class ReplacementTests(unittest.TestCase):
         self.assertEqual(self.run_replace(), 1)
         value = replacing.read(self.state)
         self.save('retired/old-space.json', {'operation': value['operation']})
-        self.ui.answers = ['abandon']
+        self.ui.answers = [self.module.ABANDON_KEEPING]
         self.assertEqual(self.run_replace(), 0)
         self.assertEqual(read_json(self.state / 'scratch.json')['codespace'], 'old-space')
         self.assertFalse((self.state / 'retired/old-space.json').exists())
@@ -840,16 +861,54 @@ class ReplacementTests(unittest.TestCase):
         self.assertIn('work:cs:delete -- --codespace new-space', self.output.getvalue())
         self.assertFalse(any('delete' in argv for argv, _, _ in self.steps))
         self.active(phase='inspected')
-        self.ui.answers = ['abandon']
+        self.ui.answers = [self.module.ABANDON_NOTHING]
         self.assertEqual(self.run_replace(), 0)
         self.assertIn('nothing was created.', self.output.getvalue())
+
+    def test_abandon_says_what_it_does(self):
+        from devcontainer_setup.project_sync.overview import cells
+        m = self.module
+        self.assertEqual(m.CONTINUE, 'Continue the replace')
+        self.assertEqual(m.ABANDON_KEEPING, 'Abandon it: the old one stays paired; the new one stays until you delete it')
+        self.assertEqual(m.ABANDON_NOTHING, 'Abandon it: the old one stays paired; nothing was created')
+        self.active(phase='created', new='new-space')
+        self.ui.answers = ['cancel']
+        self.assertEqual(self.run_replace(), 1)
+        title, options = self.ui.calls[-1]
+        self.assertEqual(options, [m.CONTINUE, m.ABANDON_KEEPING])
+        self.assertEqual(title.splitlines(), [
+            f"The replace is unfinished: it stopped at {replacing.PHASE_WORDS['created']}.",
+            '  Old one  old-space, still paired',
+            '  New one  new-space, created'])
+        self.active(phase='inspected', new=None)
+        self.ui.answers = ['cancel']
+        self.assertEqual(self.run_replace(), 1)
+        title, options = self.ui.calls[-1]
+        self.assertEqual(options, [m.CONTINUE, m.ABANDON_NOTHING])
+        self.assertEqual(title.splitlines(), [
+            f"The replace is unfinished: it stopped at {replacing.PHASE_WORDS['inspected']}.",
+            '  Old one  old-space, still paired',
+            '  New one  not created'])
+        old, new = 'bookish-space-meme-v66pqg6wpvvqcpw7j', 'literate-pancake-jjjrq4j9rqwrc5qp6'
+        coordinator = m._Coordinator(self.project, self.state, self.identity, api=None, ui=None,
+            ask=None, env={}, runner=None, now=None, sleep=None)
+        for phase in replacing.PHASES:
+            for created in (new, None):
+                with self.subTest(phase=phase, created=created):
+                    title, options = coordinator.unfinished(journal(old=old, new=created, phase=phase))
+                    self.assertIn(f'  Old one  {old}, still paired', title.splitlines())
+                    self.assertIn(f'  New one  {created}, created' if created else '  New one  not created',
+                                  title.splitlines())
+                    for line in [*title.splitlines(), *('> ' + option for option in options)]:
+                        self.assertLessEqual(cells(line), 78, line)
+                        self.assertNotIn('…', line)
 
     def test_a_started_move_is_never_abandoned(self):
         value = self.active(phase='ready', new='new-space')
         self.save('retired/old-space.json', {'operation': value['operation']})
         self.save('workspace-pending.json', {'codespace': 'new-space'})
         self.valid_launch()
-        self.ui.answers = ['abandon']
+        self.ui.answers = [self.module.ABANDON_KEEPING]
         self.assertEqual(self.run_replace(), 0)
         self.assertFalse(self.ui.calls)
         self.assertIsNotNone(self.steps[0][2]['moving'])
