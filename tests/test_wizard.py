@@ -41,12 +41,12 @@ class ReviewRerunTests(unittest.TestCase):
             def answer(self, title, default):
                 case.prompts.append(title)
                 value = answers.get(title, default)
-                return value.pop(0) if title == 'Review setup' and isinstance(value, list) else value
+                return value.pop(0) if title == 'Review: go ahead with these answers?' and isinstance(value, list) else value
             def multi(self, title, options, selected): return self.answer(title, selected)
             def confirm(self, title, default=True): return self.answer(title, default)
             def input(self, title, value=''): return self.answer(title, value)
             def choose(self, title, options, selected=None):
-                default = 'Cancel' if title == 'Review setup' else selected or options[0]
+                default = 'Cancel' if title == 'Review: go ahead with these answers?' else selected or options[0]
                 return self.answer(title, default)
         @contextlib.contextmanager
         def checkout(project): yield project, 'main' if github else None
@@ -95,7 +95,7 @@ class ReviewRerunTests(unittest.TestCase):
 
     def test_saved_answers_with_no_new_finding_open_at_review(self):
         self.run_wizard()
-        self.assertEqual(self.prompts, ['Review setup'])
+        self.assertEqual(self.prompts, ['Review: go ahead with these answers?'])
         self.plan.apply.assert_not_called()
         # The scan's chosen candidate for a range is not a new exact constraint.
         self.prompts.clear()
@@ -103,10 +103,10 @@ class ReviewRerunTests(unittest.TestCase):
         self.found['runtimes']['node'].update(selected=True, version='20',
             evidence=['package.json: Node manifest engines.node=>=20'])
         self.run_wizard()
-        self.assertEqual(self.prompts, ['Review setup'])
+        self.assertEqual(self.prompts, ['Review: go ahead with these answers?'])
         self.prompts.clear()
-        self.run_wizard(answers={'Review setup': ['View diff', 'Cancel']})
-        self.assertEqual(self.prompts, ['Review setup', 'Review setup'])
+        self.run_wizard(answers={'Review: go ahead with these answers?': ['View diff', 'Cancel']})
+        self.assertEqual(self.prompts, ['Review: go ahead with these answers?', 'Review: go ahead with these answers?'])
         self.plan.diff.assert_called_once()
         self.plan.apply.assert_not_called()
         self.prompts.clear()
@@ -114,7 +114,7 @@ class ReviewRerunTests(unittest.TestCase):
         launch = {'action': 'rebuild', 'name': 'paired', 'machine': 'premiumLinux', 'idle_timeout': '60m'}
         with patch.object(wizard, '_resolve_launch', return_value=launch):
             self.run_wizard(github=True, changes=[[], ['.devcontainer/devcontainer.json']])
-        self.assertEqual(self.prompts, ['Review setup'])
+        self.assertEqual(self.prompts, ['Review: go ahead with these answers?'])
         self.assertTrue(self.rendered[-1]['customizations']['devcontainerSetup']['selections']['ssh'])
 
     def test_replace_review_reads_no_resources(self):
@@ -132,12 +132,29 @@ class ReviewRerunTests(unittest.TestCase):
         self.assertIn('Codespace: replace paired (its machine and idle timeout); SSH: enabled', self.output)
         self.assertNotIn('Launch:', self.output)
 
+    def test_review_says_the_replace_asks_again(self):
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard
+        line = 'The replace asks once more, with its details, before anything is created.'
+        for launch in ({'action': 'replace', 'name': 'paired'},
+                       {'action': 'rebuild', 'name': 'paired', 'machine': 'premiumLinux', 'idle_timeout': '60m'},
+                       wizard._no_codespace()):
+            with self.subTest(action=launch['action']):
+                with patch.object(wizard, '_resolve_launch', return_value=launch):
+                    self.run_wizard(github=True, api=Mock(), paired='paired')
+                review = self.output.splitlines()
+                if launch['action'] == 'replace':
+                    codespace = review.index('Codespace: replace paired (its machine and idle timeout); SSH: enabled')
+                    self.assertEqual(review[codespace + 1:codespace + 2], [line])
+                else:
+                    self.assertNotIn(line, review)
+
     def test_rerun_asks_only_the_new_finding(self):
         self.found['runtimes']['rust'].update(selected=True, version='1.99.1')
         self.found['tools']['aws'] = {'selected': True, 'evidence': ['build.sh: aws s3']}
         decisions = [{'kind': 'tool', 'value': 'aws', 'answer': False}]
         marker = self.run_wizard(decisions=decisions, answers={'Add rust runtime (1.99.1)?': True})
-        self.assertEqual(self.prompts, ['Add rust runtime (1.99.1)?', 'Review setup'])
+        self.assertEqual(self.prompts, ['Add rust runtime (1.99.1)?', 'Review: go ahead with these answers?'])
         self.assertEqual(marker['selections']['runtimes']['rust'], '1.99.1')
         self.assertEqual(marker['scanDecisions'], [
             {'kind': 'runtime', 'value': 'rust', 'answer': True}, *decisions])
@@ -149,27 +166,28 @@ class ReviewRerunTests(unittest.TestCase):
         self.found['package_managers']['python'] = {'selected': 'uv', 'conflicts': [],
                                                   'versions': {'uv': {'version': None, 'conflicts': []}}}
         marker = self.run_wizard(decisions=marker['scanDecisions'], answers={
-            'python package manager': 'uv', 'Forward port 8080?': False,
-            'python version (resolve declarations above)': '3.13'})
-        self.assertEqual(self.prompts, ['python package manager', 'Forward port 8080?',
-            'python version (resolve declarations above)', 'Review setup'])
+            'Which python package manager?': 'uv', 'Forward port 8080?': False,
+            'Which python version? (the declarations above disagree)': '3.13'})
+        self.assertEqual(self.prompts, ['Which python package manager?', 'Forward port 8080?',
+            'Which python version? (the declarations above disagree)', 'Review: go ahead with these answers?'])
         self.chosen = marker['selections']
         self.prompts.clear()
         self.run_wizard(decisions=marker['scanDecisions'])
-        self.assertEqual(self.prompts, ['Review setup'])
+        self.assertEqual(self.prompts, ['Review: go ahead with these answers?'])
         self.run_wizard(github=True, decisions=marker['scanDecisions'], answers={
-            'Review setup': ['Change answers', 'Cancel'], 'Project tools': [], 'Publish': 'local commit only'})
+            'Review: go ahead with these answers?': ['Change answers', 'Cancel'],
+            'Which tools does the project need?': [], 'How should the setup reach GitHub?': 'local commit only'})
         self.assertFalse('will be asked again' in self.output,
                          'An already published decline must not be described as a new local answer')
 
     def test_recorded_decline_is_not_asked_again(self):
         self.found['tools']['aws'] = {'selected': True, 'evidence': ['build.sh: aws s3']}
         marker = self.run_wizard(answers={'Add AWS CLI?': False})
-        self.assertEqual(self.prompts, ['Add AWS CLI?', 'Review setup'])
+        self.assertEqual(self.prompts, ['Add AWS CLI?', 'Review: go ahead with these answers?'])
         self.assertEqual(marker['scanDecisions'], [{'kind': 'tool', 'value': 'aws', 'answer': False}])
         self.prompts.clear()
         self.run_wizard(decisions=marker['scanDecisions'])
-        self.assertEqual(self.prompts, ['Review setup'])
+        self.assertEqual(self.prompts, ['Review: go ahead with these answers?'])
 
     def test_evidence_path_change_is_not_a_finding(self):
         from devcontainer_setup import __main__ as wizard
@@ -188,7 +206,7 @@ class ReviewRerunTests(unittest.TestCase):
         self.found['package_managers']['node'] = {'selected': 'pnpm', 'conflicts': [],
             'versions': {'pnpm': {'version': '12.11.2', 'conflicts': []}}}
         marker = self.run_wizard()
-        self.assertEqual(self.prompts, ['Review setup'])
+        self.assertEqual(self.prompts, ['Review: go ahead with these answers?'])
         self.assertEqual(marker['selections']['package_manager_versions'], {'node': '12.11.2'})
         self.assertEqual(marker['selections']['package_managers'], {'node': 'pnpm'})
 
@@ -199,7 +217,7 @@ class ReviewRerunTests(unittest.TestCase):
         personal = self.root / '.devcontainer/devcontainer.env'
         personal.parent.mkdir()
         personal.write_bytes(b'OWNER_SETTING=preserve\n')
-        marker = self.run_wizard(answers={'Review setup': 'Continue'})
+        marker = self.run_wizard(answers={'Review: go ahead with these answers?': 'Continue'})
         self.assertIs(marker['selections']['dotfiles'], False)
         self.assertIs(self.preferences['apply_dotfiles'], True)
         self.assertEqual(personal.read_bytes(), b'OWNER_SETTING=preserve\n')
@@ -218,15 +236,15 @@ class ReviewRerunTests(unittest.TestCase):
 
     def test_missing_dotfiles_repo_is_asked_when_project_wants_dotfiles(self):
         self.chosen['dotfiles'] = True
-        marker = self.run_wizard(answers={'Dotfiles repository': 'owner/dotfiles'})
-        self.assertEqual(self.prompts, ['Dotfiles repository', 'Review setup'])
+        marker = self.run_wizard(answers={'Which dotfiles repository?': 'owner/dotfiles'})
+        self.assertEqual(self.prompts, ['Which dotfiles repository?', 'Review: go ahead with these answers?'])
         self.assertTrue(marker['selections']['dotfiles'])
         self.assertFalse(self.preferences['apply_dotfiles'])
         self.assertEqual(self.preferences['dotfiles_repo'], 'owner/dotfiles')
         self.prompts.clear()
         (self.root / '.devcontainer').mkdir()
-        self.run_wizard(answers={'Review setup': 'Continue'})
-        self.assertEqual(self.prompts, ['Review setup'])
+        self.run_wizard(answers={'Review: go ahead with these answers?': 'Continue'})
+        self.assertEqual(self.prompts, ['Review: go ahead with these answers?'])
         self.assertEqual((self.root / '.devcontainer/devcontainer.env').read_text(), 'DOTFILES_REPO=owner/dotfiles\n')
         self.assertFalse(json.loads((self.root / 'config/devcontainer-setup/config.json').read_text())['apply_dotfiles'])
 
@@ -308,11 +326,12 @@ class ReviewRerunTests(unittest.TestCase):
             'memory_in_bytes': 32 * 1024**3, 'storage_in_bytes': 64 * 1024**3}]
         with patch.object(wizard, '_launch_history', side_effect=AssertionError('Rebuild must not use a receipt')) as history:
             self.run_wizard(github=True, api=api, paired='paired',
-                            answers={'Review setup': ['Change answers', 'Cancel'], 'Codespace': 'rebuild paired'})
-        self.assertEqual(self.prompts[0], 'Review setup')
-        self.assertIn('Codespaces machine', self.prompts)
-        self.assertLess(self.prompts.index('Codespace'), self.prompts.index('Codespaces machine'))
-        self.assertNotIn('Stop when idle for', self.prompts)
+                            answers={'Review: go ahead with these answers?': ['Change answers', 'Cancel'],
+                                     'Which Codespace?': 'rebuild paired'})
+        self.assertEqual(self.prompts[0], 'Review: go ahead with these answers?')
+        self.assertIn('Which machine size?', self.prompts)
+        self.assertLess(self.prompts.index('Which Codespace?'), self.prompts.index('Which machine size?'))
+        self.assertNotIn('Stop it after how long idle?', self.prompts)
         self.assertIn('premiumLinux', self.output)
         api.machines.assert_called_once_with('owner/project')
         history.assert_not_called()
@@ -327,40 +346,133 @@ class ReviewRerunTests(unittest.TestCase):
             launch = wizard._resolve_launch(api, self.root, 'main', 'paired')
         self.assertEqual(launch['action'], 'none')
         self.run_wizard(github=True, api=api, paired='paired')
-        self.assertEqual(self.prompts, ['Review setup'])
+        self.assertEqual(self.prompts, ['Review: go ahead with these answers?'])
         api.resource_settings.assert_not_called()
         api.machines.assert_not_called()
         api.existing.assert_not_called()
 
     def test_change_answers_opens_full_editor(self):
-        self.run_wizard(github=True, answers={'Review setup': ['Change answers', 'Cancel'],
-            'Codespace': 'create like last time', 'Advanced environment options?': True,
+        self.run_wizard(github=True, answers={'Review: go ahead with these answers?': ['Change answers', 'Cancel'],
+            'Create a Codespace now?': 'create a new Codespace', 'Change advanced environment options?': True,
             'Show advanced launch options?': True})
-        self.assertEqual(self.prompts[0], 'Review setup')
-        for title in ('Project runtimes (Python, Node and uv included)', 'Project tools',
-                      'Sync scratch files and project notes with your Mac?',
-                      'Apply dotfiles inside the container?', 'Advanced environment options?',
-                      'Publish', 'Codespace', 'Show advanced launch options?', 'Editor after create'):
+        self.assertEqual(self.prompts[0], 'Review: go ahead with these answers?')
+        for title in ('Which other runtimes? (Python, Node and uv are included)',
+                      'Which tools does the project need?', 'Sync scratch files and project notes with your Mac?',
+                      'Apply dotfiles inside the container?', 'Change advanced environment options?',
+                      'How should the setup reach GitHub?', 'Create a Codespace now?',
+                      'Show advanced launch options?', 'Open an editor once it is created?'):
             self.assertIn(title, self.prompts[1:])
         from devcontainer_setup import __main__ as wizard
         self.assertFalse((self.root / 'config/devcontainer-setup/open-after-create.json').exists())
-        self.run_wizard(answers={'Review setup': ['Change answers', 'Continue'], 'Editor after create': 'browser'})
+        self.run_wizard(answers={'Review: go ahead with these answers?': ['Change answers', 'Continue'],
+                                 'Open an editor once it is created?': 'browser'})
         self.assertEqual(wizard.load_open_after_create(), 'browser')
         saved = json.loads((self.root / 'config/devcontainer-setup/config.json').read_text())
         self.assertEqual(set(saved), {'version', 'apply_dotfiles', 'dotfiles_repo', 'agentic_tools'})
 
     def test_first_setup_still_walks_every_screen(self):
         self.found['tools']['aws'] = {'selected': True, 'evidence': []}
-        marker = self.run_wizard(saved=False, answers={'Project tools': []})
-        self.assertEqual(self.prompts, ['Project runtimes (Python, Node and uv included)', 'Project tools',
-            'Sync scratch files and project notes with your Mac?', 'Apply dotfiles inside the container?',
-            'Advanced environment options?', 'Publish', 'Codespace', 'Review setup'])
+        marker = self.run_wizard(saved=False, answers={'Which tools does the project need?': []})
+        self.assertEqual(self.prompts, ['Which other runtimes? (Python, Node and uv are included)',
+            'Which tools does the project need?', 'Sync scratch files and project notes with your Mac?',
+            'Apply dotfiles inside the container?', 'Change advanced environment options?',
+            'How should the setup reach GitHub?', 'Which Codespace?', 'Review: go ahead with these answers?'])
         self.assertEqual(marker.get('scanDecisions'), [{'kind': 'tool', 'value': 'aws', 'answer': False}])
         self.assertFalse('will be asked again' in self.output,
                          'A no-origin local commit already records the answers')
         self.prompts.clear()
-        self.run_wizard(saved=False, github=True, answers={'Project tools': [], 'Publish': 'local commit only'})
+        self.run_wizard(saved=False, github=True, answers={'Which tools does the project need?': [],
+                                                          'How should the setup reach GitHub?': 'local commit only'})
         self.assertIn('will be asked again', self.output)
+
+    def test_every_wizard_prompt_is_a_question(self):
+        # A first setup with every optional screen open, then Change answers for the editor question.
+        self.found['runtimes']['python']['conflicts'] = ['.python-version: 3.12', 'pyproject.toml: >=3.13']
+        self.found['package_managers']['node'] = {'selected': None,
+            'conflicts': ['node: conflicting package managers: npm, pnpm'],
+            'versions': {'pnpm': {'version': None, 'conflicts': ['a: 12.0.0', 'b: 12.11.2']}}}
+        # A saved repository: an empty one is asked again forever if its title ever stops matching.
+        self.preferences['dotfiles_repo'] = 'owner/dotfiles'
+        self.run_wizard(saved=False, github=True, answers={
+            'Review: go ahead with these answers?': ['Change answers', 'Cancel'],
+            'Which other runtimes? (Python, Node and uv are included)': ['node'],
+            'Which node package manager?': 'pnpm',
+            'Which pnpm version? (exact x.y.z; the declarations above disagree)': '12.11.2',
+            'Apply dotfiles inside the container?': True, 'Change advanced environment options?': True, 'Show advanced launch options?': True})
+        for title in ('Which python version? (the declarations above disagree)', 'Which node version?',
+                      'Which tools does the project need?', 'Which python version?',
+                      'Which ports should be forwarded? (comma-separated)', 'How should the setup reach GitHub?',
+                      'Create a Codespace now?', 'Which machine size?', 'Stop it after how long idle?',
+                      'Which region?', 'Delete it after how long stopped?', 'Open an editor once it is created?',
+                      'Review: go ahead with these answers?'):
+            self.assertIn(title, self.prompts)
+        self.assertEqual([title for title in self.prompts if '?' not in title], [])
+
+    def test_create_names_the_codespace_it_copies(self):
+        import subprocess as process
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard
+        from devcontainer_setup.codespaces import receipt_path
+        from devcontainer_setup.project_sync import terminal
+        name = 'bookish-space-meme-v66pqg6wpvvqcpw7j'
+        receipt = receipt_path(self.root / 'state', 'owner/project', 'main')
+        receipt.parent.mkdir(parents=True)
+        record = {'repository': 'owner/project', 'branch': 'main', 'codespace': name,
+                  'commit': 'a' * 40, 'validated_commit': 'a' * 40, 'rebuild_pending': False,
+                  'machine': 'premiumLinux', 'idle_timeout_minutes': 90}
+        api = Mock()
+        api.existing.return_value = []
+        for machine, label in (('premiumLinux', f'create one like {name}'), (None, 'create a new Codespace')):
+            with self.subTest(machine=machine):
+                receipt.write_text(json.dumps(dict(record, machine=machine)))
+                menus = []
+                class UI:
+                    def choose(self, title, options, selected=None):
+                        menus.append((title, list(options), selected))
+                        return 'none'
+                with patch.object(wizard, '_repository', return_value='owner/project'), \
+                        patch.object(wizard, '_paired_codespace', return_value=None), \
+                        patch.object(wizard, 'git', return_value='{}'):
+                    self.assertEqual(wizard._launch_options(UI(), api, self.root, 'main', None)['action'], 'none')
+                self.assertEqual(menus, [('Create a Codespace now?', ['none', label], label)])
+        label = f'create one like {name}'
+        self.assertNotIn(',', label)
+        with patch.object(terminal.subprocess, 'run',
+                          return_value=process.CompletedProcess([], 0, label + '\n')) as run:
+            self.assertEqual(terminal.Gum('gum').choose('Create a Codespace now?', ['none', label], label), label)
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[argv.index('--selected') + 1], label)
+
+    def test_answers_stay_on_screen(self):
+        # A saved repository: an empty one is asked again forever if its title ever stops matching.
+        self.preferences['dotfiles_repo'] = 'owner/dotfiles'
+        self.run_wizard(saved=False, answers={'Which tools does the project need?': [],
+                                              'Apply dotfiles inside the container?': True})
+        expected = ['Which other runtimes? (Python, Node and uv are included)  none',
+                    'Which tools does the project need?  none',
+                    'Sync scratch files and project notes with your Mac?  yes',
+                    'Apply dotfiles inside the container?  yes',
+                    'Which dotfiles repository?  owner/dotfiles',
+                    'Change advanced environment options?  no',
+                    'How should the setup reach GitHub?  local commit only',
+                    'Which Codespace?  none',
+                    'Review: go ahead with these answers?  Cancel']
+        self.assertEqual([line.split('  ')[0] for line in expected], self.prompts)
+        self.assertEqual([line for line in self.output.splitlines() if line.startswith(tuple(self.prompts))],
+                         expected)
+        # The rest of the answer forms: chosen items, an empty input.
+        import contextlib
+        import io
+        from devcontainer_setup import __main__ as wizard
+        class UI:
+            def multi(self, title, options, selected): return ['go', 'rust']
+            def input(self, title, value=''): return ''
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            trail = wizard._Trail(UI())
+            self.assertEqual(trail.multi('Which other runtimes?', ['go', 'rust'], []), ['go', 'rust'])
+            self.assertEqual(trail.input('Which ports should be forwarded?', '8080'), '')
+        self.assertEqual(output.getvalue(), 'Which other runtimes?  go, rust\nWhich ports should be forwarded?  (empty)\n')
 
     def test_create_like_last_time_uses_history_and_asks_for_missing_machine(self):
         import contextlib
@@ -385,8 +497,8 @@ class ReviewRerunTests(unittest.TestCase):
                 with patch.object(wizard, '_repository', return_value='owner/project'), \
                         contextlib.redirect_stdout(io.StringIO()) as output:
                     editor = wizard._LaunchEditor(UI(), self.root, 'main')
-                    editor.choose('Codespaces machine', labels, labels[0])
-                    editor.choose('Stop when idle for', ['30m', '1h'], '30m')
+                    editor.choose('Which machine size?', labels, labels[0])
+                    editor.choose('Stop it after how long idle?', ['30m', '1h'], '30m')
                 self.assertEqual(menus[-2][2], expected)
                 self.assertEqual(menus[-1][2], '90m')
                 self.assertIn('90m', menus[-1][1])
@@ -399,7 +511,7 @@ class ReviewRerunTests(unittest.TestCase):
             storage_in_bytes=32 * 1024**3) for name, cores in (('standardLinux32gb', 4), ('premiumLinux', 8))]
         class LaunchUI(UI):
             def choose(self, title, options, selected=None):
-                if title == 'Codespace': return 'create like last time'
+                if title == 'Create a Codespace now?': return 'create one like old'
                 return super().choose(title, options, selected)
             def confirm(self, title, default=True): return False
         with patch.object(wizard, '_repository', return_value='owner/project'), \
@@ -416,11 +528,11 @@ class ReviewRerunTests(unittest.TestCase):
             'versions': {'npm': {'version': None, 'conflicts': []},
                          'pnpm': {'version': None, 'conflicts': ['a: 12.0.0', 'b: 12.11.2']}}}
         try:
-            marker = self.run_wizard(answers={'node package manager': 'npm',
-                'pnpm version (resolve declarations above; exact x.y.z)': '12.11.2'})
+            marker = self.run_wizard(answers={'Which node package manager?': 'npm',
+                'Which pnpm version? (exact x.y.z; the declarations above disagree)': '12.11.2'})
         except ValueError as error:
             self.fail(f'The abandoned manager must not leave a version override: {error}')
-        self.assertEqual(self.prompts, ['node package manager', 'Review setup'])
+        self.assertEqual(self.prompts, ['Which node package manager?', 'Review: go ahead with these answers?'])
         self.assertEqual(marker['selections']['package_managers'], {'node': 'npm'})
         self.assertEqual(marker['selections']['package_manager_versions'], {})
 
@@ -656,7 +768,7 @@ class WizardCliTests(unittest.TestCase):
         catalog = json.loads((SOURCE / '.devcontainer/devcontainer.json').read_text())
         self.assertEqual(RUNTIME_DEFAULTS['node'], catalog['features']['ghcr.io/devcontainers/features/node:1']['version'])
         # The selection screen must explain why an unselected Node is still installed.
-        self.assertIn('Project runtimes (Python, Node and uv included)',
+        self.assertIn('Which other runtimes? (Python, Node and uv are included)',
                       (SOURCE / 'devcontainer_setup/__main__.py').read_text())
 
     def test_legacy_agent_opt_out_is_ignored_without_an_agent_prompt(self):
@@ -700,7 +812,7 @@ class WizardCliTests(unittest.TestCase):
         case = self
         class UI:
             def choose(self, title, options, selected=None):
-                return 'create like last time' if title == 'Codespace' else selected or options[0]
+                return 'create a new Codespace' if title == 'Create a Codespace now?' else selected or options[0]
 
             def confirm(self, title, default=True):
                 case.assertNotEqual(title, 'Continue without a Codespace?',
@@ -743,7 +855,7 @@ class WizardCliTests(unittest.TestCase):
         class UI:
             def choose(self, title, options, selected=None):
                 menus.append((title, options, selected))
-                if title != 'Codespace':
+                if title not in ('Create a Codespace now?', 'Which Codespace?'):
                     raise AssertionError(f'Unexpected resource question: {title}')
                 return choice or selected
             def confirm(self, title, default=True):
@@ -771,10 +883,10 @@ class WizardCliTests(unittest.TestCase):
                 menus.append((title, options, selected))
                 return 'local commit only'
         self.assertEqual(wizard._publish_choice(UI(), True, True), 'local')
-        self.assertEqual(menus, [('Publish', ['merge into main', 'local commit only'], 'merge into main')])
+        self.assertEqual(menus, [('How should the setup reach GitHub?', ['merge into main', 'local commit only'], 'merge into main')])
         result, menus, calls, output, _ = self._split_menu([], published=False)
         self.assertEqual(result['action'], 'none')
-        self.assertEqual(menus, [('Codespace', ['none'], 'none')])
+        self.assertEqual(menus, [('Which Codespace?', ['none'], 'none')])
         self.assertEqual(calls, [])
         self.assertIn('default branch', output)
 
@@ -788,7 +900,7 @@ class WizardCliTests(unittest.TestCase):
         result, menus, _, _, _ = self._split_menu(
             [self._space('paired')], paired='paired', choice='none')
         self.assertIn('replace paired', menus[0][1])
-        self.assertEqual(menus[0], ('Codespace', ['none', 'rebuild paired', 'replace paired'], 'none'))
+        self.assertEqual(menus[0], ('Which Codespace?', ['none', 'rebuild paired', 'replace paired'], 'none'))
         self.assertEqual(result['action'], 'none')
         result, _, _, _, _ = self._split_menu(
             [self._space('paired')], paired='paired', choice='replace paired')
@@ -889,10 +1001,23 @@ class WizardCliTests(unittest.TestCase):
 
     def test_existing_unpaired_codespace_is_listed_and_default_reused(self):
         result, menus, _, _, _ = self._split_menu([self._space('first'), self._space('second')])
-        self.assertEqual(menus, [('Codespace', ['none', 'reuse first', 'reuse second', 'create like last time'],
+        self.assertEqual(menus, [('Which Codespace?', ['none', 'reuse first', 'reuse second', 'create a new Codespace'],
                                   'reuse first')])
         self.assertEqual((result['action'], result['name']), ('reuse', 'first'))
         self.assertEqual(result['machine'], 'premiumLinux')
+
+    def test_first_setup_offers_a_new_codespace(self):
+        result, menus, _, _, _ = self._split_menu([], choice='none')
+        self.assertEqual(result['action'], 'none')
+        self.assertEqual(menus, [('Create a Codespace now?', ['none', 'create a new Codespace'],
+                                  'create a new Codespace')])
+        for option in menus[0][1]:
+            self.assertNotIn('last time', option)
+            self.assertNotIn('like', option)
+
+    def test_several_codespaces_ask_which(self):
+        _, menus, _, _, _ = self._split_menu([self._space('only')], choice='none')
+        self.assertEqual(menus[0][:2], ('Which Codespace?', ['none', 'reuse only', 'create a new Codespace']))
 
     def test_no_create_with_a_usable_pairing(self):
         for branch, unavailable in (('main', None), ('feature', None), ('main', 'paired')):
@@ -902,10 +1027,10 @@ class WizardCliTests(unittest.TestCase):
                     unavailable=unavailable)
                 options = menus[0][1]
                 if branch == 'main' and not unavailable:
-                    self.assertNotIn('create like last time', options)
+                    self.assertNotIn('create a new Codespace', options)
                     self.assertIn('rebuild paired', options)
                 else:
-                    self.assertIn('create like last time', options)
+                    self.assertIn('create a new Codespace', options)
                     self.assertIn('unavailable', output)
                     self.assertNotIn('rebuild paired', options)
                     self.assertEqual(menus[0][2], 'reuse other')
@@ -1123,11 +1248,11 @@ class WizardCliTests(unittest.TestCase):
             def multi(self, title, options, selected):
                 return selected
             def confirm(self, title, default=True):
-                return title == 'Advanced environment options?' or title == 'Include Claude Code and Codex?'
+                return title == 'Change advanced environment options?' or title == 'Include Claude Code and Codex?'
             def input(self, title, value=''):
-                if title == 'node version':
+                if title == 'Which node version?':
                     return '26'
-                if title.startswith('Forwarded ports'):
+                if title == 'Which ports should be forwarded? (comma-separated)':
                     return '3570,8787'
                 return value
         result = _select(UI(), found, defaults(found, preferences, {}), preferences)
@@ -1167,7 +1292,7 @@ class WizardCliTests(unittest.TestCase):
                     return subprocess.CompletedProcess(args, 0, json.dumps(payload), '')
                 class UI:
                     def choose(self, title, options, selected=None):
-                        if title == 'Codespace': return 'reuse existing-space'
+                        if title == 'Which Codespace?': return 'reuse existing-space'
                         raise AssertionError(f'Unexpected creation prompt: {title}')
                     def confirm(self, title, default=True): return True
                 output = io.StringIO()
@@ -1220,7 +1345,9 @@ class WizardCliTests(unittest.TestCase):
                         return subprocess.CompletedProcess(args, 1, '', 'No Codespaces permission (HTTP 403)')
                     class UI:
                         def choose(self, title, options, selected=None):
-                            if title == 'Codespace': return 'create like last time'
+                            # A resume asks which; a list with nothing to reuse asks whether to create.
+                            if title in ('Which Codespace?', 'Create a Codespace now?'):
+                                return 'create a new Codespace'
                             raise AssertionError(f'Unexpected launch prompt: {title}')
                         def confirm(self, title, default=True):
                             prompts.append(title)
@@ -1247,7 +1374,7 @@ class WizardCliTests(unittest.TestCase):
         prompts = []
         class UI:
             def choose(self, title, options, selected=None):
-                return 'create like last time'
+                return 'create a new Codespace'
             def confirm(self, title, default=True):
                 prompts.append(title)
                 return True
@@ -1269,8 +1396,8 @@ class WizardCliTests(unittest.TestCase):
                 return selected
         self.assertEqual(_publish_choice(UI(), False, True), 'local')
         self.assertEqual(_publish_choice(UI(), True, True), 'merge')
-        self.assertEqual(menus, [('Publish', ['local commit only'], 'local commit only'),
-                                ('Publish', ['merge into main', 'local commit only'], 'merge into main')])
+        self.assertEqual(menus, [('How should the setup reach GitHub?', ['local commit only'], 'local commit only'),
+                                ('How should the setup reach GitHub?', ['merge into main', 'local commit only'], 'merge into main')])
 
     def test_gum_refuses_a_default_it_would_split_at_commas(self):
         from devcontainer_setup.ui import Gum
@@ -1414,8 +1541,8 @@ class WizardCliTests(unittest.TestCase):
                 with contextlib.redirect_stderr(error_output), contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(_launch_options(UI(), Codespaces(run=github), self.root, 'main', resume)['action'], 'none')
                 if not resume:
-                    self.assertEqual(menus[0], ('Codespace',
-                                                ['none', 'reuse old-space (on setup/devcontainer)', 'create like last time']))
+                    self.assertEqual(menus[0], ('Which Codespace?',
+                                                ['none', 'reuse old-space (on setup/devcontainer)', 'create a new Codespace']))
                 self.assertIn('Launch unavailable: Move old-space to main first; it is on setup/devcontainer.',
                               error_output.getvalue())
                 self.assertEqual(prompts, ['Continue without a Codespace?'])
@@ -1457,7 +1584,7 @@ class WizardCliTests(unittest.TestCase):
         class UI:
             def choose(self, title, options, *selected):
                 calls.append((title, options, selected))
-                if title == 'Codespace':
+                if title == 'Which Codespace?':
                     return options[1]
                 raise AssertionError(f'Unexpected menu: {title}')
 
@@ -1483,7 +1610,7 @@ class WizardCliTests(unittest.TestCase):
 
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             _launch_options(UI(), Codespaces(run=github), self.root, branch, None)
-        menus = [call for call in calls if call[0] == 'Codespace']
+        menus = [call for call in calls if call[0] == 'Which Codespace?']
         if not menus:
             raise AssertionError(f'Existing-codespace menu was not shown; calls={calls}')
         return menus[0][1], menus[0][2]
@@ -1500,16 +1627,16 @@ class WizardCliTests(unittest.TestCase):
         cases = (
             ('unpaired on this branch', None,
              [{'name': 'only', 'git_status': {'ref': 'main'}}],
-             ['none', 'reuse only', 'create like last time'], 'reuse only'),
+             ['none', 'reuse only', 'create a new Codespace'], 'reuse only'),
             ('unpaired other branch', None,
              [{'name': 'first', 'git_status': {'ref': 'feature'}},
               {'name': 'second', 'git_status': {'ref': 'other'}}],
-             ['none', 'reuse first (on feature)', 'reuse second (on other)', 'create like last time'],
-             'create like last time'),
+             ['none', 'reuse first (on feature)', 'reuse second (on other)', 'create a new Codespace'],
+             'create a new Codespace'),
             ('pairing not listed', 'deleted-space',
              [{'name': 'elsewhere', 'git_status': {'ref': 'feature'}},
               {'name': 'here', 'git_status': {'ref': 'main'}}],
-             ['none', 'reuse elsewhere (on feature)', 'reuse here', 'create like last time'], 'reuse here'),
+             ['none', 'reuse elsewhere (on feature)', 'reuse here', 'create a new Codespace'], 'reuse here'),
         )
         for name, paired, spaces, expected_options, expected in cases:
             with self.subTest(name=name):
@@ -1519,18 +1646,18 @@ class WizardCliTests(unittest.TestCase):
                 self.assertEqual(selected, (expected,))
                 self.assertIsNotNone(selected[0])
                 if any(space['git_status']['ref'] == 'main' for space in spaces):
-                    self.assertNotEqual(selected[0], 'create like last time')
+                    self.assertNotEqual(selected[0], 'create a new Codespace')
 
     def test_pairing_lookup_errors_fall_back_to_the_unpaired_default(self):
         from devcontainer_setup.project_sync import scratch
         space = [{'name': 'only', 'git_status': {'ref': 'main'}}]
-        expected = ['none', 'reuse only', 'create like last time']
+        expected = ['none', 'reuse only', 'create a new Codespace']
         self._write_binding('only', version=9)
         with self.subTest(error='ValueError'):
             options, selected = self._existing_menu(space)
             self.assertEqual(options, expected)
             self.assertEqual(selected, ('reuse only',))
-            self.assertNotEqual(selected[0], 'create like last time')
+            self.assertNotEqual(selected[0], 'create a new Codespace')
         state = self._write_binding('only')
         path = state / scratch.CONFIG
         path.chmod(0)
@@ -1539,7 +1666,7 @@ class WizardCliTests(unittest.TestCase):
             options, selected = self._existing_menu(space)
             self.assertEqual(options, expected)
             self.assertEqual(selected, ('reuse only',))
-            self.assertNotEqual(selected[0], 'create like last time')
+            self.assertNotEqual(selected[0], 'create a new Codespace')
 
     def test_existing_codespace_menu_skips_a_default_whose_ref_contains_a_comma(self):
         self._clear_binding()
@@ -1547,21 +1674,21 @@ class WizardCliTests(unittest.TestCase):
             {'name': 'comma-space', 'git_status': {'ref': 'feat,x'}},
             {'name': 'clean-space', 'git_status': {'ref': 'other'}}])
         self.assertEqual(options, ['none', 'reuse comma-space (on feat,x)',
-                                   'reuse clean-space (on other)', 'create like last time'])
-        self.assertEqual(selected, ('create like last time',))
+                                   'reuse clean-space (on other)', 'create a new Codespace'])
+        self.assertEqual(selected, ('create a new Codespace',))
         self.assertNotIn(',', selected[0])
         with self.subTest('every label has a comma'):
             options, selected = self._existing_menu([
                 {'name': 'comma-space', 'git_status': {'ref': 'feat,x'}}])
-            self.assertEqual(options, ['none', 'reuse comma-space (on feat,x)', 'create like last time'])
-            self.assertEqual(selected, ('create like last time',))
+            self.assertEqual(options, ['none', 'reuse comma-space (on feat,x)', 'create a new Codespace'])
+            self.assertEqual(selected, ('create a new Codespace',))
         with self.subTest('paired ref contains a comma'):
             self._write_binding('paired-space')
             options, selected = self._existing_menu([
                 {'name': 'paired-space', 'git_status': {'ref': 'feat,x'}},
                 {'name': 'here', 'git_status': {'ref': 'main'}}])
             self.assertEqual(options, ['none', 'replace paired-space', 'reuse paired-space (paired; on feat,x)',
-                                       'reuse here', 'create like last time'])
+                                       'reuse here', 'create a new Codespace'])
             self.assertEqual(selected, ('reuse here',))
             self.assertNotIn(',', selected[0])
 
@@ -1571,10 +1698,10 @@ class WizardCliTests(unittest.TestCase):
             {'name': 'paired-space', 'git_status': {'ref': 'feature'}},
             {'name': 'here', 'git_status': {'ref': 'main'}}])
         self.assertEqual(options, ['none', 'replace paired-space', 'reuse paired-space (paired; on feature)',
-                                   'reuse here', 'create like last time'])
+                                   'reuse here', 'create a new Codespace'])
         self.assertEqual(selected, ('reuse here',))
         self.assertNotIn(',', selected[0])
-        self.assertNotEqual(selected[0], 'create like last time')
+        self.assertNotEqual(selected[0], 'create a new Codespace')
 
     def test_paired_codespace_reads_a_hand_written_binding(self):
         from devcontainer_setup.__main__ import _paired_codespace
@@ -1824,9 +1951,9 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
 
             def choose(self, title, options, selected=None):
                 seen.setdefault('choices', []).append(title)
-                if title == 'Review setup':
+                if title == 'Review: go ahead with these answers?':
                     seen['worktrees'] = case.git('worktree', 'list', '--porcelain')
-                if title in ('Publish', 'Editor after create') and title not in answers:
+                if title in ('How should the setup reach GitHub?', 'Open an editor once it is created?') and title not in answers:
                     return selected
                 if title not in answers:
                     raise AssertionError(f'Unexpected choice: {title}')
@@ -1872,11 +1999,11 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
                 seen['output'] = output.getvalue()
         return seen
 
-    COMMIT_ONLY = {'Publish': 'local commit only', 'Codespace': 'none', 'Review setup': 'Continue',
-                   'Commit these setup files?': True}
-    LAUNCH = {'Publish': 'merge into main', 'Codespace': 'create like last time',
-              'Codespaces machine': '4 cores / 16 GB RAM / 32 GB disk (standardLinux32gb)',
-              'Stop when idle for': '30m', 'Review setup': 'Continue',
+    COMMIT_ONLY = {'How should the setup reach GitHub?': 'local commit only', 'Which Codespace?': 'none',
+                   'Review: go ahead with these answers?': 'Continue', 'Commit these setup files?': True}
+    LAUNCH = {'How should the setup reach GitHub?': 'merge into main', 'Create a Codespace now?': 'create a new Codespace',
+              'Which machine size?': '4 cores / 16 GB RAM / 32 GB disk (standardLinux32gb)',
+              'Stop it after how long idle?': '30m', 'Review: go ahead with these answers?': 'Continue',
               'Commit setup files, push setup/devcontainer and open a PR into main?': True}
     MERGE = 'Merge PR #1 into main as octo? (y/N)'
     RERUN = 'Merge it, then run task devcontainer:setup again to create the Codespace.'
@@ -1911,8 +2038,8 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), f'PR #1 is open. {self.RERUN}')
         return len(self.gh()['calls'])
 
-    SPLIT_NONE = {'Publish': 'merge into main', 'Codespace': 'none', 'Review setup': 'Continue',
-                  'Commit these setup files?': True,
+    SPLIT_NONE = {'How should the setup reach GitHub?': 'merge into main', 'Create a Codespace now?': 'none',
+                  'Review: go ahead with these answers?': 'Continue', 'Commit these setup files?': True,
                   'Commit setup files, push setup/devcontainer and open a PR into main?': True}
     SPLIT_MERGE = 'Merge PR #1 into main as octo? (y/N)'
 
@@ -1985,7 +2112,7 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
             seen = self.interact(dict(self.SPLIT_NONE, **{self.SPLIT_MERGE: True}))
         except ValueError as error:
             self.fail(f'Publish=merge and Codespace=none must finish the open PR: {error}')
-        self.assertEqual(seen['choices'], ['Publish', 'Codespace'])
+        self.assertEqual(seen['choices'], ['How should the setup reach GitHub?', 'Create a Codespace now?'])
         self.assertEqual(seen['confirms'], [self.SPLIT_MERGE])
         calls = self.gh()['calls'][start:]
         self.assertFalse(any(call['args'][:3] == ['api', '--method', 'POST'] for call in calls))
@@ -2015,11 +2142,11 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         class UI(self.ui(self.LAUNCH, seen)):
             reviews = 0
             def choose(self, title, options, selected=None):
-                if title == 'Publish' and self.reviews:
+                if title == 'How should the setup reach GitHub?' and self.reviews:
                     return 'local commit only'
-                if title == 'Codespace' and self.reviews:
+                if title == 'Which Codespace?' and self.reviews:
                     return 'none'
-                if title == 'Review setup':
+                if title == 'Review: go ahead with these answers?':
                     self.reviews += 1
                     if self.reviews == 1:
                         return 'Change answers'
@@ -2071,7 +2198,7 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         start = len(self.gh()['calls'])
         seen = self.interact(self.SPLIT_NONE)
         self.assertIn('Publish: nothing to publish (already on main)', seen['output'])
-        self.assertNotIn('Publish', seen['choices'])
+        self.assertNotIn('How should the setup reach GitHub?', seen['choices'])
         self.assertIn('Checkout: updated', seen['output'])
         self.assertEqual(self.git('rev-parse', 'HEAD'), incoming)
         self.assertEqual(notes.read_bytes(), b'owner notes\n')
@@ -2176,7 +2303,7 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.checkout_feature()
         before = self.snapshot()
         with self.assertRaises(Cancelled):
-            self.interact({'Codespace': 'none', 'Review setup': 'Cancel'})
+            self.interact({'Create a Codespace now?': 'none', 'Review: go ahead with these answers?': 'Cancel'})
         self.assertIn('Branch: setup/devcontainer (from origin/main)', self.seen['output'])
         self.assertIn(f'worktree {self.worktree_root() / "setup-devcontainer"}\n', self.seen['worktrees'])
         self.assertEqual(self.snapshot(), before)
@@ -2244,7 +2371,7 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.checkout_feature()
         before = self.snapshot()
         seen = self.interact(dict(self.COMMIT_ONLY, **{'Apply dotfiles inside the container?': True,
-                                                       'Dotfiles repository': 'owner/dotfiles'}))
+                                                       'Which dotfiles repository?': 'owner/dotfiles'}))
         self.assertEqual(seen['result'], 0, seen['output'])
         self.assertEqual(self.snapshot(), before)
         self.assertIn('DOTFILES_REPO=owner/dotfiles', seen['output'])
@@ -2297,6 +2424,55 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
         self.assertIn('Update the main checkout', seen['output'])
 
+    def test_every_wizard_prompt_is_a_question(self):
+        titles = []
+        answers = dict(self.LAUNCH, **{self.MERGE: True})
+        base = self.ui(answers, {})
+        class UI(base):
+            def multi(self, title, options, selected):
+                titles.append(title)
+                return super().multi(title, options, selected)
+            def input(self, title, value=''):
+                titles.append(title)
+                return super().input(title, value)
+            def confirm(self, title, default=True):
+                titles.append(title)
+                return super().confirm(title, default)
+            def choose(self, title, options, selected=None):
+                titles.append(title)
+                return super().choose(title, options, selected)
+        seen = self.interact(answers, ui=UI)
+        self.assertEqual(seen['result'], 0, seen['output'])
+        for title in ('How should the setup reach GitHub?', 'Create a Codespace now?', 'Which machine size?',
+                      'Stop it after how long idle?', 'Review: go ahead with these answers?', self.MERGE):
+            self.assertIn(title, titles)
+        self.assertEqual([title for title in titles if '?' not in title], [])
+
+    def test_a_cancelled_prompt_leaves_no_line(self):
+        from devcontainer_setup.ui import Cancelled
+        with self.assertRaises(Cancelled):
+            self.interact(dict(self.COMMIT_ONLY, **{'Review: go ahead with these answers?': CTRL_C}))
+        lines = self.seen['output'].splitlines()
+        self.assertIn('How should the setup reach GitHub?  local commit only', lines)
+        self.assertIn('Which Codespace?  none', lines)
+        self.assertEqual([line for line in lines if line.startswith('Review: go ahead')], [])
+
+    def test_trail_wraps_the_wizard_only(self):
+        import contextlib
+        import io
+        from devcontainer_setup.project_sync import terminal
+        output = io.StringIO()
+        with patch.object(terminal.subprocess, 'run',
+                          return_value=subprocess.CompletedProcess([], 0, 'reuse first\n')) as run, \
+                contextlib.redirect_stdout(output):
+            gum = terminal.Gum('gum')
+            self.assertEqual(gum.choose('Which Codespace?', ['none', 'reuse first'], 'none'), 'reuse first')
+            gum.multi('Which other runtimes?', ['go'], [])
+            gum.input('Which ports should be forwarded?', '')
+            gum.confirm('Connect and sign in now?')
+        self.assertEqual(run.call_count, 4)
+        self.assertEqual(output.getvalue(), '')
+
     def test_review_and_pr_body_list_grok_as_baseline(self):
         seen = self.interact(dict(self.LAUNCH, **{self.MERGE: True}))
         self.assertEqual(seen['result'], 0, seen['output'])
@@ -2309,7 +2485,7 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
 
     def test_pr_body_leaves_out_the_dotfiles_repository(self):
         seen = self.interact(dict(self.LAUNCH, **{self.MERGE: True, 'Apply dotfiles inside the container?': True,
-                                                   'Dotfiles repository': 'owner/dotfiles'}))
+                                                   'Which dotfiles repository?': 'owner/dotfiles'}))
         self.assertEqual(seen['result'], 0, seen['output'])
         self.assertIn('dotfiles: owner/dotfiles', seen['output'])  # The review still shows it.
         calls = self.gh()['calls']
@@ -2381,15 +2557,15 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
                 self.assertIs(self.seen['defaults'][self.MERGE], False)
 
     def test_resumed_pr_stays_open_unless_merged(self):
-        stops = (('commit only', {'Publish': 'local commit only', 'Codespace': 'none'}),
-                 ('ctrl-c at the codespace questions', {'Codespace': CTRL_C}),
+        stops = (('commit only', {'How should the setup reach GitHub?': 'local commit only', 'Which Codespace?': 'none'}),
+                 ('ctrl-c at the codespace questions', {'Create a Codespace now?': CTRL_C}),
                  ('declined', {self.MERGE: False}), ('enter', {self.MERGE: ENTER}), ('ctrl-c', {self.MERGE: CTRL_C}))
         for label, answers in stops:
             with self.subTest(label):
                 self.setUp()
                 start = self.decline_merge()
                 self.assert_pr_left_open(self.run_main(dict(self.LAUNCH, **answers)), start)
-                self.assertNotIn('Review setup', self.seen.get('choices', []))
+                self.assertNotIn('Review: go ahead with these answers?', self.seen.get('choices', []))
                 if label in ('commit only', 'ctrl-c at the codespace questions'):
                     self.assertNotIn(self.MERGE, self.seen.get('confirms', []))
 
@@ -2404,7 +2580,7 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         self.assertEqual(seen['result'], 0, seen['output'])
         self.assertIn(f'Setup PR #1 is open: Configure project devcontainer (setup/devcontainer into main, at {head[:12]}).',
                       seen['output'])
-        self.assertNotIn('Review setup', seen['choices'])
+        self.assertNotIn('Review: go ahead with these answers?', seen['choices'])
         calls = self.gh()['calls'][start:]
         self.assertFalse(any(call['args'][:3] == ['api', '--method', 'POST'] for call in calls))
         self.assertEqual(len(self.gh()['prs']), 1)
@@ -2450,7 +2626,7 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
             reviews = 0
             def choose(self, title, options, selected=None):
                 answer = super().choose(title, options, selected)
-                if title == 'Review setup':
+                if title == 'Review: go ahead with these answers?':
                     self.reviews += 1
                     if self.reviews == 1:
                         return 'Change answers'
@@ -2458,7 +2634,7 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         with patch.object(GitPlan, 'push', side_effect=AssertionError('an empty setup branch was pushed')):
             seen = self.interact(self.LAUNCH, ui=UI)
         self.assertEqual(seen['result'], 0, seen['output'])
-        self.assertEqual(trace['choices'][0], 'Review setup')
+        self.assertEqual(trace['choices'][0], 'Review: go ahead with these answers?')
         self.assertIn('Files: already configured', seen['output'])
         self.assertNotIn('lacks the new setup files', seen['output'])
         self.assertEqual(self.snapshot(), before)
@@ -2774,7 +2950,7 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
                 if branch != 'main':
                     self.git('switch', '--quiet', '-c', branch, 'main')
                 seen = self.interact(dict(self.COMMIT_ONLY, **{'Apply dotfiles inside the container?': True,
-                                                               'Dotfiles repository': 'owner/dotfiles'}))
+                                                               'Which dotfiles repository?': 'owner/dotfiles'}))
                 self.assertEqual(seen['result'], 0, seen['output'])
                 expected = 'setup/devcontainer' if branch == 'main' else branch
                 self.assertIn(f'Branch: {expected}\n', seen['output'])
