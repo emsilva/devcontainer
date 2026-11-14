@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -35,13 +36,19 @@ class Clock:
 
 
 class UI:
-    def __init__(self):
+    def __init__(self, module=None):
+        self.module = module
         self.answers = []
         self.calls = []
 
+    def default(self, options):
+        """Answer yes to a fresh replace's question; continue an unfinished one."""
+        fresh = [getattr(self.module, 'NOT_NOW', None), getattr(self.module, 'REPLACE_IT', None)]
+        return fresh[1] if options == fresh else 'continue'
+
     def choose(self, title, options):
         self.calls.append((title, options))
-        answer = self.answers.pop(0) if self.answers else 'continue'
+        answer = self.answers.pop(0) if self.answers else self.default(options)
         if isinstance(answer, BaseException):
             raise answer
         if isinstance(answer, int):
@@ -167,7 +174,7 @@ class ReplacementTests(unittest.TestCase):
         runtime = self.project / '.devcontainer/scripts/project-sync.sh'
         runtime.parent.mkdir(parents=True)
         runtime.write_text('# fixture: runner never executes this file\n')
-        self.api, self.ui, self.clock = API(self), UI(), Clock()
+        self.api, self.ui, self.clock = API(self), UI(self.module), Clock()
         self.steps, self.answers, self.prompts = [], [], []
         self.check_ok, self.cutover_ok, self.delete_code, self.signin_code = True, True, 1, 0
         self.runner_hook = None
@@ -340,6 +347,145 @@ class ReplacementTests(unittest.TestCase):
         self.assertEqual(self.run_replace(), 1)
         self.assertIn('Run task setup first.', self.output.getvalue())
         self.assertEqual(self.creates(), [])
+
+    # C1: a fresh replace asks before it writes or creates anything.
+    INSPECTED = dict(  # The journal inspect() wrote at 0c52227/efcfb61 for this fixture (tmp/g4/journal-at-efcfb61.txt).
+        schema=1, old='old-space', new=None, account='owner', repository='owner/project', branch='main',
+        commit='a' * 40, remote_root='/workspaces/project',
+        resources=dict(machine='premium', cpus=8, idle_timeout_minutes=120, billable_owner='owner'),
+        old_receipt=None, branch_receipt=None, request=None, phase='inspected', signins=None, check=None,
+        moving=None, ended=None, ended_at=None)
+
+    def consent(self, user):
+        from devcontainer_setup.project_sync import arming
+        arming.write(self.state, dict(schema=1, armed=True, gh_user=user, consented_at=1_000_000_000))
+
+    def nothing_written(self):
+        self.assertFalse((self.state / 'replace.json').exists())
+        self.assertEqual(sorted((self.state / 'replacements').glob('*')), [])
+        self.assertEqual(self.creates(), [])
+        self.assertFalse(self.api.launches)
+        self.assertFalse(self.steps)
+
+    def test_fresh_replace_asks_before_writing_anything(self):
+        expected = ('Replace old-space?\n'
+                    '  New one  premium (8 cores), stops after 120 min idle\n'
+                    '  From     main at aaaaaaa\n'
+                    '  Billing  owner, from the moment it is created\n'
+                    '  You      end agents when asked, approve the sign-ins, decide the delete')
+        for user in (None, 'owner', 'another'):
+            with self.subTest(consent=user):
+                if user:
+                    self.consent(user)
+                self.output = io.StringIO()
+                self.ui.calls.clear()
+                seen = []
+                choose = self.ui.choose
+                def asked(title, options):
+                    self.nothing_written()
+                    seen.append(self.output.getvalue())
+                    return choose(title, options)
+                with patch.object(self.ui, 'choose', side_effect=asked):
+                    self.assertEqual(self.run_replace(), 0, self.output.getvalue())
+                self.assertEqual(self.ui.calls[0], (expected, [self.module.NOT_NOW, self.module.REPLACE_IT]))
+                self.assertNotIn('Replacing', seen[0])
+                self.assertNotIn('Recovery', seen[0])
+                self.assertEqual(self.module.NOT_NOW, 'Not now')
+                self.assertEqual(self.module.REPLACE_IT, 'Replace it')
+                self.save('scratch.json', dict(read_json(self.state / 'scratch.json'), codespace='old-space'))
+                self.api.rows = [copy.deepcopy(self.api.old)]
+                receipt_path(self.root / 'state', 'owner/project', 'main').unlink(missing_ok=True)
+                shutil.rmtree(self.state / 'replacements')
+                self.api.gh.calls.clear()
+                self.api.launches.clear()
+                self.steps.clear()
+
+    def test_not_now_esc_and_ctrl_c_replace_nothing(self):
+        self.consent('owner')
+        for answer in ('Not now', self.module.Cancelled(), KeyboardInterrupt(), EOFError()):
+            with self.subTest(answer=type(answer).__name__):
+                self.output = io.StringIO()
+                self.ui.answers = [answer]
+                self.assertEqual(self.run_replace(), 0, self.output.getvalue())
+                self.assertTrue(self.output.getvalue().endswith('Nothing was replaced.\n'), self.output.getvalue())
+                self.assertNotIn('Recovery', self.output.getvalue())
+                self.nothing_written()
+
+    def test_cancel_before_the_question_writes_nothing(self):
+        self.api.get = lambda name: (_ for _ in ()).throw(KeyboardInterrupt())
+        self.assertEqual(self.run_replace(), 0, self.output.getvalue())
+        self.assertEqual(self.output.getvalue(), 'Nothing was replaced.\n')
+        self.assertEqual(self.ui.calls, [])
+        self.nothing_written()
+
+    def test_a_refusal_before_the_question_still_exits_1(self):
+        self.api.catalogue = []
+        self.assertEqual(self.run_replace(), 1)
+        self.assertIn('not offered for main at aaaaaaaaaaaa; nothing was created.', self.output.getvalue())
+        self.api.catalogue = [{'name': 'premium', 'cpus': 8}]
+        self.differs.return_value = 'different selections'
+        self.assertEqual(self.run_replace(), 1)
+        self.assertIn('does not carry this checkout', self.output.getvalue())
+        self.assertNotIn('Nothing was replaced.', self.output.getvalue())
+        self.assertEqual(self.ui.calls, [])
+        self.nothing_written()
+
+    def test_replace_it_starts_as_today(self):
+        date = datetime.fromtimestamp(1_000_000_000).strftime('%Y-%m-%d')
+        for user, line in (('owner', f'Recovery moves with your consent from {date} (owner).'),
+                           ('another', 'Recovery on the new Codespace will need a typed arm: consent was given as '
+                                       'another, gh is signed in as owner.')):
+            with self.subTest(consent=user):
+                self.consent(user)
+                self.output = io.StringIO()
+                self.api.preflight_failure = True  # Stop right after the journal is written.
+                written = []
+                original = replacing.write
+                with patch.object(self.module.replacing, 'write',
+                                  side_effect=lambda state, value: (written.append(copy.deepcopy(value)),
+                                                                    original(state, value))[1]):
+                    self.assertEqual(self.run_replace(), 1, self.output.getvalue())
+                first = written[0]
+                self.assertEqual(set(first) - {'operation', 'at'}, set(self.INSPECTED))
+                for key, value in self.INSPECTED.items():
+                    self.assertEqual(first[key], value, key)
+                self.assertEqual(list(first['at']), ['inspected'])
+                self.assertRegex(first['operation'], '^[0-9a-f]{12}$')
+                lines = self.output.getvalue().splitlines()
+                self.assertEqual(lines[:2], [line, 'Replacing old-space (premium, 8 cores, idle timeout 120 minutes).'])
+                (self.state / 'replace.json').unlink()
+
+    def test_a_rerun_does_not_ask_again(self):
+        for phase in replacing.PHASES:
+            with self.subTest(phase=phase):
+                paired = 'old-space' if replacing.PHASES.index(phase) < replacing.PHASES.index('moved') else 'new-space'
+                self.save('scratch.json', dict(read_json(self.state / 'scratch.json'), codespace=paired))
+                self.active(phase=phase, new=None if phase in ('inspected', 'create-requested') else 'new-space')
+                self.api.rows = [self.api.old, self.api.row()]
+                self.valid_launch()
+                self.ui.calls.clear()
+                self.assertEqual(self.run_replace(), 0, self.output.getvalue())
+                self.assertFalse([call for call in self.ui.calls if self.module.REPLACE_IT in call[1]])
+
+    def test_preview_fits_real_names(self):
+        from devcontainer_setup.project_sync.overview import cells
+        old = 'bookish-space-meme-v66pqg6wpvvqcpw7j'
+        self.assertEqual(len(old), 36)
+        coordinator = self.module._Coordinator(self.project, self.state, self.identity, api=None, ui=None,
+            ask=None, env={}, runner=None, now=None, sleep=None)
+        value = journal(old=old, branch='main', commit='9f2fae2' + '0' * 33,
+                        resources=dict(machine='premiumLinux256gb', cpus=32, idle_timeout_minutes=1440,
+                                       billable_owner='kyndryl-agentic-ai'))
+        lines = coordinator.preview(value).splitlines()
+        self.assertEqual(lines, [
+            f'Replace {old}?',
+            '  New one  premiumLinux256gb (32 cores), stops after 1440 min idle',
+            '  From     main at 9f2fae2',
+            '  Billing  kyndryl-agentic-ai, from the moment it is created',
+            '  You      end agents when asked, approve the sign-ins, decide the delete'])
+        for line in lines:
+            self.assertLessEqual(cells(line), 78, line)
+            self.assertNotIn('…', line)
 
     def test_a_tip_that_moves_before_create_is_checked_again(self):
         self.pin.side_effect = ['a' * 40, 'b' * 40]
