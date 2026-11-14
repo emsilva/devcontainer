@@ -640,8 +640,10 @@ class ExistingCheckoutTests(unittest.TestCase):
             result = workspace.status(self.project, self.state)
         self.assertEqual(result['herdr_hooks']['codespace'], 'space')
         self.assertEqual(result['herdr_hooks']['hooks']['opencode'], 'current')
-        self.assertIn('Herdr hooks: claude, codex, grok, opencode current on space', workspace.status_text(result))
-        self.assertIn('; skill unknown (task work:cs installs it)', workspace.status_text(result))
+        # Rows wrap at 78 cells; compare the words.
+        shown = ' '.join(workspace.status_text(result).split())
+        self.assertIn('Herdr hooks: claude, codex, grok, opencode current on space', shown)
+        self.assertIn('; skill unknown (task work:cs installs it)', shown)
 
     def test_status_returns_env_files_without_a_remote_call(self):
         from devcontainer_setup.project_sync.state import atomic_write

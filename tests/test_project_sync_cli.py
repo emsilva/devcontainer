@@ -182,7 +182,7 @@ class ArmFlowTests(unittest.TestCase):
         ready.assert_called_once_with(self.state, 'n' * 48)
         scan.assert_called_once_with(self.state, 'cs-1')
         self.assertIn('Recovery     armed since', out)
-        self.assertIn('Keeper       running', out)
+        self.assertIn('Running      yes (pid 4121)', out)
 
     def test_a_keeper_that_cannot_start_does_not_block_the_connection(self):
         # #57: keeper startup or readiness trouble must leave plain work:cs connecting to Herdr.
@@ -312,7 +312,7 @@ class ArmFlowTests(unittest.TestCase):
         ready.assert_called_once_with(self.state, 'n' * 48)
         self.assertIn('Armed as octo', out)
         self.assertIn('Recovery     armed since', out)
-        self.assertIn('Keeper ', out)
+        self.assertIn('Running ', out)
 
     def test_port_range(self):
         with self.assertRaises(SystemExit):
@@ -1185,14 +1185,14 @@ class ProjectSyncCLITests(unittest.TestCase):
         ]
         for worker, expected in cases:
             with self.subTest(worker=worker):
-                text = workspace.status_text(dict(worker=worker, scratch=dict(phase='waiting'),
-                                                  conversations=history))
-                self.assertEqual(text.splitlines()[0], 'Sync worker: ' + expected)
+                value = dict(worker=worker, scratch=dict(phase='waiting'), conversations=history)
+                self.assertEqual(workspace._status_rows(value)[0], ('', 'Sync: ' + expected))
+                self.assertEqual(' '.join(workspace.status_text(value).split()[:2]), 'Sync: ' + expected.split()[0])
 
     def test_work_status_is_offline_and_does_not_create_state(self):
         result = self.run_cli('work', '--status')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('Sync worker: stopped', result.stdout)
+        self.assertIn('Sync: stopped', result.stdout)
         self.assertIn('History:', result.stdout)
         self.assertNotIn('Herdr hooks:', result.stdout)
         self.assertNotIn('Env files:', result.stdout)
