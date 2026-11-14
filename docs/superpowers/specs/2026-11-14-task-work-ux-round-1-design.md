@@ -113,6 +113,8 @@ Checkout   on docs/x; Codespaces start from main
 The screen keeps the owner's #87 limits: at most 6 lines of 78 cells, a Gum menu of 3-6 actions. Menu labels drop
 the Codespace name and the command (`Replace this Codespace`, `Finish the replace`, `Check and delete the replaced
 Codespace`). The command still prints as `Running: …` once chosen and in the `Next:` lines without a terminal.
+This changes #87's "each item prints the command it runs": the owner chose labels only on 2026-11-14 ("follow your
+recommendation"), over keeping commands where they fit or everywhere.
 Tests render with a 36-character Codespace name (run 3's `literate-pancake-jjjrq4j9rqwrc5qp6` length), not
 `paired-cs`.
 
@@ -223,8 +225,8 @@ screens round 1 does not touch is not required.
 ## Constraints
 
 - The owner's #87 rulings: at most 6 lines of 78 columns, a Gum menu of 3-6 actions, the likely one first;
-  without a terminal, print the state and the `Next:` commands and exit 0. Ruling 5: only a connect turns
-  recovery on.
+  without a terminal, print the state and the `Next:` commands and exit 0. Menu items show labels only (B3, owner
+  2026-11-14); the command prints once chosen. Ruling 5: only a connect turns recovery on.
 - Never rebuild a paired Codespace; replacing one needs its own yes (C1 is that yes).
 - Gates: `task check` and `task test` green on the branch, in the default environment.
 - Copy follows the `ux-writing` skill. No AI attribution in commits or PRs.
