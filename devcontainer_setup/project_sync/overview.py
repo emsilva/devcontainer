@@ -56,7 +56,7 @@ class Action:
 
     @property
     def item(self) -> str:
-        return f'{fit(self.label)}  ({self.command})'
+        return fit(self.label)
 
 
 @dataclass(frozen=True)
@@ -147,15 +147,80 @@ def _stop(local: Local, pair: _Pair) -> tuple[str | None, float | None]:
     return None, None
 
 
+_ROWS = 5  # under the title line: #87's six lines
+_SLOTS = 5  # menu actions before Show details; run adds Exit
+_GONE = ('deleted', 'keeper-deleted', 'missing', 'elsewhere')  # the pairing is not there to recover
+
+
+def _clean(text: str) -> str:
+    return ''.join(char for char in text if unicodedata.category(char) not in _UNSAFE)
+
+
+def _title(folder: str, name: str | None) -> str:
+    """Name the Codespace once; a long line cuts the folder, never the name."""
+    tail = ' · ' + (_clean(name) if name else 'no Codespace paired')
+    folder = _clean(folder)
+    if cells(folder + tail) > 78:
+        folder = fit(folder, max(1, 78 - cells(tail)))
+    return fit(folder + tail)
+
+
+def _row(label: str, text: str) -> str:
+    return fit(f'{label:<9}  {text}')
+
+
+def _names(labels: tuple[str, ...]) -> str:
+    return labels[0] if len(labels) == 1 else ', '.join(labels[:-1]) + ' and ' + labels[-1]
+
+
+def _recovery(local: Local, situation: str, pair: _Pair, now: float) -> tuple[int, str] | None:
+    """The Recovery row's keep rank and text, first match wins; None draws no row."""
+    if local.armed is None:
+        return None  # The Problem row carries arming.json cannot be read.
+    if local.armed is False:
+        return 12, 'not armed'
+    if local.keeper == 'stale':
+        age = local.keeper_heartbeat_age
+        return 6, (f'not answering for {int(age // 60)} min; connect to restart it' if age is not None
+                   else 'not answering; connect to restart it')
+    if local.keeper == 'unknown':
+        return 6, 'state unknown (process check timed out)'
+    if local.keeper == 'stopped' and pair.kind in _GONE:
+        return None
+    stopped = situation == 'stopped'
+    kind = _stop(local, pair)[0] if stopped else None
+    if local.hold_until is not None and local.hold_until > now:
+        return (6 if stopped else 12), 'armed; on hold until ' + _when(local.hold_until, now)
+    if stopped:
+        if local.keeper_phase == 'restarting':
+            return 6, 'armed; restarting it now'
+        if kind == 'OWNER':
+            return 12, 'armed; not restarting: you stopped it'
+        if local.hold_at_stop is not None:
+            return 6, 'armed; not restarting: it stopped during your hold'
+        if local.restarts_free_at is not None and local.restarts_free_at > now:
+            return 6, 'armed; out of restarts until ' + _when(local.restarts_free_at, now)
+        if kind == 'OTHER':
+            return 6, 'armed; not restarting: this was not the 12-hour stop'
+        if kind == 'LIFETIME':
+            return 6, 'armed; not restarted yet; Show details has the reason'
+        return 6, 'armed; checking why it stopped'
+    if local.next_stop_at is None:
+        return 12, 'armed; next 12-hour stop not known yet'
+    if local.next_stop_at > now:
+        return 12, 'armed; next 12-hour stop about ' + _when(local.next_stop_at, now)
+    return 12, 'armed; the 12-hour stop was due about ' + _when(local.next_stop_at, now)
+
+
 def view(local: Local, remote: Remote | None, *,
          forgotten: frozenset[tuple[str, str]] = frozenset(), now: float | None = None) -> View:
-    """Choose one primary situation, then rank overlays without reading or changing state."""
+    """Name the Codespace once, then labelled rows, without reading or changing state."""
     now = time.time() if now is None else now
-    facts: list[tuple[int, str]] = []
+    rows: list[tuple[int, int, str]] = []
     candidates: list[Action] = []
 
-    def line(rank, text):
-        facts.append((rank, text))
+    def row(place, keep, label, text):
+        rows.append((place, keep, _row(label, text)))
 
     def action(key, label, alias, *args):
         candidates.append(Action(key, label, task_command(local, alias, *args)))
@@ -168,7 +233,7 @@ def view(local: Local, remote: Remote | None, *,
     spaces = remote.spaces.value if remote is not None and remote.spaces.status == 'ok' else None
     prs = sorted(set(remote.setup_prs.value)) if remote is not None and remote.setup_prs.status == 'ok' else []
     launch = local.launch
-    if local.setup in ('missing', 'unmanaged', 'unknown', 'partial'):
+    if local.setup in ('missing', 'unmanaged', 'unknown'):
         situation = 'setup'
     elif prs:
         situation = 'prs'
@@ -181,48 +246,48 @@ def view(local: Local, remote: Remote | None, *,
     else:
         situation = pair.kind
 
-    recovery_off = (local.armed is True and local.keeper == 'stopped'
-                    and pair.kind not in ('deleted', 'keeper-deleted', 'missing', 'elsewhere'))
-    if recovery_off:
-        line(-3, 'Recovery is off until you connect')
-    if local.replacing is not None:
-        old, phase = local.replacing['old'], replacing.PHASE_WORDS[local.replacing['phase']]
-        command = shlex.join(task_command(local, 'setup', '--', '--replace'))
-        line(-2, f'Replacing {old}: stopped at {phase}. Finish it: {command}')
-
     name = local.pairing
+    recovery_off = (local.armed is True and local.keeper == 'stopped'
+                    and pair.kind not in _GONE)
+    if recovery_off:
+        row(1, 1, 'Recovery', 'off until you connect')
+    if local.replacing is not None:
+        row(2, 2, 'Replace', f'stopped at {replacing.PHASE_WORDS[local.replacing["phase"]]}; finish it')
+
     if situation == 'setup':
-        line(1, 'Setup did not finish; run setup again to complete it' if local.setup == 'partial'
-             else 'This project is not set up yet')
+        row(5, 5, 'Setup', 'not done yet')
         action('setup', 'Set up this project', 'setup')
     elif situation == 'prs':
         if len(prs) == 1:
-            line(1, f'Setup pull request #{prs[0]} is open; resume setup to finish it')
+            row(5, 5, 'Setup', f'pull request #{prs[0]} is open; resume setup to finish it')
             action('setup', 'Resume setup', 'setup')
         else:
-            line(1, f'{len(prs)} setup pull requests are open; close all but one in GitHub')
+            row(5, 5, 'Setup', f'{len(prs)} pull requests are open; close all but one in GitHub')
             for number in prs[:3]:
                 candidates.append(Action(f'pr:{number}', f'Open setup pull request #{number}',
                                          ('gh', 'pr', 'view', str(number), '--web')))
     elif situation in ('failed', 'launch'):
         target = launch.codespace if situation == 'launch' else name
         if situation == 'failed':
-            line(1, f'Codespace {target} failed on GitHub; see its creation logs')
+            row(5, 5, 'Codespace', 'failed on GitHub; see its creation logs')
+        elif target == name:
+            row(5, 5, 'Codespace', 'setup did not finish validation; resume it')
         else:
-            line(1, f'Setup of Codespace {target} did not finish validation')
+            row(5, 5, 'Setup', f'{target} did not finish validation')
         logs = Action('creation-logs', 'Show creation logs', ('gh', 'codespace', 'logs', '-c', target))
-        resume = Action('resume', f'Resume setup of {target}', task_command(local, 'setup', '--', '--resume', target))
+        resume = Action('resume', 'Resume the Codespace setup',
+                        task_command(local, 'setup', '--', '--resume', target))
         candidates.extend((logs, resume) if situation == 'failed' else (resume, logs))
-    elif situation in ('deleted', 'keeper-deleted', 'missing', 'elsewhere'):
+    elif situation in _GONE:
         if situation in ('deleted', 'keeper-deleted'):
-            attribution = 'confirmed' if situation == 'deleted' else 'found by the recovery keeper'
-            when = _when(pair.at, now) if pair.at is not None else 'time unavailable'
-            line(1, f'Codespace {name} was deleted ({attribution} {when})')
+            attribution = 'confirmed' if situation == 'deleted' else 'found by Recovery'
+            when = ' ' + _when(pair.at, now) if pair.at is not None else ''
+            row(5, 5, 'Codespace', f'deleted ({attribution}{when})')
         elif situation == 'missing':
-            account = remote.account.value if remote.account.status == 'ok' else 'unknown account'
-            line(1, f"Codespace {name} is not among {account}'s Codespaces; it may be deleted or under another account")
+            account = remote.account.value if remote.account.status == 'ok' else 'your account'
+            row(5, 5, 'Codespace', f'not listed for {account}; deleted, or under another account')
         else:
-            line(1, f"Codespace {name} is now listed under another repository; pair this one's Codespace")
+            row(5, 5, 'Codespace', "now listed under another repository; pair this one's Codespace")
         others = sorted((space for space in (spaces or ()) if space.name != name),
                         key=lambda space: (space.last_used_at is not None,
                                            space.last_used_at if space.last_used_at is not None else 0), reverse=True)
@@ -230,11 +295,9 @@ def view(local: Local, remote: Remote | None, *,
             action('pair:' + space.name, 'Pair ' + space.name, 'work:cs', '--', '--rebind', space.name)
         action('create', 'Create a Codespace', 'setup')
     elif situation == 'unpaired':
-        line(2, 'No Codespace is paired with this checkout')
         if spaces is not None:
             count = len(spaces)
-            quantity = 'no Codespace' if not count else '1 Codespace' if count == 1 else f'{count} Codespaces'
-            line(2, f'This repository has {quantity} on GitHub')
+            row(5, 5, 'Codespace', f'GitHub lists {count or "none"} for this repository')
         if spaces is None or spaces:
             action('connect', 'Connect', 'work:cs')
         action('create', 'Create a Codespace', 'setup')
@@ -242,75 +305,78 @@ def view(local: Local, remote: Remote | None, *,
         if situation == 'stopped':
             kind, stamp = _stop(local, pair)
             if kind == 'OWNER':
-                text = f'Codespace {name} is stopped; you stopped it at {_when(stamp, now)}'
+                text = f'stopped; you stopped it at {_when(stamp, now)}'
             elif kind == 'LIFETIME':
-                text = f"Codespace {name} was stopped by GitHub's 12-hour limit at {_when(stamp, now)}"
+                text = f"stopped by GitHub's 12-hour limit at {_when(stamp, now)}"
             elif kind == 'OTHER':
-                text = f'Codespace {name} stopped at {_when(stamp, now)}, not by you'
+                text = f'stopped at {_when(stamp, now)}, not by you'
             else:
-                text = f'Codespace {name} is stopped ({pair.suffix})'
+                text = f'stopped ({pair.suffix})'
             action('start', 'Start and connect', 'work:cs')
         else:
             if situation in ('available', 'starting', 'stopping'):
-                text = f'Codespace {name} is {situation} ({pair.suffix})'
+                text = f'{situation} ({pair.suffix})'
             elif situation == 'other':
-                text = f'Codespace {name} is in state {pair.raw} ({pair.suffix})'
+                text = f'in state {pair.raw} ({pair.suffix})'
             else:
-                text = f'Codespace {name}: {pair.reason}'
+                text = pair.reason
             action('connect', 'Connect', 'work:cs')
             if situation == 'available':
                 if local.armed is False:
                     action('arm', 'Connect and arm recovery', 'work:cs:armed')
                 action('stop', 'Stop the Codespace', 'work:cs:stop')
-        line(2, text)
+        row(5, 5, 'Codespace', text)
+    if name and local.signed_out and local.worker == 'running':
+        action('signin', 'Sign in', 'work:signin:all')
 
-    connect = next((index for index, candidate in enumerate(candidates)
-                    if candidate.key in ('connect', 'start')), None)
-    if name and connect is not None and local.replacing is None:
-        candidates.insert(connect + 1, Action('replace', f'Replace {name}',
-                                              task_command(local, 'setup', '--', '--replace')))
+    replace_action = None
+    if (name and local.replacing is None
+            and any(candidate.key in ('connect', 'start') for candidate in candidates)):
+        replace_action = Action('replace', 'Replace this Codespace', task_command(local, 'setup', '--', '--replace'))
+
+    if name and not recovery_off:
+        recovery = _recovery(local, situation, pair, now)
+        if recovery is not None:
+            row(6, recovery[0], 'Recovery', recovery[1])
+    if name and local.worker == 'stopped':
+        row(7, 7, 'Sync', 'stopped; connect to start it')
+    elif local.cycle_at is not None:
+        row(7, 14, 'Sync', 'last completed ' + _when(local.cycle_at, now))
 
     refusals = tuple(refusal for refusal in local.refusals
                      if (refusal.agent, refusal.session_id) not in forgotten)
     if refusals:
         count = len(refusals)
         quantity, pronoun = ('1 conversation', 'it') if count == 1 else (f'{count} conversations', 'them')
-        line(3, f'{name} refused {quantity}; forget {pronoun} to clear the sync warning')
+        row(8, 8, 'History', f'{quantity} refused; forget {pronoun} to clear the sync warning')
         for refusal in refusals[:2]:
             action(f'forget:{refusal.agent}:{refusal.session_id}',
                    f'Forget {refusal.agent} conversation {refusal.session_id[:8]}',
                    'work:forget', '--', '--agent', refusal.agent, '--session', refusal.session_id)
-    if local.keeper == 'stale':
-        duration = (f' for {int(local.keeper_heartbeat_age // 60)} min'
-                    if local.keeper_heartbeat_age is not None else '')
-        line(4, f'The recovery keeper has not answered{duration}; connect to restart it')
-    elif local.keeper == 'unknown':
-        line(4, 'Recovery state is unknown (process check timed out)')
-    if name and local.worker == 'stopped':
-        line(4, 'Sync is stopped; connect to start it')
-    if local.armed is True and local.keeper == 'running':
-        text = f'Recovery is armed as {local.gh_user or "unknown account"}'
-        if local.hold_until is not None and local.hold_until > now:
-            text += ', on hold until ' + _when(local.hold_until, now)
-        line(5, text)
-    elif local.armed is False and name:
-        line(5, 'Recovery is not armed')
+    elif local.history_pending_since is not None and now - local.history_pending_since > 300:
+        row(8, 8, 'History', f'not synced yet, {int((now - local.history_pending_since) // 60)} min so far')
+    if local.signed_out:
+        are = 'is' if len(local.signed_out) == 1 else 'are'
+        row(9, 9, 'Sign-ins', f'{_names(local.signed_out)} {are} not signed in')
 
     checkout = local.checkout
-    if checkout.relation == 'behind' and checkout.branch == checkout.default:
+    if checkout.relation in ('other-branch', 'detached'):
+        tail = '; Codespaces start from ' + checkout.default
+        branch = ('on ' + fit(checkout.branch or '', 78 - cells('Checkout   on ' + tail))
+                  if checkout.relation == 'other-branch' else 'on a detached HEAD')
+        row(11, 11, 'Checkout', branch + tail)
+    elif checkout.relation == 'behind' and checkout.branch == checkout.default:
         copied = 'local copy' + (' from ' + _when(checkout.copied_at, now) if checkout.copied_at is not None else '')
-        line(7, f'Checkout is {checkout.behind} commits behind origin/{checkout.default} ({copied})')
+        row(11, 11, 'Checkout', f'{checkout.behind} commits behind origin/{checkout.default} ({copied})')
         candidates.append(Action('update-checkout', 'Update the checkout',
                                  ('git', '-C', str(local.root), 'merge', '--ff-only', 'origin/' + checkout.default)))
     elif checkout.relation == 'diverged':
-        line(7, f'Checkout and origin/{checkout.default} have diverged; review before merging')
+        row(11, 11, 'Checkout', f'diverged from origin/{checkout.default}; review before merging')
     if (local.generated and local.setup == 'installed' and local.source_ref is not None
             and remote is not None and remote.upstream.status == 'ok' and remote.upstream.value != local.source_ref):
         # The probe exposes the SHA only, not the configured symbolic ref's name.
-        line(6, f'Generator upstream is at {remote.upstream.value[:7]}; this project uses {local.source_ref[:7]}')
+        row(12, 13, 'Generator', f'upstream is at {remote.upstream.value[:7]}; this project uses {local.source_ref[:7]}')
         candidates.append(Action('upgrade', 'Review the generator upgrade', ('task', 'devcontainer:upgrade:self')))
-    if local.cycle_at is not None:
-        line(8, 'Sync last completed ' + _when(local.cycle_at, now))
 
     priority = []
     if recovery_off:
@@ -321,44 +387,64 @@ def view(local: Local, remote: Remote | None, *,
             connect = Action('connect', 'Connect', task_command(local, 'work:cs'))
         priority.append(connect)
     if local.replacing is not None:
-        priority.append(Action('finish-replace', f'Finish replacing {local.replacing["old"]}',
-                               task_command(local, 'setup', '--', '--replace')))
+        priority.append(Action('finish-replace', 'Finish the replace', task_command(local, 'setup', '--', '--replace')))
     if local.cleanup:
         target = local.cleanup[0]
-        cleanup = Action('cleanup:' + target, f'Finish cleaning up after {target}',
-                         task_command(local, 'work:cs:delete', '--', '--codespace', target))
-        priority.append(cleanup)
-        line(-1, f'Cleanup after deleting {target} is not finished.')
-    candidates = priority + candidates
+        priority.append(Action('cleanup:' + target, 'Finish cleaning up after the delete',
+                               task_command(local, 'work:cs:delete', '--', '--codespace', target)))
+        row(3, 3, 'Cleanup', f'not finished for {target}')
     listed = {space.name for space in spaces or ()}
     unchecked_old = (local.replacing['old'] if local.replacing is not None and
                      replacing.PHASES.index(local.replacing['phase']) < replacing.PHASES.index('checked') else None)
     retired = next((target for target in local.retired
                     if target != name and target != unchecked_old and target in listed), None)
-    delete_key = 'delete:' + retired if retired is not None else None
+    delete = None
     if retired is not None:
-        action(delete_key, f'Check and delete {retired}', 'work:cs:delete', '--', '--codespace', retired)
+        delete = Action('delete:' + retired, 'Check and delete the replaced Codespace',
+                        task_command(local, 'work:cs:delete', '--', '--codespace', retired))
+        row(10, 10, 'Replaced', 'still on GitHub; check and delete it when ready')
 
-    details = Action('details', 'Show details', task_command(local, 'work:status'))
-    more = details.command + ' shows more'
-    for problem in local.problems:
-        line(1, problem + '; ' + more)
+    problems = []
     unique = {}
-    for candidate in candidates:
+    for candidate in [*priority, *candidates, *filter(None, (replace_action, delete))]:
         if any(unicodedata.category(char) in _UNSAFE for arg in candidate.argv for char in arg):
-            line(1, f'Action {candidate.key} withheld for unsafe text; {more}')
+            # Withheld first: it is why the menu lacks an action the situation calls for.
+            if 'an action was withheld for unsafe text' not in problems:
+                problems.insert(0, 'an action was withheld for unsafe text')
         else:
             unique.setdefault(candidate.key, candidate)
-    # Reserve the last candidate slot so overlays cannot hide a listed retired target.
-    delete = unique.pop(delete_key, None)
-    actions = list(unique.values())[:4 if delete is not None else 5]
-    if len(actions) + (delete is not None) < 3:
+    replace_action = unique.pop('replace', None)
+    delete = unique.pop(delete.key, None) if delete is not None else None
+    problems += [problem for problem in local.problems if problem not in problems]
+    if problems:
+        tail = (f' (+{len(problems) - 1} more)' if len(problems) > 1 else '') + '; Show details has more'
+        row(4, 4, 'Problem', fit(problems[0], 78 - cells('Problem    ' + tail)) + tail)
+
+    # Replace and the retired delete keep their slots, so a busy state never hides them.
+    reserved = [found for found in (replace_action, delete) if found is not None]
+    actions = list(unique.values())[:_SLOTS - len(reserved)]
+    if local.logs and len(actions) + len(reserved) < 3:
         actions.append(Action('logs', 'Show recovery and sync logs', task_command(local, 'work:logs')))
-    if delete is not None:
-        actions.append(delete)
-    actions.append(details)
-    lines = tuple(fit(text) for _, text in sorted(facts, key=lambda fact: fact[0])[:6])
-    return View(lines, tuple(actions))
+    actions += reserved
+    actions.append(Action('details', 'Show details', task_command(local, 'work:status')))
+
+    kept = sorted(sorted(rows, key=lambda found: (found[1], found[0]))[:_ROWS])
+    lines = (_title(local.root.name, name), *(text for _, _, text in kept))
+    return View(lines, _unique_labels(actions))
+
+
+def _unique_labels(actions: list[Action]) -> tuple[Action, ...]:
+    """Menu items are matched by text, so a repeated item gets (2), (3) that no cut can drop."""
+    used, result = set(), []
+    for found in actions:
+        number, label = 1, found.label
+        while fit(label) in used:
+            number += 1
+            suffix = f' ({number})'
+            label = fit(found.label, 78 - cells(suffix)) + suffix
+        used.add(fit(label))
+        result.append(found if label == found.label else replace(found, label=label))
+    return tuple(result)
 
 
 def run(root: Path, *, env: Mapping[str, str] = os.environ, stdin=sys.stdin, stdout=sys.stdout,

@@ -19,15 +19,16 @@ ARCHIVE = 'replacements'
 LOCK = 'replace.lock'
 RECEIPTS = 'replace-receipts'
 PHASES = ('inspected', 'create-requested', 'created', 'ready', 'moved', 'signed-in', 'checked', 'offered')
+# The one place these words live; screens read them as "stopped at <words>".
 PHASE_WORDS = {
-    'inspected': 'inspect',
-    'create-requested': 'create',
-    'created': 'create',
-    'ready': 'flush and move',
-    'moved': 'sign in',
-    'signed-in': 'check',
-    'checked': 'delete offer',
-    'offered': 'delete offer',
+    'inspected': 'the first checks',
+    'create-requested': 'creating the new Codespace',
+    'created': 'creating the new Codespace',
+    'ready': 'the final sync',
+    'moved': 'the sign-ins',
+    'signed-in': 'the last check',
+    'checked': 'the delete question',
+    'offered': 'the delete question',
 }
 ENDED = ('completed', 'abandoned', 'deleted')
 _ERROR = 'The replace record cannot be read'

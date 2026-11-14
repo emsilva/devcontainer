@@ -151,7 +151,9 @@ class WorkOverviewTests(unittest.TestCase):
         state.atomic_write(self.local.state / 'replace.json', json.dumps(journal()).encode())
         before = snapshot(self.local.state)
         self.assertEqual(self.run_overview(), 0)
-        self.assertIn('Replacing old-space: stopped at flush and move.', self.out.getvalue())
+        from devcontainer_setup.project_sync import replacing
+        words = replacing.PHASE_WORDS[journal()['phase']]
+        self.assertIn(f'Replace    stopped at {words}; finish it\n', self.out.getvalue())
         self.assertIn('Next: task setup -- --replace\n', self.out.getvalue())
         self.assertEqual(snapshot(self.local.state), before)
         self.call.assert_not_called()
@@ -167,7 +169,7 @@ class WorkOverviewTests(unittest.TestCase):
                 self.assertEqual(result, 0)
                 self.assert_frame()
                 self.assertIn('Next: task work:cs\n', self.out.getvalue())
-                self.assertEqual(self.out.getvalue().count('is available'), 1)
+                self.assertEqual(self.out.getvalue().count('Codespace  available'), 1)
                 self.assertNotIn('checking GitHub', self.out.getvalue())
         self.call.assert_not_called()
 
@@ -175,7 +177,7 @@ class WorkOverviewTests(unittest.TestCase):
         # Cover every primary situation and the overlays consumed by Task 3.
         local = replace(self.local, generated=True, setup='installed', source_ref='a' * 40,
                         managed=frozenset(('work:cs', 'work:status', 'work:logs', 'work:forget')))
-        cases = [(replace(local, setup=value), {}) for value in ('missing', 'unmanaged', 'unknown', 'partial')]
+        cases = [(replace(local, setup=value), {}) for value in ('missing', 'unmanaged', 'unknown')]
         cases += [(local, dict(prs=[[dict(number=n, head=dict(ref='setup/devcontainer',
                    repo=dict(full_name='example/project'))) for n in numbers]])) for numbers in ((7,), (7, 9))]
         cases += [(local, dict(names=[dict(total_count=1, codespaces=[dict(name='paired-cs', state=value,
@@ -297,7 +299,7 @@ class WorkOverviewTests(unittest.TestCase):
             self.assertEqual(self.run_overview(tty=True), 0)
         self.assertIn(f'\x1b[{len(initial)}F\x1b[J', self.out.getvalue())
         self.assertIn('checking GitHub', self.out.getvalue())
-        self.assertIn('is available', self.out.getvalue())
+        self.assertIn('Codespace  available', self.out.getvalue())
 
     def test_menu_runs_the_chosen_command_after_printing_it(self):
         self.out = Stream(True)
@@ -306,9 +308,10 @@ class WorkOverviewTests(unittest.TestCase):
             def choose(menu, title, options):
                 self.assertEqual(title, 'What next?')
                 self.assertEqual(options[-1], 'Exit')
-                self.assertIn('(task work:cs)', options[0])
-                self.assertIn('(task setup -- --replace)', options[1])
-                return next(option for option in options if '(task work:cs:armed)' in option)
+                # Items are labels only; the command prints once one is chosen.
+                self.assertEqual(options, ['Connect', 'Connect and arm recovery', 'Stop the Codespace',
+                                           'Replace this Codespace', 'Show details', 'Exit'])
+                return 'Connect and arm recovery'
 
         def call(argv, *, cwd):
             self.assertEqual(argv, ['task', 'work:cs:armed'])

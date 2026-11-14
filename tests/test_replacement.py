@@ -783,8 +783,11 @@ class ReplacementTests(unittest.TestCase):
                     self.runner_hook = signin
                     self.assertEqual(self.run_replace(), 0)
                     self.assertEqual(self.archives()[-1]['signins']['retry'], ['unknown'])
+                    # The resume line names the phase in its own words, which may mention sign-ins.
+                    resume = f"A replace of old-space is at {replacing.PHASE_WORDS['moved']}."
+                    self.assertIn(resume, self.output.getvalue().splitlines())
                     lines = [line for line in self.output.getvalue().splitlines()
-                             if 'sign-in' in line.lower() or 'signed in' in line.lower()]
+                             if line != resume and ('sign-in' in line.lower() or 'signed in' in line.lower())]
                     self.assertEqual(lines, ['Sign-in on new-space did not finish; retry with task work:signin:all.'])
 
     def test_new_check_failure_stops_before_the_offer(self):
