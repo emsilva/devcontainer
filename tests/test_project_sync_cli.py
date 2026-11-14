@@ -130,7 +130,7 @@ class ArmFlowTests(unittest.TestCase):
         ask.assert_called_once()
 
     def work_cs(self, *, armed=True, account='octo', row='default', space_error=None, foreign=(),
-                start_error=None, ready_error=None):
+                start_error=None, ready_error=None, ready_phase='watching'):
         from devcontainer_setup.project_sync import __main__ as cli, arming, keeper, workspace
         from devcontainer_setup.project_sync.state import atomic_write, locked
         mock = self.mock
@@ -155,7 +155,7 @@ class ArmFlowTests(unittest.TestCase):
                 mock.patch.object(workspace, 'remote', side_effect=remote), \
                 mock.patch.object(keeper, 'foreign_processes', return_value=list(foreign)) as scan, \
                 mock.patch.object(keeper, 'start', return_value=started, side_effect=start_error) as start, \
-                mock.patch.object(keeper, 'wait_ready', return_value=dict(started, phase='watching'),
+                mock.patch.object(keeper, 'wait_ready', return_value=dict(started, phase=ready_phase),
                                   side_effect=ready_error) as ready, \
                 mock.patch.object(keeper, 'status', return_value=dict(started, running=True, heartbeat_age=0)), \
                 mock.patch.object(arming, 'account', side_effect=account if isinstance(account, BaseException)
@@ -200,6 +200,18 @@ class ArmFlowTests(unittest.TestCase):
                 else:
                     ready.assert_called_once_with(self.state, 'n' * 48)
                 self.assertEqual(out, str(error) + '\n')
+
+    def test_a_silent_recovery_names_recovery_and_the_logs(self):
+        # FR5 (spec E): a connect whose recovery has not reported names Recovery, never the keeper.
+        expected = 'Recovery has not reported within 60 seconds; see task work:logs.'
+        for name in ('work:cs', 'work:cs:armed'):
+            with self.subTest(name=name):
+                if name == 'work:cs':
+                    *_, out = self.work_cs(ready_phase='starting')
+                else:
+                    *_, out = self.armed_step(ready_phase='starting')
+                self.assertIn(expected, out.splitlines())
+                self.assertNotIn('keeper', out.lower())
 
     def test_work_cs_with_stale_consent_connects_without_the_keeper_and_says_why(self):
         # #57: changed account, Codespace or consent text requires an explicit armed entrypoint.
@@ -256,7 +268,7 @@ class ArmFlowTests(unittest.TestCase):
         self.assertEqual(checked.call_count, 0)
         self.assertEqual(out, '')
 
-    def armed_step(self, foreign=(), port=(), no_port=()):
+    def armed_step(self, foreign=(), port=(), no_port=(), ready_phase='waiting'):
         from devcontainer_setup.project_sync import __main__ as cli, keeper
         from devcontainer_setup.project_sync.state import atomic_write
         mock = self.mock
@@ -266,7 +278,7 @@ class ArmFlowTests(unittest.TestCase):
         with mock.patch.object(keeper, 'foreign_processes', return_value=list(foreign)) as scan, \
                 mock.patch.object(keeper, 'start', return_value=started) as start, \
                 mock.patch.object(keeper, 'stop') as stop, \
-                mock.patch.object(keeper, 'wait_ready', return_value=dict(started, phase='waiting')) as ready, \
+                mock.patch.object(keeper, 'wait_ready', return_value=dict(started, phase=ready_phase)) as ready, \
                 mock.patch('devcontainer_setup.project_sync.arming.account', return_value='octo'), \
                 mock.patch('devcontainer_setup.project_sync.codespaces.Codespaces') as spaces, \
                 mock.patch('builtins.input', return_value='arm') as ask, \
