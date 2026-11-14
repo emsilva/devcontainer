@@ -88,9 +88,7 @@ def integrate_taskfile(project: Path, files: dict[str, bytes]) -> None:
     path = project / name
     if path.is_symlink():
         raise ValueError(f'Existing Taskfile is a symlink: {name}; review integration manually')
-    text = path.read_text() if existing else "version: '3'\ntasks:\n" + ''.join(
-        f"  {operation}:\n    cmds: [{{task: 'devcontainer:{operation}'}}]\n"
-        for operation in ('up', 'down', 'status', 'build'))
+    text = path.read_text() if existing else "version: '3'\ntasks:\n"
     from .taskfile_mapping import integrate_include, mapping
     mapping(text, 'tasks', required=True)
     changed = integrate_include(text)
@@ -135,7 +133,14 @@ def _task_inventory(root: Path, name: str) -> set[str]:
     except (OSError, subprocess.TimeoutExpired) as error:
         raise ValueError('Cannot inspect Taskfile inventory: ' + str(error)) from error
     if result.returncode:
-        raise ValueError('Taskfile inventory failed: ' + result.stderr.strip())
+        # go-task exits 1 for a Taskfile with no tasks at all, after listing them as [].
+        try:
+            empty = json.loads(result.stdout)['tasks'] == []
+        except (ValueError, KeyError, TypeError):
+            empty = False
+        if not empty:
+            raise ValueError('Taskfile inventory failed: ' + result.stderr.strip())
+        return set()
     try:
         return {entry['name'] for entry in json.loads(result.stdout)['tasks']}
     except (ValueError, KeyError, TypeError) as error:
@@ -1326,6 +1331,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise ValueError('Interactive setup requires a terminal. Use --scan, --dry-run, or --check for read-only commands.')
+        if github:
+            from .default_holds import refusal
+            refused = refusal(project)
+            if refused:
+                print(refused, file=sys.stderr)
+                return 1
         if args.upgrade and not args.upgrade_loaded:
             result = upgrade_handoff(project, ref, args.resume)
             if result is not None:
