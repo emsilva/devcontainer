@@ -296,3 +296,30 @@ inspect task work:logs.` names Recovery instead, and says `see task work:logs`.
 shared Mac, `tests/test_probe.py`'s `assert_dead` timed out on a 1 s `ps`, and `tests/test_signins.py`'s
 `test_ctrl_c_on_the_codespace_reads_as_a_cancel` timed out on a 5 s wait. Both pass alone. The budgets are not the
 behaviour under test; raise them so only a hang fails.
+
+### Fix round 1, lead rulings on the fixer's report (2026-11-14)
+
+The fixer built FR1-FR7 as written and reported four places where an FR's heading promises more than its named
+change. Ruled here, so each is a written requirement:
+
+**FR8. "final sync" on every screen, not only the three cutover lines.** Also `seal.py`'s `The final flush for NAME
+cannot be recorded` (printed in the same cutover run), `replace_check.py`'s `the final flush of OLD cannot be read`
+(printed as `Not ready: …`) and the four checked-delete verdict lines in `verdict.py` (`… so no final flush was
+recorded`, `changed or added since the final flush`, `unchanged since the final flush at …`). The docs' Checked
+deletion section follows. Identifiers, record names and `--json` keys keep their names.
+
+**FR9. No "keeper" on any connect screen.** The `keeper.py` messages that reach `task work:cs` or `task work:cs:armed`
+on failure (`exited during startup`, `did not start within 60 seconds`, `still shutting down`, and the keep-alive
+child that survived SIGKILL) name Recovery instead, and end with where to look (`see task work:logs` or `see task
+work:status`), as FR5 does.
+
+**FR10. `Sign in to the tools` only where the menu can connect.** It is offered only when the menu also offers
+`Connect`, `Open in Herdr` or `Start and connect` for the paired Codespace (the condition Replace already uses, minus
+the unfinished-replace part). Not in the setup, open-PR, failed, unfinished-launch or deleted situations: signing in
+needs a Codespace to connect to.
+
+**FR11. `Open in Herdr` only while recovery is running or not armed.** When recovery is off, not answering (stale)
+or unknown, the item reads `Connect`, which is what the Recovery row tells the owner to do and what restarts it.
+
+**FR12.** `docs/project-continuity.md`'s sentence on where `Replace this Codespace` appears says "for a paired
+Codespace".
