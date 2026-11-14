@@ -2077,6 +2077,9 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
         class FirstQuestionCancels:
             def __getattr__(self, name):
                 raise Cancelled()
+        # main must hold most of the branch's files (3 of 5), or the setup refuses before its first question.
+        self.push_to_main({'src/a.txt': 'a\n', 'src/b.txt': 'b\n'})
+        self.git('pull', '--quiet', '--ff-only')
         self.checkout_feature()
         config = self.root / '.devcontainer/devcontainer.json'
         config.parent.mkdir()

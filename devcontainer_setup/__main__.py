@@ -1326,6 +1326,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise ValueError('Interactive setup requires a terminal. Use --scan, --dry-run, or --check for read-only commands.')
+        if github:
+            from .default_holds import refusal
+            refused = refusal(project)
+            if refused:
+                print(refused, file=sys.stderr)
+                return 1
         if args.upgrade and not args.upgrade_loaded:
             result = upgrade_handoff(project, ref, args.resume)
             if result is not None:
