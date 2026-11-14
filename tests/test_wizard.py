@@ -132,6 +132,23 @@ class ReviewRerunTests(unittest.TestCase):
         self.assertIn('Codespace: replace paired (its machine and idle timeout); SSH: enabled', self.output)
         self.assertNotIn('Launch:', self.output)
 
+    def test_review_says_the_replace_asks_again(self):
+        from unittest.mock import Mock
+        from devcontainer_setup import __main__ as wizard
+        line = 'The replace asks once more, with its details, before anything is created.'
+        for launch in ({'action': 'replace', 'name': 'paired'},
+                       {'action': 'rebuild', 'name': 'paired', 'machine': 'premiumLinux', 'idle_timeout': '60m'},
+                       wizard._no_codespace()):
+            with self.subTest(action=launch['action']):
+                with patch.object(wizard, '_resolve_launch', return_value=launch):
+                    self.run_wizard(github=True, api=Mock(), paired='paired')
+                review = self.output.splitlines()
+                if launch['action'] == 'replace':
+                    codespace = review.index('Codespace: replace paired (its machine and idle timeout); SSH: enabled')
+                    self.assertEqual(review[codespace + 1:codespace + 2], [line])
+                else:
+                    self.assertNotIn(line, review)
+
     def test_rerun_asks_only_the_new_finding(self):
         self.found['runtimes']['rust'].update(selected=True, version='1.99.1')
         self.found['tools']['aws'] = {'selected': True, 'evidence': ['build.sh: aws s3']}
@@ -424,6 +441,36 @@ class ReviewRerunTests(unittest.TestCase):
             self.assertEqual(terminal.Gum('gum').choose('Create a Codespace now?', ['none', label], label), label)
         argv = run.call_args.args[0]
         self.assertEqual(argv[argv.index('--selected') + 1], label)
+
+    def test_answers_stay_on_screen(self):
+        self.run_wizard(saved=False, answers={'Which tools does the project need?': [],
+                                              'Apply dotfiles inside the container?': True,
+                                              'Which dotfiles repository?': 'owner/dotfiles'})
+        expected = ['Which other runtimes? (Python, Node and uv are included)  none',
+                    'Which tools does the project need?  none',
+                    'Sync scratch files and project notes with your Mac?  yes',
+                    'Apply dotfiles inside the container?  yes',
+                    'Which dotfiles repository?  owner/dotfiles',
+                    'Change advanced environment options?  no',
+                    'How should the setup reach GitHub?  local commit only',
+                    'Which Codespace?  none',
+                    'Review: go ahead with these answers?  Cancel']
+        self.assertEqual([line.split('  ')[0] for line in expected], self.prompts)
+        self.assertEqual([line for line in self.output.splitlines() if line.startswith(tuple(self.prompts))],
+                         expected)
+        # The rest of the answer forms: chosen items, an empty input.
+        import contextlib
+        import io
+        from devcontainer_setup import __main__ as wizard
+        class UI:
+            def multi(self, title, options, selected): return ['go', 'rust']
+            def input(self, title, value=''): return ''
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            trail = wizard._Trail(UI())
+            self.assertEqual(trail.multi('Which other runtimes?', ['go', 'rust'], []), ['go', 'rust'])
+            self.assertEqual(trail.input('Which ports should be forwarded?', '8080'), '')
+        self.assertEqual(output.getvalue(), 'Which other runtimes?  go, rust\nWhich ports should be forwarded?  (empty)\n')
 
     def test_create_like_last_time_uses_history_and_asks_for_missing_machine(self):
         import contextlib
@@ -2398,6 +2445,31 @@ class SetupFromDefaultBranchTests(unittest.TestCase):
                       'Stop it after how long idle?', 'Review: go ahead with these answers?', self.MERGE):
             self.assertIn(title, titles)
         self.assertEqual([title for title in titles if '?' not in title], [])
+
+    def test_a_cancelled_prompt_leaves_no_line(self):
+        from devcontainer_setup.ui import Cancelled
+        with self.assertRaises(Cancelled):
+            self.interact(dict(self.COMMIT_ONLY, **{'Review: go ahead with these answers?': CTRL_C}))
+        lines = self.seen['output'].splitlines()
+        self.assertIn('How should the setup reach GitHub?  local commit only', lines)
+        self.assertIn('Which Codespace?  none', lines)
+        self.assertEqual([line for line in lines if line.startswith('Review: go ahead')], [])
+
+    def test_trail_wraps_the_wizard_only(self):
+        import contextlib
+        import io
+        from devcontainer_setup.project_sync import terminal
+        output = io.StringIO()
+        with patch.object(terminal.subprocess, 'run',
+                          return_value=subprocess.CompletedProcess([], 0, 'reuse first\n')) as run, \
+                contextlib.redirect_stdout(output):
+            gum = terminal.Gum('gum')
+            self.assertEqual(gum.choose('Which Codespace?', ['none', 'reuse first'], 'none'), 'reuse first')
+            gum.multi('Which other runtimes?', ['go'], [])
+            gum.input('Which ports should be forwarded?', '')
+            gum.confirm('Connect and sign in now?')
+        self.assertEqual(run.call_count, 4)
+        self.assertEqual(output.getvalue(), '')
 
     def test_review_and_pr_body_list_grok_as_baseline(self):
         seen = self.interact(dict(self.LAUNCH, **{self.MERGE: True}))

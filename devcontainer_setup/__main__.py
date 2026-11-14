@@ -807,6 +807,39 @@ def _ask_launch_resources(ui, api, project, options):
     return options
 
 
+class _Trail:
+    """Gum clears a prompt once answered; leave one line with the question and the answer."""
+    def __init__(self, ui):
+        self.ui = ui
+
+    def __getattr__(self, name):
+        return getattr(self.ui, name)
+
+    @staticmethod
+    def _leave(title, answer) -> None:
+        print(f'{title}  {answer}', flush=True)
+
+    def choose(self, title, options, selected=None) -> str:
+        answer = self.ui.choose(title, options, selected)
+        self._leave(title, answer)
+        return answer
+
+    def multi(self, title, options, selected) -> list[str]:
+        answer = self.ui.multi(title, options, selected)
+        self._leave(title, ', '.join(map(str, answer)) or 'none')
+        return answer
+
+    def input(self, title, value='') -> str:
+        answer = self.ui.input(title, value)
+        self._leave(title, answer or '(empty)')
+        return answer
+
+    def confirm(self, title, default=True) -> bool:
+        answer = self.ui.confirm(title, default)
+        self._leave(title, 'yes' if answer else 'no')
+        return answer
+
+
 class _LaunchEditor:
     """Give the existing Codespace menu the last successful create's defaults."""
     def __init__(self, ui, project, branch):
@@ -1136,7 +1169,7 @@ def _resume_setup_pr(ui, api: Codespaces, project: Path, repo: str, default: str
 
 def interactive(project: Path, found: dict | None, metadata: dict | None, ref: str, resume: str | None,
                 upgrade: bool = False) -> int:
-    ui, api = Gum(), Codespaces()
+    ui, api = _Trail(Gum()), Codespaces()
     preferences = load_preferences()
     github = _github_repository(project)
     if not github:
@@ -1246,6 +1279,8 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
             if launch['action'] == 'replace':
                 target += ' (its machine and idle timeout)'
             print(f'Codespace: {launch["action"]}{target}; SSH: {"enabled" if chosen["ssh"] else "disabled"}', flush=True)
+            if launch['action'] == 'replace':
+                print('The replace asks once more, with its details, before anything is created.', flush=True)
             if launch['action'] not in ('none', 'replace'):
                 print(f'Launch: {launch["machine"]}, idle {launch["idle_timeout"]}; '
                       f'editor after create: {editor_preference or load_open_after_create()}', flush=True)
