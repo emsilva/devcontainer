@@ -391,13 +391,14 @@ class ReviewRerunTests(unittest.TestCase):
         self.found['package_managers']['node'] = {'selected': None,
             'conflicts': ['node: conflicting package managers: npm, pnpm'],
             'versions': {'pnpm': {'version': None, 'conflicts': ['a: 12.0.0', 'b: 12.11.2']}}}
+        # A saved repository: an empty one is asked again forever if its title ever stops matching.
+        self.preferences['dotfiles_repo'] = 'owner/dotfiles'
         self.run_wizard(saved=False, github=True, answers={
             'Review: go ahead with these answers?': ['Change answers', 'Cancel'],
             'Which other runtimes? (Python, Node and uv are included)': ['node'],
             'Which node package manager?': 'pnpm',
             'Which pnpm version? (exact x.y.z; the declarations above disagree)': '12.11.2',
-            'Apply dotfiles inside the container?': True, 'Which dotfiles repository?': 'owner/dotfiles',
-            'Change advanced environment options?': True, 'Show advanced launch options?': True})
+            'Apply dotfiles inside the container?': True, 'Change advanced environment options?': True, 'Show advanced launch options?': True})
         for title in ('Which python version? (the declarations above disagree)', 'Which node version?',
                       'Which tools does the project need?', 'Which python version?',
                       'Which ports should be forwarded? (comma-separated)', 'How should the setup reach GitHub?',
@@ -443,9 +444,10 @@ class ReviewRerunTests(unittest.TestCase):
         self.assertEqual(argv[argv.index('--selected') + 1], label)
 
     def test_answers_stay_on_screen(self):
+        # A saved repository: an empty one is asked again forever if its title ever stops matching.
+        self.preferences['dotfiles_repo'] = 'owner/dotfiles'
         self.run_wizard(saved=False, answers={'Which tools does the project need?': [],
-                                              'Apply dotfiles inside the container?': True,
-                                              'Which dotfiles repository?': 'owner/dotfiles'})
+                                              'Apply dotfiles inside the container?': True})
         expected = ['Which other runtimes? (Python, Node and uv are included)  none',
                     'Which tools does the project need?  none',
                     'Sync scratch files and project notes with your Mac?  yes',
