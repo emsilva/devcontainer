@@ -115,6 +115,37 @@ class ExistingCheckoutTests(unittest.TestCase):
         self.assertEqual(self.connect_for_account(), 0)
         self.assertEqual(read_json(self.state / 'accounts.json'), saved)
 
+    def test_connect_prints_no_history_line(self):
+        # D3: the first cycle is usually still pending before Herdr; task work shows a late one instead.
+        import contextlib
+        import io
+        pending = {'conversations': {'outcome': 'pending', 'stage': 'desktop_to_codespace:transfer'}}
+        with patch.object(workspace, '_prerequisites'), \
+                patch.object(workspace, '_choose_pairing', return_value=('space', self.original)), \
+                patch('devcontainer_setup.project_sync.transport.CodespaceConnection', return_value=self.connection()), \
+                patch.object(workspace, '_verify_roots', return_value=[]), \
+                patch.object(workspace, '_remote_herdr'), patch.object(scratch, 'retarget'), \
+                patch.object(scratch, 'start'), patch.object(workspace, '_ready', return_value=pending) as ready, \
+                patch('devcontainer_setup.project_sync.ssh_hosts.configure_ssh'), \
+                patch('devcontainer_setup.project_sync.herdr.open_remote', return_value=0), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(workspace.remote(self.project, self.state), 0)
+        ready.assert_called_once()
+        self.assertNotIn('history', out.getvalue().lower())
+
+    def test_codespace_choice_is_a_question(self):
+        from devcontainer_setup.project_sync.codespaces import Codespaces
+        from devcontainer_setup.project_sync.terminal import Gum
+        value = self.registry()
+        rows = [{'name': 'bookish-space-meme-v66pqg6wpvvqcpw7j', 'state': 'Available'},
+                {'name': 'literate-pancake-jjjrq4j9rqwrc5qp6', 'state': 'Available'}]
+        with patch.object(Codespaces, 'spaces', return_value=rows), \
+                patch.object(Codespaces, 'roots', return_value=[self.original]), \
+                patch.object(Gum, 'choose', return_value=rows[1]['name'] + ' (Available)') as choose:
+            self.assertEqual(workspace._choose_pairing(self.project, self.state, value),
+                             (rows[1]['name'], self.original))
+        self.assertEqual(choose.call_args.args[0], 'Which Codespace should this project connect to?')
+
     def test_connect_keeps_working_when_account_read_fails_then_records_on_retry(self):
         self.account.side_effect = ValueError('fixture account unavailable')
         self.assertEqual(self.connect_for_account(), 0)
@@ -609,8 +640,10 @@ class ExistingCheckoutTests(unittest.TestCase):
             result = workspace.status(self.project, self.state)
         self.assertEqual(result['herdr_hooks']['codespace'], 'space')
         self.assertEqual(result['herdr_hooks']['hooks']['opencode'], 'current')
-        self.assertIn('Herdr hooks: claude, codex, grok, opencode current on space', workspace.status_text(result))
-        self.assertIn('; skill unknown (task work:cs installs it)', workspace.status_text(result))
+        # Rows wrap at 78 cells; compare the words.
+        shown = ' '.join(workspace.status_text(result).split())
+        self.assertIn('Herdr hooks: claude, codex, grok, opencode current on space', shown)
+        self.assertIn('; skill unknown (task work:cs installs it)', shown)
 
     def test_status_returns_env_files_without_a_remote_call(self):
         from devcontainer_setup.project_sync.state import atomic_write

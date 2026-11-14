@@ -776,13 +776,18 @@ def _signin_config(connection, state):
                         atomic_write(path, before)
 
 
+# Not an error: the connected sync opens queued sign-in pages itself (D1).
+CONNECTED = ('Nothing to do: the connected sync already opens sign-in pages on this Mac.\n'
+             'To sign in to the tools, run task work:signin:all.')
+
+
 def signin_main(root: Path, state: Path) -> int:
     from .scratch import _config
     from .transport import CodespaceConnection
     root, state = Path(root), Path(state)
     if watcher_live(state):
-        print('The connected worker is already handling links.')
-        return 1
+        print(CONNECTED)
+        return 0
     config = _config(root, state)
     forwards, previous = None, {}
     def interrupted(number, _):
@@ -794,8 +799,8 @@ def signin_main(root: Path, state: Path) -> int:
             with CodespaceConnection(config['codespace'], state=state) as connection:
                 with _signin_config(connection, state) as allowed:
                     if not allowed:
-                        print('The connected worker is already handling links.')
-                        return 1
+                        print(CONNECTED)
+                        return 0
                     try:
                         forwards = Forwards(state, 'signin-' + secrets.token_hex(16))
                         forwards.end_left_behind()

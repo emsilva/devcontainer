@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import textwrap
 import time
 
 from . import scratch, sync_cycle
@@ -311,7 +312,7 @@ def _choose_pairing(project, state, value, rebind=None, expect_owner=None, start
         if not spaces:
             raise ValueError('No Codespace for this repository. Run task devcontainer:setup and choose a Codespace to create one')
         labels = [r['name'] + ' (' + r.get('state', 'unknown') + ')' for r in spaces]
-        row = spaces[0] if len(spaces) == 1 else spaces[labels.index(Gum().choose('Codespace', labels))]
+        row = spaces[0] if len(spaces) == 1 else spaces[labels.index(Gum().choose('Which Codespace should this project connect to?', labels))]
         name = row['name']
         if row.get('state') != 'Available':
             if not start:
@@ -519,7 +520,7 @@ def remote(project, state, armed=None, rebind=None, before_herdr=None, move=None
             print(recovery_move.commit(primary, state, now=time.time()))
         print('Starting scratch and conversation synchronization…', flush=True)
         scratch.start(primary.root, state)
-        runtime = _ready(primary, state)
+        _ready(primary, state)
         configure_ssh(primary, state)
         # The worker has repointed the alias, so Herdr reconnects to this Codespace.
         from .restore import end_proxies_elsewhere
@@ -529,9 +530,6 @@ def remote(project, state, armed=None, rebind=None, before_herdr=None, move=None
         elif ended is None:
             print('Could not read processes to check Herdr’s connection; if Herdr still shows the old '
                   'Codespace, run task work:cs again.', flush=True)
-    history = (runtime or {}).get('conversations', {}).get('outcome', 'pending')
-    if history != 'complete':
-        print('Conversation history is ' + history + '; inspect task work:status.')
     if armed is not None:
         # Outside workspace-control.lock, which arming takes for its own write,
         # and before Herdr, whose TUI would otherwise hold the step back.
@@ -615,128 +613,169 @@ def _token_hint(runtime):
     return ''
 
 
-def recovery_lines(value):
-    """Spec 6.8's Recovery block; each line that is not fine names the command to run."""
+# Show details (B9): a 13-cell label column, every row wrapped at spaces to 78 cells.
+LABEL, WIDTH = 13, 78
+RECOVERY_OFF = 'Recovery is off: connect with task work:cs'
+
+
+def _fit_row(label: str, text: str) -> list[str]:
+    """One row as terminal lines; a word wider than the room, such as a path, is not broken."""
+    options = dict(break_long_words=False, break_on_hyphens=False)
+    if not label:
+        return textwrap.wrap(text, WIDTH, subsequent_indent='  ', **options) or ['']
+    parts = textwrap.wrap(text, WIDTH - LABEL, **options) or ['']
+    return [label.ljust(LABEL) + parts[0]] + [' ' * LABEL + part for part in parts[1:]]
+
+
+def _fit(rows) -> list[str]:
+    return [line for row in rows for line in _fit_row(*row)]
+
+
+def _home(path) -> str:
+    try:
+        return '~/' + Path(path).relative_to(Path.home()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def recovery_off(value) -> bool:
+    """Armed while recovery does not run: the one fix is a connect, so status leads with it."""
+    runtime = value['keeper']
+    return value['arming'].get('armed') is True and not runtime.get('running') and runtime.get('phase') != 'deleted'
+
+
+def _recovery_rows(value, *, hints: bool = True) -> list[tuple[str, str]]:
+    """Spec 6.8's Recovery block as (label, text); without hints only the lead line names a command."""
     from .arming import deleted_message, format_time, short_time
     from . import keeper, lifecycle
     config, runtime, now = value['arming'], value['keeper'], value['now']
-    def deleted_line():
-        return 'Codespace    ' + deleted_message(str(runtime.get('codespace')), armed=bool(config.get('armed')))
+    def hint(text):
+        return text if hints else ''
+    def deleted_row():
+        return ('Codespace', deleted_message(str(runtime.get('codespace')), armed=bool(config.get('armed'))))
     if config.get('issue'):
-        # Unknown, not unarmed: a keeper may still be running, so its lines follow.
-        lines = ['Recovery     arming.json cannot be read (' + config['issue'] + '); move '
-                 + config['path'] + ' aside, then run task work:cs:armed to arm again']
+        # Unknown, not unarmed: a keeper may still be running, so its rows follow.
+        rows = [('Recovery', 'arming.json cannot be read (' + config['issue'] + '); move '
+                 + _home(config['path']) + ' aside, then run task work:cs:armed to arm again')]
     elif not config.get('armed'):
-        return ['Recovery     not armed; task work:cs:armed arms it'] + (
-            [deleted_line()] if runtime.get('phase') == 'deleted' else [])
+        return [('Recovery', 'not armed; task work:cs:armed arms it')] + (
+            [deleted_row()] if runtime.get('phase') == 'deleted' else [])
     else:
         hold = config.get('hold_until')
         held = ('on hold until ' + format_time(hold) + ' (task work:hold -- off ends it)'
                 if isinstance(hold, (int, float)) and hold > now else 'no hold')
-        lines = ['Recovery     armed since ' + format_time(config.get('armed_at') or now) + ' as '
+        rows = [('Recovery', 'armed since ' + format_time(config.get('armed_at') or now) + ' as '
                  + str(config.get('gh_user')) + ', ' + held + '; restarts ' + str(value['restarts'])
-                 + ' of ' + str(lifecycle.MAX_RESTARTS) + ' in 24 h']
-    running, age = runtime.get('running'), runtime.get('heartbeat_age')
-    phase, rid = runtime.get('phase'), (runtime.get('last_restart') or {}).get('rid')
+                 + ' of ' + str(lifecycle.MAX_RESTARTS) + ' in 24 h')]
+    running, age, phase = runtime.get('running'), runtime.get('heartbeat_age'), runtime.get('phase')
     if not running:
-        lines.append('Keeper       not running; run task work:cs')
+        rows.append(('Running', 'no' + hint('; run task work:cs')))
     elif phase == 'refused':
-        lines.append('Keeper       refused: ' + str(runtime.get('error')))
+        rows.append(('Running', 'refused: ' + str(runtime.get('error'))))
     elif age is None or age > keeper.HEARTBEAT_STALE:
-        lines.append(f'Keeper       running (pid {runtime.get("pid")}) but its heartbeat is '
-                     + ('missing' if age is None else f'{int(age)} s old') + '; run task work:cs:armed')
+        rows.append(('Running', f'yes (pid {runtime.get("pid")}), but silent '
+                     + ('since it started' if age is None else f'for {int(age)} s') + '; run task work:cs:armed'))
     else:
-        text = (f'Keeper       running (pid {runtime.get("pid")}), heartbeat {int(age)} s, caffeinate '
-                + ('held' if runtime.get('caffeinate') else 'not held'))
+        text = (f'yes (pid {runtime.get("pid")}), last check {int(age)} s ago, this Mac '
+                + ('is kept awake' if runtime.get('caffeinate') else 'is not kept awake'))
         if phase == 'waiting':
             text += '; waiting: ' + str(runtime.get('error'))
         elif phase in ('restarting', 'restoring', 'resuming'):
-            text += f'; {phase} {rid}'
-        lines.append(text)
+            text += '; ' + {'restarting': 'restarting the Codespace', 'restoring': 'reconnecting Herdr',
+                            'resuming': 'telling the agents to resume'}[phase]
+        rows.append(('Running', text))
     reading, anchor, watch = runtime.get('reading') or {}, runtime.get('anchor'), runtime.get('down') or {}
     if phase == 'deleted':
-        lines.append(deleted_line())
+        rows.append(deleted_row())
     elif not running or not reading:
-        lines.append('Codespace    not read yet' + ('; run task work:cs:armed' if not running else _token_hint(runtime)))
+        rows.append(('Codespace', 'not read yet' + (hint('; run task work:cs:armed') if not running
+                                                    else _token_hint(runtime))))
     elif not reading.get('ok'):
-        lines.append('Codespace    unreadable at ' + format_time(reading['at'])
-                     + '; check gh auth status --hostname github.com and the network')
+        rows.append(('Codespace', 'unreadable at ' + format_time(reading['at'])
+                     + '; check gh auth status --hostname github.com and the network'))
     elif reading.get('state') == 'Available':
         if anchor:
             at = anchor['at']
             also = anchor.get('also') or []
-            text = ('Codespace    Available; 12-hour stop expected ~' + short_time(at + lifecycle.LIFETIME)
-                    + ''.join(' (or ~' + short_time(item + lifecycle.LIFETIME) + ')' for item in also)
+            text = ('Available; next 12-hour stop about ' + short_time(at + lifecycle.LIFETIME)
+                    + ''.join(' (or ' + short_time(item + lifecycle.LIFETIME) + ')' for item in also)
                     + ', counted from its last start at ' + short_time(at))
         else:
-            text = 'Codespace    Available, no anchor yet'
-        lines.append(text)
+            text = 'Available; next 12-hour stop not known yet'
+        rows.append(('Codespace', text))
     else:
-        text = 'Codespace    ' + str(reading.get('state')) + ' since ' + format_time(watch.get('first_at') or reading['at'])
+        text = str(reading.get('state')) + ' since ' + format_time(watch.get('first_at') or reading['at'])
         reason = {'OWNER': 'stopped by you', 'OTHER': 'not the 12-hour stop',
                   'LIFETIME': "GitHub's 12-hour stop"}.get(watch.get('kind'))
         text += (' (' + reason + ')') if reason else ''
-        # lifecycle.start never rewrites the reading, so only the phase says the keeper is on it.
-        lines.append(text + (f'; the keeper is restarting it ({rid}), follow task work:logs'
-                             if phase == 'restarting' else '; run task work:cs to start it'))
+        # lifecycle.start never rewrites the reading, so only the phase says recovery is on it.
+        rows.append(('Codespace', text + ('; Recovery is restarting it, follow task work:logs'
+                                          if phase == 'restarting' else '; run task work:cs to start it')))
     keepalive, ports = runtime.get('keepalive') or {}, _ports(config.get('ports', []))
     if running and keepalive.get('pid'):
         # A port in use was skipped at launch; the child holds the Codespace without it.
         skipped = ', '.join(f'{local} in use' + (f' by pid {pid}' if pid else '')
                             for local, pid in keepalive.get('ports_skipped') or [])
-        lines.append(f'Keep-alive   holding (pid {keepalive["pid"]}); ports '
+        rows.append(('Kept up', f'yes (pid {keepalive["pid"]}); ports '
                      + _ports([remote for _, remote in keepalive.get('ports_up', [])])
-                     + ('; ' + skipped if skipped else ''))
+                     + ('; ' + skipped if skipped else '')))
     elif not running:
-        lines.append('Keep-alive   not holding; ports ' + ports + '; run task work:cs:armed')
+        rows.append(('Kept up', 'no; ports ' + ports + hint('; run task work:cs:armed')))
     elif reading.get('ok') and reading.get('state') != 'Available':
-        # As designed; the Codespace line names what to run.
-        lines.append('Keep-alive   not holding while the Codespace is ' + str(reading.get('state'))
-                     + '; ports ' + ports)
+        # As designed; the Codespace row names what to run.
+        rows.append(('Kept up', 'no while the Codespace is ' + str(reading.get('state')) + '; ports ' + ports))
     else:
         error = keepalive.get('error')
-        lines.append('Keep-alive   not holding' + (f' ({error})' if error else '') + '; ports ' + ports
-                     + '; run task work:logs for the reason')
+        rows.append(('Kept up', 'no' + (f' ({error})' if error else '') + '; ports ' + ports
+                     + '; run task work:logs for the reason'))
     last = runtime.get('last_restart')
     if isinstance(last, dict) and isinstance(last.get('at'), (int, float)):
-        lines.append('Last restart ' + str(last.get('rid')) + ' ' + format_time(last['at']) + ': '
-                     + str(last.get('outcome', 'unknown')))
+        rows.append(('Last restart', format_time(last['at']) + ': ' + str(last.get('outcome', 'unknown'))))
     else:
-        lines.append('Last restart none')
-    return lines
+        rows.append(('Last restart', 'none'))
+    return rows
 
 
-def status_text(value):
+def recovery_lines(value):
+    """The Recovery block as printed on connect; each row that is not fine names the command to run."""
+    return _fit(_recovery_rows(value))
+
+
+def _status_rows(value) -> list[tuple[str, str]]:
+    """task work:status as (label, text) rows; label '' is a row without the label column."""
     worker, scratch_status, history = value['worker'], value['scratch'], value['conversations']
+    off = bool(value.get('recovery')) and recovery_off(value['recovery'])
     worker_text = 'running' if worker.get('running') else 'stopped'
     error = worker.get('error')
     if worker.get('running') and worker.get('phase') == 'waiting' and isinstance(error, str) and error:
         from .sessions import display_text
         worker_text += ', waiting: ' + display_text(error, 200)
-    lines = ['Sync worker: ' + worker_text,
-             'Scratch: ' + scratch_status.get('phase', 'unknown'),
-             'History: ' + history['outcome'] + ' (' + history['stage'] + ')']
-    for name, label in zip(sync_cycle.DIRECTIONS, ('Desktop → Codespace', 'Codespace → Desktop')):
-        row = history['directions'][name]
-        counts = row['counts']
-        lines.append(label + ': ' + str(counts['received']) + ' received, ' + str(counts['available'])
-                     + ' available, ' + str(counts['pending']) + ' pending, ' + str(counts['unsupported']) + ' unsupported')
-    if any(history['retained_receipts'].values()):
-        lines.append('Previous verified receipts retained; availability reflects the current cycle.')
+    # The stage and the retained receipts stay in --json.
+    rows = [('', RECOVERY_OFF)] if off else []
+    rows += [('', 'Sync: ' + worker_text),
+             ('', 'Scratch: ' + scratch_status.get('phase', 'unknown')),
+             ('', 'History: ' + history['outcome'])]
+    for name, label in zip(sync_cycle.DIRECTIONS, ('Mac → Codespace', 'Codespace → Mac')):
+        counts = history['directions'][name]['counts']
+        rows.append(('', label + ': ' + str(counts['received']) + ' received, ' + str(counts['available'])
+                     + ' available, ' + str(counts['pending']) + ' pending, ' + str(counts['unsupported'])
+                     + ' unsupported'))
     if history['issues'] or worker.get('error') or scratch_status.get('issue'):
-        lines.append('Details: task work:status -- --json; logs: task scratch:logs')
-    # A property of this Codespace, not of arming, so it is not a recovery line.
-    # Callers in tests omit the new key; a missing Codespace adds no line.
+        rows.append(('', 'Details: task work:status -- --json; logs: task scratch:logs'))
+    # A property of this Codespace, not of arming, so it is not a recovery row.
+    # Callers in tests omit the new key; a missing Codespace adds no row.
     workspace_row = value.get('workspace')
     codespace = workspace_row.get('codespace') if isinstance(workspace_row, dict) else None
     if codespace:
         from . import agent_hooks, env_files
-        hook_line = agent_hooks.status_line(value.get('herdr_hooks'), codespace)
-        if hook_line:
-            lines.append(hook_line)
-        env_line = env_files.status_line(value.get('env_files'), codespace)
-        if env_line:
-            lines.append(env_line)
+        for line in (agent_hooks.status_line(value.get('herdr_hooks'), codespace),
+                     env_files.status_line(value.get('env_files'), codespace)):
+            if line:
+                rows.append(('', line))
     if value.get('recovery'):
-        lines += recovery_lines(value['recovery'])
-    return '\n'.join(lines)
+        rows += _recovery_rows(value['recovery'], hints=not off)
+    return rows
+
+
+def status_text(value):
+    return '\n'.join(_fit(_status_rows(value)))

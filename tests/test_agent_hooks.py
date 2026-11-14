@@ -855,7 +855,8 @@ class StatusTests(unittest.TestCase):
         self.assertIsNone(agent_hooks.status_line(self.receipt(), None))
 
     def test_status_text_shows_the_hooks_line_and_tolerates_a_missing_key(self):
-        shown = workspace.status_text(status_value(herdr_hooks=self.receipt()))
+        # Rows wrap at 78 cells; compare the words.
+        shown = ' '.join(workspace.status_text(status_value(herdr_hooks=self.receipt())).split())
         self.assertIn('Herdr hooks: claude, codex, grok, opencode current on space (checked '
                       + format_time(WHEN) + ')', shown)
         self.assertIn('Env files: not checked on space; task work:cs copies them', shown)
