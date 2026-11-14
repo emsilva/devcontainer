@@ -261,3 +261,38 @@ asks too and a menu change cannot bypass it.
   needing action first).
 - Where B5's figures come from (the keeper's state, as `task work:status` reads it).
 - Test layout, provided each new test fails with its change removed.
+
+## Fix round 1 (2026-11-14)
+
+Added after the six groups merged (`fec86be`). Sources: the Codex review (`F1`), the owner's live use of `task work`
+on innovate, and the lead's list from the builders' reports.
+
+**FR1. Show details wraps by screen width (Codex F1, P2).** `workspace._fit_row` wraps with character counts, so a
+row of short wide words (`"接続 エラー " * 12` in a sync error) prints a 112-cell line. Wrap by `overview.cells`,
+keeping the rule that a single word wider than the room (a path) is not broken. Every `task work:status` and connect
+Recovery line stays at 78 cells or less, wide text included.
+
+**FR2. `Open in Herdr` while connected (owner, 2026-11-14: "its already connected, shouldnt it give me an option to
+arm?").** The screen offered `Connect` to a project that was already connected and armed. While the sync runs for the
+paired Codespace and recovery is not off, the Connect item reads `Open in Herdr`. Its argv stays `task work:cs`.
+When recovery is off, it stays `Connect` (a connect is what turns recovery back on).
+
+**FR3. A sign-in item whenever connected (owner, 2026-11-14: "we should also have an item on the ux for signin
+all").** While the sync runs for the paired Codespace, the menu offers `Sign in to the tools`
+(`task work:signin:all`), directly above Replace. When the sign-in record names a tool that is not signed in, the
+same item moves up to right after the first action, with the `Sign-ins` row as today. It is never reserved: in a
+full menu it gives way before Replace and the retired delete.
+
+**FR4. "final sync" everywhere on screen (spec E).** `cutover.py`'s `Final flush of … recorded`, `… while its final
+flush was recorded …` and `… final flush is not complete` say "final sync".
+
+**FR5. No "keeper" on the connect screen (spec E).** The connect's `The keeper has not reported within 60 seconds;
+inspect task work:logs.` names Recovery instead, and says `see task work:logs`.
+
+**FR6. The docs match the screens.** `README.md` and `docs/project-continuity.md` describe the C1 question
+(`Not now` / `Replace it`), the C2 options, the new phase words, the labels-only menu, A1's refusal and A2's Taskfile.
+
+**FR7. Two load flakes, fixed at their tests (tests only, own commits).** Under load averages near 140 on the
+shared Mac, `tests/test_probe.py`'s `assert_dead` timed out on a 1 s `ps`, and `tests/test_signins.py`'s
+`test_ctrl_c_on_the_codespace_reads_as_a_cancel` timed out on a 5 s wait. Both pass alone. The budgets are not the
+behaviour under test; raise them so only a hang fails.
