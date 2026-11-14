@@ -311,7 +311,7 @@ def _choose_pairing(project, state, value, rebind=None, expect_owner=None, start
         if not spaces:
             raise ValueError('No Codespace for this repository. Run task devcontainer:setup and choose a Codespace to create one')
         labels = [r['name'] + ' (' + r.get('state', 'unknown') + ')' for r in spaces]
-        row = spaces[0] if len(spaces) == 1 else spaces[labels.index(Gum().choose('Codespace', labels))]
+        row = spaces[0] if len(spaces) == 1 else spaces[labels.index(Gum().choose('Which Codespace should this project connect to?', labels))]
         name = row['name']
         if row.get('state') != 'Available':
             if not start:
@@ -519,7 +519,7 @@ def remote(project, state, armed=None, rebind=None, before_herdr=None, move=None
             print(recovery_move.commit(primary, state, now=time.time()))
         print('Starting scratch and conversation synchronization…', flush=True)
         scratch.start(primary.root, state)
-        runtime = _ready(primary, state)
+        _ready(primary, state)
         configure_ssh(primary, state)
         # The worker has repointed the alias, so Herdr reconnects to this Codespace.
         from .restore import end_proxies_elsewhere
@@ -529,9 +529,6 @@ def remote(project, state, armed=None, rebind=None, before_herdr=None, move=None
         elif ended is None:
             print('Could not read processes to check Herdr’s connection; if Herdr still shows the old '
                   'Codespace, run task work:cs again.', flush=True)
-    history = (runtime or {}).get('conversations', {}).get('outcome', 'pending')
-    if history != 'complete':
-        print('Conversation history is ' + history + '; inspect task work:status.')
     if armed is not None:
         # Outside workspace-control.lock, which arming takes for its own write,
         # and before Herdr, whose TUI would otherwise hold the step back.
