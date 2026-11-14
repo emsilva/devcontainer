@@ -393,7 +393,7 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(self.judge('Scratch', replace(evidence,
                          scan=replace(evidence.scan, scratch=())), target).verdict, 'safe')
         scan = replace(evidence.scan, scratch=(*evidence.scan.scratch, ('late.txt', DIGEST)))
-        self.assertIn('changed or added since the final flush', self.judge('Scratch', replace(evidence, scan=scan), target).text)
+        self.assertIn('changed or added since the final sync', self.judge('Scratch', replace(evidence, scan=scan), target).text)
         for path in ('codex/sessions/' + NAME, 'codex/archived_sessions/' + NAME):
             scan = replace(evidence.scan, sessions=((path, 'c' * 64),))
             self.assertEqual(self.judge('History', replace(evidence, scan=scan), target).verdict, 'unsafe')
@@ -412,7 +412,8 @@ class VerdictTests(unittest.TestCase):
         result = self.result(target=replace(self.target, kind='moved'))
         self.assertEqual(tuple(row.verdict for row in result.categories), ('safe', 'unknown', 'unknown', 'safe'))
         self.assertFalse(result.deletable)
-        self.assertIn('moved with --rebind', result.categories[1].text)
+        self.assertEqual(result.categories[1].text, 'Unknown: moved with --rebind, so no final sync was recorded')
+        self.assertEqual(result.categories[2].text, 'Unknown: moved with --rebind, so no final sync was recorded')
 
     def test_failed_process_read_is_unknown(self):
         self.assertEqual(self.judge('Agents').items, ())
@@ -463,7 +464,7 @@ class VerdictTests(unittest.TestCase):
         sealed = replace(result, target=replace(self.target, kind='sealed', seal=self.seal()),
                          categories=self.v.judge(replace(self.target, kind='sealed', seal=self.seal()),
                                                  replace(self.evidence, capture_loads=True), now=NOW))
-        self.assertIn('  Scratch  unchanged since the final flush at 11:44 (1 file)', self.v.lines(sealed, self.local))
+        self.assertIn('  Scratch  unchanged since the final sync at 11:44 (1 file)', self.v.lines(sealed, self.local))
         no_repos = replace(self.evidence, scan=replace(self.evidence.scan, repositories=()), proofs=())
         self.assertEqual(self.judge('Git', no_repos).text, 'no repositories under /workspaces')
         unknown = replace(result, categories=self.v.unreachable(self.target, 'space is stopped'),

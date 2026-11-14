@@ -324,12 +324,12 @@ class Store:
             except FileNotFoundError:
                 seals = []
             except OSError:
-                raise ValueError('The final-flush record cannot be read; nothing was collected') from None
+                raise ValueError('The final-sync record cannot be read; nothing was collected') from None
             for path in seals:
                 try:
                     named.add(_digest(read_json(path)['snapshot_id']))
                 except (OSError, ValueError, KeyError, TypeError):
-                    raise ValueError('The final-flush record cannot be read; nothing was collected') from None
+                    raise ValueError('The final-sync record cannot be read; nothing was collected') from None
             manifests = self._entries('manifests')
             kept = {digest for digest, info in manifests.items()
                     if digest in named or info.st_mtime >= now - keep_days * 86400}

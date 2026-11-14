@@ -31,71 +31,71 @@ class Seal:
 
 def _text(value):
     if not isinstance(value, str) or not value or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in value):
-        raise ValueError('Invalid final-flush text')
+        raise ValueError('Invalid final-sync text')
     return value
 
 
 def _path(value, *, absolute=False):
     path = Path(_text(value))
     if path.is_absolute() != absolute or '..' in path.parts:
-        raise ValueError('Invalid final-flush path')
+        raise ValueError('Invalid final-sync path')
     return value
 
 
 def _digest(value):
     if not isinstance(value, str) or not re.fullmatch('[0-9a-f]{64}', value):
-        raise ValueError('Invalid final-flush digest')
+        raise ValueError('Invalid final-sync digest')
     return value
 
 
 def _pairs(value, *, sessions=False):
     if not isinstance(value, (tuple, list)):
-        raise ValueError('Invalid final-flush files')
+        raise ValueError('Invalid final-sync files')
     result = []
     for pair in value:
         if not isinstance(pair, (tuple, list)) or len(pair) != 2:
-            raise ValueError('Invalid final-flush file')
+            raise ValueError('Invalid final-sync file')
         path, digest = pair
         _path(path)
         _digest(digest)
         if sessions and not path.startswith(('codex/sessions/', 'codex/archived_sessions/', 'claude/')):
-            raise ValueError('Invalid final-flush conversation path')
+            raise ValueError('Invalid final-sync conversation path')
         result.append((path, digest))
     if result != sorted(result) or len({path for path, _ in result}) != len(result):
-        raise ValueError('Invalid final-flush file order')
+        raise ValueError('Invalid final-sync file order')
     return tuple(result)
 
 
 def _decode(state, codespace, value):
     if (not isinstance(value, dict) or set(value) != {'schema', *(field.name for field in fields(Seal))}
             or type(value['schema']) is not int or value['schema'] != 1 or value['codespace'] != codespace):
-        raise ValueError('Invalid final-flush record')
+        raise ValueError('Invalid final-sync record')
     _name(value['codespace'])
     identity = _text(value['identity'])
     if (project_state._identity('https://' + identity) != identity
             or identity != 'github.com/' + _text(value['repository'])):
-        raise ValueError('Final-flush repository differs')
+        raise ValueError('Final-sync repository differs')
     project_id = hashlib.sha256(identity.encode()).hexdigest()[:24]
     state = Path(state)
     if re.fullmatch('[0-9a-f]{24}', state.name) and state.name != project_id:
-        raise ValueError('Final-flush project differs')
+        raise ValueError('Final-sync project differs')
     for filename in ('workspace.json', 'scratch.json'):
         try:
             current = project_state.read_json(state / filename)
         except FileNotFoundError:
             continue
         if current.get('identity') != identity:
-            raise ValueError('Final-flush project differs')
+            raise ValueError('Final-sync project differs')
     try:
         _login(_text(value['gh_user']))
     except ValueError:
-        raise ValueError('Invalid final-flush account') from None
+        raise ValueError('Invalid final-sync account') from None
     _path(value['remote_root'], absolute=True)
     _text(value['operation'])
     _text(value['cycle_id'])
     _digest(value['snapshot_id'])
     if type(value['sealed_at']) not in (int, float) or not math.isfinite(value['sealed_at']):
-        raise ValueError('Invalid final-flush time')
+        raise ValueError('Invalid final-sync time')
     datetime.fromtimestamp(value['sealed_at'])
     record = {field.name: value[field.name] for field in fields(Seal)}
     record.update(scratch=_pairs(value['scratch']), sessions=_pairs(value['sessions'], sessions=True))
@@ -108,30 +108,30 @@ def write(state, store, scan, *, evidence, identity, repository, gh_user, remote
     from .verdict import Evidence, SAFE, Target, cutoffs, judge
     if isinstance(evidence, Evidence):
         if not evidence.steady:
-            raise ValueError('Final-flush evidence is not steady')
+            raise ValueError('Final-sync evidence is not steady')
         target = Target(scan.codespace, 'paired', remote_root, None, None)
         if next(row for row in judge(target, evidence, now=now) if row.name == 'History').verdict != SAFE:
-            raise ValueError('Final-flush capture is not complete')
+            raise ValueError('Final-sync capture is not complete')
     try:
         if (not isinstance(evidence, Evidence) or evidence.scan is not scan or evidence.sync_running is not True
                 or evidence.conflicts or evidence.mac_scratch is None
                 or not set(scan.scratch) <= set(evidence.mac_scratch)):
-            raise ValueError('Final-flush scratch has not reached this Mac')
+            raise ValueError('Final-sync scratch has not reached this Mac')
         if Path(store.state) != Path(state):
-            raise ValueError('Final-flush store differs')
+            raise ValueError('Final-sync store differs')
         manifest = store.load(snapshot_id)
         validate_manifest(manifest, identity)
         if manifest['project'].get('root') != remote_root or manifest['conversations']['issues']:
-            raise ValueError('Final-flush capture is incomplete or out of scope')
+            raise ValueError('Final-sync capture is incomplete or out of scope')
         for entry in manifest['conversations']['entries']:
             for item in entry['files']:
                 if item['blob'] != item['sha256'] or len(store.read(item['blob'])) != item['size']:
-                    raise ValueError('Final-flush prefix differs from the retained blob')
+                    raise ValueError('Final-sync prefix differs from the retained blob')
         compared = cutoffs(manifest)
         found = {(path.split('/', 1)[0], Path(path).name) for path, _ in scan.sessions}
         if (target_scan.fingerprint(scan) is None or scan.cutoffs_sha256 != target_scan.cutoffs_digest(compared)
                 or set(scan.checked) != set(compared) & found or scan.mismatched or scan.tails):
-            raise ValueError('Final-flush scan does not prove the captured prefixes')
+            raise ValueError('Final-sync scan does not prove the captured prefixes')
         record = Seal(scan.codespace, identity, repository, gh_user, remote_root, operation, now,
                       cycle_id, snapshot_id, scan.scratch, scan.sessions)
         value = dict(schema=1, **asdict(record))
@@ -140,7 +140,7 @@ def write(state, store, scan, *, evidence, identity, repository, gh_user, remote
         project_state.atomic_write(path, json.dumps(value, sort_keys=True, allow_nan=False).encode() + b'\n')
         return path
     except (OSError, ValueError, TypeError, KeyError, OverflowError):
-        raise ValueError('The final flush for ' + _name(scan.codespace) + ' cannot be recorded') from None
+        raise ValueError('The final sync for ' + _name(scan.codespace) + ' cannot be recorded') from None
 
 
 def read(state, codespace) -> Seal | None:
@@ -150,11 +150,11 @@ def read(state, codespace) -> Seal | None:
     except FileNotFoundError:
         return None
     except (OSError, ValueError):
-        raise ValueError('The final-flush record for ' + codespace + ' cannot be read') from None
+        raise ValueError('The final-sync record for ' + codespace + ' cannot be read') from None
     try:
         return _decode(state, codespace, value)
     except (OSError, ValueError, TypeError, KeyError, OverflowError):
-        raise ValueError('The final-flush record for ' + codespace + ' cannot be read') from None
+        raise ValueError('The final-sync record for ' + codespace + ' cannot be read') from None
 
 
 def names(state) -> tuple[str, ...]:

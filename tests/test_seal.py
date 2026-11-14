@@ -43,6 +43,24 @@ class SealTests(unittest.TestCase):
         return replace(verdict.Evidence(scan, True, (), scan.scratch, (), True, cycle, receipt,
                                        verdict.sessions_by_file(self.manifest), None, ()), **updates)
 
+    def test_no_message_says_final_flush(self):
+        # FR8 (spec E): screens say "final sync". Every string literal in the product but docstrings
+        # is a message that can print; identifiers, record names and --json keys are not string text here.
+        import ast
+        import re
+        found = []
+        for path in sorted(Path('devcontainer_setup').rglob('*.py')):
+            tree = ast.parse(path.read_text(), str(path))
+            docstrings = {id(node.body[0].value) for node in ast.walk(tree)
+                          if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                          and node.body and isinstance(node.body[0], ast.Expr)
+                          and isinstance(node.body[0].value, ast.Constant)}
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings
+                        and re.search(r'final[ -]flush', node.value, re.I)):
+                    found.append(f'{path}:{node.lineno}: {node.value}')
+        self.assertEqual(found, [])
+
     def test_enterprise_login_round_trips_and_malformed_logins_are_refused(self):
         try:
             path = self.write(gh_user='owner_enterprise')
@@ -52,10 +70,10 @@ class SealTests(unittest.TestCase):
         good = json.loads(path.read_bytes())
         for login in ('owner_', 'owner__x', 'a b', '', None, True, 123, 'owner\n'):
             with self.subTest(login=login):
-                with self.assertRaisesRegex(ValueError, '^The final flush for space cannot be recorded$'):
+                with self.assertRaisesRegex(ValueError, '^The final sync for space cannot be recorded$'):
                     self.write(gh_user=login)
                 atomic_write(path, json.dumps(dict(good, gh_user=login)).encode())
-                with self.assertRaisesRegex(ValueError, '^The final-flush record for space cannot be read$'):
+                with self.assertRaisesRegex(ValueError, '^The final-sync record for space cannot be read$'):
                     self.seal.read(self.state, 'space')
         atomic_write(path, json.dumps(good).encode())
         self.assertEqual(self.seal.read(self.state, 'space').gh_user, 'owner_enterprise')
@@ -77,13 +95,13 @@ class SealTests(unittest.TestCase):
         scan = example_scan()
         late = ('claude/project/11111111-2222-4333-8444-555555555555.jsonl', 'd' * 64)
         scan = replace(scan, sessions=tuple(sorted((*scan.sessions, late))))
-        with self.assertRaisesRegex(ValueError, '^Final-flush evidence is not steady$'):
+        with self.assertRaisesRegex(ValueError, '^Final-sync evidence is not steady$'):
             self.write(scan, evidence=self.evidence(scan, steady=False))
         self.assertFalse((self.state / 'retired/space.json').exists())
 
     def test_unfinished_capture_cannot_be_sealed(self):
         scan = example_scan()
-        with self.assertRaisesRegex(ValueError, '^Final-flush capture is not complete$'):
+        with self.assertRaisesRegex(ValueError, '^Final-sync capture is not complete$'):
             self.write(scan, evidence=self.evidence(scan, cycle=None, receipt=None))
         self.assertFalse((self.state / 'retired/space.json').exists())
 
@@ -154,7 +172,7 @@ class SealTests(unittest.TestCase):
                         dict(sealed_at=1e100),
                         dict(scratch=[['../outside', DIGEST]]), dict(extra=True)):
             atomic_write(path, json.dumps(dict(good, **changed)).encode())
-            with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, 'final-flush record for space cannot be read'):
+            with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, 'final-sync record for space cannot be read'):
                 self.seal.read(self.state, 'space')
             self.assertEqual(self.seal.names(self.state), ())
         atomic_write(path, json.dumps(good).encode())

@@ -239,7 +239,7 @@ deletion with GitHub's inventory before cleaning up.
 Git covers every repository and linked worktree under `/workspaces`: changes,
 untracked files, stashes and commits that have not reached GitHub. Scratch and
 Codex/Claude conversations must have reached this Mac; an unfinished turn blocks
-deletion. A retired Codespace is compared with the final flush recorded when it
+deletion. A retired Codespace is compared with the final sync recorded when it
 was replaced. Running Claude, Codex, Grok or OpenCode agents also block deletion.
 Conversations kept on this Mac that the replacement refused are named in the
 verdict and do not block it.
@@ -253,7 +253,7 @@ makes no changes. Without `--codespace NAME`, it checks the current pairing.
 A stopped or unreachable Codespace reads Unknown. Start a retired one explicitly
 with `task work:cs:delete -- --codespace NAME --start`, then run the check again;
 use `task work:cs:restart` for the current pairing. The check never starts one
-silently. A Codespace moved with `--rebind` has no final-flush record and cannot
+silently. A Codespace moved with `--rebind` has no final-sync record and cannot
 be deleted this way.
 
 Deleting the current pairing turns recovery off, stops its keeper, sync worker
@@ -265,7 +265,7 @@ checkpoints, relay records and the restart ledger. If cleanup is interrupted,
 rerun the same delete command in a terminal to finish it. `task work` offers
 one pending cleanup (`Finish cleaning up after the delete`) and, as `Check and
 delete the replaced Codespace`, the oldest listed retired Codespace with a
-final-flush record; it never offers deletion of the current pairing.
+final-sync record; it never offers deletion of the current pairing.
 
 ## Conversation availability
 
