@@ -1,5 +1,6 @@
 """Exercise the distributed command entrypoint, including isolated execution."""
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -316,6 +317,111 @@ class ArmFlowTests(unittest.TestCase):
     def test_port_range(self):
         with self.assertRaises(SystemExit):
             parser().parse_args(['work', '--armed', '--port', '60000'])
+
+    NOT_ARMED = 'Not armed. Connecting without recovery; arm later from task work.'
+
+    def wrong_word(self, answer, *, running=False):
+        """_armed with one typed answer; returns (keeper start, keeper stop, stdout)."""
+        from devcontainer_setup.project_sync import __main__ as cli, keeper
+        from devcontainer_setup.project_sync.state import atomic_write
+        mock = self.mock
+        atomic_write(self.state / 'scratch.json', json.dumps({'codespace': 'cs-1', 'root': str(self.project.root)}).encode())
+        status = {'running': running, 'phase': 'watching' if running else 'stopped', 'pid': 4121, 'heartbeat_age': 1}
+        with mock.patch.object(keeper, 'foreign_processes', return_value=[]), \
+                mock.patch.object(keeper, 'start', side_effect=AssertionError('keeper.start')) as start, \
+                mock.patch.object(keeper, 'stop', side_effect=AssertionError('keeper.stop')) as stop, \
+                mock.patch.object(keeper, 'status', return_value=status), \
+                mock.patch('devcontainer_setup.project_sync.arming.account', return_value='octo'), \
+                mock.patch('devcontainer_setup.project_sync.codespaces.Codespaces') as spaces, \
+                mock.patch('builtins.input', side_effect=answer if isinstance(answer, BaseException) else [answer]), \
+                mock.patch('sys.stdout', new_callable=io.StringIO) as out:
+            spaces.return_value.space.return_value = self.row
+            self.assertIsNone(cli._armed(self.project, self.state, self.args))
+        return start, stop, out.getvalue()
+
+    def test_wrong_word_goes_on_without_recovery(self):
+        # D2: anything but arm skips recovery and lets the connect go on to Herdr.
+        from devcontainer_setup.project_sync import arming
+        consent = arming.consent_text(self.project.root.name, 'cs-1', 'octo')
+        for answer in ('yes', ''):
+            with self.subTest(answer=answer):
+                start, stop, out = self.wrong_word(answer)
+                self.assertEqual(out, consent + '\n' + self.NOT_ARMED + '\n')
+                start.assert_not_called()
+                stop.assert_not_called()
+                self.assertFalse(arming.read(self.state)['armed'])
+
+    def test_wrong_word_reaches_herdr(self):
+        from devcontainer_setup.project_sync import __main__ as cli, keeper, workspace
+        mock = self.mock
+        from devcontainer_setup.project_sync.state import atomic_write
+        atomic_write(self.state / 'scratch.json', json.dumps({'codespace': 'cs-1'}).encode())
+        herdr = mock.Mock(return_value=0)
+
+        def remote(project, state, armed=None, rebind=None):
+            armed(project)
+            return herdr()
+
+        with mock.patch.object(cli, 'discover_project', return_value=self.project), \
+                mock.patch.object(cli, 'state_dir', return_value=self.state), \
+                mock.patch.object(workspace, 'remote', side_effect=remote), \
+                mock.patch.object(keeper, 'foreign_processes', return_value=[]), \
+                mock.patch.object(keeper, 'start', side_effect=AssertionError('keeper.start')) as start, \
+                mock.patch('devcontainer_setup.project_sync.arming.account', return_value='octo'), \
+                mock.patch('devcontainer_setup.project_sync.codespaces.Codespaces') as spaces, \
+                mock.patch('builtins.input', return_value='yes'), \
+                contextlib.redirect_stdout(io.StringIO()) as out, \
+                mock.patch('sys.stdin.isatty', return_value=True), \
+                mock.patch('sys.stdout.isatty', return_value=True):
+            spaces.return_value.space.return_value = self.row
+            args = parser().parse_args(['--project', str(self.project.root), 'work', '--armed'])
+            self.assertEqual(cli.run(args), 0)
+        herdr.assert_called_once_with()
+        start.assert_not_called()
+        self.assertIn(self.NOT_ARMED, out.getvalue())
+
+    def test_wrong_word_leaves_a_running_recovery_alone(self):
+        # Review focus 5: an older consent on file asks again; a wrong word stops and starts nothing.
+        from devcontainer_setup.project_sync import arming
+        from devcontainer_setup.project_sync.state import locked
+        with locked(self.state / 'workspace-control.lock', blocking=True):
+            arming.arm(self.state, gh_user='someone-else', codespace='cs-1',
+                       consent=arming.consent_text(self.project.root.name, 'cs-1', 'octo'),
+                       billable_owner='octo', ports=[3570], now=1.0)
+        before = (self.state / arming.ARMING).read_bytes()
+        start, stop, out = self.wrong_word('yes', running=True)
+        self.assertEqual(out.splitlines()[-1], self.NOT_ARMED)
+        self.assertIn('Type arm to confirm.', out)
+        start.assert_not_called()
+        stop.assert_not_called()
+        self.assertEqual((self.state / arming.ARMING).read_bytes(), before)
+
+    def test_ctrl_c_at_arm_still_ends_the_connect(self):
+        from devcontainer_setup.project_sync import __main__ as cli, keeper
+        from devcontainer_setup.project_sync.state import atomic_write
+        mock = self.mock
+        atomic_write(self.state / 'scratch.json', json.dumps({'codespace': 'cs-1'}).encode())
+        for error in (EOFError(), KeyboardInterrupt()):
+            with self.subTest(error=type(error).__name__), \
+                    mock.patch.object(keeper, 'foreign_processes', return_value=[]), \
+                    mock.patch.object(keeper, 'start') as start, \
+                    mock.patch('devcontainer_setup.project_sync.arming.account', return_value='octo'), \
+                    mock.patch('devcontainer_setup.project_sync.codespaces.Codespaces') as spaces, \
+                    mock.patch('builtins.input', side_effect=error), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                spaces.return_value.space.return_value = self.row
+                with self.assertRaises(ValueError) as caught:
+                    cli._armed(self.project, self.state, self.args)
+                self.assertEqual(str(caught.exception), 'Arming cancelled')
+                self.assertEqual(type(caught.exception), ValueError)
+                start.assert_not_called()
+                self.assertNotIn(self.NOT_ARMED, out.getvalue())
+
+    def test_consent_text_is_unchanged(self):
+        # Every armed project's consent hashes this text; one changed character asks every project again.
+        from devcontainer_setup.project_sync import arming
+        self.assertEqual(hashlib.sha256(arming.consent_text('p', 'c', 'o').encode()).hexdigest(),
+                         '1d06896759ef9ec63bef7e7bac01c97431e9dc534a5bf6f5ebc14bb26e785db3')
 
 
 T0 = 1_000_000.0

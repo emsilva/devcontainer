@@ -105,6 +105,10 @@ def _consent_on_file(project, state) -> str | None:
     return None
 
 
+class _NotConfirmed(ValueError):
+    """A wrong word at the arm prompt; only _armed catches it and connects without recovery."""
+
+
 def _arm(project, state, args):
     # Records consent; _armed then starts the keeper. Network calls and the
     # prompt run unlocked; the lock covers only the read and write.
@@ -137,7 +141,7 @@ def _arm(project, state, args):
     except (EOFError, KeyboardInterrupt):
         raise ValueError('Arming cancelled') from None
     if answer.strip() != 'arm':
-        raise ValueError('Not armed: the confirmation was not "arm"')
+        raise _NotConfirmed('Not armed: the confirmation was not "arm"')
     ports = arming.resolve_ports(arming.default_ports(project.root), args.port, args.no_port)
     with locked(state / 'workspace-control.lock', blocking=True):
         arming.arm(state, gh_user=user, codespace=row['name'], consent=text, billable_owner=owner,
@@ -156,7 +160,12 @@ def _armed(project, state, args):
         raise ValueError('Another gh process holds ' + name + ' (pid ' + ', '.join(map(str, pids))
                          + '); stop it before arming, because gh can start the Codespace and it holds the ports.')
     before = arming.read(state)
-    _arm(project, state, args)
+    try:
+        _arm(project, state, args)
+    except _NotConfirmed:
+        # Before keeper.stop and keeper.start: start raises for a project that is not armed.
+        print('Not armed. Connecting without recovery; arm later from task work.')
+        return
     if before.get('armed') and arming.read(state).get('ports') != before.get('ports'):
         # R20: the running keep-alive child carries the old ports; a new keeper starts one with the new list.
         keeper.stop(state)
