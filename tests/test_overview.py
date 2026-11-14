@@ -270,7 +270,7 @@ class OverviewTests(unittest.TestCase):
         logs = self.argv('work:logs')
         setup = [('task', 'devcontainer:setup')]
         signin = self.argv('work:signin:all')  # FR3: the fixture's sync runs for the paired Codespace
-        create = setup + signin + details
+        create = setup + details  # FR10: no sign-in item where the menu cannot connect
         replace_command = [('task', 'devcontainer:setup', '--', '--replace')]
         paired = self.argv('work:cs') + signin + replace_command + details
         creation = ('gh', 'codespace', 'logs', '-c', CS)
@@ -280,18 +280,18 @@ class OverviewTests(unittest.TestCase):
             (replace(self.local, setup='missing', pairing=None), self.remote, UNPAIRED,
              'Setup      not done yet', setup + details),
             (replace(self.local, setup='missing', logs=True), self.remote, TITLE,
-             'Setup      not done yet', setup + logs + signin + details),
+             'Setup      not done yet', setup + logs + details),
             (replace(self.local, setup='unmanaged'), self.remote, TITLE, 'Setup      not done yet', create),
             (replace(self.local, setup='unknown'), self.remote, TITLE, 'Setup      not done yet', create),
             (self.local, replace(self.remote, setup_prs=self.ok((7,))), TITLE,
              'Setup      pull request #7 is open; resume setup to finish it', create),
             (self.local, replace(self.remote, setup_prs=self.ok((9, 7))), TITLE,
              'Setup      2 pull requests are open; close all but one in GitHub',
-             [('gh', 'pr', 'view', '7', '--web'), ('gh', 'pr', 'view', '9', '--web')] + signin + details),
+             [('gh', 'pr', 'view', '7', '--web'), ('gh', 'pr', 'view', '9', '--web')] + details),
             (self.local, self.remote_state('Failed'), TITLE,
-             'Codespace  failed on GitHub; see its creation logs', [creation, resume] + signin + details),
+             'Codespace  failed on GitHub; see its creation logs', [creation, resume] + details),
             (replace(self.local, launch=Launch(CS, False)), self.remote, TITLE,
-             'Codespace  setup did not finish validation; resume it', [resume, creation] + signin + details),
+             'Codespace  setup did not finish validation; resume it', [resume, creation] + details),
             (replace(self.local, launch=Launch(OLD, False), pairing=None), self.remote, UNPAIRED,
              f'Setup      {OLD} did not finish validation',
              [('task', 'devcontainer:setup', '--', '--resume', OLD), ('gh', 'codespace', 'logs', '-c', OLD)]
@@ -489,7 +489,7 @@ class OverviewTests(unittest.TestCase):
             self.assertNotIn('connect', self.keys(missing))
             self.assertIn('not listed for', missing.lines[1])
         prs = self.frame(remote=replace(self.remote, setup_prs=self.ok((9, 7))))
-        self.assertEqual(self.keys(prs), ['pr:7', 'pr:9', 'signin', 'details'])
+        self.assertEqual(self.keys(prs), ['pr:7', 'pr:9', 'details'])
         foreign = self.frame(replace(self.local, launch=Launch('another-cs', False)))
         self.assertIn('available', foreign.lines[1])
         # A setup situation must not hide the evidence that recovery has no current target.
@@ -691,6 +691,23 @@ class OverviewTests(unittest.TestCase):
                              ['Sign-ins   ' + text])
         unpaired = self.frame(replace(self.local, pairing=None, signed_out=('Plaud',)))
         self.assertNotIn('signin', self.keys(unpaired))
+        # FR10: only where the menu can connect to the paired Codespace, signed out or not, recovery off or not.
+        nowhere = [(replace(self.local, setup='missing'), self.remote),
+                   (self.local, replace(self.remote, setup_prs=self.ok((7,)))),
+                   (self.local, self.remote_state('Failed')),
+                   (replace(self.local, launch=Launch(CS, False)), self.remote),
+                   (self.local, replace(self.remote, names=self.ok(frozenset()), spaces=self.ok(())))]
+        for (local, remote), signed_out, armed in product(nowhere, ((), ('Plaud',)), (False, True)):
+            with self.subTest(situation=self.frame(local, remote).lines[1], signed_out=signed_out, armed=armed):
+                local = replace(local, signed_out=signed_out, armed=armed, keeper='stopped' if armed else 'running')
+                frame = self.frame(local, remote)
+                self.assertNotIn('signin', self.keys(frame))
+                self.assertNotIn('replace', self.keys(frame))
+        for state in ('Available', 'Shutdown', 'Starting', 'ShuttingDown', 'Moved'):
+            with self.subTest(state=state):
+                keys = self.keys(self.frame(remote=self.remote_state(state)))
+                self.assertTrue({'connect', 'start'} & set(keys), keys)
+                self.assertIn('signin', keys)
         # Right after the first action, priority actions included.
         off = self.frame(self.replacing_local(armed=True, keeper='stopped', signed_out=('Plaud',)))
         self.assertEqual(self.keys(off), ['connect', 'signin', 'finish-replace', 'stop', 'details'])
@@ -779,10 +796,10 @@ class OverviewTests(unittest.TestCase):
 
     def test_several_setup_prs_offer_each_pull_request(self):
         frame = self.frame(remote=replace(self.remote, setup_prs=self.ok((9, 7))))
-        self.assert_actions(frame, [('gh', 'pr', 'view', '7', '--web'), ('gh', 'pr', 'view', '9', '--web'),
-                                    ('task', 'work:signin:all'), ('task', 'work:status')])
+        self.assert_actions(frame, [('gh', 'pr', 'view', '7', '--web'),
+                                    ('gh', 'pr', 'view', '9', '--web'), ('task', 'work:status')])
         many = self.frame(remote=replace(self.remote, setup_prs=self.ok((11, 9, 7, 10))))
-        self.assertEqual(self.keys(many), ['pr:7', 'pr:9', 'pr:10', 'signin', 'details'])
+        self.assertEqual(self.keys(many), ['pr:7', 'pr:9', 'pr:10', 'details'])
 
     def test_cached_state_says_as_of(self):
         for dt in (self.today.replace(hour=9, minute=10),
@@ -870,7 +887,7 @@ class OverviewTests(unittest.TestCase):
         remote = replace(self.remote, names=self.ok(frozenset()), spaces=self.ok(spaces[0:2] + spaces[3:]))
         frame = self.frame(remote=remote)
         self.assertEqual([a.key for a in frame.actions],
-                         ['pair:new-cs', 'pair:middle-cs', 'pair:older-cs', 'create', 'signin', 'details'])
+                         ['pair:new-cs', 'pair:middle-cs', 'pair:older-cs', 'create', 'details'])
         self.assertEqual(frame.actions[0].argv, ('task', 'work:cs', '--', '--rebind', 'new-cs'))
 
     def test_overlays_are_ranked_and_generator_requires_an_installed_generated_project(self):

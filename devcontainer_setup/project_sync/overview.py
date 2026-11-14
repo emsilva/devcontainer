@@ -329,11 +329,13 @@ def view(local: Local, remote: Remote | None, *,
                     action('arm', 'Connect and arm recovery', 'work:cs:armed')
                 action('stop', 'Stop the Codespace', 'work:cs:stop')
         row(5, 5, 'Codespace', text)
-    signin = Action('signin', 'Sign in to the tools', task_command(local, 'work:signin:all')) if connected else None
+    # The paired Codespace is one the menu can connect to: Replace and the sign-in item need one.
+    reachable = bool(name) and any(candidate.key in ('connect', 'start') for candidate in candidates)
+    signin = (Action('signin', 'Sign in to the tools', task_command(local, 'work:signin:all'))
+              if connected and reachable else None)
 
     replace_action = None
-    if (name and local.replacing is None
-            and any(candidate.key in ('connect', 'start') for candidate in candidates)):
+    if reachable and local.replacing is None:
         replace_action = Action('replace', 'Replace this Codespace', task_command(local, 'setup', '--', '--replace'))
 
     if name and not recovery_off:

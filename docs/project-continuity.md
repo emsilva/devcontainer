@@ -39,8 +39,8 @@ create checkouts. Uncommitted code stays on the host where it was edited.
 `task work` names the paired Codespace once, then shows labelled rows such as
 `Codespace`, `Recovery`, `Sync` and `Sign-ins`, at most six lines of 78 columns.
 Its menu shows labels only, for example `Connect` (`Open in Herdr` while the sync
-already runs, unless recovery is off), `Sign in to the tools` while the sync runs,
-and `Replace this Codespace`. The chosen command prints as `Running: …` before it
+already runs, unless recovery is off), `Sign in to the tools` while the sync runs
+and the menu can connect to the paired Codespace, and `Replace this Codespace`. The chosen command prints as `Running: …` before it
 runs; without a terminal, each one prints as a `Next:` line.
 
 Run the connection tasks on your Mac. Inside Herdr, connection returns to your
