@@ -1006,16 +1006,41 @@ class WizardCliTests(unittest.TestCase):
         self.assertIn('10.2.1', output.getvalue())
         self.assertEqual(chosen['package_manager_versions'], {'node': '9.15.4'})
 
-    def test_fresh_taskfile_has_working_lifecycle_aliases(self):
-        from devcontainer_setup.__main__ import integrate_taskfile
+    def test_fresh_taskfile_claims_no_project_task_names(self):
+        from devcontainer_setup.__main__ import integrate_continuity, integrate_taskfile
+        # Resolved: the guidance walk uses O_NOFOLLOW, and /var is a symlink on macOS.
+        root = self.root.resolve()
         files = {}
-        integrate_taskfile(self.root, files)
-        (self.root / 'Taskfile.yml').write_bytes(files['Taskfile.yml'])
-        (self.root / '.devcontainer').mkdir()
-        (self.root / '.devcontainer/Taskfile.yml').write_bytes((SOURCE / 'templates/Taskfile.yml').read_bytes())
-        for operation in ('up', 'down', 'status', 'build'):
-            result = subprocess.run(['task', '--dry', operation], cwd=self.root, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
+        integrate_taskfile(root, files)
+        integrate_continuity(root, files, True)
+        for name, data in files.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_bytes(data)
+        (root / '.devcontainer').mkdir(exist_ok=True)
+        (root / '.devcontainer/Taskfile.yml').write_bytes((SOURCE / 'templates/Taskfile.yml').read_bytes())
+        result = subprocess.run(['task', '--list-all', '--json'], cwd=root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        names = {task['name'] for task in json.loads(result.stdout)['tasks']}
+        # These names are the project's to choose; the devcontainer's own live under devcontainer:.
+        self.assertEqual(names & {'up', 'down', 'status', 'build'}, set())
+        self.assertLessEqual({'work', 'devcontainer:up'}, names)
+        self.assertTrue(files['Taskfile.yml'].startswith(b"version: '3'\ntasks:\n"), files['Taskfile.yml'])
+
+    def test_existing_taskfile_keeps_every_line(self):
+        from devcontainer_setup.__main__ import integrate_continuity, integrate_taskfile
+        root = self.root.resolve()
+        original = ("version: '3'\n\ntasks:\n"
+                    + ''.join(f"  {operation}:\n    cmds: [{{task: 'devcontainer:{operation}'}}]\n"
+                              for operation in ('up', 'down', 'status', 'build'))
+                    + '  lint:\n    desc: Lint the project\n    cmds:\n      - echo lint\n')
+        (root / 'Taskfile.yml').write_text(original)
+        files = {}
+        integrate_taskfile(root, files)
+        integrate_continuity(root, files, True)
+        result = iter(files['Taskfile.yml'].decode().splitlines())
+        # Each original line, in order: consuming the iterator makes this a subsequence check.
+        missing = [line for line in original.splitlines() if not any(line == kept for kept in result)]
+        self.assertEqual(missing, [], files['Taskfile.yml'].decode())
 
     def test_task_inventory_of_a_taskfile_with_no_tasks_is_empty(self):
         from devcontainer_setup.__main__ import _task_inventory

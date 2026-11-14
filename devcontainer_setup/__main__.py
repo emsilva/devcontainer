@@ -88,9 +88,7 @@ def integrate_taskfile(project: Path, files: dict[str, bytes]) -> None:
     path = project / name
     if path.is_symlink():
         raise ValueError(f'Existing Taskfile is a symlink: {name}; review integration manually')
-    text = path.read_text() if existing else "version: '3'\ntasks:\n" + ''.join(
-        f"  {operation}:\n    cmds: [{{task: 'devcontainer:{operation}'}}]\n"
-        for operation in ('up', 'down', 'status', 'build'))
+    text = path.read_text() if existing else "version: '3'\ntasks:\n"
     from .taskfile_mapping import integrate_include, mapping
     mapping(text, 'tasks', required=True)
     changed = integrate_include(text)
