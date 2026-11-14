@@ -610,6 +610,13 @@ class OverviewTests(unittest.TestCase):
             ('sync stopped', replace(self.local, worker='stopped'), self.remote, 'Connect'),
             ('sync unknown', replace(self.local, worker='unknown'), self.remote, 'Connect'),
             ('recovery off', replace(self.local, armed=True, keeper='stopped'), self.remote, 'Connect'),
+            # FR11: not answering or unknown keeps Connect too.
+            ('recovery stale', replace(self.local, armed=True, keeper='stale', keeper_heartbeat_age=400),
+             self.remote, 'Connect'),
+            ('recovery unknown', replace(self.local, armed=True, keeper='unknown'), self.remote, 'Connect'),
+            ('arming unreadable', replace(self.local, armed=None, keeper='running'), self.remote, 'Connect'),
+            ('not armed, keeper record stale', replace(self.local, armed=False, keeper='stale'), self.remote,
+             'Open in Herdr'),
         ]
         for name, local, remote, expected in cases:
             with self.subTest(name=name):

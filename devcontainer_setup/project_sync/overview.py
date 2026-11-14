@@ -322,8 +322,10 @@ def view(local: Local, remote: Remote | None, *,
                 text = f'in state {pair.raw} ({pair.suffix})'
             else:
                 text = pair.reason
-            # Recovery off keeps Connect: only a connect turns it back on.
-            action('connect', 'Open in Herdr' if connected and not recovery_off else 'Connect', 'work:cs')
+            # Only while recovery runs or is not armed; off, not answering or unknown keeps Connect,
+            # which is what restarts it.
+            recovering = local.armed is False or (local.armed is True and local.keeper == 'running')
+            action('connect', 'Open in Herdr' if connected and recovering else 'Connect', 'work:cs')
             if situation == 'available':
                 if local.armed is False:
                     action('arm', 'Connect and arm recovery', 'work:cs:armed')
