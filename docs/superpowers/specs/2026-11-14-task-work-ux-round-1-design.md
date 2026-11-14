@@ -37,10 +37,13 @@ action without help, and today's four failures cannot recur.
 
 ### A. Setup wizard (`devcontainer_setup/__main__.py`)
 
-**A1. Stop when GitHub's default branch does not hold the project (owner item a).** After the fetch that
-`setup_checkout` already does and before the first question, compare the files tracked at this checkout's `HEAD`
-with those at `origin/<default>`. When the default branch holds fewer than half of them, print one refusal and exit
-non-zero, having asked nothing, written nothing and pushed nothing:
+**A1. Stop when GitHub's default branch does not hold the project (owner item a).** Before anything else that
+can publish (so also before `interactive()` looks for an open setup PR to resume, `__main__.py:1118-1126`), fetch
+`origin/<default>` and compare the files tracked at this checkout's `HEAD` with those at `origin/<default>`,
+leaving out on both sides the paths the setup itself writes (`.devcontainer/`). Those are the same on both sides
+once a setup has landed, and about 60 of them would let a small project pass while `main` lacks it. When the
+default branch holds fewer than half of the remaining files, print one refusal and exit non-zero, having asked
+nothing, written nothing and pushed nothing:
 
 ```
 GitHub's main holds 3 of the 212 files tracked on docs/design-20261023.
@@ -48,8 +51,16 @@ A Codespace starts from main, so it would hold almost none of this project.
 Merge the project into main first, then run the setup from a checkout on main.
 ```
 
-This is the same test as the leads' `codespace-ready` step 0 (`ready.py`, check 1), so the two agree. Running from
-a checkout on `main` always passes it. A checkout with no `origin` keeps today's behavior (commit-only setup).
+The test runs on every branch, `main` included: a Mac whose own `main` holds the project while GitHub's `main`
+holds only the template must be refused too, with the fix worded for it (`Push this Mac's main to GitHub, or merge
+it there, first`). A checkout whose `HEAD` is an ancestor of `origin/<default>` (on `main` and only behind) always
+passes: the Codespace gets everything it has. A checkout with no `origin` keeps today's behavior (commit-only
+setup). *(Lead's calls, from the builder check: the PR-resume path, the `.devcontainer/` exclusion, the ancestor
+pass.)*
+
+This is the same test as the leads' `codespace-ready` step 0 (`ready.py`, check 1). The two must agree, so round 1
+also gives `ready.py` (dotfiles repo, `~/.local/share/chezmoi/private_dot_claude/skills/codespace-ready/scripts/`)
+the `.devcontainer/` exclusion and the ancestor pass, with tests.
 
 **A2. Never write `up`, `down`, `status` or `build` (owner item b).** When the project has no Taskfile, the wizard
 still creates `Taskfile.yml` (the devcontainer include and the `work` task block need one), with no tasks of its
@@ -105,8 +116,11 @@ Codespace`). The command still prints as `Running: …` once chosen and in the `
 Tests render with a 36-character Codespace name (run 3's `literate-pancake-jjjrq4j9rqwrc5qp6` length), not
 `paired-cs`.
 
-**B4. Replace moves down (review item 1, order).** Replace is the last item before `Show details`, below Connect,
-Connect and arm recovery, Start and connect, and Stop. Its argv is unchanged.
+**B4. Replace moves down (review item 1, order).** Replace sits below Connect, Connect and arm recovery, Start
+and connect, Stop and every other action, directly above the retired-Codespace delete (which keeps its reserved
+slot, `overview.py:352-358`) and `Show details`. Like that delete, Replace gets a reserved slot: the cut to six
+actions drops other items first, so Replace never disappears in a busy state. Its argv is unchanged. *(Lead's
+call, from the builder check.)*
 
 **B5. The Recovery row says what the owner plans around (review item 7).** Armed and running: `armed; next 12-hour
 stop about 17:45` (the figure `task work:status` already prints as `12-hour stop expected`). During a stop:
@@ -118,7 +132,10 @@ listed on GitHub: `The replaced Codespace is still on GitHub; check and delete i
 **B7. Sign-in state reaches the screen (review item 11).** From the sign-in record: `Sign-ins   Plaud is not
 signed in`, with the action `Sign in` (`task work:signin:all`).
 
-**B8. `Show recovery and sync logs` appears only when a log exists (review item 12).**
+**B8. `Show recovery and sync logs` appears only when a log exists (review item 12).** It no longer pads a short
+menu. `Exit` counts toward #87's three-item minimum, so "not set up" shows `Set up this project`, `Show details`,
+`Exit`: one real action where there is one thing to do. *(Lead's call, from the builder check; the test at
+`test_overview.py:171` changes with it.)*
 
 **B9. `Show details` leads with the one fix (review item 9).** After a Mac restart it says `Recovery is off:
 connect with task work:cs` once, not `run task work:cs` then twice `run task work:cs:armed`. No row wider than 78
@@ -158,9 +175,12 @@ sync already finishes sign-ins and that `task work:signin:all` starts them, and 
 **D2. A wrong word at `arm` no longer aborts the connect (review item 6).** In `task work:cs:armed`, anything but
 `arm` prints `Not armed. Connecting without recovery; arm later from task work.` and the connect goes on to Herdr.
 
-**D3. No pending-history line on a healthy connect (review item 12).** `Conversation history is pending; inspect
-task work:status.` (`workspace.py:532-534`) prints only when the history is still pending once the connect has
-finished; the History row in `task work:status` keeps the detail.
+**D3. No pending-history line on a healthy connect (review item 12).** The connect no longer prints
+`Conversation history is pending; inspect task work:status.` (`workspace.py:532-534`): before Herdr opens, the
+first cycle is usually still pending (up to 120 s), and after Herdr the line would come hours late. Instead
+`task work` shows a `History` row when conversation history has been pending for more than 5 minutes, read from
+the same state the History row in `task work:status` reads. The connect itself does not wait. *(Lead's call, from
+the builder check.)*
 
 ### E. Words (review, question 2)
 
@@ -169,6 +189,20 @@ flush, final capture, flush and move), Recovery plus a state (not keeper, keep-a
 worker, Mac worker), paired (not binding), Connect. Internal terms (`the lead`, operation ids, `pending
 (desktop_to_codespace:transfer)`, phase names) stay out of screens and stay in `--json` and logs. A full sweep of
 screens round 1 does not touch is not required.
+
+## Done means
+
+*(Lead's call, from the builder check.)* No Codespace is created, rebuilt or deleted to prove round 1.
+
+1. `task check` and `task test` green on the branch in the default environment, re-run by the lead; each new test
+   shown failing with its change removed. The dotfiles gates (`task test`, `task scan`) green for `ready.py`.
+2. A render file for the owner: every `task work` situation drawn by `overview.view` with run 3's real names
+   (36-character Codespace name), each line measured at 78 cells or less; the wizard's prompts and the A1 refusal
+   captured from a run against a local fake GitHub remote (as `ready.py`'s tests do).
+3. Roll-out with the usual recipe (Codespace `none`, never rebuild) to mainstage, innovate and strata-sap under the
+   owner's standing yes. strata-mf and ai-hub-demo get it too only on the owner's word at roll-out time.
+4. The owner, on a live project: `task work` (reads it unaided), Replace then `Not now` (nothing written), and
+   `task work:signin` while connected (points to `work:signin:all`, exit 0).
 
 ## Non-goals
 
@@ -182,7 +216,8 @@ screens round 1 does not touch is not required.
 - Anything that lets a Codespace be created, rebuilt or deleted with fewer confirmations than today.
 - A `task work` screen over 6 lines or 78 cells, or a menu without the command it will run printed once chosen.
 - A test that passes on a short fixture name but cuts a real one.
-- A refusal (A1) that fires on a checkout on `main`, or on a project with no `origin`.
+- A refusal (A1) that fires on a checkout that is an ancestor of `origin/<default>`, or on a project with no
+  `origin`.
 - Losing a line from a project's own Taskfile.
 
 ## Constraints
