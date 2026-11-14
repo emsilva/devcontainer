@@ -417,13 +417,31 @@ class WatcherTests(unittest.TestCase):
             with mock.patch.object(links, 'process_identity', return_value=identity):
                 self.assertEqual(links.watcher_live(self.state), expected)
 
-    def test_signin_refuses_while_watcher_live(self):
+    CONNECTED = ('Nothing to do: the connected sync already opens sign-in pages on this Mac.\n'
+                 'To sign in to the tools, run task work:signin:all.\n')
+
+    def test_signin_while_connected_points_to_signin_all(self):
         with mock.patch.object(links, 'watcher_live', return_value=True), \
                 mock.patch('devcontainer_setup.project_sync.transport.CodespaceConnection') as connection, \
                 contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(links.signin_main(self.root, self.state), 1)
+            self.assertEqual(links.signin_main(self.root, self.state), 0)
         connection.assert_not_called()
-        self.assertEqual(out.getvalue().strip(), 'The connected worker is already handling links.')
+        self.assertEqual(out.getvalue(), self.CONNECTED)
+
+    def test_signin_refused_by_the_codespace_side_points_there_too(self):
+        from devcontainer_setup.project_sync import scratch
+
+        @contextlib.contextmanager
+        def refused(connection, state):
+            yield False
+        with mock.patch.object(links, 'watcher_live', return_value=False), \
+                mock.patch.object(links, '_signin_config', refused), \
+                mock.patch.object(scratch, '_config', return_value=self.config), \
+                mock.patch('devcontainer_setup.project_sync.transport.CodespaceConnection') as factory, \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(links.signin_main(self.root, self.state), 0)
+        factory.return_value.__enter__.return_value.python.assert_not_called()
+        self.assertEqual(out.getvalue(), self.CONNECTED)
 
     def test_signin_refusal_preserves_worker_ssh_config(self):
         from devcontainer_setup.project_sync import scratch
@@ -436,7 +454,7 @@ class WatcherTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             connection = factory.return_value.__enter__.return_value
             connection.ssh_config.side_effect = lambda dest: dest.write_bytes(b'manual port 40002\n')
-            self.assertEqual(links.signin_main(self.root, self.state), 1)
+            self.assertEqual(links.signin_main(self.root, self.state), 0)
             connection.ssh_config.assert_not_called()
         self.assertEqual(path.read_bytes(), b'worker port 40001\n')
 
