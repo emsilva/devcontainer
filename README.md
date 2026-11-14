@@ -29,19 +29,33 @@ The wizard asks you to:
    existing Codespace's actual settings.
 5. Review the file diff and approve the commit, plus the push and launch if selected.
 
+A Codespace starts from GitHub's default branch, so setup first checks that the
+branch holds this project. When it holds fewer than half of the files tracked in
+this checkout (files under `.devcontainer/` are not counted), setup prints a
+refusal such as `GitHub's main holds 3 of the 212 files tracked on docs/x.` with
+the fix: merge the project into `main`, then run the setup from a checkout on
+`main`; or, from this Mac's `main`, push it to GitHub first. It exits without
+asking, writing or pushing anything. A checkout that is only behind GitHub's
+default branch always passes, and one without a GitHub `origin` is not checked.
+
 Every environment includes Python, uv, Codex, Claude Code, OpenCode, and Grok. The four
 coding tools use their official native installers as `vscode`; Node is selected
 when the project needs it. Dotfiles apply inside the container.
 
 Your project receives the selected `.devcontainer` configuration, Feature lockfile,
-small helpers, and a Taskfile include. Personal preferences live in
+small helpers, and a Taskfile include. A project without a Taskfile gets a new
+`Taskfile.yml` holding only that include and, with sync on, the `work` and
+`scratch` tasks.
+Setup never adds `up`, `down`, `status` or `build`: those names belong to the
+project's own stack, and the container's tasks stay under `task devcontainer:`.
+Personal preferences live in
 `${XDG_CONFIG_HOME:-$HOME/.config}/devcontainer-setup/config.json`.
 
 ## Use an installed project
 
 | Command | Action |
 |---|---|
-| `task work` | Show where this project stands and pick the next step from a menu; without a terminal it prints the commands |
+| `task work` | Show where this project stands and pick the next step from a menu; the chosen command prints before it runs, and without a terminal it prints the commands |
 | `codex` / `claude` / `opencode` / `grok` | Start a native agent in the current checkout |
 | `codex resume` / `claude --resume` | Choose a native conversation |
 | `task work:cs` | Connect Codespace Herdr and sync scratch and project conversations |
@@ -108,14 +122,18 @@ sign-ins when the worker is disconnected. See [sign-ins](docs/project-continuity
 
 `task work:cs` always reconnects the paired Codespace. To replace it, run
 `task setup -- --replace` in this repository, or `task devcontainer:setup -- --replace`
-in a generated project. You can also choose `Replace NAME` in `task work`, or
-`replace NAME` in the setup wizard. Replacement reads its live machine and idle
-timeout, creates and validates the new Codespace from the default branch, records
-the old one's final flush, then moves sync, recovery and Herdr. It signs in and
-checks the new one before offering the old one's checked delete. Recovery consent
-is kept when the GitHub account and billing owner match; otherwise it asks you to
-type `arm` before the move. Rerun the same replace command to continue an unfinished
-phase. See [Replace a Codespace](docs/project-continuity.md#replace-a-codespace).
+in a generated project. You can also choose `Replace this Codespace` in `task work`,
+or `replace NAME` in the setup wizard. Replacement reads its live machine and idle
+timeout, then asks `Replace NAME?` with the new one's machine, branch, billing owner
+and what you will be asked to do. `Not now` is the default; it, Esc and Ctrl-C
+print `Nothing was replaced.` and leave nothing behind. After `Replace it`, it
+creates and validates the new Codespace from the default branch, records the old
+one's final sync, then moves sync, recovery and Herdr. It signs in and checks the
+new one before offering the old one's checked delete. Recovery consent is kept when
+the GitHub account and billing owner match; otherwise it asks you to type `arm`
+before the move. Rerun the same replace command to continue an unfinished replace:
+it does not ask again, and before the move it offers `Continue the replace` or to
+abandon it. See [Replace a Codespace](docs/project-continuity.md#replace-a-codespace).
 
 During replacement, Herdr's connection to the old Codespace ends. When the new
 one lacks the Herdr version your Mac runs, it asks to install it there. If you

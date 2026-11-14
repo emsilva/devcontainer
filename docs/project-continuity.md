@@ -20,6 +20,7 @@ create checkouts. Uncommitted code stays on the host where it was edited.
 
 | Command | Result |
 | --- | --- |
+| `task work` | Show the project's state on your Mac and offer the next steps in a menu |
 | `task work:cs` | Start/connect the paired Codespace, start sync, connect its saved Herdr machine |
 | `task work:signin:all` | Start or retry sign-ins to every tool on the paired Codespace |
 | `task work:signin` | Finish waiting Codespace browser sign-ins on this Mac |
@@ -34,6 +35,13 @@ create checkouts. Uncommitted code stays on the host where it was edited.
 | `task work:cs:restart` | Stop and start the Codespace now, outside the restart budget |
 | `task work:cs:delete [-- --codespace NAME]` | Check the named Codespace (the pairing by default), then delete only after a typed `delete` |
 | `task work:logs` | Show the last keeper and worker log lines, merged by time |
+
+`task work` names the paired Codespace once, then shows labelled rows such as
+`Codespace`, `Recovery`, `Sync` and `Sign-ins`, at most six lines of 78 columns.
+Its menu shows labels only, for example `Connect` (`Open in Herdr` while the sync
+already runs, unless recovery is off), `Sign in to the tools` while the sync runs,
+and `Replace this Codespace`. The chosen command prints as `Running: …` before it
+runs; without a terminal, each one prints as a `Next:` line.
 
 Run the connection tasks on your Mac. Inside Herdr, connection returns to your
 shell; select the Codespace group to work remotely. From another terminal, it
@@ -152,52 +160,66 @@ without creating duplicate imports.
 On your Mac, run `task setup -- --replace` in this repository, or
 `task devcontainer:setup -- --replace` in a generated project. Both commands need
 a terminal and a real gh account, with `GH_TOKEN` and `GITHUB_TOKEN` unset.
-`task work` offers `Replace NAME` after connect or start. The setup wizard offers
-`replace NAME` for a paired Codespace it can read, including one on a feature
-branch; it publishes any reviewed setup changes before starting the replacement.
+`task work` offers `Replace this Codespace` wherever it offers a connect or start
+and no replace is unfinished, just above the replaced Codespace's delete and `Show details`. The setup wizard
+offers `replace NAME` for a paired Codespace it can read, including one on a
+feature branch; it publishes any reviewed setup changes, then the replace asks its
+own question before anything is created.
 
 Replacement runs in this order:
 
 1. Inspect the paired Codespace's live machine, cores, idle timeout and billing
    owner. Unreadable resources stop the operation before creating anything. The
    default branch must carry this checkout's installed setup.
-2. Create the new Codespace from the default branch's tip, using the old one's
+2. Ask `Replace NAME?`, with the new one's machine, cores and idle timeout, the
+   branch and commit it starts from, the billing owner, and what you will be asked
+   to do. `Not now` is the default: it, Esc and Ctrl-C print `Nothing was replaced.`
+   and exit 0, with no replace journal written. Only `Replace it` goes on.
+3. Create the new Codespace from the default branch's tip, using the old one's
    machine and idle timeout. The old one's branch may differ. Validate and apply
    dotfiles to the new one. A dotfiles retry does not rebuild it.
-3. While the old one is still paired, decide recovery consent, ask you to end any
-   running agents, then record its final normal sync cycle and conversation flush.
-   The command never kills agents. Unfinished scratch or history stops the move.
-4. Move sync, recovery and Herdr to the new Codespace without opening Herdr's TUI.
+4. While the old one is still paired, decide recovery consent, ask you to end any
+   running agents in their Herdr panes, then record its final sync: one normal sync
+   cycle and its conversations. The command never kills agents. Unfinished scratch
+   or history stops the move.
+5. Move sync, recovery and Herdr to the new Codespace without opening Herdr's TUI.
    Matching GitHub account and billing owner carry your recovery consent; otherwise
-   you type `arm` before the final flush. Nothing asks between that flush and move.
-5. Sign in through the existing all-tool sequence. Failed or skipped sign-ins are
+   you type `arm` before the final sync. Nothing asks between that sync and the move.
+6. Sign in through the existing all-tool sequence. Failed or skipped sign-ins are
    listed for `task work:signin:all`; they do not block the next check.
-6. Check setup validation, a completed sync cycle, recovery when armed, Herdr
+7. Check setup validation, a completed sync cycle, recovery when armed, Herdr
    reachability and the old one's conversation revisions on the new one. Refused
    conversations kept on this Mac and explicitly forgotten conversations are named.
    A failed check keeps the old Codespace and stops before offering deletion.
-7. Offer the old one's [checked deletion](#checked-deletion), with fresh evidence
-   against its final flush and the typed word `delete`. Declining keeps it listed
+8. Offer the old one's [checked deletion](#checked-deletion), with fresh evidence
+   against its final sync and the typed word `delete`. Declining keeps it listed
    in `task work`. Connect to the new one with `task work:cs` when finished.
 
 The project keeps a private replace journal and one operation lock. Rerun the same
-replace command after interruption: it prints its phase and continues it.
-`task work` shows `Finish replacing NAME` ahead of other work, below a recovery
-connection when recovery is off. After a lost create reply it checks the inventory
-before offering `continue` or `abandon`. One matching new Codespace is adopted;
+replace command after interruption: it prints where it stopped, for example
+`A replace of OLD is at the final sync.`, and continues from there without asking
+`Replace NAME?` again. The steps read `the first checks`, `creating the new
+Codespace`, `the final sync`, `the sign-ins`, `the last check` and `the delete
+question`. `task work` shows the same words in its `Replace` row (`stopped at the
+final sync; finish it`) and offers `Finish the replace` ahead of other work, below
+`Connect` when recovery is off. After a lost create reply it checks the inventory
+before offering to continue or abandon. One matching new Codespace is adopted;
 several candidates or unreadable candidates require a choice. If none appears
-during the two-minute recheck, `continue` leads to the typed `create` that alone
-allows another create request.
+during the two-minute recheck, `Continue the replace` leads to the typed `create`
+that alone allows another create request.
 
-A rerun with the old Codespace still paired always records a fresh final flush
-first, even after a failed or partial move. If OLD changes while the flush is
-recorded, it prints `OLD changed while its final flush was recorded; nothing moved.`
+A rerun with the old Codespace still paired always records a fresh final sync
+first, even after a failed or partial move. If OLD changes while it is recorded,
+it prints `OLD changed while its final sync was recorded; nothing moved.`
 When sync is paused and OLD remains paired, it prints
 `Sync with OLD is paused. Run the replace again, or task work:cs to resume it.`
 
-Before the move starts, a rerun offers `continue` or `abandon`. Abandon keeps the old
-pairing and leaves any new Codespace listed for an explicit checked delete; nothing
-deletes it automatically. Ctrl-C or EOF keeps the current phase for a rerun. Once
+Before the move starts, a rerun says `The replace is unfinished: it stopped at
+PHASE.` and offers `Continue the replace` or `Abandon it: the old one stays paired;
+the new one stays until you delete it` (`…; nothing was created` when nothing was).
+Abandon keeps the old pairing and leaves any new Codespace listed, printing the
+`task work:cs:delete` command for its checked delete; nothing deletes it
+automatically. Ctrl-C or EOF keeps the current phase for a rerun. Once
 the move starts, reruns finish forward, including after a partial move. Returning
 to the old Codespace then requires an explicit `task work:cs -- --rebind NAME`.
 Deletion of either Codespace ends that replacement operation. A completed replace
@@ -241,8 +263,9 @@ the new pairing and its recovery alone. Either path ends the deleted
 Codespace's paused sync session, while retaining scratch payloads, conversation
 checkpoints, relay records and the restart ledger. If cleanup is interrupted,
 rerun the same delete command in a terminal to finish it. `task work` offers
-one pending cleanup and the oldest listed retired Codespace with a final-flush
-record; it never offers deletion of the current pairing.
+one pending cleanup (`Finish cleaning up after the delete`) and, as `Check and
+delete the replaced Codespace`, the oldest listed retired Codespace with a
+final-flush record; it never offers deletion of the current pairing.
 
 ## Conversation availability
 
