@@ -186,8 +186,8 @@ class ArmFlowTests(unittest.TestCase):
 
     def test_a_keeper_that_cannot_start_does_not_block_the_connection(self):
         # #57: keeper startup or readiness trouble must leave plain work:cs connecting to Herdr.
-        for stage, error in (('start', ValueError('The keeper is still shutting down; inspect '
-                                                'task work:status before retrying')),
+        for stage, error in (('start', ValueError('Recovery is still shutting down; try again '
+                                                'shortly, or see task work:status')),
                              ('start', OSError('Keeper startup unavailable')),
                              ('wait_ready', ValueError('Keeper readiness unavailable')),
                              ('wait_ready', OSError('Keeper readiness unavailable'))):
@@ -1078,8 +1078,8 @@ class ProjectSyncCLITests(unittest.TestCase):
         from devcontainer_setup.project_sync.__main__ import main
         from devcontainer_setup.project_sync.state import atomic_write, discover_project, state_dir
         state = state_dir(discover_project(self.root), self.env)
-        hung = mock.patch.object(keeper, 'stop', side_effect=ValueError('The keeper is still shutting down; '
-                                                                         'inspect task work:status before retrying'))
+        hung = mock.patch.object(keeper, 'stop', side_effect=ValueError('Recovery is still shutting down; try '
+                                                                         'again shortly, or see task work:status'))
         corrupt = mock.patch.object(keeper, 'RUNTIME', 'corrupt-keeper-runtime.json')
         atomic_write(state / 'corrupt-keeper-runtime.json', b'{not json')
         # A ps that outlives its 5 s timeout while the keeper's ownership is checked.
