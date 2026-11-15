@@ -309,7 +309,7 @@ class OverviewTests(unittest.TestCase):
                                 spaces=self.ok(())), TITLE,
              'Codespace  not listed for your account; deleted, or under another account', create),
             (self.local, replace(self.remote, spaces=self.ok(())), TITLE,
-             "Codespace  now listed under another repository; pair this one's Codespace", create),
+             'Codespace  now under another repository; create one for this project', create),
             (replace(self.local, pairing=None), replace(self.remote, spaces=self.ok(())), UNPAIRED,
              'Codespace  GitHub lists none for this repository', setup + details),
             (replace(self.local, pairing=None), self.remote, UNPAIRED,
@@ -336,7 +336,7 @@ class OverviewTests(unittest.TestCase):
             (self.local, self.remote_state('Moved'), TITLE, 'Codespace  in state Moved (checked 09:10)', paired),
             (self.local, replace(self.unavailable(), spaces=self.failed('no answer within 2 s', 'unknown')), TITLE,
              'Codespace  GitHub did not answer within 2 s', paired),
-            (self.local, self.unavailable(), TITLE, 'Codespace  request failed', paired),
+            (self.local, self.unavailable(), TITLE, 'Codespace  not read: the request to GitHub failed', paired),
         ]
         for local, remote, title, situation, actions in cases:
             with self.subTest(situation=situation, setup=local.setup):
@@ -348,8 +348,84 @@ class OverviewTests(unittest.TestCase):
         self.assertEqual(inside.lines, ("This is the Codespace; task work shows the project's state on your Mac.",))
         self.assert_actions(inside, self.argv('work:cs:stop'))
         silent = self.frame(replace(self.local, pairing=None), self.unavailable())
-        self.assertEqual(silent.lines, (UNPAIRED,))
+        self.assertEqual(silent.lines,
+                         (UNPAIRED, 'Codespace  not read: the request to GitHub failed; Connect asks it again'))
         self.assert_actions(silent, self.argv('work:cs') + setup + details)
+
+    def test_rows_ask_only_for_an_action_the_menu_offers(self):
+        # FR20 (Fable P3-3, P3-4): with no Connect on the menu, the Sync and Recovery rows do not say connect.
+        quiet = replace(self.local, worker='stopped', armed=True, keeper='stale', keeper_heartbeat_age=600)
+        gone = {'deleted': replace(self.remote, names=self.ok(frozenset()), spaces=self.ok(())),
+                'missing': replace(self.remote, account=self.ok('mannu_kyndryl'), names=self.ok(frozenset()),
+                                   spaces=self.ok(())),
+                'elsewhere': replace(self.remote, spaces=self.ok(())),
+                'setup': self.remote, 'failed': self.remote_state('Failed')}
+        for situation, remote in gone.items():
+            with self.subTest(situation=situation):
+                local = replace(quiet, setup='missing') if situation == 'setup' else quiet
+                frame = self.frame(local, remote)
+                self.assertFalse({'connect', 'start'} & set(self.keys(frame)), self.keys(frame))
+                self.assertEqual(self.rows(frame, 'Recovery'), ['Recovery   not answering for 10 min'])
+                self.assertEqual(self.rows(frame, 'Sync'), ['Sync       stopped'])
+        # Where the menu connects, the rows still say so.
+        frame = self.frame(quiet)
+        self.assertEqual(self.rows(frame, 'Recovery'), ['Recovery   not answering for 10 min; connect to restart it'])
+        self.assertEqual(self.rows(frame, 'Sync'), ['Sync       stopped; connect to start it'])
+        # Recovery off puts Connect first in any situation, so its rows keep connect.
+        off = self.frame(replace(quiet, keeper='stopped', setup='missing'))
+        self.assertEqual(self.keys(off)[0], 'connect')
+        self.assertEqual(self.rows(off, 'Sync'), ['Sync       stopped; connect to start it'])
+        # The elsewhere row's two forms, by whether a Pair item is offered.
+        listed = replace(self.remote, spaces=self.ok((Space(OLD, 'Shutdown', None),)))
+        frame = self.frame(self.local, listed)
+        self.assertEqual(frame.lines[1], 'Codespace  now under another repository; pair or create one for this project')
+        self.assertEqual(self.keys(frame), [f'pair:{OLD}', 'create', 'details'])
+        self.assertLessEqual(self.overview.cells(frame.lines[1]), 78)
+        # Unpaired with GitHub silent: Connect asks GitHub itself, so the row says so where asking again can help.
+        unpaired = replace(self.local, pairing=None)
+        for remote, text in ((None, 'checking GitHub…'),
+                             (replace(self.unavailable(), spaces=self.failed('no answer within 2 s', 'unknown')),
+                              'GitHub did not answer within 2 s; Connect asks it again'),
+                             (self.unavailable(), 'not read: the request to GitHub failed; Connect asks it again'),
+                             (Remote(*(self.failed('request failed; child 99998 was not reaped') for _ in range(5))),
+                              'not read: the request to GitHub failed; Connect asks it again'),
+                             (Remote(*(self.failed('not signed in to GitHub') for _ in range(5))),
+                              'not signed in to GitHub'),
+                             (Remote(*(self.failed('gh is not installed') for _ in range(5))), 'gh is not installed')):
+            with self.subTest(remote=text):
+                frame = (self.overview.view(unpaired, None, now=self.now) if remote is None
+                         else self.frame(unpaired, remote))
+                self.assertEqual(frame.lines[1], 'Codespace  ' + text)
+                self.assertEqual(self.keys(frame), ['connect', 'create', 'details'])
+                # No cut: only the checking row ends in '…', and that is a word.
+                self.assertTrue(all(self.overview.cells(line) <= 78
+                                    and (not line.endswith('…') or line == 'Codespace  checking GitHub…')
+                                    for line in frame.lines))
+
+    def test_the_elsewhere_row_names_what_the_final_menu_offers(self):
+        # FR26 (Codex P2-2): the clause follows the menu after the cut, not the candidates before it.
+        names = (OLD, 'fluffy-guide-0123456789abcdefgh', 'probable-space-zebra-q7r8s9t0u1v2')
+        three = replace(self.remote, spaces=self.ok(tuple(Space(name, 'Shutdown', None) for name in names)))
+        cleanup = ('scaling-fortnight-abcdefghijklmnop',)
+        cases = [(self.local, replace(self.remote, spaces=self.ok(())), 'create one for this project'),
+                 (self.local, three, 'pair or create one for this project'),
+                 # The cleanup takes a priority slot and the retired delete a reserved one: Create is cut.
+                 (replace(self.local, cleanup=cleanup, retired=(OLD,)), three, 'pair one for this project'),
+                 (replace(self.local, cleanup=cleanup, replacing={'old': CS, 'new': OLD, 'phase': 'ready'}), three,
+                  'pair one for this project')]
+        for local, remote, clause in cases:
+            with self.subTest(clause=clause, cleanup=bool(local.cleanup), retired=local.retired):
+                frame = self.frame(local, remote)
+                row, = self.rows(frame, 'Codespace')
+                self.assertEqual(row, 'Codespace  now under another repository; ' + clause)
+                self.assertLessEqual(self.overview.cells(row), 78)
+                keys = self.keys(frame)
+                self.assertEqual(any(key.startswith('pair:') for key in keys), 'pair' in clause)
+                self.assertEqual('create' in keys, 'create' in clause)
+        # The menu itself is unchanged by the wording: its order and argv are the cut's.
+        crowded = self.frame(replace(self.local, cleanup=cleanup, retired=(OLD,)), three)
+        self.assertEqual(self.keys(crowded), [f'cleanup:{cleanup[0]}', *(f'pair:{name}' for name in names),
+                                              f'delete:{OLD}', 'details'])
 
     def test_recovery_row_says_what_to_plan_around(self):
         armed = replace(self.local, armed=True, keeper='running')
@@ -473,7 +549,7 @@ class OverviewTests(unittest.TestCase):
             'Recovery   off until you connect',
             'Codespace  stopped; you stopped it at 09:10',
             'History    1 conversation refused; forget it to clear the sync warning',
-            'Checkout   2 commits behind origin/main (local copy)'))
+            "Checkout   2 commits behind GitHub's main"))
         self.assert_actions(frame, [
             ('task', 'work:cs'),
             ('task', 'work:forget', '--', '--agent', 'codex', '--session', 'session-1'),
@@ -565,6 +641,26 @@ class OverviewTests(unittest.TestCase):
         self.assertTrue(title.endswith('…'), title)
         self.assertEqual(self.frame(replace(local, pairing=None)).lines[0],
                          'consult-sm-strata-mainframe-modernisation · no Codespace paired')
+
+    def test_an_unread_origin_names_the_pairing_as_not_read(self):
+        # FR18: Git did not give origin, so no state and no pairing were read; no Create a Codespace.
+        unread = replace(self.local, origin_unread=True, pairing=None, state=None, repository='', armed=None,
+                         keeper='unknown', worker='unknown', problems=('Git remote cannot be read',))
+        for remote in (None, self.unavailable(), replace(self.remote, names=self.ok(frozenset()), spaces=self.ok(()))):
+            frame = self.frame(unread, remote) if remote is not None else self.overview.view(unread, None, now=self.now)
+            self.assertEqual(frame.lines[0], 'consult-sm-innovate · pairing not read')
+            self.assertEqual(self.keys(frame), ['connect', 'details'])
+            self.assertEqual(frame.actions[0].argv, ('task', 'work:cs'))
+            self.assertIn('Problem    Git remote cannot be read; Show details has more', frame.lines)
+        # A long folder is cut, never the tail.
+        long = replace(unread, root=Path('/fixture/consult-sm-strata-mainframe-modernisation-' + 'x' * 60))
+        title = self.frame(long).lines[0]
+        self.assertTrue(title.endswith('… · pairing not read'), title)
+        self.assertEqual(self.overview.cells(title), 78)
+        # Line one says so in every situation; an unfinished setup keeps its own action.
+        unset = self.frame(replace(unread, setup='missing'))
+        self.assertEqual(unset.lines[0], 'consult-sm-innovate · pairing not read')
+        self.assertEqual(self.keys(unset), ['setup', 'details'])
 
     def test_a_long_problem_keeps_its_pointer(self):
         problem = f'retired/{CS}.json cannot be read'
@@ -757,7 +853,7 @@ class OverviewTests(unittest.TestCase):
         behind = replace(self.local, signed_out=('Plaud',), checkout=replace(self.local.checkout, relation='behind',
                                                                              behind=2))
         frame = self.frame(behind)
-        self.assertEqual(self.rows(frame, 'Checkout'), ['Checkout   2 commits behind origin/main (local copy)'])
+        self.assertEqual(self.rows(frame, 'Checkout'), ["Checkout   2 commits behind GitHub's main"])
         self.assertEqual(self.keys(frame), ['connect', 'arm', 'stop', 'update-checkout', 'replace', 'details'])
         # Once the row is cleared, a slot is free and the item moves back up.
         self.assertEqual(self.keys(self.frame(replace(refused, refusals=()))),
@@ -787,6 +883,31 @@ class OverviewTests(unittest.TestCase):
                              'Sign-ins')
             self.assertLessEqual(self.overview.cells(row), 78, row)
         self.assertEqual(self.rows(self.frame(), 'Sign-ins'), [])
+
+    def test_rows_name_github_in_the_owners_words(self):
+        # FR23 (Fable P3-6): the Checkout, Generator and failed-request rows, at their widest.
+        old = datetime(2026, 11, 7, 22, 0).timestamp()
+        behind = replace(self.local, checkout=replace(self.local.checkout, relation='behind', behind=1234,
+                                                      copied_at=old))
+        row, = self.rows(self.frame(behind), 'Checkout')
+        self.assertEqual(row, "Checkout   1234 commits behind GitHub's main (as fetched 2026-11-07 22:00)")
+        self.assertLessEqual(self.overview.cells(row), 78)
+        generator, = self.rows(self.frame(remote=replace(self.remote, upstream=self.ok('b' * 40))), 'Generator')
+        self.assertEqual(generator, 'Generator  a newer version (bbbbbbb) is out; this project uses aaaaaaa')
+        # Every reason the probe gives for a failed read; a detail that would not fit is left to Show details.
+        for reason, text in (('request failed', 'not read: the request to GitHub failed'),
+                             ('request failed; child 99998 was not reaped',
+                              'not read: the request to GitHub failed; child 99998 was not reaped'),
+                             ('request failed; child 99998 could not be signalled',
+                              'not read: the request to GitHub failed'),
+                             ('not signed in to GitHub', 'not signed in to GitHub'),
+                             ('gh is not installed', 'gh is not installed'),
+                             ('incomplete list', 'incomplete list'), ('answer too large', 'answer too large')):
+            with self.subTest(reason=reason):
+                remote = Remote(*(self.failed(reason) for _ in range(5)))
+                lines = self.frame(remote=remote).lines
+                self.assertEqual(lines[1], 'Codespace  ' + text)
+                self.assertTrue(all(self.overview.cells(line) <= 78 and not line.endswith('…') for line in lines))
 
     def test_history_row_waits_five_minutes(self):
         self.assertEqual(self.rows(self.frame(replace(self.local, history_pending_since=self.now - 299)),
@@ -966,10 +1087,10 @@ class OverviewTests(unittest.TestCase):
             'Codespace  available (checked 09:10)',
             'Recovery   not answering for 3 min; connect to restart it',
             'Sync       stopped; connect to start it',
-            'Checkout   2 commits behind origin/main (local copy from 09:10)'))
+            "Checkout   2 commits behind GitHub's main (as fetched 09:10)"))
         self.assertIn(('task', 'devcontainer:upgrade:self'), [a.argv for a in frame.actions])
         generator = self.frame(replace(self.local, cycle_at=self.at), remote)
-        self.assertIn('Generator  upstream is at bbbbbbb; this project uses aaaaaaa', generator.lines)
+        self.assertIn('Generator  a newer version (bbbbbbb) is out; this project uses aaaaaaa', generator.lines)
         held = self.frame(replace(self.local, armed=True, hold_until=self.now + 3600, cycle_at=self.at))
         self.assertIn('Recovery   armed; on hold until 13:00', held.lines)
         self.assertIn('Sync       last completed 09:10', held.lines)

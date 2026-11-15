@@ -266,9 +266,10 @@ class RecoveryStatusTests(unittest.TestCase):
         stopped = self.lines(running=False)
         self.assertEqual('Running      no; run task work:cs', stopped[1])
         stale = self.lines(heartbeat_at=self.now - 400)
-        self.assertRegex(stale[1], r'^Running      yes \(pid 4121\), but silent for 4\d\d s; run task work:cs:armed$')
+        # FR22: a silent keeper too; keeper.start replaces one with no heartbeat or one older than HEARTBEAT_STALE.
+        self.assertRegex(stale[1], r'^Running      yes \(pid 4121\), but silent for 4\d\d s; run task work:cs$')
         silent = self.lines(heartbeat_at=None)
-        self.assertEqual(silent[1], 'Running      yes (pid 4121), but silent since it started; run task work:cs:armed')
+        self.assertEqual(silent[1], 'Running      yes (pid 4121), but silent since it started; run task work:cs')
         other = self.lines(reading={'at': self.now, 'ok': True, 'state': 'Shutdown', 'pending': False},
                            down={'count': 4, 'first_at': self.now - 240, 'kind': 'OTHER'})
         self.assertIn('run task work:cs to start it', other[2])

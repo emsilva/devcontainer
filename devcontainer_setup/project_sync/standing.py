@@ -42,6 +42,7 @@ class Refusal:
 class Local:
     root: Path
     state: Path | None = None
+    origin_unread: bool = False  # reading origin raised (a timeout, for one); a project with no origin is not this
     repository: str = ''
     generated: bool = False
     in_codespace: bool = False
@@ -509,7 +510,13 @@ def read(root: Path, *, env: Mapping[str, str] = os.environ, timeout: float = 1.
         values['generated'] = Path(__file__).resolve().parent == root / '.devcontainer/scripts/project_sync'
         git = _Git(root, env, timeout, reader)
         values['checkout'] = _checkout(git)
-        remote = git.text('remote', 'get-url', 'origin')
+        origin = git.run('remote', 'get-url', 'origin')
+        # Exit 2 is Git's "No such remote 'origin'", a fact. A raise (_Git.run records the problem) or any other exit,
+        # such as 128 for a broken .git/config, is a failed read.
+        values['origin_unread'] = origin is None or origin.returncode not in (0, 2)
+        if origin is not None and origin.returncode not in (0, 2):
+            reader.problem('Git remote cannot be read')
+        remote = origin.stdout.strip() if origin is not None and origin.returncode == 0 else None
         match = _REPOSITORY.fullmatch(remote or '')
         values['repository'] = match[1] if match else ''
         state = None

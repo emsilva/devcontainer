@@ -444,7 +444,7 @@ class SequenceTests(unittest.TestCase):
                 self.assertEqual(code, 0)
         self.assertIn('Signed in: Plaud, Claude, OpenCode, Grok.', out)
 
-    def test_summary_and_screen_share_the_signed_out_rule(self):
+    def test_missing_and_the_summary_count_unknown_as_not_signed_in(self):
         tools = {'plaud': {'state': 'signed-out', 'checked_at': 1.0}, 'codex': {'state': 'signed-in'},
                  'claude': {'state': 'unknown'}, 'opencode': {'state': 'other-method'}, 'grok': {'state': 'absent'}}
         missing = self.signins.missing(tools, unlisted=True)

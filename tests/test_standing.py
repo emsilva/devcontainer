@@ -252,6 +252,62 @@ class StandingTests(unittest.TestCase):
         self.assertFalse(any('did not finish' in line for line in frame.lines), frame.lines)
         self.assertEqual(frame.actions[0].key, 'connect')
 
+    def test_an_origin_that_was_not_read_is_not_a_missing_pairing(self):
+        # FR18 (Fable P3-1): Git timing out on origin is a failed read; a project with no origin is a fact.
+        from devcontainer_setup.project_sync import overview
+        from devcontainer_setup.project_sync.probe import Observation, Remote
+        self.metadata()
+        self.bind()
+        self.assertFalse(self.read().origin_unread)
+        self.assertEqual(self.read().pairing, 'new-cs')
+        real = subprocess.run
+
+        def slow(argv, *args, **kwargs):
+            if argv[:1] == ['git'] and argv[-3:] == ['remote', 'get-url', 'origin']:
+                raise subprocess.TimeoutExpired(argv, 1.0)
+            return real(argv, *args, **kwargs)
+
+        with patch.object(self.standing.subprocess, 'run', slow):
+            unread = self.read()
+        self.assertTrue(unread.origin_unread)
+        self.assertIsNone(unread.state)
+        self.assertIsNone(unread.pairing)
+        self.assertIn('Git remote cannot be read', unread.problems)
+        ok = lambda value: Observation('ok', value, time.time(), None)
+        # The probe still asks GitHub, for an empty repository: it lists nothing for it.
+        remote = Remote(ok('fixture'), ok(frozenset()), ok(()), ok(()), ok('a' * 40))
+        for answer in (None, remote):
+            frame = overview.view(unread, answer)
+            self.assertEqual(frame.lines[0], 'project · pairing not read')
+            self.assertFalse(any('GitHub lists' in line for line in frame.lines), frame.lines)
+            self.assertEqual([action.key for action in frame.actions], ['connect', 'details'])
+        # FR25: Git answering with an error is a failed read too: a broken .git/config exits 128.
+        config = self.root / '.git/config'
+        saved = config.read_text()
+        config.write_text(saved + '[core\n')
+        try:
+            self.assertEqual(subprocess.run(['git', '-C', str(self.root), 'remote', 'get-url', 'origin'],
+                                            capture_output=True).returncode, 128)
+            broken = self.read()
+        finally:
+            config.write_text(saved)
+        self.assertTrue(broken.origin_unread)
+        self.assertIsNone(broken.pairing)
+        self.assertIn('Git remote cannot be read', broken.problems)
+        frame = overview.view(broken, remote)
+        self.assertEqual(frame.lines[0], 'project · pairing not read')
+        self.assertEqual([action.key for action in frame.actions], ['connect', 'details'])
+        # No origin at all keeps today's screen: Git exits 2, "No such remote 'origin'".
+        self.git('remote', 'remove', 'origin')
+        self.assertEqual(subprocess.run(['git', '-C', str(self.root), 'remote', 'get-url', 'origin'],
+                                        capture_output=True).returncode, 2)
+        bare = self.read()
+        self.assertFalse(bare.origin_unread)
+        self.assertNotIn('Git remote cannot be read', bare.problems)
+        frame = overview.view(bare, remote)
+        self.assertEqual(frame.lines[0], 'project · no Codespace paired')
+        self.assertIn('create', [action.key for action in frame.actions])
+
     def recovery(self, **extra):
         """A live, armed keeper for new-cs whose record carries the fields the screen plans around."""
         self.bind()

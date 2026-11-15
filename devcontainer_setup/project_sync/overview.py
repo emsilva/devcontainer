@@ -126,12 +126,24 @@ def _pair(local: Local, remote: Remote | None, now: float) -> _Pair:
     if local.reading is not None:
         raw, at = local.reading
         return _Pair(normalize(raw), raw, 'as of ' + _when(at, now), at)
+    return _Pair('unknown', reason=_silence(remote))
+
+
+def _silence(remote: Remote | None, *, again: bool = False) -> str:
+    """The words for a GitHub read that gave no list; `again` adds that Connect asks GitHub itself."""
     if remote is None:
-        return _Pair('unknown', reason='checking GitHub…')
+        return 'checking GitHub…'
     reason = remote.spaces.reason or remote.names.reason or 'GitHub state is unknown'
+    # Connect asks again only where asking again can answer: not without gh or its sign-in.
+    tail = '; Connect asks it again' if again else ''
     if reason == 'no answer within 2 s':
-        reason = 'GitHub did not answer within 2 s'
-    return _Pair('unknown', reason=reason)
+        return 'GitHub did not answer within 2 s' + tail
+    if reason.startswith('request failed'):
+        # The probe's detail (a child it could not signal or reap) stays only where the row still fits.
+        text = 'not read: the request to GitHub failed'
+        detail = text + reason.removeprefix('request failed')
+        return (detail if cells('Codespace  ' + detail + tail) <= 78 else text) + tail
+    return reason
 
 
 def _stop(local: Local, pair: _Pair) -> tuple[str | None, float | None]:
@@ -156,9 +168,9 @@ def _clean(text: str) -> str:
     return ''.join(char for char in text if unicodedata.category(char) not in _UNSAFE)
 
 
-def _title(folder: str, name: str | None) -> str:
+def _title(folder: str, name: str | None, unread: bool = False) -> str:
     """Name the Codespace once; a long line cuts the folder, never the name."""
-    tail = ' · ' + (_clean(name) if name else 'no Codespace paired')
+    tail = ' · ' + (_clean(name) if name else 'pairing not read' if unread else 'no Codespace paired')
     folder = _clean(folder)
     if cells(folder + tail) > 78:
         folder = fit(folder, max(1, 78 - cells(tail)))
@@ -173,7 +185,7 @@ def _names(labels: tuple[str, ...]) -> str:
     return labels[0] if len(labels) == 1 else ', '.join(labels[:-1]) + ' and ' + labels[-1]
 
 
-def _recovery(local: Local, situation: str, pair: _Pair, now: float) -> tuple[int, str] | None:
+def _recovery(local: Local, situation: str, pair: _Pair, now: float, connects: bool) -> tuple[int, str] | None:
     """The Recovery row's keep rank and text, first match wins; None draws no row."""
     if local.armed is None:
         return None  # The Problem row carries arming.json cannot be read.
@@ -181,8 +193,9 @@ def _recovery(local: Local, situation: str, pair: _Pair, now: float) -> tuple[in
         return 12, 'not armed'
     if local.keeper == 'stale':
         age = local.keeper_heartbeat_age
-        return 6, (f'not answering for {int(age // 60)} min; connect to restart it' if age is not None
-                   else 'not answering; connect to restart it')
+        # A connect restarts it (keeper.start replaces a silent keeper); said only where the menu connects.
+        return 6, ('not answering' + (f' for {int(age // 60)} min' if age is not None else '')
+                   + ('; connect to restart it' if connects else ''))
     if local.keeper == 'unknown':
         return 6, 'state unknown (process check timed out)'
     if local.keeper == 'stopped' and pair.kind in _GONE:
@@ -241,6 +254,9 @@ def view(local: Local, remote: Remote | None, *,
         situation = 'failed'
     elif launch is not None and not launch.complete and (not local.pairing or launch.codespace == local.pairing):
         situation = 'launch'
+    elif not local.pairing and local.origin_unread:
+        # Git did not give origin, so neither the project's state nor its GitHub repository is known.
+        situation = 'unread'
     elif not local.pairing:
         situation = 'unpaired'
     else:
@@ -288,18 +304,22 @@ def view(local: Local, remote: Remote | None, *,
         elif situation == 'missing':
             account = remote.account.value if remote.account.status == 'ok' else 'your account'
             row(5, 5, 'Codespace', f'not listed for {account}; deleted, or under another account')
-        else:
-            row(5, 5, 'Codespace', "now listed under another repository; pair this one's Codespace")
         others = sorted((space for space in (spaces or ()) if space.name != name),
                         key=lambda space: (space.last_used_at is not None,
                                            space.last_used_at if space.last_used_at is not None else 0), reverse=True)
         for space in others[:3]:
             action('pair:' + space.name, 'Pair ' + space.name, 'work:cs', '--', '--rebind', space.name)
         action('create', 'Create a Codespace', 'setup')
+    elif situation == 'unread':
+        # task work:cs reads Git again; Create a Codespace would act on a project not read.
+        action('connect', 'Connect', 'work:cs')
     elif situation == 'unpaired':
         if spaces is not None:
             count = len(spaces)
             row(5, 5, 'Codespace', f'GitHub lists {count or "none"} for this repository')
+        else:
+            # task work:cs lists the repository's Codespaces itself (workspace._choose_pairing, service.spaces).
+            row(5, 5, 'Codespace', _silence(remote, again=True))
         if spaces is None or spaces:
             action('connect', 'Connect', 'work:cs')
         action('create', 'Create a Codespace', 'setup')
@@ -342,12 +362,14 @@ def view(local: Local, remote: Remote | None, *,
     if reachable and local.replacing is None:
         replace_action = Action('replace', 'Replace this Codespace', task_command(local, 'setup', '--', '--replace'))
 
+    # Connect is on the menu: the situation offers it, or recovery off puts it first. Rows say connect only then.
+    connects = recovery_off or any(candidate.key in ('connect', 'start') for candidate in candidates)
     if name and not recovery_off:
-        recovery = _recovery(local, situation, pair, now)
+        recovery = _recovery(local, situation, pair, now, connects)
         if recovery is not None:
             row(6, recovery[0], 'Recovery', recovery[1])
     if name and local.worker == 'stopped':
-        row(7, 7, 'Sync', 'stopped; connect to start it')
+        row(7, 7, 'Sync', 'stopped; connect to start it' if connects else 'stopped')
     elif local.cycle_at is not None:
         row(7, 14, 'Sync', 'last completed ' + _when(local.cycle_at, now))
 
@@ -377,8 +399,8 @@ def view(local: Local, remote: Remote | None, *,
                   if checkout.relation == 'other-branch' else 'on a detached HEAD')
         row(11, 11, 'Checkout', branch + tail)
     elif checkout.relation == 'behind' and checkout.branch == checkout.default:
-        copied = 'local copy' + (' from ' + _when(checkout.copied_at, now) if checkout.copied_at is not None else '')
-        row(11, 11, 'Checkout', f'{checkout.behind} commits behind origin/{checkout.default} ({copied})')
+        fetched = f' (as fetched {_when(checkout.copied_at, now)})' if checkout.copied_at is not None else ''
+        row(11, 11, 'Checkout', f"{checkout.behind} commits behind GitHub's {checkout.default}{fetched}")
         candidates.append(Action('update-checkout', 'Update the checkout',
                                  ('git', '-C', str(local.root), 'merge', '--ff-only', 'origin/' + checkout.default)))
     elif checkout.relation == 'diverged':
@@ -386,7 +408,8 @@ def view(local: Local, remote: Remote | None, *,
     if (local.generated and local.setup == 'installed' and local.source_ref is not None
             and remote is not None and remote.upstream.status == 'ok' and remote.upstream.value != local.source_ref):
         # The probe exposes the SHA only, not the configured symbolic ref's name.
-        row(12, 13, 'Generator', f'upstream is at {remote.upstream.value[:7]}; this project uses {local.source_ref[:7]}')
+        row(12, 13, 'Generator',
+            f'a newer version ({remote.upstream.value[:7]}) is out; this project uses {local.source_ref[:7]}')
         candidates.append(Action('upgrade', 'Review the generator upgrade', ('task', 'devcontainer:upgrade:self')))
 
     priority = []
@@ -446,9 +469,15 @@ def view(local: Local, remote: Remote | None, *,
         actions.insert(at, Action('logs', 'Show recovery and sync logs', task_command(local, 'work:logs')))
     actions += reserved
     actions.append(Action('details', 'Show details', task_command(local, 'work:status')))
+    if situation == 'elsewhere':
+        # Worded from the final menu: the cut (priority and reserved items first) can drop Create or the Pair items.
+        offered = [verb for verb, found in (('pair', any(action.key.startswith('pair:') for action in actions)),
+                                            ('create', any(action.key == 'create' for action in actions))) if found]
+        row(5, 5, 'Codespace', 'now under another repository'
+            + ('; ' + ' or '.join(offered) + ' one for this project' if offered else ''))
 
     kept = sorted(sorted(rows, key=lambda found: (found[1], found[0]))[:_ROWS])
-    lines = (_title(local.root.name, name), *(text for _, _, text in kept))
+    lines = (_title(local.root.name, name, local.origin_unread), *(text for _, _, text in kept))
     return View(lines, _unique_labels(actions))
 
 
