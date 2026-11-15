@@ -273,6 +273,7 @@ class OverviewTests(unittest.TestCase):
         create = setup + details  # FR10: no sign-in item where the menu cannot connect
         replace_command = [('task', 'devcontainer:setup', '--', '--replace')]
         paired = self.argv('work:cs') + signin + replace_command + details
+        down = self.argv('work:cs') + replace_command + details  # FR14: no sign-in until the Codespace is up
         creation = ('gh', 'codespace', 'logs', '-c', CS)
         resume = ('task', 'devcontainer:setup', '--', '--resume', CS)
         cases = [
@@ -318,19 +319,19 @@ class OverviewTests(unittest.TestCase):
             (self.local, self.remote, TITLE,
              'Codespace  available (checked 09:10)',
              self.argv('work:cs', 'work:cs:armed', 'work:cs:stop') + signin + replace_command + details),
-            (self.local, self.remote_state('Shutdown'), TITLE, 'Codespace  stopped (checked 09:10)', paired),
+            (self.local, self.remote_state('Shutdown'), TITLE, 'Codespace  stopped (checked 09:10)', down),
             (replace(self.local, logs=True, worker='stopped'), self.remote_state('Shutdown'), TITLE,
              'Codespace  stopped (checked 09:10)', self.argv('work:cs', 'work:logs') + replace_command + details),
             (replace(self.local, owner_stop_at=self.at), self.remote_state('Shutdown'), TITLE,
-             'Codespace  stopped; you stopped it at 09:10', paired),
+             'Codespace  stopped; you stopped it at 09:10', down),
             (replace(self.local, down_kind='OWNER', down_at=self.at), self.remote_state('Shutdown'), TITLE,
-             'Codespace  stopped; you stopped it at 09:10', paired),
+             'Codespace  stopped; you stopped it at 09:10', down),
             (replace(self.local, down_kind='LIFETIME', down_at=self.at), self.remote_state('Shutdown'), TITLE,
-             "Codespace  stopped by GitHub's 12-hour limit at 09:10", paired),
+             "Codespace  stopped by GitHub's 12-hour limit at 09:10", down),
             (replace(self.local, down_kind='OTHER', down_at=self.at), self.remote_state('Shutdown'), TITLE,
-             'Codespace  stopped at 09:10, not by you', paired),
-            (self.local, self.remote_state('Starting'), TITLE, 'Codespace  starting (checked 09:10)', paired),
-            (self.local, self.remote_state('ShuttingDown'), TITLE, 'Codespace  stopping (checked 09:10)', paired),
+             'Codespace  stopped at 09:10, not by you', down),
+            (self.local, self.remote_state('Starting'), TITLE, 'Codespace  starting (checked 09:10)', down),
+            (self.local, self.remote_state('ShuttingDown'), TITLE, 'Codespace  stopping (checked 09:10)', down),
             (self.local, self.remote_state('Moved'), TITLE, 'Codespace  in state Moved (checked 09:10)', paired),
             (self.local, replace(self.unavailable(), spaces=self.failed('no answer within 2 s', 'unknown')), TITLE,
              'Codespace  GitHub did not answer within 2 s', paired),
@@ -476,7 +477,6 @@ class OverviewTests(unittest.TestCase):
             ('task', 'work:cs'),
             ('task', 'work:forget', '--', '--agent', 'codex', '--session', 'session-1'),
             ('git', '-C', '/fixture/consult-sm-innovate', 'merge', '--ff-only', 'origin/main'),
-            ('task', 'work:signin:all'),
             ('task', 'devcontainer:setup', '--', '--replace'),
             ('task', 'work:status')])
         failed = self.frame(replace(self.local, launch=Launch(CS, False)), self.remote_state('Failed'))
@@ -661,8 +661,9 @@ class OverviewTests(unittest.TestCase):
                          ['start', 'replace', 'details'])
         # Nothing pads a menu that already has three actions, the sign-in item included.
         self.assertNotIn('logs', self.keys(self.frame(replace(self.local, logs=True))))
+        # FR14: a stopped Codespace gets no sign-in item, so the logs item fills its slot while the sync runs.
         self.assertEqual(self.keys(self.frame(replace(self.local, logs=True), stopped)),
-                         ['start', 'signin', 'replace', 'details'])
+                         ['start', 'logs', 'replace', 'details'])
 
     def test_other_branch_checkout_is_named(self):
         def row(branch, relation='other-branch'):
@@ -710,11 +711,22 @@ class OverviewTests(unittest.TestCase):
                 frame = self.frame(local, remote)
                 self.assertNotIn('signin', self.keys(frame))
                 self.assertNotIn('replace', self.keys(frame))
-        for state in ('Available', 'Shutdown', 'Starting', 'ShuttingDown', 'Moved'):
-            with self.subTest(state=state):
-                keys = self.keys(self.frame(remote=self.remote_state(state)))
-                self.assertTrue({'connect', 'start'} & set(keys), keys)
-                self.assertIn('signin', keys)
+        # FR14: and only while the Codespace is up; a state GitHub did not name or did not answer keeps it.
+        slow = replace(self.unavailable(), spaces=self.failed('no answer within 2 s', 'unknown'))
+        states = [(state, self.remote_state(state), state in ('Available', 'Moved'))
+                  for state in ('Available', 'Shutdown', 'Starting', 'ShuttingDown', 'Moved')]
+        for state, remote, offered in [*states, ('unknown', slow, True), ('failed read', self.unavailable(), True)]:
+            for signed_out in ((), ('Plaud',)):
+                with self.subTest(state=state, signed_out=signed_out):
+                    frame = self.frame(replace(self.local, signed_out=signed_out), remote)
+                    keys = self.keys(frame)
+                    self.assertTrue({'connect', 'start'} & set(keys), keys)
+                    self.assertEqual('signin' in keys, offered, keys)
+                    self.assertEqual(self.rows(frame, 'Sign-ins'),
+                                     ['Sign-ins   Plaud is not signed in'] if signed_out else [])
+        # The render's "Stopped: with a log": the logs item takes the slot the sign-in item would have had.
+        stopped = self.frame(replace(self.local, logs=True), self.remote_state('Shutdown'))
+        self.assertEqual(self.keys(stopped), ['start', 'logs', 'replace', 'details'])
         # Right after the first action, priority actions included.
         off = self.frame(self.replacing_local(armed=True, keeper='stopped', signed_out=('Plaud',)))
         self.assertEqual(self.keys(off), ['connect', 'signin', 'finish-replace', 'stop', 'details'])
@@ -728,7 +740,7 @@ class OverviewTests(unittest.TestCase):
         busy = self.frame(replace(self.local, refusals=refusals, retired=(OLD,), signed_out=('Plaud',)), listed)
         self.assertEqual(self.keys(busy), ['connect', 'signin', 'arm', 'replace', f'delete:{OLD}', 'details'])
         # Padding with the logs item keeps the sign-in directly above Replace.
-        padded = self.frame(replace(self.local, logs=True), self.remote_state('Starting'))
+        padded = self.frame(replace(self.local, logs=True), self.remote_state('Moved'))
         self.assertEqual(self.keys(padded), ['connect', 'signin', 'replace', 'details'])
 
     def test_history_row_waits_five_minutes(self):
