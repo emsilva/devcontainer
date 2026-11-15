@@ -546,6 +546,21 @@ class ContinuedClaudeTests(NativeFixture):
         second = self.api._publish_conversation(dp, self.store, entry, state=self.root / 'second-recovery', env=self.env)
         self.assertNotEqual(second['session_id'], result['session_id'])
 
+    def test_an_explicit_historical_root_is_not_an_import_destination(self):
+        """Receipts are judged against the destination roots, never against the capture scopes."""
+        source, dp, state, result, alias, child, receipt = self.forked_fixture()
+        third = self.root / 'third-checkout'
+        subprocess.run(['git', 'init', '-q', str(third)], check=True)
+        subprocess.run(['git', '-C', str(third), 'remote', 'add', 'origin', source.remote], check=True)
+        project = discover_project(third)
+        self.assertEqual((project.project_id, project.identity), (dp.project_id, dp.identity))
+        captured = self.api.capture_conversations(project, self.store, state=state, env=self.env,
+                                                  historical_roots=[str(dp.root)])
+        # The fork's folder is listed (its root is a capture scope), but the receipt that
+        # would authorize its inherited root names a destination this state never approved.
+        self.assertNotIn(result['session_id'], [item['session_id'] for item in captured['entries']])
+        self.assertIn(result['session_id'], [item['session_id'] for item in captured['issues']])
+
     def test_modified_alias_wrong_child_and_receipt_scope_mismatch_refuse(self):
         import copy
         source, dp, state, result, alias, child, receipt_path = self.forked_fixture()
@@ -732,6 +747,18 @@ class ReceiptReadTests(NativeFixture):
         self.claude()
         for _ in range(3):
             self.codex_import(state, str(uuid.uuid4()))
+        # Another project's receipt claims one of ours as its unchanged import.
+        # _publish_conversation refuses to write one, so it is written by hand.
+        claimed = Path(self.env['CODEX_HOME']) / 'sessions/2026/10/17' / f'rollout-2026-10-17T12-00-00-{ours[0]}.jsonl'
+        data = claimed.read_bytes()
+        foreign = state / 'conversation-imports' / hashlib.sha256(b'another-project').hexdigest() / 'receipt.json'
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text(json.dumps(dict(
+            publication=True, schema=1, status='complete', agent='codex', project_id='0' * 24,
+            identity='github.com/example/another-project', destination_root=str(self.project.root),
+            source_session_id=str(uuid.uuid4()), baselines=[dict(agent='codex', session_id=ours[0], turn_id=self.turn)],
+            files=[dict(destination=str(claimed), created=True, native_fork=True, session_id=ours[0], size=len(data),
+                        sha256=hashlib.sha256(data).hexdigest(), scope_roots=[str(self.project.root)])])))
         read = []
         real_read = self.api.read_json
         def recording(candidate):
@@ -742,9 +769,12 @@ class ReceiptReadTests(NativeFixture):
         self.assertEqual(result['issues'], [])
         self.assertEqual(sorted(entry['session_id'] for entry in result['entries']), sorted(ours + [self.sid]))
         receipts = sorted((state / 'conversation-imports').glob('*/receipt.json'))
-        self.assertEqual(len(receipts), 3)
+        self.assertEqual(len(receipts), 4)
+        self.assertIn(foreign, receipts)
         self.assertEqual(sorted(path for path in read if path.name == 'receipt.json'), receipts)
         self.assertLessEqual(sum(path.name == 'workspace.json' for path in read), 2)
+        # The foreign receipt neither drops nor disowns the session it claims.
+        self.assertEqual(self.api._conversation_origins(state), dict(claude={self.sid}, codex=set(ours)))
 
     def test_an_import_that_lands_just_before_the_listing_is_seen_with_its_receipt(self):
         from devcontainer_setup.project_sync import sessions
@@ -782,3 +812,25 @@ class ReceiptReadTests(NativeFixture):
         third = self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
         self.assertEqual(third['issues'], [])
         self.assertNotIn(published[0]['session_id'], [item['session_id'] for item in third['entries']])
+
+    def test_a_claude_import_that_lands_just_after_the_receipts_are_read_is_not_visited(self):
+        """CR3, the Claude half: the Claude folders are listed before the receipts are read."""
+        state = self.root / 'state'
+        (state / 'conversation-imports').mkdir(parents=True)
+        self.claude()
+        first = self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
+        entry = next(item for item in first['entries'] if item['session_id'] == self.sid)
+        published, started = [], []
+        real_read = self.api._import_receipts
+        def read_then_publication(project, state_):
+            receipts = real_read(project, state_)
+            if not started:  # A publication finishes right after this capture read the receipts.
+                started.append(True)
+                published.append(self.api._publish_conversation(self.project, self.store, entry, state=state, env=self.env))
+            return receipts
+        with patch.object(self.api, '_import_receipts', read_then_publication):
+            second = self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
+        self.assertEqual(len(published), 1)
+        self.assertEqual(second['issues'], [])
+        self.assertNotIn(published[0]['session_id'], [item['session_id'] for item in second['entries']])
+        self.assertNotIn(published[0]['session_id'], self.api._conversation_origins(state)['claude'])
