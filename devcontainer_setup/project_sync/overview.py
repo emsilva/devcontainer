@@ -365,7 +365,10 @@ def view(local: Local, remote: Remote | None, *,
         row(8, 8, 'History', f'not synced yet, {int((now - local.history_pending_since) // 60)} min so far')
     if local.signed_out:
         are = 'is' if len(local.signed_out) == 1 else 'are'
-        row(9, 9, 'Sign-ins', f'{_names(local.signed_out)} {are} not signed in')
+        unchecked = f'; {len(local.unchecked)} not checked' if local.unchecked else ''
+        row(9, 9, 'Sign-ins', f'{_names(local.signed_out)} {are} not signed in{unchecked}')
+    elif local.unchecked:
+        row(9, 9, 'Sign-ins', f'{_names(local.unchecked)} could not be checked')
 
     checkout = local.checkout
     if checkout.relation in ('other-branch', 'detached'):

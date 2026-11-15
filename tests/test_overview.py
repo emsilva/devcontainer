@@ -763,6 +763,31 @@ class OverviewTests(unittest.TestCase):
         self.assertEqual(self.keys(self.frame(replace(refused, refusals=()))),
                          ['connect', 'signin', 'arm', 'stop', 'replace', 'details'])
 
+    def test_sign_ins_row_says_not_signed_in_only_where_the_record_does(self):
+        # FR17 (Fable P2-2): unchecked tools get their own words and never move the sign-in item up.
+        tools = ('Plaud', 'Codex', 'Claude', 'OpenCode', 'Grok')
+        cases = [((), ('Plaud', 'Codex'), 'Plaud and Codex could not be checked'),
+                 ((), ('Plaud',), 'Plaud could not be checked'),
+                 (('Plaud',), ('Codex', 'Claude'), 'Plaud is not signed in; 2 not checked'),
+                 (('Plaud', 'Codex'), ('Grok',), 'Plaud and Codex are not signed in; 1 not checked'),
+                 (('Plaud',), (), 'Plaud is not signed in'),
+                 # The worst case of each form, with all five tools.
+                 ((), tools, 'Plaud, Codex, Claude, OpenCode and Grok could not be checked'),
+                 (tools, (), 'Plaud, Codex, Claude, OpenCode and Grok are not signed in'),
+                 (tools[:4], tools[4:], 'Plaud, Codex, Claude and OpenCode are not signed in; 1 not checked')]
+        for signed_out, unchecked, text in cases:
+            with self.subTest(signed_out=signed_out, unchecked=unchecked):
+                frame = self.frame(replace(self.local, signed_out=signed_out, unchecked=unchecked))
+                row, = self.rows(frame, 'Sign-ins')
+                self.assertEqual(row, 'Sign-ins   ' + text)
+                self.assertLessEqual(self.overview.cells(row), 78)
+                self.assertEqual(self.keys(frame).index('signin'), 1 if signed_out else 3, self.keys(frame))
+        for count in range(1, 5):
+            row, = self.rows(self.frame(replace(self.local, signed_out=tools[:count], unchecked=tools[count:])),
+                             'Sign-ins')
+            self.assertLessEqual(self.overview.cells(row), 78, row)
+        self.assertEqual(self.rows(self.frame(), 'Sign-ins'), [])
+
     def test_history_row_waits_five_minutes(self):
         self.assertEqual(self.rows(self.frame(replace(self.local, history_pending_since=self.now - 299)),
                                    'History'), [])
