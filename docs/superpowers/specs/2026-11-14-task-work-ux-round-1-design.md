@@ -429,3 +429,22 @@ ref, which can refuse where the full fetch passes. Round 2 weighs a printed line
 ruled: `default_holds.measure` fetches
 `origin/<default>` with no time limit before the wizard prints anything, so a GitHub that hangs holds the wizard
 silent. Bound that fetch (20 s); on timeout the last fetch serves, as Review Focus 3 says.
+
+### Fix round 3b, rulings on its Codex review (2026-11-15)
+
+Source: Codex review of `0965eb2..f2e8519` (two P2s, no P1). Accepted as built: the unpaired, GitHub-silent row says
+`Connect asks it again` (`task work:cs` with nothing paired errors for none, connects for one and asks for several,
+so "lists the ones it has" is not true for all three); FR20's connect rule also covers the setup, open-PR, failed and
+unfinished-launch situations (none of those menus connects); the `unread` situation offers only `Connect`.
+
+**FR25. FR18 also covers a Git error exit (Codex P2-1).** `git remote get-url origin` exits 2 with `No such remote
+'origin'` when there is no origin (measured, Git 2.54.0), and 128 for a broken `.git/config` or a folder Git cannot
+read. Only exit 2 means "no origin". A call that raises or exits with anything but 0 or 2 is a failed read:
+`origin_unread`, and the `Git remote cannot be read` problem. Tests cover the timeout, exit 2 and exit 128.
+
+**FR26. The elsewhere row's words come from the final menu (Codex P2-2).** With a cleanup unfinished, a retired
+Codespace listed and three other Codespaces to pair, the cut drops `Create a Codespace` while the row still says
+`pair or create one`. The row names what the final menu offers: `pair or create one for this project` when both are
+on it, `pair one for this project` with only `Pair …`, `create one for this project` with only Create, and no clause
+with neither. FR20's sweep test gains that crowded frame (and the render gains it), so a row that names an action
+the cut removed fails.
