@@ -135,7 +135,7 @@ def _silence(remote: Remote | None, *, again: bool = False) -> str:
         return 'checking GitHub…'
     reason = remote.spaces.reason or remote.names.reason or 'GitHub state is unknown'
     # Connect asks again only where asking again can answer: not without gh or its sign-in.
-    tail = '; Connect asks it again' if again else ''
+    tail = '; Connect asks again' if again else ''
     if reason == 'no answer within 2 s':
         return 'GitHub did not answer within 2 s' + tail
     if reason.startswith('request failed'):
@@ -406,12 +406,13 @@ def view(local: Local, remote: Remote | None, *,
         candidates.append(Action('update-checkout', 'Update the checkout',
                                  ('git', '-C', str(local.root), 'merge', '--ff-only', 'origin/' + checkout.default)))
     elif checkout.relation == 'diverged':
-        row(11, 11, 'Checkout', f'diverged from origin/{checkout.default}; review before merging')
+        row(11, 11, 'Checkout', f"diverged from GitHub's {checkout.default}; review before merging")
     if (local.generated and local.setup == 'installed' and local.source_ref is not None
             and remote is not None and remote.upstream.status == 'ok' and remote.upstream.value != local.source_ref):
-        # The probe exposes the SHA only, not the configured symbolic ref's name.
+        # The probe exposes the SHA only, not the configured symbolic ref's name. Different, not newer: a project set
+        # up from another branch or an unpushed commit differs too.
         row(12, 13, 'Generator',
-            f'a newer version ({remote.upstream.value[:7]}) is out; this project uses {local.source_ref[:7]}')
+            f'the latest version is {remote.upstream.value[:7]}; this project uses {local.source_ref[:7]}')
         candidates.append(Action('upgrade', 'Review the generator upgrade', ('task', 'devcontainer:upgrade:self')))
 
     priority = []
