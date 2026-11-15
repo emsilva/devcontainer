@@ -360,3 +360,58 @@ after a connect the item is back.
 `WIZARD_SECONDS = 180` stops a valid first setup on this Mac at load near 110-145; the saved-answer rerun then trips the
 100-prompt guard and reports a prompt loop that is not there. Raise it to 1200 s (a valid run took 870 s for the whole
 class under that load). The 100-prompt guard stays.
+
+### Fix round 3 (2026-11-15)
+
+Source: the Fable final review of `af769fc..ceff1ab` (no P1; two P2s, eight P3s, three "plausible, not shown").
+Ruled by the lead while the owner was away; every item below is a builder change on top of fix round 2. Deferred to
+round 2: the wizard Review block's raw values (Fable P3-7, not in this diff), `Next:` lines over 78 cells (P3-8,
+#87 binds the six lines only), and a time on the `Sign-ins` row.
+
+**FR16. The sign-in item never pushes off an action a row asks for (Fable P2-1).** FR3 moves the item to right after
+the first action while a tool is signed out; in a full menu that cut `Forget …` and `Update the checkout` while their
+rows still asked for them. With a tool signed out, the item moves up only when the menu has a free slot for it;
+otherwise it stays directly above Replace and gives way first, as FR3 says for a full menu.
+
+**FR17. "Not signed in" means the record says so (Fable P2-2).** A tool whose sign-in state could not be read
+(`unknown`, or a state `signins` does not name) is not drawn as not signed in and does not move the sign-in item up.
+The `Sign-ins` row names the signed-out tools as today; when there are none, it names the unchecked ones
+(`Plaud and Codex could not be checked`); when there are both, it adds a count (`Plaud is not signed in; 2 not
+checked`). Every form stays within 78 cells with all five tools. `test_standing.py`'s pin on `unknown` changes with
+it.
+
+**FR18. A pairing that was not read is not "no Codespace paired" (Fable P3-1).** When `standing.read` cannot place
+the project's state (`Local.state is None`, for example Git did not answer within its time), line one ends
+`· pairing not read`, and the menu offers no `Create a Codespace`.
+
+**FR19. A failed history sync has a row (Fable P3-2).** D3 removed the connect line that also reported a `failed` or
+`degraded` cycle. When the last completed conversation cycle's outcome is not `complete`, `task work` shows a
+`History` row that says so with its time and where the reason is (the place that actually names it: Show details or
+`task work:logs`), and the `Sync` row does not call that cycle completed.
+
+**FR20. No row asks for an action the menu does not offer (Fable P3-3, P3-4).** In the deleted, missing and
+elsewhere situations the `Sync` and `Recovery` rows do not tell the owner to connect. The elsewhere row reads
+`now under another repository; pair or create one for this project`, or `…; create one for this project` when no
+`Pair …` item is offered. Unpaired with GitHub silent gets a `Codespace` row, `GitHub did not answer; Connect lists
+the ones it has`, if `task work:cs` does list them in that state (otherwise words that are true). A test sweeps the
+render's situations: a row that names forget, connect, pair, create or update has that item on the menu, with any
+exception written beside the test.
+
+**FR21. `Open in Herdr` only while the Codespace is up (Fable, plausible).** FR2's label also needs the `available`,
+`other` or `unknown` reading that FR14 uses; while GitHub lists it starting or stopping the item reads `Connect`
+(a connect while stopping starts it again).
+
+**FR22. One command for a silent Recovery (Fable P3-5).** Show details says `run task work:cs` where it says `run
+task work:cs:armed` for a Recovery that is not answering, after the builder confirms through `keeper.start` that a
+plain connect replaces a silent keeper.
+
+**FR23. Words (Fable P3-6 and the owner's read).** On the `task work` screen: `on your Mac` becomes `on the Mac`
+(E); `Checkout   N commits behind GitHub's main (as fetched DATE)` replaces `… behind origin/main (local copy
+from DATE)`; `Generator  a newer version (bbbbbbb) is out; this project uses aaaaaaa` replaces `upstream is at …`;
+`Codespace  not read: the request to GitHub failed` replaces `request failed`; `History    1 conversation was not
+synced; forget it to clear the warning` (and the plural) replaces `… refused; forget it to clear the sync warning`.
+The same words in `__main__.py:635` and the docs follow.
+
+**FR24. The A1 fetch has a time limit (Review Focus 3; Fable, plausible).** `default_holds.measure` fetches
+`origin/<default>` with no time limit before the wizard prints anything, so a GitHub that hangs holds the wizard
+silent. Bound that fetch (20 s); on timeout the last fetch serves, as Review Focus 3 says.
