@@ -432,12 +432,14 @@ def view(local: Local, remote: Remote | None, *,
     # Replace and the retired delete keep their slots, so a busy state never hides them.
     reserved = [found for found in (replace_action, delete) if found is not None]
     actions = list(unique.values())
+    # Directly above Replace, or right after the first action while a tool is signed out and a slot is free; never
+    # reserved, so in a full menu it gives way before any action a row asks for.
+    up = bool(local.signed_out) and len(actions) < _SLOTS - len(reserved)
     if signin is not None:
-        # Directly above Replace, or right after the first action while a tool is signed out; never reserved.
-        actions.insert(1 if local.signed_out else len(actions), signin)
+        actions.insert(1 if up else len(actions), signin)
     actions = actions[:_SLOTS - len(reserved)]
     if local.logs and len(actions) + len(reserved) < 3:
-        at = actions.index(signin) if signin in actions and not local.signed_out else len(actions)
+        at = actions.index(signin) if signin in actions and not up else len(actions)
         actions.insert(at, Action('logs', 'Show recovery and sync logs', task_command(local, 'work:logs')))
     actions += reserved
     actions.append(Action('details', 'Show details', task_command(local, 'work:status')))

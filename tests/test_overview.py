@@ -141,7 +141,8 @@ class OverviewTests(unittest.TestCase):
         busy = replace(self.local, signed_out=('Plaud',),
                        refusals=(Refusal('codex', 'session-1', 'refused'), Refusal('codex', 'session-2', 'refused')))
         frame = self.frame(busy, replace(self.remote, upstream=self.ok('b' * 40)))
-        self.assertEqual(self.keys(frame), ['connect', 'signin', 'arm', 'stop', 'replace', 'details'])
+        # FR16: no free slot, so the sign-in item stays above Replace and gives way to the forget item.
+        self.assertEqual(self.keys(frame), ['connect', 'arm', 'stop', 'forget:codex:session-1', 'replace', 'details'])
         self.assertEqual(frame.actions[-2].argv, replace_argv)
         for local, remote in ((replace(self.local, setup='missing'), self.remote),
                               (replace(self.local, launch=Launch(CS, False)), self.remote),
@@ -738,10 +739,29 @@ class OverviewTests(unittest.TestCase):
         full = self.frame(replace(self.local, refusals=refusals, retired=(OLD,)), listed)
         self.assertEqual(self.keys(full), ['connect', 'arm', 'stop', 'replace', f'delete:{OLD}', 'details'])
         busy = self.frame(replace(self.local, refusals=refusals, retired=(OLD,), signed_out=('Plaud',)), listed)
-        self.assertEqual(self.keys(busy), ['connect', 'signin', 'arm', 'replace', f'delete:{OLD}', 'details'])
+        # FR16: a tool signed out moves it up only into a free slot; this menu has none.
+        self.assertEqual(self.keys(busy), ['connect', 'arm', 'stop', 'replace', f'delete:{OLD}', 'details'])
         # Padding with the logs item keeps the sign-in directly above Replace.
         padded = self.frame(replace(self.local, logs=True), self.remote_state('Moved'))
         self.assertEqual(self.keys(padded), ['connect', 'signin', 'replace', 'details'])
+
+    def test_sign_in_gives_way_to_an_action_a_row_asks_for(self):
+        # FR16 (Fable P2-1): available, not armed, Plaud signed out, one refused conversation.
+        refused = replace(self.local, signed_out=('Plaud',), refusals=(Refusal('codex', 'session-1', 'refused'),))
+        frame = self.frame(refused)
+        self.assertEqual(self.rows(frame, 'History'),
+                         ['History    1 conversation refused; forget it to clear the sync warning'])
+        self.assertEqual(self.keys(frame), ['connect', 'arm', 'stop', 'forget:codex:session-1', 'replace', 'details'])
+        self.assertEqual(self.rows(frame, 'Sign-ins'), ['Sign-ins   Plaud is not signed in'])
+        # The same for a checkout behind main.
+        behind = replace(self.local, signed_out=('Plaud',), checkout=replace(self.local.checkout, relation='behind',
+                                                                             behind=2))
+        frame = self.frame(behind)
+        self.assertEqual(self.rows(frame, 'Checkout'), ['Checkout   2 commits behind origin/main (local copy)'])
+        self.assertEqual(self.keys(frame), ['connect', 'arm', 'stop', 'update-checkout', 'replace', 'details'])
+        # Once the row is cleared, a slot is free and the item moves back up.
+        self.assertEqual(self.keys(self.frame(replace(refused, refusals=()))),
+                         ['connect', 'signin', 'arm', 'stop', 'replace', 'details'])
 
     def test_history_row_waits_five_minutes(self):
         self.assertEqual(self.rows(self.frame(replace(self.local, history_pending_since=self.now - 299)),

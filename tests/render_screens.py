@@ -179,6 +179,8 @@ def _other_rows(case):
                                                         worker='stopped'), case.remote),
         ('History: one conversation refused', replace(local, refusals=(Refusal('codex', 'session-1', 'refused'),)),
          case.remote),
+        ('Sign-ins: one signed out, a conversation refused',
+         replace(local, signed_out=('Plaud',), refusals=(Refusal('codex', 'session-1', 'refused'),)), case.remote),
         ('History: not synced yet', replace(local, history_pending_since=NOW - 901), case.remote),
         ('Checkout: behind origin/main', replace(local, checkout=replace(checkout, relation='behind', behind=2)),
          case.remote),
