@@ -549,7 +549,7 @@ class OverviewTests(unittest.TestCase):
             'Recovery   off until you connect',
             'Codespace  stopped; you stopped it at 09:10',
             'History    1 conversation refused; forget it to clear the sync warning',
-            "Checkout   2 commits behind GitHub's main"))
+            "Checkout   2 commits behind GitHub's main (as last fetched)"))
         self.assert_actions(frame, [
             ('task', 'work:cs'),
             ('task', 'work:forget', '--', '--agent', 'codex', '--session', 'session-1'),
@@ -853,7 +853,7 @@ class OverviewTests(unittest.TestCase):
         behind = replace(self.local, signed_out=('Plaud',), checkout=replace(self.local.checkout, relation='behind',
                                                                              behind=2))
         frame = self.frame(behind)
-        self.assertEqual(self.rows(frame, 'Checkout'), ["Checkout   2 commits behind GitHub's main"])
+        self.assertEqual(self.rows(frame, 'Checkout'), ["Checkout   2 commits behind GitHub's main (as last fetched)"])
         self.assertEqual(self.keys(frame), ['connect', 'arm', 'stop', 'update-checkout', 'replace', 'details'])
         # Once the row is cleared, a slot is free and the item moves back up.
         self.assertEqual(self.keys(self.frame(replace(refused, refusals=()))),
@@ -892,6 +892,12 @@ class OverviewTests(unittest.TestCase):
         row, = self.rows(self.frame(behind), 'Checkout')
         self.assertEqual(row, "Checkout   1234 commits behind GitHub's main (as fetched 2026-11-07 22:00)")
         self.assertLessEqual(self.overview.cells(row), 78)
+        # FR27 (Fable N1): without a fetch time the count is still the last fetch's, never GitHub's own.
+        unknown = self.frame(replace(behind, checkout=replace(behind.checkout, copied_at=None)))
+        self.assertEqual(unknown.lines[0], TITLE)
+        row, = self.rows(unknown, 'Checkout')
+        self.assertEqual(row, "Checkout   1234 commits behind GitHub's main (as last fetched)")
+        self.assertEqual(self.overview.cells(row), 62)
         generator, = self.rows(self.frame(remote=replace(self.remote, upstream=self.ok('b' * 40))), 'Generator')
         self.assertEqual(generator, 'Generator  a newer version (bbbbbbb) is out; this project uses aaaaaaa')
         # Every reason the probe gives for a failed read; a detail that would not fit is left to Show details.

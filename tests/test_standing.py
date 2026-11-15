@@ -586,6 +586,18 @@ class StandingTests(unittest.TestCase):
                  env=dict(env, GIT_COMMITTER_DATE='2031-01-02T03:04:05+00:00'))
         self.assertEqual(self.read().checkout.copied_at, copied)
 
+    def test_a_checkout_without_a_fetch_time_says_as_last_fetched(self):
+        # FR27 (Fable N1): a fresh clone has no reflog entry for origin/main, and Git expires old ones.
+        from devcontainer_setup.project_sync import overview
+        self.checkout_fixture('behind')
+        self.assertIsInstance(self.read().checkout.copied_at, float)
+        self.git('reflog', 'expire', '--expire=now', '--all')
+        self.assertEqual(self.git('reflog', 'show', 'refs/remotes/origin/main'), '')
+        checkout = self.read().checkout
+        self.assertEqual((checkout.relation, checkout.behind, checkout.copied_at), ('behind', 2, None))
+        lines = overview.view(self.read(), None).lines
+        self.assertIn("Checkout   2 commits behind GitHub's main (as last fetched)", lines)
+
     def test_checkout_matches_setup_decision(self):
         for relation in ('behind', 'current', 'diverged', 'detached', 'other-branch'):
             with self.subTest(relation=relation):

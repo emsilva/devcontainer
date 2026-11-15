@@ -399,7 +399,9 @@ def view(local: Local, remote: Remote | None, *,
                   if checkout.relation == 'other-branch' else 'on a detached HEAD')
         row(11, 11, 'Checkout', branch + tail)
     elif checkout.relation == 'behind' and checkout.branch == checkout.default:
-        fetched = f' (as fetched {_when(checkout.copied_at, now)})' if checkout.copied_at is not None else ''
+        # Without a reflog entry (a fresh clone, or one Git expired) the count is still against the last fetch.
+        fetched = (f' (as fetched {_when(checkout.copied_at, now)})' if checkout.copied_at is not None
+                   else ' (as last fetched)')
         row(11, 11, 'Checkout', f"{checkout.behind} commits behind GitHub's {checkout.default}{fetched}")
         candidates.append(Action('update-checkout', 'Update the checkout',
                                  ('git', '-C', str(local.root), 'merge', '--ff-only', 'origin/' + checkout.default)))
