@@ -183,33 +183,40 @@ def _claude_child_scopes(project, receipt, path, data, store, destination_roots)
     return roots
 
 
-def _receipt_scopes(project, state, path, data, store):
-    destination_roots = _scopes(project, state)
+def _import_receipts(project, state):
+    """This project's conversation-import receipts, each read once, in directory order.
+
+    Callers share the tuple across every session of a capture, so nothing may
+    change a receipt in it."""
+    if state is None:
+        return ()
+    receipts = (read_json(path) for path in (Path(state) / 'conversation-imports').glob('*/receipt.json'))
+    return tuple(receipt for receipt in receipts
+                 if receipt.get('project_id') == project.project_id and receipt.get('identity') == project.identity)
+
+
+def _receipt_scopes(project, receipts, destination_roots, path, data, store):
     scopes = set(destination_roots)
-    if state is not None:
-        for receipt_path in (Path(state) / 'conversation-imports').glob('*/receipt.json'):
-            receipt = read_json(receipt_path)
-            if receipt.get('project_id') != project.project_id or receipt.get('identity') != project.identity:
+    for receipt in receipts:
+        scopes.update(_claude_child_scopes(project, receipt, path, data, store, destination_roots))
+        if receipt.get('publication') and receipt.get('agent') == 'claude':
+            continue
+        for item in receipt.get('files', []):
+            destination = Path(item.get('destination', ''))
+            archived_fork = (receipt.get('publication') and item.get('native_fork')
+                             and len(destination.parents) >= 5
+                             and path.is_relative_to(destination.parents[4] / 'archived_sessions')
+                             and path.name == destination.name)
+            if str(path) != item.get('destination') and not archived_fork:
                 continue
-            scopes.update(_claude_child_scopes(project, receipt, path, data, store, destination_roots))
-            if receipt.get('publication') and receipt.get('agent') == 'claude':
-                continue
-            for item in receipt.get('files', []):
-                destination = Path(item.get('destination', ''))
-                archived_fork = (receipt.get('publication') and item.get('native_fork')
-                                 and len(destination.parents) >= 5
-                                 and path.is_relative_to(destination.parents[4] / 'archived_sessions')
-                                 and path.name == destination.name)
-                if str(path) != item.get('destination') and not archived_fork:
+            size = item.get('size')
+            if type(size) is int and 0 <= size <= sessions.MAX_BYTES:
+                prefix = data[:size] if len(data) >= size else _stable_prefix(path, size)
+                if hashlib.sha256(prefix).hexdigest() != item.get('sha256'):
                     continue
-                size = item.get('size')
-                if type(size) is int and 0 <= size <= sessions.MAX_BYTES:
-                    prefix = data[:size] if len(data) >= size else _stable_prefix(path, size)
-                    if hashlib.sha256(prefix).hexdigest() != item.get('sha256'):
-                        continue
-                    for scope in item.get('scope_roots', []):
-                        sessions._scoped_roots(scope, [scope])
-                        scopes.add(scope)
+                for scope in item.get('scope_roots', []):
+                    sessions._scoped_roots(scope, [scope])
+                    scopes.add(scope)
     return sorted(scopes)
 
 
@@ -247,7 +254,7 @@ def _ordinal(data):
     return ordinals[-1] + 1
 
 
-def _codex_entry(project, store, sid, index, *, state, scopes):
+def _codex_entry(project, store, sid, index, *, scopes, receipts, destination_roots):
     visiting, retained, cutoff_by_id, files, observed = set(), {}, {}, [], []
     def visit(current, length=None):
         if current in visiting:
@@ -271,7 +278,7 @@ def _codex_entry(project, store, sid, index, *, state, scopes):
             raise ValueError('Invalid native session metadata')
         sessions.session_uuid(meta.get('id'))
         sessions._version('codex', meta.get('cli_version'))
-        approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, data, store)))
+        approved = sorted(set(scopes) | set(_receipt_scopes(project, receipts, destination_roots, path, data, store)))
         sessions._scoped_roots(meta.get('cwd'), approved)
         parent = sessions._parent(meta)
         inherited = None
@@ -308,7 +315,7 @@ def _codex_entry(project, store, sid, index, *, state, scopes):
     return retained, dict(schema=SCHEMA, agent='codex', session_id=sid, project_id=project.project_id, identity=project.identity, source_root=meta['cwd'], scope_roots=sorted({root for item in files for root in item['scope_roots']}), cutoff=dict(turn_id=cutoff, bytes=len(retained[sid])), files=files, title=sessions._catalog_metadata(retained[sid], 'codex', index[sid])['title'], updated_at=index[sid].stat().st_mtime)
 
 
-def _claude_entry(project, store, sid, path, *, state, scopes):
+def _claude_entry(project, store, sid, path, *, scopes, receipts, destination_roots):
     # The transcript resumes on its own. Its side folders (subagents, large tool
     # results) and task list stay on this host for now (#52).
     data = _stable_prefix(path)
@@ -323,7 +330,7 @@ def _claude_entry(project, store, sid, path, *, state, scopes):
         raise ValueError('No validated completed Claude turn yet')
     kept = b''.join(data.splitlines(keepends=True)[:end])
     valid = sessions._records(kept, 'claude')
-    approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, kept, store)))
+    approved = sorted(set(scopes) | set(_receipt_scopes(project, receipts, destination_roots, path, kept, store)))
     sessions._validate_claude(valid, sid, approved)
     versions = [row['version'] for row in valid if 'version' in row]
     if not versions:
@@ -397,20 +404,18 @@ def _finished_workers(home, scopes):
     return over
 
 
-def _import_aliases(project, state):
+def _import_aliases(receipts):
     aliases = set()
-    if state is not None:
-        for receipt_path in (Path(state) / 'conversation-imports').glob('*/receipt.json'):
-            receipt = read_json(receipt_path)
-            if not receipt.get('publication') and receipt.get('project_id') == project.project_id and receipt.get('identity') == project.identity:
-                aliases.update(item['destination'] for item in receipt.get('files', []) if item.get('physical_alias'))
+    for receipt in receipts:
+        if not receipt.get('publication'):
+            aliases.update(item['destination'] for item in receipt.get('files', []) if item.get('physical_alias'))
     return aliases
 
 
-def _created_imports(project, state):
+def _created_imports(receipts):
     """Native files claimed by publication journals, including pending ones."""
     return {(receipt['agent'], item['destination'])
-            for receipt in _publication_receipts(project, state)
+            for receipt in receipts if receipt.get('publication')
             for item in receipt.get('files', []) if item.get('created') is True}
 
 
@@ -461,15 +466,17 @@ def _started_here(project, state, agent, sid, env):
     path = (home / 'projects' / sessions.claude_namespace(project.root) / (sid + '.jsonl')
             if agent == 'claude' else sessions._codex_index(home).get(sid))
     return (path is not None and sessions._safe(path).is_file()
-            and (agent, str(path)) not in _created_imports(project, state))
+            and (agent, str(path)) not in _created_imports(_import_receipts(project, state)))
 
 
 def capture_conversations(project, store, *, state=None, env=None, historical_roots=()):
     """Observe ordinary project sessions without a native process or writer lock."""
     scopes = _scopes(project, state, historical_roots)
+    # Where an import may land. It differs from scopes only with historical_roots
+    # (the Codespace side), and receipts are judged against it, never against scopes.
+    destination_roots = _scopes(project, state)
     result = dict(schema=SCHEMA, entries=[], issues=[], completed_files=[])
     origins = dict(claude=set(), codex=set())
-    imported = _created_imports(project, state)
     def issue(agent, sid, error):
         result['issues'].append(dict(agent=agent, session_id=sid, reason=sessions.display_text(str(error), 400)))
     def keep(retained, entry):
@@ -480,7 +487,7 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
                    for item in entry['files']]))
         # Decide before any put: no manifest would reference an unchanged import's
         # blobs, and the store never deletes. Its retained bytes are still in hand.
-        if _unchanged_import(project, retained, state, entry):
+        if _unchanged_import(receipts, retained, entry):
             return
         try:
             for item in entry['files']:
@@ -501,6 +508,15 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
     except (ValueError, OSError) as exc:
         index = {}
         issue('codex', None, exc)
+    # List every file this capture visits before reading the receipts, the one
+    # read of the capture. A publication records a file in its receipt before the
+    # file gets its name, so each listed import is found with its receipt.
+    claude_stores = []
+    for root in scopes:
+        directory = home / 'projects' / sessions.claude_namespace(root)
+        claude_stores.append(None if directory.is_symlink() else list(directory.glob('*.jsonl')))
+    receipts = _import_receipts(project, state)
+    imported = _created_imports(receipts)
     for sid, path in index.items():
         if sid in finished:
             continue
@@ -524,26 +540,26 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
                 raise ValueError('Invalid native session metadata')
             if meta.get('source') == 'exec':
                 continue  # Headless runs are not conversations; the picker hides them (#49).
-            approved = sorted(set(scopes) | set(_receipt_scopes(project, state, path, first, store)))
+            approved = sorted(set(scopes) | set(_receipt_scopes(project, receipts, destination_roots, path, first, store)))
             if meta.get('cwd') not in approved:
                 continue
             if row.get('type') == 'session_meta' and metadata_only and sessions._parent(meta) is None:
                 continue  # An unopened turn is not a conversation or an origin yet.
             if ('codex', str(path)) not in imported:
                 origins['codex'].add(sid)
-            retained, entry = _codex_entry(project, store, sid, index, state=state, scopes=scopes)
+            retained, entry = _codex_entry(project, store, sid, index, scopes=scopes, receipts=receipts,
+                                           destination_roots=destination_roots)
         except (ValueError, OSError) as exc:
             issue('codex', sid, exc)
             continue
         keep(retained, entry)
         del retained  # Hold one session's retained bytes at a time.
-    aliases = _import_aliases(project, state)
-    for root in scopes:
-        directory = home / 'projects' / sessions.claude_namespace(root)
-        if directory.is_symlink():
+    aliases = _import_aliases(receipts)
+    for paths in claude_stores:
+        if paths is None:
             issue('claude', None, ValueError('Symlink native project store'))
             continue
-        for path in directory.glob('*.jsonl'):
+        for path in paths:
             sid = path.stem
             if str(path) in aliases or sid in finished or not re.fullmatch(r'[0-9a-f-]{36}', sid):
                 continue  # Not a transcript (herd.jsonl and the like), or a finished worker's.
@@ -553,7 +569,8 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
                     continue  # Agent SDK and claude -p runs are not conversations.
                 if ('claude', str(path)) not in imported:
                     origins['claude'].add(sid)
-                retained, entry = _claude_entry(project, store, sid, path, state=state, scopes=scopes)
+                retained, entry = _claude_entry(project, store, sid, path, scopes=scopes, receipts=receipts,
+                                                destination_roots=destination_roots)
             except (ValueError, OSError) as exc:
                 issue('claude', sid, exc)
                 continue
@@ -1010,17 +1027,13 @@ def _revision(entry, by_id, order):
 
 
 def _publication_receipts(project, state):
-    if state is None:
-        return
-    for path in (Path(state) / 'conversation-imports').glob('*/receipt.json'):
-        receipt = read_json(path)
-        if (receipt.get('publication') and receipt.get('project_id') == project.project_id
-                and receipt.get('identity') == project.identity):
-            yield receipt
+    return (receipt for receipt in _import_receipts(project, state) if receipt.get('publication'))
 
 
-def _unchanged_import(project, retained, state, entry):
-    for receipt in _publication_receipts(project, state):
+def _unchanged_import(receipts, retained, entry):
+    for receipt in receipts:
+        if not receipt.get('publication'):
+            continue
         for baseline in receipt.get('baselines', []):
             if baseline.get('agent') == entry['agent'] and baseline.get('session_id') == entry['session_id']:
                 # A completed-turn advance is the only reason to export an import.

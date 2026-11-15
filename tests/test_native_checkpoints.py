@@ -702,3 +702,83 @@ class NativeRetryTests(NativeFixture):
             result = self.api._publish_conversation(self.project, self.store, entry, state=state, env=destination_env)
         self.assertNotEqual(result['session_id'], self.sid)
         self.assertEqual(len([method for method, _ in calls if method == 'thread/resume']), 2)
+
+
+class ReceiptReadTests(NativeFixture):
+    def codex_import(self, state, sid):
+        """What a finished Codex publication leaves: the native file, then its receipt."""
+        path = self.codex(sid)
+        data = path.read_bytes()
+        receipt = state / 'conversation-imports' / hashlib.sha256(sid.encode()).hexdigest() / 'receipt.json'
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps(dict(
+            publication=True, schema=1, status='complete', agent='codex', project_id=self.project.project_id,
+            identity=self.project.identity, destination_root=str(self.project.root), source_session_id=str(uuid.uuid4()),
+            baselines=[dict(agent='codex', session_id=sid, turn_id=self.turn)],
+            files=[dict(destination=str(path), created=True, native_fork=True, session_id=sid, size=len(data),
+                        sha256=hashlib.sha256(data).hexdigest(), scope_roots=[str(self.project.root)])])))
+        return path
+
+    def test_a_capture_reads_each_receipt_once_however_many_sessions_it_visits(self):
+        state = self.root / 'state'
+        ours = [str(uuid.uuid4()) for _ in range(2)]
+        for sid in ours:
+            self.codex(sid)
+        elsewhere = self.codex(str(uuid.uuid4()))
+        rows = elsewhere.read_bytes().splitlines(keepends=True)
+        first = json.loads(rows[0])
+        first['payload'].update(cwd=str(self.root / 'another-project'), runtime_workspace_roots=[str(self.root / 'another-project')])
+        elsewhere.write_bytes(json.dumps(first).encode() + b'\n' + b''.join(rows[1:]))
+        self.claude()
+        for _ in range(3):
+            self.codex_import(state, str(uuid.uuid4()))
+        read = []
+        real_read = self.api.read_json
+        def recording(candidate):
+            read.append(Path(candidate))
+            return real_read(candidate)
+        with patch.object(self.api, 'read_json', recording):
+            result = self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
+        self.assertEqual(result['issues'], [])
+        self.assertEqual(sorted(entry['session_id'] for entry in result['entries']), sorted(ours + [self.sid]))
+        receipts = sorted((state / 'conversation-imports').glob('*/receipt.json'))
+        self.assertEqual(len(receipts), 3)
+        self.assertEqual(sorted(path for path in read if path.name == 'receipt.json'), receipts)
+        self.assertLessEqual(sum(path.name == 'workspace.json' for path in read), 2)
+
+    def test_an_import_that_lands_just_before_the_listing_is_seen_with_its_receipt(self):
+        from devcontainer_setup.project_sync import sessions
+        state = self.root / 'state'
+        (state / 'conversation-imports').mkdir(parents=True)
+        imported = str(uuid.uuid4())
+        real_index = sessions._codex_index
+        def publication_then_index(home):
+            self.codex_import(state, imported)  # A publication finishes as the capture starts listing.
+            return real_index(home)
+        with patch.object(sessions, '_codex_index', publication_then_index):
+            result = self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
+        self.assertEqual(result['issues'], [])
+        self.assertEqual(result['entries'], [])  # An unchanged import is not sent back,
+        self.assertEqual(self.api._conversation_origins(state), dict(claude=set(), codex=set()))  # nor started here.
+
+    def test_a_claude_import_that_lands_while_codex_sessions_are_read_is_not_sent_back(self):
+        state = self.root / 'state'
+        (state / 'conversation-imports').mkdir(parents=True)
+        self.claude()
+        self.codex(str(uuid.uuid4()))
+        first = self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
+        entry = next(item for item in first['entries'] if item['session_id'] == self.sid)
+        published = []
+        real_entry = self.api._codex_entry
+        def publication_then_entry(*args, **kwargs):
+            if not published:  # Another process publishes while this capture reads its Codex sessions.
+                published.append(self.api._publish_conversation(self.project, self.store, entry, state=state, env=self.env))
+            return real_entry(*args, **kwargs)
+        with patch.object(self.api, '_codex_entry', publication_then_entry):
+            second = self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
+        self.assertEqual(len(published), 1)
+        self.assertEqual(second['issues'], [])
+        self.assertNotIn(published[0]['session_id'], [item['session_id'] for item in second['entries']])
+        third = self.api.capture_conversations(self.project, self.store, state=state, env=self.env)
+        self.assertEqual(third['issues'], [])
+        self.assertNotIn(published[0]['session_id'], [item['session_id'] for item in third['entries']])
