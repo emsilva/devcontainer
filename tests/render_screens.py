@@ -10,13 +10,16 @@ name keeps `unittest discover` from collecting it.
 from contextlib import contextmanager
 from dataclasses import fields, replace
 from datetime import datetime
+import os
 from pathlib import Path
 import signal
+import subprocess
 import sys
+import tempfile
 from unittest.mock import patch
 
 from devcontainer_setup import replacement
-from devcontainer_setup.project_sync import overview, workspace
+from devcontainer_setup.project_sync import overview, standing, workspace
 from devcontainer_setup.project_sync.probe import Observation, Remote, Space
 from devcontainer_setup.project_sync.standing import Checkout, Launch, Refusal
 # Modules only: a TestCase class imported by name would be collected again by any test module importing this one.
@@ -58,9 +61,38 @@ def frame(local, remote):
     return overview.view(local, remote, now=NOW)
 
 
+# The facts standing.read leaves when Git does not give origin; the frame takes them from that path (FR28).
+UNREAD_FIELDS = ('origin_unread', 'pairing', 'state', 'repository', 'armed', 'keeper', 'worker', 'problems')
+
+
+def unread_origin():
+    """`standing.read` on a temporary repository with Git timing out on origin, as the product reads it."""
+    with tempfile.TemporaryDirectory() as temp:
+        base = Path(temp).resolve()
+        env = dict(os.environ, HOME=str(base / 'home'), XDG_STATE_HOME=str(base / 'state'),
+                   XDG_CACHE_HOME=str(base / 'cache'), GIT_CEILING_DIRECTORIES=str(base),
+                   GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
+        env.pop('CODESPACES', None)
+        root = base / 'consult-sm-innovate'
+        root.mkdir()
+        for args in (('init', '-q', '-b', 'main'),
+                     ('remote', 'add', 'origin', 'https://github.com/Example/Project.git')):
+            subprocess.run(['git', '-C', str(root), *args], check=True, capture_output=True, env=env)
+        real = subprocess.run
+
+        def slow(argv, *args, **kwargs):
+            if argv[:1] == ['git'] and argv[-3:] == ['remote', 'get-url', 'origin']:
+                raise subprocess.TimeoutExpired(argv, 1.0)
+            return real(argv, *args, **kwargs)
+
+        with patch.object(standing.subprocess, 'run', slow):
+            return standing.read(root, env=env, timeout=30.0)
+
+
 def _situation_rows(case):
     local, remote, ok = case.local, case.remote, case.ok
     unpaired = replace(local, pairing=None)
+    unread = unread_origin()
     return [
         ('Setup: not done yet', replace(local, setup='missing'), remote),
         ('Setup: not done yet, nothing paired', replace(local, setup='missing', pairing=None), remote),
@@ -103,8 +135,7 @@ def _situation_rows(case):
         ('GitHub not answering: a request failed', local, case.unavailable()),
         ('GitHub not answering: nothing paired', unpaired, case.unavailable()),
         ('Git did not give origin: pairing not read',
-         replace(unpaired, origin_unread=True, state=None, repository='', armed=None, keeper='unknown',
-                 worker='unknown', problems=('Git remote cannot be read',)),
+         replace(local, **{name: getattr(unread, name) for name in UNREAD_FIELDS}),
          replace(remote, names=case.ok(frozenset()), spaces=case.ok(()))),
     ]
 

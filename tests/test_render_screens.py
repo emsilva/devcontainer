@@ -48,6 +48,22 @@ class RenderScreensTests(unittest.TestCase):
             self.assertNotIn(marker, self.text)
 
 
+class UnreadOriginTests(unittest.TestCase):
+    def test_the_pairing_not_read_frame_draws_the_products_problems(self):
+        # FR28 (Fable N2): the frame's facts come from standing.read with Git timing out on origin.
+        unread = render_screens.unread_origin()
+        self.assertTrue(unread.origin_unread)
+        self.assertEqual(unread.problems, ('Git remote cannot be read',))
+        (local, remote), = [(local, remote) for name, local, remote in render_screens.situations()
+                            if name == 'Git did not give origin: pairing not read']
+        for field in render_screens.UNREAD_FIELDS:
+            self.assertEqual(getattr(local, field), getattr(unread, field), field)
+        frame = render_screens.frame(local, remote)
+        self.assertEqual(frame.lines, ('consult-sm-innovate · pairing not read',
+                                       'Problem    Git remote cannot be read; Show details has more'))
+        self.assertEqual([action.key for action in frame.actions], ['connect', 'details'])
+
+
 class RowActionTests(unittest.TestCase):
     """FR20: a row that asks for forget, connect, pair, create or update has that item on the menu."""
 

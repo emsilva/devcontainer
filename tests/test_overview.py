@@ -349,7 +349,7 @@ class OverviewTests(unittest.TestCase):
         self.assert_actions(inside, self.argv('work:cs:stop'))
         silent = self.frame(replace(self.local, pairing=None), self.unavailable())
         self.assertEqual(silent.lines,
-                         (UNPAIRED, 'Codespace  not read: the request to GitHub failed; Connect asks it again'))
+                         (UNPAIRED, 'Codespace  not read: the request to GitHub failed; Connect asks again'))
         self.assert_actions(silent, self.argv('work:cs') + setup + details)
 
     def test_rows_ask_only_for_an_action_the_menu_offers(self):
@@ -385,10 +385,10 @@ class OverviewTests(unittest.TestCase):
         unpaired = replace(self.local, pairing=None)
         for remote, text in ((None, 'checking GitHub…'),
                              (replace(self.unavailable(), spaces=self.failed('no answer within 2 s', 'unknown')),
-                              'GitHub did not answer within 2 s; Connect asks it again'),
-                             (self.unavailable(), 'not read: the request to GitHub failed; Connect asks it again'),
+                              'GitHub did not answer within 2 s; Connect asks again'),
+                             (self.unavailable(), 'not read: the request to GitHub failed; Connect asks again'),
                              (Remote(*(self.failed('request failed; child 99998 was not reaped') for _ in range(5))),
-                              'not read: the request to GitHub failed; Connect asks it again'),
+                              'not read: the request to GitHub failed; Connect asks again'),
                              (Remote(*(self.failed('not signed in to GitHub') for _ in range(5))),
                               'not signed in to GitHub'),
                              (Remote(*(self.failed('gh is not installed') for _ in range(5))), 'gh is not installed')):
@@ -549,7 +549,7 @@ class OverviewTests(unittest.TestCase):
             'Recovery   off until you connect',
             'Codespace  stopped; you stopped it at 09:10',
             'History    1 conversation refused; forget it to clear the sync warning',
-            "Checkout   2 commits behind GitHub's main"))
+            "Checkout   2 commits behind GitHub's main (as last fetched)"))
         self.assert_actions(frame, [
             ('task', 'work:cs'),
             ('task', 'work:forget', '--', '--agent', 'codex', '--session', 'session-1'),
@@ -853,7 +853,7 @@ class OverviewTests(unittest.TestCase):
         behind = replace(self.local, signed_out=('Plaud',), checkout=replace(self.local.checkout, relation='behind',
                                                                              behind=2))
         frame = self.frame(behind)
-        self.assertEqual(self.rows(frame, 'Checkout'), ["Checkout   2 commits behind GitHub's main"])
+        self.assertEqual(self.rows(frame, 'Checkout'), ["Checkout   2 commits behind GitHub's main (as last fetched)"])
         self.assertEqual(self.keys(frame), ['connect', 'arm', 'stop', 'update-checkout', 'replace', 'details'])
         # Once the row is cleared, a slot is free and the item moves back up.
         self.assertEqual(self.keys(self.frame(replace(refused, refusals=()))),
@@ -892,8 +892,20 @@ class OverviewTests(unittest.TestCase):
         row, = self.rows(self.frame(behind), 'Checkout')
         self.assertEqual(row, "Checkout   1234 commits behind GitHub's main (as fetched 2026-11-07 22:00)")
         self.assertLessEqual(self.overview.cells(row), 78)
+        # FR27 (Fable N1): without a fetch time the count is still the last fetch's, never GitHub's own.
+        unknown = self.frame(replace(behind, checkout=replace(behind.checkout, copied_at=None)))
+        self.assertEqual(unknown.lines[0], TITLE)
+        row, = self.rows(unknown, 'Checkout')
+        self.assertEqual(row, "Checkout   1234 commits behind GitHub's main (as last fetched)")
+        self.assertEqual(self.overview.cells(row), 62)
         generator, = self.rows(self.frame(remote=replace(self.remote, upstream=self.ok('b' * 40))), 'Generator')
-        self.assertEqual(generator, 'Generator  a newer version (bbbbbbb) is out; this project uses aaaaaaa')
+        self.assertEqual(generator, 'Generator  the latest version is bbbbbbb; this project uses aaaaaaa')
+        self.assertEqual(self.overview.cells(generator), 67)
+        # FR30: the diverged row names GitHub's main, as the behind row does.
+        diverged, = self.rows(self.frame(replace(self.local, checkout=replace(self.local.checkout,
+                                                                             relation='diverged'))), 'Checkout')
+        self.assertEqual(diverged, "Checkout   diverged from GitHub's main; review before merging")
+        self.assertEqual(self.overview.cells(diverged), 61)
         # Every reason the probe gives for a failed read; a detail that would not fit is left to Show details.
         for reason, text in (('request failed', 'not read: the request to GitHub failed'),
                              ('request failed; child 99998 was not reaped',
@@ -1090,7 +1102,7 @@ class OverviewTests(unittest.TestCase):
             "Checkout   2 commits behind GitHub's main (as fetched 09:10)"))
         self.assertIn(('task', 'devcontainer:upgrade:self'), [a.argv for a in frame.actions])
         generator = self.frame(replace(self.local, cycle_at=self.at), remote)
-        self.assertIn('Generator  a newer version (bbbbbbb) is out; this project uses aaaaaaa', generator.lines)
+        self.assertIn('Generator  the latest version is bbbbbbb; this project uses aaaaaaa', generator.lines)
         held = self.frame(replace(self.local, armed=True, hold_until=self.now + 3600, cycle_at=self.at))
         self.assertIn('Recovery   armed; on hold until 13:00', held.lines)
         self.assertIn('Sync       last completed 09:10', held.lines)
@@ -1098,7 +1110,7 @@ class OverviewTests(unittest.TestCase):
         self.assertIn('Recovery   armed; next 12-hour stop not known yet', expired.lines)
         self.assertNotIn('upgrade', self.keys(self.frame(replace(self.local, setup='missing'), remote)))
         diverged = self.frame(replace(self.local, checkout=replace(self.local.checkout, relation='diverged')))
-        self.assertIn('Checkout   diverged from origin/main; review before merging', diverged.lines)
+        self.assertIn("Checkout   diverged from GitHub's main; review before merging", diverged.lines)
         self.assertNotIn('update-checkout', self.keys(diverged))
         other = self.frame(replace(self.local, checkout=replace(self.local.checkout, branch='topic', relation='behind')))
         self.assertNotIn('update-checkout', self.keys(other))
