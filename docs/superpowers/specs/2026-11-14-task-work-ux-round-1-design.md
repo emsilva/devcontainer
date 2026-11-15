@@ -416,7 +416,8 @@ plain connect replaces a silent keeper.
 **FR23 (3b). Words (Fable P3-6 and the owner's read).** On the `task work` screen: `Checkout   N commits behind GitHub's main (as fetched DATE)` replaces `… behind origin/main (local copy
 from DATE)`; `Generator  a newer version (bbbbbbb) is out; this project uses aaaaaaa` replaces `upstream is at …`;
 `Codespace  not read: the request to GitHub failed` replaces `request failed`. The docs follow. `your Mac` stays: it names the same
-Mac, and fifteen messages outside round 1 use it; E is amended below. The `History` row keeps "refused": `task work:forget`'s help and refusal say "refused", so
+Mac, `devcontainer_setup` uses it on 24 lines (`git grep -n "your Mac" -- devcontainer_setup`), and round 1
+added none of them; E is amended below. The `History` row keeps "refused": `task work:forget`'s help and refusal say "refused", so
 "was not synced" would give one thing two names (E), next to the pending row's different "not synced yet".
 
 **E, amended (2026-11-15, lead, from Fable P3-6).** "your Mac" is allowed: it is the same Mac, not a second name. E
