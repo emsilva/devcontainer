@@ -342,3 +342,21 @@ longer on this Mac`, `… changed since the final capture`, `no turn newer than 
 sync". The AST guard that FR8 added covers every word E bans for the final sync (`final flush`, `final-flush`,
 `final capture`, `flush and move`). The FR10 test whose name says "whenever connected" is renamed to say where the
 menu can connect.
+
+### Fix round 2 (2026-11-15)
+
+Sources: the second Codex review (`F2`, P3; no P1 or P2) and the lead's reading of the fix-round render.
+
+**FR14. `Sign in to the tools` only while the Codespace is up.** FR10 counted `Start and connect` as a place the menu
+can connect, so a stopped Codespace whose sync is still running gets the item. `task work:signin:all` cannot start a
+Codespace: `signins.ready` waits up to 30 s for the link and an ssh heartbeat, then prints `Sign-in needs this project
+connected to its Codespace. Run task work:cs, …`. Beside `Start and connect` the item is a dead end, and it takes the
+slot `Show recovery and sync logs` fills in a short menu (render, "Stopped: with a log"). The item is offered only
+where FR10 offers it and GitHub does not list the paired Codespace as stopped, stopping or starting: the `available`,
+`other` and `unknown` readings keep it (a slow GitHub must not hide it). The `Sign-ins` row stays in every situation;
+after a connect the item is back.
+
+**FR15. The render fixture's wizard budget tolerates load (Codex F2, tests only).** `tests/render_screens.py`'s
+`WIZARD_SECONDS = 180` stops a valid first setup on this Mac at load near 110-145; the saved-answer rerun then trips the
+100-prompt guard and reports a prompt loop that is not there. Raise it to 1200 s (a valid run took 870 s for the whole
+class under that load). The 100-prompt guard stays.
