@@ -806,6 +806,27 @@ class ReplicationTests(unittest.TestCase):
         self.assertEqual(progress[0]['stage'], 'publication')
         self.assertLess(progress[0]['stage_deadline_at'] - progress[0]['stage_started_at'], .03)
 
+    def test_an_expiry_that_does_not_end_the_stage_is_raised_again(self):
+        import signal
+        import threading
+        from devcontainer_setup.project_sync import sync_cycle
+        before = signal.getsignal(signal.SIGALRM)
+        cycle = sync_cycle.begin(self.project, str(self.root))
+        swallowed = []
+        with patch.object(sync_cycle, 'STAGE_TIMEOUT', .02), patch.object(sync_cycle, 'STAGE_RETRY', 1.0):
+            with self.assertRaisesRegex(TimeoutError, 'timed out'):
+                with sync_cycle.stage(cycle, 'capture', None):
+                    try:
+                        threading.Event().wait(5)
+                    except BaseException:
+                        swallowed.append(signal.getitimer(signal.ITIMER_REAL))  # The first expiry is lost here.
+                    threading.Event().wait(5)
+        self.assertEqual(len(swallowed), 1)
+        self.assertGreater(swallowed[0][0], 0)
+        self.assertEqual(swallowed[0][1], 1.0)
+        self.assertEqual(signal.getsignal(signal.SIGALRM), before)
+        self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0., 0.))
+
     def test_batch_transport_and_retry_only_send_missing_verified_objects(self):
         snapshot = self.snapshot(count=100)
         remote = replication.RemoteStore(self.endpoint)

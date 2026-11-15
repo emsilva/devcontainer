@@ -15,6 +15,9 @@ DIRECTIONS = ('desktop_to_codespace', 'codespace_to_desktop')
 # RPC calls have their own 180 second transport bound. A whole stage (which may
 # contain several calls) also has a deadline; an idle PID cannot refresh evidence.
 STAGE_TIMEOUT = 240
+# An expiry that does not end the stage is raised again this often. Longer than any
+# cleanup the first one starts (closing the Codex client can take 19 seconds).
+STAGE_RETRY = 60
 HEARTBEAT_MAX_AGE = 30
 RESULT_MAX_AGE = 300
 
@@ -68,7 +71,7 @@ def stage(cycle, name, progress):
         def expired(*_):
             raise _StageExpired()
         previous_handler = signal.signal(signal.SIGALRM, expired)
-        previous_timer = signal.setitimer(signal.ITIMER_REAL, STAGE_TIMEOUT)
+        previous_timer = signal.setitimer(signal.ITIMER_REAL, STAGE_TIMEOUT, STAGE_RETRY)
         started = time.monotonic()
     try:
         yield
