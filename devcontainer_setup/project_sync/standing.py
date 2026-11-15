@@ -511,8 +511,11 @@ def read(root: Path, *, env: Mapping[str, str] = os.environ, timeout: float = 1.
         git = _Git(root, env, timeout, reader)
         values['checkout'] = _checkout(git)
         origin = git.run('remote', 'get-url', 'origin')
-        # None only when the call raised; no origin exits non-zero, which is a fact, not a failed read.
-        values['origin_unread'] = origin is None
+        # Exit 2 is Git's "No such remote 'origin'", a fact. A raise (_Git.run records the problem) or any other exit,
+        # such as 128 for a broken .git/config, is a failed read.
+        values['origin_unread'] = origin is None or origin.returncode not in (0, 2)
+        if origin is not None and origin.returncode not in (0, 2):
+            reader.problem('Git remote cannot be read')
         remote = origin.stdout.strip() if origin is not None and origin.returncode == 0 else None
         match = _REPOSITORY.fullmatch(remote or '')
         values['repository'] = match[1] if match else ''

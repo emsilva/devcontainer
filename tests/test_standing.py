@@ -281,8 +281,26 @@ class StandingTests(unittest.TestCase):
             self.assertEqual(frame.lines[0], 'project · pairing not read')
             self.assertFalse(any('GitHub lists' in line for line in frame.lines), frame.lines)
             self.assertEqual([action.key for action in frame.actions], ['connect', 'details'])
-        # No origin at all keeps today's screen.
+        # FR25: Git answering with an error is a failed read too: a broken .git/config exits 128.
+        config = self.root / '.git/config'
+        saved = config.read_text()
+        config.write_text(saved + '[core\n')
+        try:
+            self.assertEqual(subprocess.run(['git', '-C', str(self.root), 'remote', 'get-url', 'origin'],
+                                            capture_output=True).returncode, 128)
+            broken = self.read()
+        finally:
+            config.write_text(saved)
+        self.assertTrue(broken.origin_unread)
+        self.assertIsNone(broken.pairing)
+        self.assertIn('Git remote cannot be read', broken.problems)
+        frame = overview.view(broken, remote)
+        self.assertEqual(frame.lines[0], 'project · pairing not read')
+        self.assertEqual([action.key for action in frame.actions], ['connect', 'details'])
+        # No origin at all keeps today's screen: Git exits 2, "No such remote 'origin'".
         self.git('remote', 'remove', 'origin')
+        self.assertEqual(subprocess.run(['git', '-C', str(self.root), 'remote', 'get-url', 'origin'],
+                                        capture_output=True).returncode, 2)
         bare = self.read()
         self.assertFalse(bare.origin_unread)
         self.assertNotIn('Git remote cannot be read', bare.problems)
