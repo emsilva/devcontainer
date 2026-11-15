@@ -685,8 +685,9 @@ def _recovery_rows(value, *, hints: bool = True) -> list[tuple[str, str]]:
     elif phase == 'refused':
         rows.append(('Running', 'refused: ' + str(runtime.get('error'))))
     elif age is None or age > keeper.HEARTBEAT_STALE:
+        # A plain connect replaces a silent keeper: keeper.start stops one past HEARTBEAT_STALE and launches another.
         rows.append(('Running', f'yes (pid {runtime.get("pid")}), but silent '
-                     + ('since it started' if age is None else f'for {int(age)} s') + '; run task work:cs:armed'))
+                     + ('since it started' if age is None else f'for {int(age)} s') + '; run task work:cs'))
     else:
         text = (f'yes (pid {runtime.get("pid")}), last check {int(age)} s ago, this Mac '
                 + ('is kept awake' if runtime.get('caffeinate') else 'is not kept awake'))
