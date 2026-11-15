@@ -328,3 +328,17 @@ or unknown, the item reads `Connect`, which is what the Recovery row tells the o
 
 **FR12.** `docs/project-continuity.md`'s sentence on where `Replace this Codespace` appears says "for a paired
 Codespace".
+
+### Fix round 1, rulings on the second fix report (2026-11-15)
+
+Accepted as built: "final-sync record" in printed text (the record's path, class and JSON keys keep their names);
+the 105-cell `Process PID from an earlier Recovery survived SIGKILL; …` error line (no 78-cell rule binds an error
+line, and it keeps the `ps -p` check); recovery-off `Connect` with no sign-in item in the setup, failed and
+unfinished-launch situations (FR10 as written).
+
+**FR13. "final sync" in the checked-delete History row too.** E bans "final capture" as well as "final flush", and
+FR8 made the checked-delete verdict a screen round 1 touches. `verdict.py`'s History texts (`the final capture is no
+longer on this Mac`, `… changed since the final capture`, `no turn newer than the final capture at …`) say "final
+sync". The AST guard that FR8 added covers every word E bans for the final sync (`final flush`, `final-flush`,
+`final capture`, `flush and move`). The FR10 test whose name says "whenever connected" is renamed to say where the
+menu can connect.
