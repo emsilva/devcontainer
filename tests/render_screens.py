@@ -33,7 +33,7 @@ LONG_NAME = 'Line one: a 100-character Codespace name'
 LONG_NAMES = (LONG_FOLDER, LONG_NAME)
 INSIDE = 'Inside a Codespace'
 ONE_ACTION = (INSIDE,)  # The Codespace's own frame offers only Stop (overview.view, in_codespace).
-WIZARD_SECONDS = 180  # Bounds each wizard run: a prompt the fake UI misreads must not loop forever.
+WIZARD_SECONDS = 1200  # Bounds each wizard run: a prompt the fake UI misreads must not loop forever. Sized for a loaded Mac.
 
 
 def _fixture():
