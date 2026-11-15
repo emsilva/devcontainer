@@ -74,7 +74,8 @@ class Local:
     next_stop_at: float | None = None
     hold_at_stop: float | None = None
     restarts_free_at: float | None = None
-    signed_out: tuple[str, ...] = ()
+    signed_out: tuple[str, ...] = ()  # recorded as signed out; only these move the sign-in item up
+    unchecked: tuple[str, ...] = ()  # recorded in a state that says nothing either way, such as unknown
     history_pending_since: float | None = None
     logs: bool = False
     problems: tuple[str, ...] = ()
@@ -397,13 +398,19 @@ def _retirement_facts(state, reader):
                 cleanup=tuple(name for _, name in sorted(pending)))
 
 
-def _signed_out(state, pairing, reader):
+def _sign_ins(state, pairing, reader):
     record = reader.json(state / 'signins.json', private=True)
     if not record or record.get('codespace') != pairing or not isinstance(record.get('tools'), dict):
-        return ()
+        return {}
     # Imported here: signins pulls in the link watcher, about 90 ms task work does not otherwise pay.
     from . import signins
-    return signins.missing(record['tools'], unlisted=False)
+    tools = record['tools']
+    # signins.missing is task work:signin:all's rule; the screen splits it, and says not signed in only where the
+    # record does.
+    missing = signins.missing(tools, unlisted=False)
+    signed_out = tuple(tool.label for tool in signins.TOOLS
+                       if isinstance(tools.get(tool.key), dict) and tools[tool.key].get('state') == signins.SIGNED_OUT)
+    return dict(signed_out=signed_out, unchecked=tuple(label for label in missing if label not in signed_out))
 
 
 def _state_facts(state, project, reader, timeout):
@@ -484,7 +491,7 @@ def _state_facts(state, project, reader, timeout):
                 and pending.get('outcome') == 'pending'):
             values['history_pending_since'] = _number(pending.get('started_at'))
     if pairing:
-        values['signed_out'] = _signed_out(state, pairing, reader)
+        values.update(_sign_ins(state, pairing, reader))
     values['logs'] = any((state / name).exists() for name in (keeper.LOG, 'scratch.log'))
     evidence = reader.json(state / 'start-evidence.json', private=True)
     if evidence and pairing:

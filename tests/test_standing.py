@@ -317,13 +317,18 @@ class StandingTests(unittest.TestCase):
 
     def test_signed_out_tools_come_from_the_paired_record(self):
         self.bind()
-        self.assertEqual(self.read().signed_out, ())
+        self.assertEqual((self.read().signed_out, self.read().unchecked), ((), ()))
         tools = {'plaud': {'state': 'signed-out'}, 'codex': {'state': 'signed-in'},
-                 'claude': {'state': 'unknown'}, 'grok': {'state': 'absent'}}
+                 'claude': {'state': 'unknown'}, 'opencode': {'state': 'renamed-later'}, 'grok': {'state': 'absent'}}
         self.signins(dict(schema=1, codespace='new-cs', updated_at=1.0, tools=tools))
-        self.assertEqual(self.read().signed_out, ('Plaud', 'Claude'))
+        # FR17: only a recorded signed-out is not signed in; unknown and a state signins does not name are unchecked.
+        local = self.read()
+        self.assertEqual(local.signed_out, ('Plaud',))
+        self.assertEqual(local.unchecked, ('Claude', 'OpenCode'))
+        self.signins(dict(schema=1, codespace='new-cs', updated_at=1.0, tools={'plaud': {}, 'codex': 'x'}))
+        self.assertEqual((self.read().signed_out, self.read().unchecked), ((), ('Plaud',)))
         self.signins(dict(schema=1, codespace='old-cs', updated_at=1.0, tools=tools))
-        self.assertEqual(self.read().signed_out, ())
+        self.assertEqual((self.read().signed_out, self.read().unchecked), ((), ()))
         self.signins(dict(schema=1, codespace='new-cs', updated_at=1.0, tools=['plaud']))
         self.assertEqual(self.read().signed_out, ())
         self.signins(b'not json')
