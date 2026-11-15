@@ -521,12 +521,16 @@ def read(root: Path, *, env: Mapping[str, str] = os.environ, timeout: float = 1.
         values['repository'] = match[1] if match else ''
         state = None
         project = None
-        try:
-            identity = project_state._identity(remote or '')
-            project = project_state.Project(root, remote, identity, hashlib.sha256(identity.encode()).hexdigest()[:24])
-            state = project_state.state_dir(project, env)
-        except (OSError, ValueError) as error:
-            reader.problem(str(error))
+        # An origin that was never read names no project: its identity would only add a problem about an empty
+        # origin. A project with no origin (exit 2) still reports one.
+        if not values['origin_unread']:
+            try:
+                identity = project_state._identity(remote or '')
+                project = project_state.Project(root, remote, identity,
+                                                hashlib.sha256(identity.encode()).hexdigest()[:24])
+                state = project_state.state_dir(project, env)
+            except (OSError, ValueError) as error:
+                reader.problem(str(error))
         values['state'] = state
         values['setup'], values['source_ref'] = _setup(root, values['generated'], reader)
         values['taskfile'], values['managed'] = _taskfile(root, reader)

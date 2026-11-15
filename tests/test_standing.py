@@ -272,7 +272,8 @@ class StandingTests(unittest.TestCase):
         self.assertTrue(unread.origin_unread)
         self.assertIsNone(unread.state)
         self.assertIsNone(unread.pairing)
-        self.assertIn('Git remote cannot be read', unread.problems)
+        # FR28 (Fable N2): only the problem it has, not one about an origin it never read.
+        self.assertEqual(unread.problems, ('Git remote cannot be read',))
         ok = lambda value: Observation('ok', value, time.time(), None)
         # The probe still asks GitHub, for an empty repository: it lists nothing for it.
         remote = Remote(ok('fixture'), ok(frozenset()), ok(()), ok(()), ok('a' * 40))
@@ -281,6 +282,7 @@ class StandingTests(unittest.TestCase):
             self.assertEqual(frame.lines[0], 'project · pairing not read')
             self.assertFalse(any('GitHub lists' in line for line in frame.lines), frame.lines)
             self.assertEqual([action.key for action in frame.actions], ['connect', 'details'])
+            self.assertIn('Problem    Git remote cannot be read; Show details has more', frame.lines)
         # FR25: Git answering with an error is a failed read too: a broken .git/config exits 128.
         config = self.root / '.git/config'
         saved = config.read_text()
@@ -293,7 +295,7 @@ class StandingTests(unittest.TestCase):
             config.write_text(saved)
         self.assertTrue(broken.origin_unread)
         self.assertIsNone(broken.pairing)
-        self.assertIn('Git remote cannot be read', broken.problems)
+        self.assertEqual(broken.problems, ('Git remote cannot be read',))
         frame = overview.view(broken, remote)
         self.assertEqual(frame.lines[0], 'project · pairing not read')
         self.assertEqual([action.key for action in frame.actions], ['connect', 'details'])
@@ -304,6 +306,8 @@ class StandingTests(unittest.TestCase):
         bare = self.read()
         self.assertFalse(bare.origin_unread)
         self.assertNotIn('Git remote cannot be read', bare.problems)
+        # Round 2 owns this problem for a project with no origin; until then it stays.
+        self.assertIn('Origin must not contain whitespace or control characters', bare.problems)
         frame = overview.view(bare, remote)
         self.assertEqual(frame.lines[0], 'project · no Codespace paired')
         self.assertIn('create', [action.key for action in frame.actions])
