@@ -141,7 +141,7 @@ class OverviewTests(unittest.TestCase):
         busy = replace(self.local, signed_out=('Plaud',),
                        refusals=(Refusal('codex', 'session-1', 'refused'), Refusal('codex', 'session-2', 'refused')))
         frame = self.frame(busy, replace(self.remote, upstream=self.ok('b' * 40)))
-        self.assertEqual(self.keys(frame), ['connect', 'arm', 'stop', 'signin', 'replace', 'details'])
+        self.assertEqual(self.keys(frame), ['connect', 'signin', 'arm', 'stop', 'replace', 'details'])
         self.assertEqual(frame.actions[-2].argv, replace_argv)
         for local, remote in ((replace(self.local, setup='missing'), self.remote),
                               (replace(self.local, launch=Launch(CS, False)), self.remote),
@@ -269,15 +269,16 @@ class OverviewTests(unittest.TestCase):
         details = self.argv('work:status')
         logs = self.argv('work:logs')
         setup = [('task', 'devcontainer:setup')]
-        create = setup + details
+        signin = self.argv('work:signin:all')  # FR3: the fixture's sync runs for the paired Codespace
+        create = setup + details  # FR10: no sign-in item where the menu cannot connect
         replace_command = [('task', 'devcontainer:setup', '--', '--replace')]
-        paired = self.argv('work:cs') + replace_command + details
+        paired = self.argv('work:cs') + signin + replace_command + details
         creation = ('gh', 'codespace', 'logs', '-c', CS)
         resume = ('task', 'devcontainer:setup', '--', '--resume', CS)
         cases = [
             (replace(self.local, setup='missing'), self.remote, TITLE, 'Setup      not done yet', create),
             (replace(self.local, setup='missing', pairing=None), self.remote, UNPAIRED,
-             'Setup      not done yet', create),
+             'Setup      not done yet', setup + details),
             (replace(self.local, setup='missing', logs=True), self.remote, TITLE,
              'Setup      not done yet', setup + logs + details),
             (replace(self.local, setup='unmanaged'), self.remote, TITLE, 'Setup      not done yet', create),
@@ -308,7 +309,7 @@ class OverviewTests(unittest.TestCase):
             (self.local, replace(self.remote, spaces=self.ok(())), TITLE,
              "Codespace  now listed under another repository; pair this one's Codespace", create),
             (replace(self.local, pairing=None), replace(self.remote, spaces=self.ok(())), UNPAIRED,
-             'Codespace  GitHub lists none for this repository', create),
+             'Codespace  GitHub lists none for this repository', setup + details),
             (replace(self.local, pairing=None), self.remote, UNPAIRED,
              'Codespace  GitHub lists 1 for this repository', self.argv('work:cs') + setup + details),
             (replace(self.local, pairing=None),
@@ -316,9 +317,9 @@ class OverviewTests(unittest.TestCase):
              UNPAIRED, 'Codespace  GitHub lists 2 for this repository', self.argv('work:cs') + setup + details),
             (self.local, self.remote, TITLE,
              'Codespace  available (checked 09:10)',
-             self.argv('work:cs', 'work:cs:armed', 'work:cs:stop') + replace_command + details),
+             self.argv('work:cs', 'work:cs:armed', 'work:cs:stop') + signin + replace_command + details),
             (self.local, self.remote_state('Shutdown'), TITLE, 'Codespace  stopped (checked 09:10)', paired),
-            (replace(self.local, logs=True), self.remote_state('Shutdown'), TITLE,
+            (replace(self.local, logs=True, worker='stopped'), self.remote_state('Shutdown'), TITLE,
              'Codespace  stopped (checked 09:10)', self.argv('work:cs', 'work:logs') + replace_command + details),
             (replace(self.local, owner_stop_at=self.at), self.remote_state('Shutdown'), TITLE,
              'Codespace  stopped; you stopped it at 09:10', paired),
@@ -475,6 +476,7 @@ class OverviewTests(unittest.TestCase):
             ('task', 'work:cs'),
             ('task', 'work:forget', '--', '--agent', 'codex', '--session', 'session-1'),
             ('git', '-C', '/fixture/consult-sm-innovate', 'merge', '--ff-only', 'origin/main'),
+            ('task', 'work:signin:all'),
             ('task', 'devcontainer:setup', '--', '--replace'),
             ('task', 'work:status')])
         failed = self.frame(replace(self.local, launch=Launch(CS, False)), self.remote_state('Failed'))
@@ -588,7 +590,7 @@ class OverviewTests(unittest.TestCase):
                 self.assertNotIn('(task', action.item)
                 self.assertNotIn(CS, action.item)
         labels = {action.key: action.label for frame in frames for action in frame.actions}
-        self.assertEqual(labels['connect'], 'Connect')
+        self.assertEqual(labels['connect'], 'Open in Herdr')  # connected; Connect otherwise (FR2)
         self.assertEqual(labels['start'], 'Start and connect')
         self.assertEqual(labels['arm'], 'Connect and arm recovery')
         self.assertEqual(labels['stop'], 'Stop the Codespace')
@@ -597,6 +599,38 @@ class OverviewTests(unittest.TestCase):
         self.assertEqual(labels['cleanup:cleanup-cs'], 'Finish cleaning up after the delete')
         resume = self.frame(replace(self.local, launch=Launch(CS, False)))
         self.assertEqual(next(a.label for a in resume.actions if a.key == 'resume'), 'Resume the Codespace setup')
+
+    def test_connect_reads_open_in_herdr_while_connected(self):
+        # FR2: a running sync means connected; recovery off keeps Connect, since only a connect turns it on.
+        connect = ('task', 'work:cs')
+        cases = [
+            ('armed', replace(self.local, armed=True), self.remote, 'Open in Herdr'),
+            ('not armed', self.local, self.remote, 'Open in Herdr'),
+            ('starting', replace(self.local, armed=True), self.remote_state('Starting'), 'Open in Herdr'),
+            ('sync stopped', replace(self.local, worker='stopped'), self.remote, 'Connect'),
+            ('sync unknown', replace(self.local, worker='unknown'), self.remote, 'Connect'),
+            ('recovery off', replace(self.local, armed=True, keeper='stopped'), self.remote, 'Connect'),
+            # FR11: not answering or unknown keeps Connect too.
+            ('recovery stale', replace(self.local, armed=True, keeper='stale', keeper_heartbeat_age=400),
+             self.remote, 'Connect'),
+            ('recovery unknown', replace(self.local, armed=True, keeper='unknown'), self.remote, 'Connect'),
+            ('arming unreadable', replace(self.local, armed=None, keeper='running'), self.remote, 'Connect'),
+            ('not armed, keeper record stale', replace(self.local, armed=False, keeper='stale'), self.remote,
+             'Open in Herdr'),
+        ]
+        for name, local, remote, expected in cases:
+            with self.subTest(name=name):
+                frame = self.frame(local, remote)
+                found, = (action for action in frame.actions if action.key == 'connect')
+                self.assertEqual((found.label, found.argv), (expected, connect))
+                self.assertLessEqual(self.overview.cells(found.item), 78)
+        armed = self.frame(replace(self.local, armed=False))
+        self.assertEqual([action.label for action in armed.actions][:3],
+                         ['Open in Herdr', 'Connect and arm recovery', 'Stop the Codespace'])
+        stopped = self.frame(remote=self.remote_state('Shutdown'))
+        self.assertEqual(stopped.actions[0].label, 'Start and connect')
+        unpaired = self.frame(replace(self.local, pairing=None))
+        self.assertEqual(unpaired.actions[0].label, 'Connect')
 
     def test_menu_labels_are_unique(self):
         refusals = (Refusal('codex', 'abcdefgh-1', 'refused'), Refusal('codex', 'abcdefgh-2', 'refused'))
@@ -616,16 +650,19 @@ class OverviewTests(unittest.TestCase):
         self.assertLessEqual(self.overview.cells(unique[1].item), 78)
 
     def test_logs_appear_only_with_a_log(self):
+        quiet = replace(self.local, worker='stopped')
         for logs in (False, True):
-            self.assertEqual(self.keys(self.frame(replace(self.local, setup='missing', logs=logs)))[-1:], ['details'])
-        self.assertEqual(self.keys(self.frame(replace(self.local, setup='missing'))), ['setup', 'details'])
+            self.assertEqual(self.keys(self.frame(replace(quiet, setup='missing', logs=logs)))[-1:], ['details'])
+        self.assertEqual(self.keys(self.frame(replace(quiet, setup='missing'))), ['setup', 'details'])
         stopped = self.remote_state('Shutdown')
-        self.assertEqual(self.keys(self.frame(replace(self.local, logs=True), stopped)),
+        self.assertEqual(self.keys(self.frame(replace(quiet, logs=True), stopped)),
                          ['start', 'logs', 'replace', 'details'])
-        self.assertEqual(self.keys(self.frame(replace(self.local, logs=False), stopped)),
+        self.assertEqual(self.keys(self.frame(replace(quiet, logs=False), stopped)),
                          ['start', 'replace', 'details'])
-        # Nothing pads a menu that already has three actions.
+        # Nothing pads a menu that already has three actions, the sign-in item included.
         self.assertNotIn('logs', self.keys(self.frame(replace(self.local, logs=True))))
+        self.assertEqual(self.keys(self.frame(replace(self.local, logs=True), stopped)),
+                         ['start', 'signin', 'replace', 'details'])
 
     def test_other_branch_checkout_is_named(self):
         def row(branch, relation='other-branch'):
@@ -638,24 +675,61 @@ class OverviewTests(unittest.TestCase):
         self.assertEqual(row(None, 'detached'), ['Checkout   on a detached HEAD; Codespaces start from main'])
         self.assertEqual(row('main', 'current'), [])
 
-    def test_sign_in_is_offered_only_while_connected(self):
-        for worker in ('running', 'stopped'):
+    def test_sign_in_is_offered_where_the_menu_can_connect(self):
+        # FR3: directly above Replace while connected; right after the first action while a tool is signed out.
+        signin = ('Sign in to the tools', ('task', 'work:signin:all'))
+        for signed_out, keys in (((), ['connect', 'arm', 'stop', 'signin', 'replace', 'details']),
+                                 (('Plaud',), ['connect', 'signin', 'arm', 'stop', 'replace', 'details'])):
+            with self.subTest(signed_out=signed_out):
+                frame = self.frame(replace(self.local, signed_out=signed_out))
+                self.assertEqual(self.keys(frame), keys)
+                found, = (action for action in frame.actions if action.key == 'signin')
+                self.assertEqual((found.label, found.argv), signin)
+                self.assertLessEqual(self.overview.cells(found.item), 78)
+                self.assertEqual(self.rows(frame, 'Sign-ins'), ['Sign-ins   Plaud is not signed in'] if signed_out else [])
+        for worker in ('stopped', 'unknown'):
             with self.subTest(worker=worker):
                 frame = self.frame(replace(self.local, signed_out=('Plaud',), worker=worker))
                 self.assertEqual(self.rows(frame, 'Sign-ins'), ['Sign-ins   Plaud is not signed in'])
-                signin = [action for action in frame.actions if action.key == 'signin']
-                if worker == 'running':
-                    self.assertEqual([(a.label, a.argv) for a in signin], [('Sign in', ('task', 'work:signin:all'))])
-                    self.assertEqual(self.keys(frame)[:4], ['connect', 'arm', 'stop', 'signin'])
-                else:
-                    self.assertEqual(signin, [])
+                self.assertNotIn('signin', self.keys(frame))
         for names, text in ((('Plaud', 'Codex'), 'Plaud and Codex are not signed in'),
                             (('Plaud', 'Codex', 'Claude'), 'Plaud, Codex and Claude are not signed in')):
             self.assertEqual(self.rows(self.frame(replace(self.local, signed_out=names)), 'Sign-ins'),
                              ['Sign-ins   ' + text])
-        self.assertEqual(self.rows(self.frame(), 'Sign-ins'), [])
         unpaired = self.frame(replace(self.local, pairing=None, signed_out=('Plaud',)))
         self.assertNotIn('signin', self.keys(unpaired))
+        # FR10: only where the menu can connect to the paired Codespace, signed out or not, recovery off or not.
+        nowhere = [(replace(self.local, setup='missing'), self.remote),
+                   (self.local, replace(self.remote, setup_prs=self.ok((7,)))),
+                   (self.local, self.remote_state('Failed')),
+                   (replace(self.local, launch=Launch(CS, False)), self.remote),
+                   (self.local, replace(self.remote, names=self.ok(frozenset()), spaces=self.ok(())))]
+        for (local, remote), signed_out, armed in product(nowhere, ((), ('Plaud',)), (False, True)):
+            with self.subTest(situation=self.frame(local, remote).lines[1], signed_out=signed_out, armed=armed):
+                local = replace(local, signed_out=signed_out, armed=armed, keeper='stopped' if armed else 'running')
+                frame = self.frame(local, remote)
+                self.assertNotIn('signin', self.keys(frame))
+                self.assertNotIn('replace', self.keys(frame))
+        for state in ('Available', 'Shutdown', 'Starting', 'ShuttingDown', 'Moved'):
+            with self.subTest(state=state):
+                keys = self.keys(self.frame(remote=self.remote_state(state)))
+                self.assertTrue({'connect', 'start'} & set(keys), keys)
+                self.assertIn('signin', keys)
+        # Right after the first action, priority actions included.
+        off = self.frame(self.replacing_local(armed=True, keeper='stopped', signed_out=('Plaud',)))
+        self.assertEqual(self.keys(off), ['connect', 'signin', 'finish-replace', 'stop', 'details'])
+        self.assertEqual(off.actions[0].label, 'Connect')
+        # Never reserved: a full menu drops it before Replace and the retired delete.
+        refusals = tuple(Refusal('codex', f'session-{n}', 'refused') for n in range(2))
+        listed = replace(self.remote, upstream=self.ok('b' * 40),
+                         spaces=self.ok((*self.remote.spaces.value, Space(OLD, 'Shutdown', None))))
+        full = self.frame(replace(self.local, refusals=refusals, retired=(OLD,)), listed)
+        self.assertEqual(self.keys(full), ['connect', 'arm', 'stop', 'replace', f'delete:{OLD}', 'details'])
+        busy = self.frame(replace(self.local, refusals=refusals, retired=(OLD,), signed_out=('Plaud',)), listed)
+        self.assertEqual(self.keys(busy), ['connect', 'signin', 'arm', 'replace', f'delete:{OLD}', 'details'])
+        # Padding with the logs item keeps the sign-in directly above Replace.
+        padded = self.frame(replace(self.local, logs=True), self.remote_state('Starting'))
+        self.assertEqual(self.keys(padded), ['connect', 'signin', 'replace', 'details'])
 
     def test_history_row_waits_five_minutes(self):
         self.assertEqual(self.rows(self.frame(replace(self.local, history_pending_since=self.now - 299)),

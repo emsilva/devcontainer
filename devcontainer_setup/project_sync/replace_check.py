@@ -134,7 +134,7 @@ def _conversations(project, state, journal, cycle):
     try:
         record = seal.read(state, journal['old'])
         if (record is None or record.operation != journal['operation'] or record.identity != project.identity):
-            raise ValueError('Unbound final flush')
+            raise ValueError('Unbound final sync')
         manifest = store.load(record.snapshot_id)
         validate_manifest(manifest, project.identity, project.project_id)
         sealed = {}
@@ -146,7 +146,7 @@ def _conversations(project, state, journal, cycle):
             sealed[key] = closure
         forgotten = forget.forgotten(state)
     except _ERRORS:
-        return result, f"the final flush of {journal['old']} cannot be read"
+        return result, f"the final sync of {journal['old']} cannot be read"
     outgoing, published, issues = {}, set(), set()
     if cycle is not None:
         try:

@@ -87,7 +87,7 @@ class StoreTests(unittest.TestCase):
                 raise PermissionError('fixture seals cannot be listed')
             return real(path)
         with mock.patch.object(checkpoint_store.os, 'scandir', side_effect=scandir):
-            with self.assertRaisesRegex(ValueError, 'final-flush record cannot be read'):
+            with self.assertRaisesRegex(ValueError, 'final-sync record cannot be read'):
                 self.store.collect(apply=True)
         self.assertEqual(self.store.read(blob), b'sealed data')
         self.assertIsNotNone(self.store.load(snapshot))

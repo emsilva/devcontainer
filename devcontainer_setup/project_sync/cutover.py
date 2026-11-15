@@ -161,7 +161,7 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
             print(f'Moved sync and Herdr to {new}.')
 
     def flush_lines(target, categories):
-        print(f"{old}'s final flush is not complete; nothing moved:")
+        print(f"{old}'s final sync is not complete; nothing moved:")
         observed = verdict.Verdict(target, now(), journal['account'], journal['repository'],
                                    categories, (), None, None)
         local = standing.Local(project.root, repository=journal['repository'])
@@ -268,14 +268,14 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
             scan = target_scan.scan(connection, old, target.remote_root, now=now)
             fingerprint = target_scan.fingerprint(evidence.scan)
             if fingerprint is None or fingerprint != target_scan.fingerprint(scan):
-                print(f'{old} changed while its final flush was recorded; nothing moved.')
+                print(f'{old} changed while its final sync was recorded; nothing moved.')
                 return 1
             sealed_at = now()
             seal.write(state, Store(state), evidence.scan, evidence=evidence, identity=project.identity,
                        repository=journal['repository'], gh_user=journal['account'], remote_root=target.remote_root,
                        operation=operation, cycle_id=evidence.cycle['cycle_id'],
                        snapshot_id=evidence.receipt['snapshot_id'], now=sealed_at)
-            print(f'Final flush of {old} recorded at {overview._when(sealed_at, sealed_at)} '
+            print(f'Final sync of {old} recorded at {overview._when(sealed_at, sealed_at)} '
                   f'({verdict._quantity(len(evidence.scan.scratch), "file")}, '
                   f'{verdict._quantity(len({(agent, session) for agent, _, session in evidence.sessions_by_file}), "conversation")}).')
             remote(rebind=new, move=decision, armed=recovery if decision is not None else None, expected_old=old)

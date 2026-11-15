@@ -528,13 +528,15 @@ class SequenceTests(unittest.TestCase):
         argv = spawn.call_args.args[0]
         self.assertEqual(argv[-3:-1], ['bash', '-lc'])
         remote = subprocess.Popen(['bash', '-c', shlex.split(argv[-1])[0]], start_new_session=True)
+        # Hang guards for a loaded Mac, under the login's 30 s sleep; the exit code is what is under test.
+        budget = 25
         try:
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + budget
             while not marker.exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
             self.assertTrue(marker.exists(), 'the remote command never started the login')
             os.killpg(remote.pid, signal.SIGINT)
-            self.assertEqual(remote.wait(timeout=5), 128 + signal.SIGINT)
+            self.assertEqual(remote.wait(timeout=budget), 128 + signal.SIGINT)
         finally:
             if remote.poll() is None:
                 os.killpg(remote.pid, signal.SIGKILL)

@@ -345,7 +345,7 @@ class ReplaceCheckTests(unittest.TestCase):
         code, result, output = self.check()
         self.assertEqual(code, 1)
         self.assertFalse(result['ok'])
-        self.assertIn('Not ready: the final flush of old-space cannot be read', output)
+        self.assertIn('Not ready: the final sync of old-space cannot be read', output)
 
     def test_check_writes_nothing_but_its_receipt(self):
         # Establish the worker observation before the baseline byte inventory.

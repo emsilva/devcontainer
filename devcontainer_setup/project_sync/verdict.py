@@ -116,7 +116,7 @@ def resolve(project, state, name: str | None) -> Target:
         return Target(name, 'paired', binding.get('remote_root'), None, None)
     record = seal.read(state, name)
     if record is not None and record.identity != project.identity:
-        raise ValueError('The final-flush record for ' + name + ' cannot be read')
+        raise ValueError('The final-sync record for ' + name + ' cannot be read')
     newest = None
     remote_root = None
     for archive in sorted((state / 'retired-bindings').glob('*'), reverse=True):
@@ -255,7 +255,7 @@ def _git(scan, proofs):
 def _scratch(target, evidence, now):
     scan = evidence.scan
     if target.kind == 'moved':
-        return _category('Scratch', UNKNOWN, 'moved with --rebind, so no final flush was recorded')
+        return _category('Scratch', UNKNOWN, 'moved with --rebind, so no final sync was recorded')
     if not scan.scratch_complete:
         return _category('Scratch', UNKNOWN, 'could not read .scratch on ' + target.name)
     if target.kind == 'replacement':
@@ -278,10 +278,10 @@ def _scratch(target, evidence, now):
         fine = 'synchronized at ' + _when(scan.at, now)
     else:
         if target.seal is None:
-            return _category('Scratch', UNKNOWN, 'the final-flush record cannot be read')
+            return _category('Scratch', UNKNOWN, 'the final-sync record cannot be read')
         saved = set(target.seal.scratch)
-        suffix = 'changed or added since the final flush'
-        fine = 'unchanged since the final flush at ' + _when(target.seal.sealed_at, now)
+        suffix = 'changed or added since the final sync'
+        fine = 'unchanged since the final sync at ' + _when(target.seal.sealed_at, now)
     changed = tuple(path for path, digest in scan.scratch if (path, digest) not in saved)
     if changed:
         if len(changed) == 1:
@@ -294,7 +294,7 @@ def _scratch(target, evidence, now):
 def _history(target, evidence, now):
     scan = evidence.scan
     if target.kind == 'moved':
-        return _category('History', UNKNOWN, 'moved with --rebind, so no final flush was recorded')
+        return _category('History', UNKNOWN, 'moved with --rebind, so no final sync was recorded')
     if not scan.sessions_complete:
         return _category('History', UNKNOWN, 'could not read every conversation on ' + target.name)
     if target.kind == 'replacement':
@@ -305,15 +305,15 @@ def _history(target, evidence, now):
         return _category('History', SAFE, 'no conversations on ' + target.name)
     if target.kind == 'sealed':
         if target.seal is None:
-            return _category('History', UNKNOWN, 'the final capture is no longer on this Mac')
+            return _category('History', UNKNOWN, 'the final sync is no longer on this Mac')
         saved = set(target.seal.sessions)
         changed = tuple(path for path, digest in scan.sessions if (path, digest) not in saved)
         if changed:
             return _category('History', UNSAFE, _quantity(len(changed), 'conversation file') +
-                             ' changed since the final capture', changed)
+                             ' changed since the final sync', changed)
         if evidence.capture_loads is not True:
-            return _category('History', UNKNOWN, 'the final capture is no longer on this Mac')
-        return _category('History', SAFE, 'no turn newer than the final capture at ' + _when(target.seal.sealed_at, now))
+            return _category('History', UNKNOWN, 'the final sync is no longer on this Mac')
+        return _category('History', SAFE, 'no turn newer than the final sync at ' + _when(target.seal.sealed_at, now))
     if not evidence.sync_running:
         return _category('History', UNKNOWN, _SYNC_STOPPED)
     cycle = evidence.cycle

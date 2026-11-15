@@ -307,8 +307,9 @@ class CutoverTests(unittest.TestCase):
                 when = self.c.overview._when(self.clock, self.clock)
                 noun = 'file' if count == 1 else 'files'
                 conversation = 'conversation' if count == 1 else 'conversations'
-                self.assertIn(f'Final flush of old-space recorded at {when} '
+                self.assertIn(f'Final sync of old-space recorded at {when} '
                               f'({count} {noun}, {count} {conversation}).', out)
+                self.assertNotIn('flush', out)  # spec E: final sync, one name per thing
                 self.assertEqual(seal.read(self.state, 'old-space').scratch, files)
 
     def test_agents_are_asked_never_killed(self):
@@ -546,7 +547,7 @@ class CutoverTests(unittest.TestCase):
         self.scanner.side_effect = [self.scan, replace(self.scan, services=(('opencode serve', 100001, 1),))]
         code, out = self.run_cutover()
         self.assertEqual(code, 1)
-        self.assertIn('old-space changed while its final flush was recorded; nothing moved.', out)
+        self.assertIn('old-space changed while its final sync was recorded; nothing moved.', out)
         self.sealer.assert_not_called()
         self.remote.assert_not_called()
 
@@ -562,7 +563,7 @@ class CutoverTests(unittest.TestCase):
                 self.evidence = replace(good, **change)
                 code, out = self.run_cutover()
                 self.assertEqual(code, 1)
-                self.assertIn("old-space's final flush is not complete; nothing moved:", out)
+                self.assertIn("old-space's final sync is not complete; nothing moved:", out)
                 self.sealer.assert_not_called()
                 self.remote.assert_not_called()
         # Git's UNSAFE judgment alone is deliberately outside the flush gate.
@@ -594,7 +595,7 @@ class CutoverTests(unittest.TestCase):
                     leaf.reset_mock()
                 code, out = self.run_cutover()
                 self.assertEqual(code, 1)
-                self.assertIn('old-space changed while its final flush was recorded; nothing moved.', out)
+                self.assertIn('old-space changed while its final sync was recorded; nothing moved.', out)
                 self.assertTrue(out.endswith('Sync with old-space is paused. Run the replace again, or task work:cs to resume it.\n'))
                 self.stop.assert_called_once_with(self.state)
                 self.sealer.assert_not_called()

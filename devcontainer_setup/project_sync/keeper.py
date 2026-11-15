@@ -85,8 +85,8 @@ def start(root: Path, state: Path) -> dict:
                 return current
             _stop(state, current)
         return launch_detached('keeper', '--keep', root, state, env=_env(value), status=status,
-                               exited='The keeper exited during startup; inspect task work:logs',
-                               timed_out=f'The keeper did not start within {STARTUP_WAIT} seconds; inspect task work:logs')
+                               exited='Recovery stopped while starting; see task work:logs',
+                               timed_out=f'Recovery did not start within {STARTUP_WAIT} seconds; see task work:logs')
 
 
 def _stop(state, current):
@@ -99,7 +99,7 @@ def _stop(state, current):
     # Done when that exact process (start time and argv) is gone, so its locks are free.
     if wait_gone(current, 15):
         return status(state)
-    raise ValueError('The keeper is still shutting down; inspect task work:status before retrying')
+    raise ValueError('Recovery is still shutting down; try again shortly, or see task work:status')
 
 
 def _end_left_behind(state):
@@ -127,8 +127,8 @@ def stop(state: Path) -> dict:
         result = _stop(state, status(state))
         outcome, pid = _end_left_behind(state)
         if outcome == 'survived':
-            raise ValueError(f'The keep-alive child {pid} a previous keeper left survived SIGKILL; '
-                             f'inspect it with ps -p {pid}')
+            raise ValueError(f'Process {pid} from an earlier Recovery survived SIGKILL; check it with ps -p {pid}, '
+                             'or see task work:logs')
         return result
 
 
@@ -602,7 +602,7 @@ class Keeper:
         if reason is None and not self._token_usable():
             # Last, so any final refusal wins over this one, which later passes ask again (R36).
             reason = (f'{NO_TOKEN}{value.get("gh_user")} could be read; run gh auth status --hostname github.com, '
-                      'and the keeper tries again each minute while it stays stopped')
+                      'and Recovery tries again each minute while it stays stopped')
         return reason
 
     def _token_usable(self):

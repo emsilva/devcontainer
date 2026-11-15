@@ -145,6 +145,48 @@ class KeeperStepTests(unittest.TestCase):
                 keeper.start(self.state.parent, self.state)
         launch.assert_not_called()
 
+    def test_connect_failures_name_recovery_and_where_to_look(self):
+        # FR9 (spec E): the messages task work:cs and task work:cs:armed print when recovery cannot start or stop.
+        expected = {
+            'exited': 'Recovery stopped while starting; see task work:logs',
+            'timed_out': f'Recovery did not start within {keeper.STARTUP_WAIT} seconds; see task work:logs',
+            'shutting down': 'Recovery is still shutting down; try again shortly, or see task work:status',
+            'survived': 'Process 4242 from an earlier Recovery survived SIGKILL; check it with ps -p 4242, '
+                        'or see task work:logs',
+        }
+        with patch.object(keeper, 'launch_detached', return_value={}) as launch, \
+                patch.object(keeper, 'status', return_value={'running': False}):
+            keeper.start(self.state.parent, self.state)
+        found = {'exited': launch.call_args.kwargs['exited'], 'timed_out': launch.call_args.kwargs['timed_out']}
+        running = {'running': True, 'pid': 4241, 'process_identity': 'x'}
+        with patch.object(keeper.os, 'kill'), patch.object(keeper, 'wait_gone', return_value=False), \
+                self.assertRaises(ValueError) as caught:
+            keeper._stop(self.state, running)
+        found['shutting down'] = str(caught.exception)
+        atomic_write(self.state / keeper.RUNTIME,
+                     json.dumps({'codespace': 'cs-1', 'keepalive': {'pid': 4242, 'process_identity': 'x'}}).encode())
+        with patch.object(keeper, 'end_left_behind', return_value='survived'), \
+                patch.object(keeper, '_owned', return_value=False), self.assertLogs(keeper._LOG, 'INFO'), \
+                self.assertRaises(ValueError) as caught:
+            keeper.stop(self.state)
+        found['survived'] = str(caught.exception)
+        # The token wait's reason: a restart refused by it is shown as the connect's Last restart row.
+        k = self.keeper([up(T0)])
+        self.api.token_usable = False
+        reason = k._start_refusal(None, {'first_at': T0, 'count': 3})
+        self.assertTrue(reason.startswith(keeper.NO_TOKEN), reason)
+        self.assertNotIn('keeper', reason.lower())
+        from devcontainer_setup.project_sync import workspace
+        row = workspace._recovery_rows({'arming': arming.read(self.state), 'restarts': 0, 'now': T0,
+                                        'keeper': {'running': False, 'last_restart': {
+                                            'at': T0, 'outcome': 'not restarted: ' + reason}}})[-1]
+        self.assertEqual(row, ('Last restart', arming.format_time(T0) + ': not restarted: ' + reason))
+        self.assertEqual(found, expected)
+        for text in found.values():
+            self.assertNotIn('keeper', text.lower())
+            self.assertNotIn('keep-alive', text.lower())
+            self.assertTrue(text.endswith(('see task work:logs', 'see task work:status')), text)
+
     def advance(self, seconds):
         self.clock += seconds
 
@@ -518,7 +560,7 @@ class KeeperStepTests(unittest.TestCase):
         self.assertEqual(self.runtime()['down']['kind'], 'LIFETIME')
         self.assertEqual(len(self.notes), 1)
         self.assertIn('was not restarted: no GitHub token for octo could be read; run gh auth status --hostname '
-                      'github.com, and the keeper tries again each minute while it stays stopped', self.notes[0])
+                      'github.com, and Recovery tries again each minute while it stays stopped', self.notes[0])
         self.api.token_usable = True
         self.run_steps(k, later[3:])
         rows = lifecycle.Ledger(self.state / keeper.LEDGER).rows()
@@ -529,7 +571,7 @@ class KeeperStepTests(unittest.TestCase):
         self.assertEqual(self.runtime()['anchor']['source'], 'keeper')
         # R37: told "tries again", the owner then hears how it ended; exactly these two.
         self.assertEqual(len(self.notes), 2)
-        self.assertIn('the keeper tries again each minute', self.notes[0])
+        self.assertIn('Recovery tries again each minute', self.notes[0])
         self.assertIn("proj restarted after GitHub's 12-hour stop (" + lifecycle.new_rid(later[3]) + ')', self.notes[1])
 
     def test_a_token_refusal_survives_a_keeper_replacement(self):
@@ -1392,7 +1434,7 @@ class KeeperStepTests(unittest.TestCase):
                 self.assertEqual(keeper._end_left_behind(self.state), ('survived', 4242))
             self.assertIn('keep-alive child 4242 a previous keeper left survived SIGKILL', logs.output[0])
             with patch.object(keeper, '_owned', return_value=False), \
-                    self.assertRaisesRegex(ValueError, 'survived SIGKILL; inspect it with ps -p 4242'):
+                    self.assertRaisesRegex(ValueError, 'survived SIGKILL; check it with ps -p 4242, or see task work:logs'):
                 keeper.stop(self.state)
 
     def test_arm_wait_holds_for_the_keep_alive_child_while_available(self):

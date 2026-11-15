@@ -171,7 +171,7 @@ def _armed(project, state, args):
         keeper.stop(state)
     started = keeper.start(project.root, state)
     if keeper.wait_ready(state, started['nonce']).get('phase') == 'starting':
-        print('The keeper has not reported within 60 seconds; inspect task work:logs.')
+        print('Recovery has not reported within 60 seconds; see task work:logs.')
     print('\n'.join(workspace.recovery_lines(workspace.recovery(state))))
 
 
@@ -199,7 +199,7 @@ def _resume_recovery(project, state) -> None:
         print(str(error))
         return
     if ready.get('phase') == 'starting':
-        print('The keeper has not reported within 60 seconds; inspect task work:logs.')
+        print('Recovery has not reported within 60 seconds; see task work:logs.')
     print('\n'.join(workspace.recovery_lines(workspace.recovery(state))))
 
 

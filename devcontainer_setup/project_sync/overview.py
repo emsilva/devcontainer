@@ -249,6 +249,8 @@ def view(local: Local, remote: Remote | None, *,
     name = local.pairing
     recovery_off = (local.armed is True and local.keeper == 'stopped'
                     and pair.kind not in _GONE)
+    # The sync runs for the paired Codespace (standing reads it for that binding only).
+    connected = bool(name) and local.worker == 'running'
     if recovery_off:
         row(1, 1, 'Recovery', 'off until you connect')
     if local.replacing is not None:
@@ -320,18 +322,22 @@ def view(local: Local, remote: Remote | None, *,
                 text = f'in state {pair.raw} ({pair.suffix})'
             else:
                 text = pair.reason
-            action('connect', 'Connect', 'work:cs')
+            # Only while recovery runs or is not armed; off, not answering or unknown keeps Connect,
+            # which is what restarts it.
+            recovering = local.armed is False or (local.armed is True and local.keeper == 'running')
+            action('connect', 'Open in Herdr' if connected and recovering else 'Connect', 'work:cs')
             if situation == 'available':
                 if local.armed is False:
                     action('arm', 'Connect and arm recovery', 'work:cs:armed')
                 action('stop', 'Stop the Codespace', 'work:cs:stop')
         row(5, 5, 'Codespace', text)
-    if name and local.signed_out and local.worker == 'running':
-        action('signin', 'Sign in', 'work:signin:all')
+    # The paired Codespace is one the menu can connect to: Replace and the sign-in item need one.
+    reachable = bool(name) and any(candidate.key in ('connect', 'start') for candidate in candidates)
+    signin = (Action('signin', 'Sign in to the tools', task_command(local, 'work:signin:all'))
+              if connected and reachable else None)
 
     replace_action = None
-    if (name and local.replacing is None
-            and any(candidate.key in ('connect', 'start') for candidate in candidates)):
+    if reachable and local.replacing is None:
         replace_action = Action('replace', 'Replace this Codespace', task_command(local, 'setup', '--', '--replace'))
 
     if name and not recovery_off:
@@ -406,7 +412,7 @@ def view(local: Local, remote: Remote | None, *,
 
     problems = []
     unique = {}
-    for candidate in [*priority, *candidates, *filter(None, (replace_action, delete))]:
+    for candidate in [*priority, *candidates, *filter(None, (signin, replace_action, delete))]:
         if any(unicodedata.category(char) in _UNSAFE for arg in candidate.argv for char in arg):
             # Withheld first: it is why the menu lacks an action the situation calls for.
             if 'an action was withheld for unsafe text' not in problems:
@@ -414,6 +420,7 @@ def view(local: Local, remote: Remote | None, *,
         else:
             unique.setdefault(candidate.key, candidate)
     replace_action = unique.pop('replace', None)
+    signin = unique.pop('signin', None)
     delete = unique.pop(delete.key, None) if delete is not None else None
     problems += [problem for problem in local.problems if problem not in problems]
     if problems:
@@ -422,9 +429,14 @@ def view(local: Local, remote: Remote | None, *,
 
     # Replace and the retired delete keep their slots, so a busy state never hides them.
     reserved = [found for found in (replace_action, delete) if found is not None]
-    actions = list(unique.values())[:_SLOTS - len(reserved)]
+    actions = list(unique.values())
+    if signin is not None:
+        # Directly above Replace, or right after the first action while a tool is signed out; never reserved.
+        actions.insert(1 if local.signed_out else len(actions), signin)
+    actions = actions[:_SLOTS - len(reserved)]
     if local.logs and len(actions) + len(reserved) < 3:
-        actions.append(Action('logs', 'Show recovery and sync logs', task_command(local, 'work:logs')))
+        at = actions.index(signin) if signin in actions and not local.signed_out else len(actions)
+        actions.insert(at, Action('logs', 'Show recovery and sync logs', task_command(local, 'work:logs')))
     actions += reserved
     actions.append(Action('details', 'Show details', task_command(local, 'work:status')))
 
