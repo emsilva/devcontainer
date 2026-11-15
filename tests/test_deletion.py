@@ -894,7 +894,7 @@ class DeletionTests(unittest.TestCase):
         self.assertEqual(code, 1)
         history = next(row for row in json.loads(output)['categories'] if row['name'] == 'history')
         self.assertEqual(history['verdict'], 'unknown')
-        self.assertEqual(history['text'], 'Unknown: the final capture is no longer on this Mac')
+        self.assertEqual(history['text'], 'Unknown: the final sync is no longer on this Mac')
         self.assertEqual(self.mutations(), [])
 
     def test_404_alone_is_not_deleted(self):

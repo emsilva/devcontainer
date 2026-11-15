@@ -43,9 +43,10 @@ class SealTests(unittest.TestCase):
         return replace(verdict.Evidence(scan, True, (), scan.scratch, (), True, cycle, receipt,
                                        verdict.sessions_by_file(self.manifest), None, ()), **updates)
 
-    def test_no_message_says_final_flush(self):
-        # FR8 (spec E): screens say "final sync". Every string literal in the product but docstrings
-        # is a message that can print; identifiers, record names and --json keys are not string text here.
+    def test_no_message_uses_a_banned_word_for_the_final_sync(self):
+        # FR8 and FR13 (spec E): screens say "final sync", never final flush, final capture or flush and move.
+        # Every string literal in the product but docstrings is a message that can print; identifiers, record
+        # names and --json keys are not string text here.
         import ast
         import re
         found = []
@@ -57,7 +58,7 @@ class SealTests(unittest.TestCase):
                           and isinstance(node.body[0].value, ast.Constant)}
             for node in ast.walk(tree):
                 if (isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings
-                        and re.search(r'final[ -]flush', node.value, re.I)):
+                        and re.search(r'final[ -]flush|final capture|flush and move', node.value, re.I)):
                     found.append(f'{path}:{node.lineno}: {node.value}')
         self.assertEqual(found, [])
 

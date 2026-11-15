@@ -403,7 +403,7 @@ class VerdictTests(unittest.TestCase):
         for available in (False, None):
             row = self.judge('History', replace(self.evidence, capture_loads=available), target)
             self.assertEqual(row.verdict, 'unknown')
-            self.assertIn('final capture is no longer on this Mac', row.text)
+            self.assertIn('final sync is no longer on this Mac', row.text)
         scan = replace(self.evidence.scan, sessions=(('codex/sessions/' + NAME, 'c' * 64),))
         self.assertEqual(self.judge('History', replace(self.evidence, scan=scan, capture_loads=False), target).verdict,
                          'unsafe')

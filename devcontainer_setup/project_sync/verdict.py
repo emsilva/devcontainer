@@ -305,15 +305,15 @@ def _history(target, evidence, now):
         return _category('History', SAFE, 'no conversations on ' + target.name)
     if target.kind == 'sealed':
         if target.seal is None:
-            return _category('History', UNKNOWN, 'the final capture is no longer on this Mac')
+            return _category('History', UNKNOWN, 'the final sync is no longer on this Mac')
         saved = set(target.seal.sessions)
         changed = tuple(path for path, digest in scan.sessions if (path, digest) not in saved)
         if changed:
             return _category('History', UNSAFE, _quantity(len(changed), 'conversation file') +
-                             ' changed since the final capture', changed)
+                             ' changed since the final sync', changed)
         if evidence.capture_loads is not True:
-            return _category('History', UNKNOWN, 'the final capture is no longer on this Mac')
-        return _category('History', SAFE, 'no turn newer than the final capture at ' + _when(target.seal.sealed_at, now))
+            return _category('History', UNKNOWN, 'the final sync is no longer on this Mac')
+        return _category('History', SAFE, 'no turn newer than the final sync at ' + _when(target.seal.sealed_at, now))
     if not evidence.sync_running:
         return _category('History', UNKNOWN, _SYNC_STOPPED)
     cycle = evidence.cycle
