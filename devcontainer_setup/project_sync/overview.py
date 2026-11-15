@@ -333,8 +333,10 @@ def view(local: Local, remote: Remote | None, *,
         row(5, 5, 'Codespace', text)
     # The paired Codespace is one the menu can connect to: Replace and the sign-in item need one.
     reachable = bool(name) and any(candidate.key in ('connect', 'start') for candidate in candidates)
+    # Signing in also needs the Codespace up, since work:signin:all cannot start it: not while GitHub lists it
+    # stopped, stopping or starting. A state GitHub did not name or a slow read keeps the item.
     signin = (Action('signin', 'Sign in to the tools', task_command(local, 'work:signin:all'))
-              if connected and reachable else None)
+              if connected and reachable and situation in ('available', 'other', 'unknown') else None)
 
     replace_action = None
     if reachable and local.replacing is None:
