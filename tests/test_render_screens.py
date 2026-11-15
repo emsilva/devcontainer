@@ -48,5 +48,42 @@ class RenderScreensTests(unittest.TestCase):
             self.assertNotIn(marker, self.text)
 
 
+class RowActionTests(unittest.TestCase):
+    """FR20: a row that asks for forget, connect, pair, create or update has that item on the menu."""
+
+    # Row text -> the menu keys that answer it (any one; a key ending in ':' is a prefix).
+    ASKS = ((r'\bforget (it|them)\b', ('forget:',)), (r'\bconnect\b', ('connect', 'start')),
+            (r'\bpair\b', ('pair:',)), (r'\bcreate\b', ('create',)),
+            (r'\bcommits behind\b', ('update-checkout',)), (r'^Generator ', ('upgrade',)))
+    # Frames allowed to miss an item, each with its reason. None of the render's frames needs one. Fable's
+    # row_sweep axes (186,624 frames, fix-3b/miss-causes.txt) find these conditions, which no frame here draws:
+    # - "forget it/them" without Forget: only where an unfinished replace, a cleanup or the retired delete take the
+    #   slots first (priority and reserved items, which outrank a refused conversation).
+    # - "commits behind" without Update the checkout and "Generator" without its review: both rank after the Forget
+    #   items, so a full menu cuts them; their rows state a fact and do not name the action.
+    EXCEPTIONS = {
+        'Another repository: three to pair, a cleanup and a stopped replace':
+            'Finish the replace and the cleanup come first and three Pair items follow, so the cut drops Create a '
+            'Codespace while the row says "pair or create one"; Pair answers it, and Create returns once either '
+            'finishes.',
+    }
+
+    def test_a_row_that_asks_for_an_action_has_it_on_the_menu(self):
+        import re
+        missing = []
+        for name, local, remote in render_screens.situations():
+            frame = render_screens.frame(local, remote)
+            keys = [action.key for action in frame.actions]
+            for line in frame.lines[1:]:
+                for pattern, answers in self.ASKS:
+                    if re.search(pattern, line, re.I) and not any(
+                            key == answer or (answer.endswith(':') and key.startswith(answer))
+                            for key in keys for answer in answers):
+                        missing.append((name, line, keys))
+        self.assertEqual([found for found in missing if found[0] not in self.EXCEPTIONS], [])
+        # An exception that no longer applies is removed.
+        self.assertEqual(sorted(set(self.EXCEPTIONS) - {found[0] for found in missing}), [])
+
+
 if __name__ == '__main__':
     unittest.main()

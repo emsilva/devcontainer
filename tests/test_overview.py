@@ -309,7 +309,7 @@ class OverviewTests(unittest.TestCase):
                                 spaces=self.ok(())), TITLE,
              'Codespace  not listed for your account; deleted, or under another account', create),
             (self.local, replace(self.remote, spaces=self.ok(())), TITLE,
-             "Codespace  now listed under another repository; pair this one's Codespace", create),
+             'Codespace  now under another repository; create one for this project', create),
             (replace(self.local, pairing=None), replace(self.remote, spaces=self.ok(())), UNPAIRED,
              'Codespace  GitHub lists none for this repository', setup + details),
             (replace(self.local, pairing=None), self.remote, UNPAIRED,
@@ -348,8 +348,59 @@ class OverviewTests(unittest.TestCase):
         self.assertEqual(inside.lines, ("This is the Codespace; task work shows the project's state on your Mac.",))
         self.assert_actions(inside, self.argv('work:cs:stop'))
         silent = self.frame(replace(self.local, pairing=None), self.unavailable())
-        self.assertEqual(silent.lines, (UNPAIRED,))
+        self.assertEqual(silent.lines,
+                         (UNPAIRED, 'Codespace  not read: the request to GitHub failed; Connect asks it again'))
         self.assert_actions(silent, self.argv('work:cs') + setup + details)
+
+    def test_rows_ask_only_for_an_action_the_menu_offers(self):
+        # FR20 (Fable P3-3, P3-4): with no Connect on the menu, the Sync and Recovery rows do not say connect.
+        quiet = replace(self.local, worker='stopped', armed=True, keeper='stale', keeper_heartbeat_age=600)
+        gone = {'deleted': replace(self.remote, names=self.ok(frozenset()), spaces=self.ok(())),
+                'missing': replace(self.remote, account=self.ok('mannu_kyndryl'), names=self.ok(frozenset()),
+                                   spaces=self.ok(())),
+                'elsewhere': replace(self.remote, spaces=self.ok(())),
+                'setup': self.remote, 'failed': self.remote_state('Failed')}
+        for situation, remote in gone.items():
+            with self.subTest(situation=situation):
+                local = replace(quiet, setup='missing') if situation == 'setup' else quiet
+                frame = self.frame(local, remote)
+                self.assertFalse({'connect', 'start'} & set(self.keys(frame)), self.keys(frame))
+                self.assertEqual(self.rows(frame, 'Recovery'), ['Recovery   not answering for 10 min'])
+                self.assertEqual(self.rows(frame, 'Sync'), ['Sync       stopped'])
+        # Where the menu connects, the rows still say so.
+        frame = self.frame(quiet)
+        self.assertEqual(self.rows(frame, 'Recovery'), ['Recovery   not answering for 10 min; connect to restart it'])
+        self.assertEqual(self.rows(frame, 'Sync'), ['Sync       stopped; connect to start it'])
+        # Recovery off puts Connect first in any situation, so its rows keep connect.
+        off = self.frame(replace(quiet, keeper='stopped', setup='missing'))
+        self.assertEqual(self.keys(off)[0], 'connect')
+        self.assertEqual(self.rows(off, 'Sync'), ['Sync       stopped; connect to start it'])
+        # The elsewhere row's two forms, by whether a Pair item is offered.
+        listed = replace(self.remote, spaces=self.ok((Space(OLD, 'Shutdown', None),)))
+        frame = self.frame(self.local, listed)
+        self.assertEqual(frame.lines[1], 'Codespace  now under another repository; pair or create one for this project')
+        self.assertEqual(self.keys(frame), [f'pair:{OLD}', 'create', 'details'])
+        self.assertLessEqual(self.overview.cells(frame.lines[1]), 78)
+        # Unpaired with GitHub silent: Connect asks GitHub itself, so the row says so where asking again can help.
+        unpaired = replace(self.local, pairing=None)
+        for remote, text in ((None, 'checking GitHub…'),
+                             (replace(self.unavailable(), spaces=self.failed('no answer within 2 s', 'unknown')),
+                              'GitHub did not answer within 2 s; Connect asks it again'),
+                             (self.unavailable(), 'not read: the request to GitHub failed; Connect asks it again'),
+                             (Remote(*(self.failed('request failed; child 99998 was not reaped') for _ in range(5))),
+                              'not read: the request to GitHub failed; Connect asks it again'),
+                             (Remote(*(self.failed('not signed in to GitHub') for _ in range(5))),
+                              'not signed in to GitHub'),
+                             (Remote(*(self.failed('gh is not installed') for _ in range(5))), 'gh is not installed')):
+            with self.subTest(remote=text):
+                frame = (self.overview.view(unpaired, None, now=self.now) if remote is None
+                         else self.frame(unpaired, remote))
+                self.assertEqual(frame.lines[1], 'Codespace  ' + text)
+                self.assertEqual(self.keys(frame), ['connect', 'create', 'details'])
+                # No cut: only the checking row ends in '…', and that is a word.
+                self.assertTrue(all(self.overview.cells(line) <= 78
+                                    and (not line.endswith('…') or line == 'Codespace  checking GitHub…')
+                                    for line in frame.lines))
 
     def test_recovery_row_says_what_to_plan_around(self):
         armed = replace(self.local, armed=True, keeper='running')

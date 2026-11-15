@@ -218,10 +218,39 @@ def _long_rows(case):
     ]
 
 
+def _action_rows(case):
+    """FR20: rows that would name an action, in the situations that might not offer it."""
+    local, remote, ok = case.local, case.remote, case.ok
+    quiet = replace(local, worker='stopped', armed=True, keeper='stale', keeper_heartbeat_age=600)
+    unpaired = replace(local, pairing=None)
+    return [
+        ('Deleted: sync stopped, Recovery not answering', quiet,
+         replace(remote, names=ok(frozenset()), spaces=ok(()))),
+        ('Not listed: sync stopped, Recovery not answering', quiet,
+         replace(remote, account=ok('mannu_kyndryl'), names=ok(frozenset()), spaces=ok(()))),
+        ('Another repository: sync stopped, Recovery not answering', quiet, replace(remote, spaces=ok(()))),
+        ('Another repository: another Codespace listed', local,
+         replace(remote, spaces=ok((Space(OLD, 'Shutdown', None),)))),
+        ('Another repository: three to pair, a cleanup and a stopped replace',
+         replace(local, cleanup=('scaling-fortnight-abcdefghijklmnop',),
+                 replacing={'old': CS, 'new': OLD, 'phase': 'ready'}),
+         replace(remote, spaces=ok(tuple(Space(name, 'Shutdown', None) for name in (
+             OLD, 'fluffy-guide-0123456789abcdefgh', 'probable-space-zebra-q7r8s9t0u1v2'))))),
+        ('Setup not done: sync stopped, Recovery not answering', replace(quiet, setup='missing'), remote),
+        ('Setup pull request open: sync stopped', quiet, replace(remote, setup_prs=ok((7,)))),
+        ('Failed on GitHub: sync stopped', quiet, case.remote_state('Failed')),
+        ('Setup did not finish: sync stopped', replace(quiet, launch=Launch(CS, False)), remote),
+        ('Unpaired: GitHub did not answer within 2 s', unpaired,
+         replace(case.unavailable(), spaces=case.failed('no answer within 2 s', 'unknown'))),
+        ('Unpaired: checking GitHub', unpaired, None),
+    ]
+
+
 def _groups():
     case = _fixture()
     return [
         ('The situation row', _situation_rows(case)),
+        ('Rows that name an action', _action_rows(case)),
         ('The Recovery row', _recovery_rows(case)),
         ("The plan's drawings", _drawings(case)),
         ('Other rows', _other_rows(case)),
