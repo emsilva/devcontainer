@@ -126,12 +126,22 @@ def _pair(local: Local, remote: Remote | None, now: float) -> _Pair:
     if local.reading is not None:
         raw, at = local.reading
         return _Pair(normalize(raw), raw, 'as of ' + _when(at, now), at)
+    return _Pair('unknown', reason=_silence(remote))
+
+
+def _silence(remote: Remote | None) -> str:
+    """The words for a GitHub read that gave no list."""
     if remote is None:
-        return _Pair('unknown', reason='checking GitHub…')
+        return 'checking GitHub…'
     reason = remote.spaces.reason or remote.names.reason or 'GitHub state is unknown'
     if reason == 'no answer within 2 s':
-        reason = 'GitHub did not answer within 2 s'
-    return _Pair('unknown', reason=reason)
+        return 'GitHub did not answer within 2 s'
+    if reason.startswith('request failed'):
+        # The probe's detail (a child it could not signal or reap) stays only where the row still fits.
+        text = 'not read: the request to GitHub failed'
+        detail = text + reason.removeprefix('request failed')
+        return detail if cells('Codespace  ' + detail) <= 78 else text
+    return reason
 
 
 def _stop(local: Local, pair: _Pair) -> tuple[str | None, float | None]:
@@ -377,8 +387,8 @@ def view(local: Local, remote: Remote | None, *,
                   if checkout.relation == 'other-branch' else 'on a detached HEAD')
         row(11, 11, 'Checkout', branch + tail)
     elif checkout.relation == 'behind' and checkout.branch == checkout.default:
-        copied = 'local copy' + (' from ' + _when(checkout.copied_at, now) if checkout.copied_at is not None else '')
-        row(11, 11, 'Checkout', f'{checkout.behind} commits behind origin/{checkout.default} ({copied})')
+        fetched = f' (as fetched {_when(checkout.copied_at, now)})' if checkout.copied_at is not None else ''
+        row(11, 11, 'Checkout', f"{checkout.behind} commits behind GitHub's {checkout.default}{fetched}")
         candidates.append(Action('update-checkout', 'Update the checkout',
                                  ('git', '-C', str(local.root), 'merge', '--ff-only', 'origin/' + checkout.default)))
     elif checkout.relation == 'diverged':
@@ -386,7 +396,8 @@ def view(local: Local, remote: Remote | None, *,
     if (local.generated and local.setup == 'installed' and local.source_ref is not None
             and remote is not None and remote.upstream.status == 'ok' and remote.upstream.value != local.source_ref):
         # The probe exposes the SHA only, not the configured symbolic ref's name.
-        row(12, 13, 'Generator', f'upstream is at {remote.upstream.value[:7]}; this project uses {local.source_ref[:7]}')
+        row(12, 13, 'Generator',
+            f'a newer version ({remote.upstream.value[:7]}) is out; this project uses {local.source_ref[:7]}')
         candidates.append(Action('upgrade', 'Review the generator upgrade', ('task', 'devcontainer:upgrade:self')))
 
     priority = []

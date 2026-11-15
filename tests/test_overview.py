@@ -336,7 +336,7 @@ class OverviewTests(unittest.TestCase):
             (self.local, self.remote_state('Moved'), TITLE, 'Codespace  in state Moved (checked 09:10)', paired),
             (self.local, replace(self.unavailable(), spaces=self.failed('no answer within 2 s', 'unknown')), TITLE,
              'Codespace  GitHub did not answer within 2 s', paired),
-            (self.local, self.unavailable(), TITLE, 'Codespace  request failed', paired),
+            (self.local, self.unavailable(), TITLE, 'Codespace  not read: the request to GitHub failed', paired),
         ]
         for local, remote, title, situation, actions in cases:
             with self.subTest(situation=situation, setup=local.setup):
@@ -473,7 +473,7 @@ class OverviewTests(unittest.TestCase):
             'Recovery   off until you connect',
             'Codespace  stopped; you stopped it at 09:10',
             'History    1 conversation refused; forget it to clear the sync warning',
-            'Checkout   2 commits behind origin/main (local copy)'))
+            "Checkout   2 commits behind GitHub's main"))
         self.assert_actions(frame, [
             ('task', 'work:cs'),
             ('task', 'work:forget', '--', '--agent', 'codex', '--session', 'session-1'),
@@ -757,7 +757,7 @@ class OverviewTests(unittest.TestCase):
         behind = replace(self.local, signed_out=('Plaud',), checkout=replace(self.local.checkout, relation='behind',
                                                                              behind=2))
         frame = self.frame(behind)
-        self.assertEqual(self.rows(frame, 'Checkout'), ['Checkout   2 commits behind origin/main (local copy)'])
+        self.assertEqual(self.rows(frame, 'Checkout'), ["Checkout   2 commits behind GitHub's main"])
         self.assertEqual(self.keys(frame), ['connect', 'arm', 'stop', 'update-checkout', 'replace', 'details'])
         # Once the row is cleared, a slot is free and the item moves back up.
         self.assertEqual(self.keys(self.frame(replace(refused, refusals=()))),
@@ -787,6 +787,31 @@ class OverviewTests(unittest.TestCase):
                              'Sign-ins')
             self.assertLessEqual(self.overview.cells(row), 78, row)
         self.assertEqual(self.rows(self.frame(), 'Sign-ins'), [])
+
+    def test_rows_name_github_in_the_owners_words(self):
+        # FR23 (Fable P3-6): the Checkout, Generator and failed-request rows, at their widest.
+        old = datetime(2026, 11, 7, 22, 0).timestamp()
+        behind = replace(self.local, checkout=replace(self.local.checkout, relation='behind', behind=1234,
+                                                      copied_at=old))
+        row, = self.rows(self.frame(behind), 'Checkout')
+        self.assertEqual(row, "Checkout   1234 commits behind GitHub's main (as fetched 2026-11-07 22:00)")
+        self.assertLessEqual(self.overview.cells(row), 78)
+        generator, = self.rows(self.frame(remote=replace(self.remote, upstream=self.ok('b' * 40))), 'Generator')
+        self.assertEqual(generator, 'Generator  a newer version (bbbbbbb) is out; this project uses aaaaaaa')
+        # Every reason the probe gives for a failed read; a detail that would not fit is left to Show details.
+        for reason, text in (('request failed', 'not read: the request to GitHub failed'),
+                             ('request failed; child 99998 was not reaped',
+                              'not read: the request to GitHub failed; child 99998 was not reaped'),
+                             ('request failed; child 99998 could not be signalled',
+                              'not read: the request to GitHub failed'),
+                             ('not signed in to GitHub', 'not signed in to GitHub'),
+                             ('gh is not installed', 'gh is not installed'),
+                             ('incomplete list', 'incomplete list'), ('answer too large', 'answer too large')):
+            with self.subTest(reason=reason):
+                remote = Remote(*(self.failed(reason) for _ in range(5)))
+                lines = self.frame(remote=remote).lines
+                self.assertEqual(lines[1], 'Codespace  ' + text)
+                self.assertTrue(all(self.overview.cells(line) <= 78 and not line.endswith('…') for line in lines))
 
     def test_history_row_waits_five_minutes(self):
         self.assertEqual(self.rows(self.frame(replace(self.local, history_pending_since=self.now - 299)),
@@ -966,10 +991,10 @@ class OverviewTests(unittest.TestCase):
             'Codespace  available (checked 09:10)',
             'Recovery   not answering for 3 min; connect to restart it',
             'Sync       stopped; connect to start it',
-            'Checkout   2 commits behind origin/main (local copy from 09:10)'))
+            "Checkout   2 commits behind GitHub's main (as fetched 09:10)"))
         self.assertIn(('task', 'devcontainer:upgrade:self'), [a.argv for a in frame.actions])
         generator = self.frame(replace(self.local, cycle_at=self.at), remote)
-        self.assertIn('Generator  upstream is at bbbbbbb; this project uses aaaaaaa', generator.lines)
+        self.assertIn('Generator  a newer version (bbbbbbb) is out; this project uses aaaaaaa', generator.lines)
         held = self.frame(replace(self.local, armed=True, hold_until=self.now + 3600, cycle_at=self.at))
         self.assertIn('Recovery   armed; on hold until 13:00', held.lines)
         self.assertIn('Sync       last completed 09:10', held.lines)

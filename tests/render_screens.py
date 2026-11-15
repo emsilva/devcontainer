@@ -185,7 +185,7 @@ def _other_rows(case):
         ('Sign-ins: one signed out, a conversation refused',
          replace(local, signed_out=('Plaud',), refusals=(Refusal('codex', 'session-1', 'refused'),)), case.remote),
         ('History: not synced yet', replace(local, history_pending_since=NOW - 901), case.remote),
-        ('Checkout: behind origin/main', replace(local, checkout=replace(checkout, relation='behind', behind=2)),
+        ("Checkout: behind GitHub's main", replace(local, checkout=replace(checkout, relation='behind', behind=2)),
          case.remote),
         ('Checkout: diverged', replace(local, checkout=replace(checkout, relation='diverged')), case.remote),
         ('Checkout: detached HEAD', replace(local, checkout=Checkout(default='main', relation='detached')),
