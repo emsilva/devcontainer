@@ -28,7 +28,12 @@ The work is split in two (owner, 2026-11-14: "follow your recommendation"). **Ro
 that cannot create, bill or delete a Codespace. **Round 2, later:** review items 2 (delete progress and finishing
 an interrupted delete), 3 (recovery after a Mac restart, other projects, the Herdr sidebar marker from #87 step 10)
 and 5 (calling the owner back during a replace), plus the replace preview's "what is running there now" row,
-which needs the early scan of the old Codespace from #113.
+which needs the early scan of the old Codespace from #113. Round 2 also takes two port fixes (owner, 2026-11-15:
+"go ahead"), found when a Codespace agent said its server could not be opened live. First, the managed notes'
+"this project forwards no ports" text names no remedy. It should tell the agent to ask the owner to run
+`task work:cs:armed -- --port N` on the Mac and give the Mac URL `http://localhost:<N+10000>`. Second, a port added
+to `forwardPorts` after arming never reaches the armed list, because an armed project re-reads nothing and only
+`--port` changes it. The notes, which list `forwardPorts`, and the tunnel can then disagree.
 
 ## Goals
 
