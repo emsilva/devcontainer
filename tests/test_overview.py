@@ -566,6 +566,26 @@ class OverviewTests(unittest.TestCase):
         self.assertEqual(self.frame(replace(local, pairing=None)).lines[0],
                          'consult-sm-strata-mainframe-modernisation · no Codespace paired')
 
+    def test_an_unread_origin_names_the_pairing_as_not_read(self):
+        # FR18: Git did not give origin, so no state and no pairing were read; no Create a Codespace.
+        unread = replace(self.local, origin_unread=True, pairing=None, state=None, repository='', armed=None,
+                         keeper='unknown', worker='unknown', problems=('Git remote cannot be read',))
+        for remote in (None, self.unavailable(), replace(self.remote, names=self.ok(frozenset()), spaces=self.ok(()))):
+            frame = self.frame(unread, remote) if remote is not None else self.overview.view(unread, None, now=self.now)
+            self.assertEqual(frame.lines[0], 'consult-sm-innovate · pairing not read')
+            self.assertEqual(self.keys(frame), ['connect', 'details'])
+            self.assertEqual(frame.actions[0].argv, ('task', 'work:cs'))
+            self.assertIn('Problem    Git remote cannot be read; Show details has more', frame.lines)
+        # A long folder is cut, never the tail.
+        long = replace(unread, root=Path('/fixture/consult-sm-strata-mainframe-modernisation-' + 'x' * 60))
+        title = self.frame(long).lines[0]
+        self.assertTrue(title.endswith('… · pairing not read'), title)
+        self.assertEqual(self.overview.cells(title), 78)
+        # Line one says so in every situation; an unfinished setup keeps its own action.
+        unset = self.frame(replace(unread, setup='missing'))
+        self.assertEqual(unset.lines[0], 'consult-sm-innovate · pairing not read')
+        self.assertEqual(self.keys(unset), ['setup', 'details'])
+
     def test_a_long_problem_keeps_its_pointer(self):
         problem = f'retired/{CS}.json cannot be read'
         for problems, tail in (((problem,), '; Show details has more'),

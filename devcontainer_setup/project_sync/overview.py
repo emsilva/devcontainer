@@ -166,9 +166,9 @@ def _clean(text: str) -> str:
     return ''.join(char for char in text if unicodedata.category(char) not in _UNSAFE)
 
 
-def _title(folder: str, name: str | None) -> str:
+def _title(folder: str, name: str | None, unread: bool = False) -> str:
     """Name the Codespace once; a long line cuts the folder, never the name."""
-    tail = ' · ' + (_clean(name) if name else 'no Codespace paired')
+    tail = ' · ' + (_clean(name) if name else 'pairing not read' if unread else 'no Codespace paired')
     folder = _clean(folder)
     if cells(folder + tail) > 78:
         folder = fit(folder, max(1, 78 - cells(tail)))
@@ -251,6 +251,9 @@ def view(local: Local, remote: Remote | None, *,
         situation = 'failed'
     elif launch is not None and not launch.complete and (not local.pairing or launch.codespace == local.pairing):
         situation = 'launch'
+    elif not local.pairing and local.origin_unread:
+        # Git did not give origin, so neither the project's state nor its GitHub repository is known.
+        situation = 'unread'
     elif not local.pairing:
         situation = 'unpaired'
     else:
@@ -306,6 +309,9 @@ def view(local: Local, remote: Remote | None, *,
         for space in others[:3]:
             action('pair:' + space.name, 'Pair ' + space.name, 'work:cs', '--', '--rebind', space.name)
         action('create', 'Create a Codespace', 'setup')
+    elif situation == 'unread':
+        # task work:cs reads Git again; Create a Codespace would act on a project not read.
+        action('connect', 'Connect', 'work:cs')
     elif situation == 'unpaired':
         if spaces is not None:
             count = len(spaces)
@@ -459,7 +465,7 @@ def view(local: Local, remote: Remote | None, *,
     actions.append(Action('details', 'Show details', task_command(local, 'work:status')))
 
     kept = sorted(sorted(rows, key=lambda found: (found[1], found[0]))[:_ROWS])
-    lines = (_title(local.root.name, name), *(text for _, _, text in kept))
+    lines = (_title(local.root.name, name, local.origin_unread), *(text for _, _, text in kept))
     return View(lines, _unique_labels(actions))
 
 

@@ -102,6 +102,10 @@ def _situation_rows(case):
          replace(case.unavailable(), spaces=case.failed('no answer within 2 s', 'unknown'))),
         ('GitHub not answering: a request failed', local, case.unavailable()),
         ('GitHub not answering: nothing paired', unpaired, case.unavailable()),
+        ('Git did not give origin: pairing not read',
+         replace(unpaired, origin_unread=True, state=None, repository='', armed=None, keeper='unknown',
+                 worker='unknown', problems=('Git remote cannot be read',)),
+         replace(remote, names=case.ok(frozenset()), spaces=case.ok(()))),
     ]
 
 
