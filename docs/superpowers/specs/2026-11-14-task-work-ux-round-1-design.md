@@ -413,12 +413,14 @@ first ruled: FR2's label also needs the `available`,
 task work:cs:armed` for a Recovery that is not answering, after the builder confirms through `keeper.start` that a
 plain connect replaces a silent keeper.
 
-**FR23 (3b). Words (Fable P3-6 and the owner's read).** On the `task work` screen: `on your Mac` becomes `on the Mac`
-(E); `Checkout   N commits behind GitHub's main (as fetched DATE)` replaces `… behind origin/main (local copy
+**FR23 (3b). Words (Fable P3-6 and the owner's read).** On the `task work` screen: `Checkout   N commits behind GitHub's main (as fetched DATE)` replaces `… behind origin/main (local copy
 from DATE)`; `Generator  a newer version (bbbbbbb) is out; this project uses aaaaaaa` replaces `upstream is at …`;
-`Codespace  not read: the request to GitHub failed` replaces `request failed`. The same words in `__main__.py:635`
-and the docs follow. The `History` row keeps "refused": `task work:forget`'s help and refusal say "refused", so
+`Codespace  not read: the request to GitHub failed` replaces `request failed`. The docs follow. `your Mac` stays: it names the same
+Mac, and fifteen messages outside round 1 use it; E is amended below. The `History` row keeps "refused": `task work:forget`'s help and refusal say "refused", so
 "was not synced" would give one thing two names (E), next to the pending row's different "not synced yet".
+
+**E, amended (2026-11-15, lead, from Fable P3-6).** "your Mac" is allowed: it is the same Mac, not a second name. E
+still bans `local`, `Desktop`, and the other names it lists.
 
 **FR24 (round 2). The A1 fetch has a time limit (Review Focus 3; Fable, plausible).** Struck from round 1: killing
 `git fetch` acts on the owner's real checkout, and a slow but live fetch cut short would leave A1 judging a stale
