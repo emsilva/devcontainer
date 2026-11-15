@@ -225,8 +225,11 @@ def _parent(path: Path, create: bool = False, private: bool = False):
             except BaseException:
                 os.close(next_fd)
                 raise
-            os.close(fd)
-            fd = next_fd
+            # Hand the walk to the new descriptor before closing the old one. A signal
+            # handler can raise as os.close returns (the stage alarm, a stop request);
+            # `finally` must then close next_fd, never the old number a second time.
+            previous, fd = fd, next_fd
+            os.close(previous)
         yield fd, path.name
     finally:
         os.close(fd)

@@ -103,6 +103,26 @@ class GitEnv(unittest.TestCase):
         return receipt, out.getvalue(), err.getvalue()
 
 
+class ReadInterruptTests(unittest.TestCase):
+    def test_an_interrupt_after_any_close_while_reading_an_env_file_survives(self):
+        from test_project_state import Interrupt, interrupted
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            (root / 'a' / 'b').mkdir(parents=True)
+            (root / 'a' / 'b' / '.env').write_bytes(b'KEY=value\n')
+            read = []
+            def action():
+                read.append(env_files._read_no_symlink(root, 'a/b/.env'))
+            raised, twice, opened, closes = interrupted(action, 0)
+            self.assertEqual((read, raised, twice, opened, closes), ([b'KEY=value\n'], None, [], set(), 4))
+            for number in range(1, closes + 1):
+                with self.subTest(close=number):
+                    raised, twice, opened, _ = interrupted(action, number)
+                    self.assertIsInstance(raised, Interrupt)
+                    self.assertEqual(twice, [])
+                    self.assertEqual(opened, set())
+
+
 class FindTests(GitEnv):
     def test_find_picks_env_files_and_reports_too_large(self):
         init_repo(self.root)

@@ -12,7 +12,7 @@ import uuid
 from unittest import mock
 
 from devcontainer_setup.project_sync.state import (
-    Project, atomic_write, discover_project, locked, read_json, state_dir,
+    Project, _parent, atomic_write, discover_project, locked, read_json, state_dir,
 )
 
 
@@ -275,6 +275,79 @@ class LockDescriptorTests(unittest.TestCase):
                 self.assertTrue(stat.S_ISREG(os.fstat(descriptor).st_mode))
             with self.assertRaises(OSError):
                 os.fstat(descriptor)
+
+
+class Interrupt(BaseException):
+    """Stands for the stage alarm or a stop request: raised by a signal handler, not by the code."""
+
+
+def interrupted(action, interrupt_after_close):
+    """Run action(); raise Interrupt as a handler would, right after the Nth os.close returns."""
+    real_open, real_close = os.open, os.close
+    opened, twice, closes = set(), [], 0
+    def tracking_open(*args, **kwargs):
+        fd = real_open(*args, **kwargs)
+        opened.add(fd)
+        return fd
+    def tracking_close(fd):
+        nonlocal closes
+        if fd in opened:
+            opened.discard(fd)
+        else:
+            twice.append(fd)
+        real_close(fd)
+        closes += 1
+        if closes == interrupt_after_close:
+            raise Interrupt()
+    raised = None
+    with mock.patch.object(os, 'open', tracking_open), mock.patch.object(os, 'close', tracking_close):
+        try:
+            action()
+        except BaseException as error:
+            raised = error
+    return raised, twice, opened, closes
+
+
+class WalkInterruptTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+
+    def assert_every_close_survives(self, action, closes):
+        for number in range(1, closes + 1):
+            with self.subTest(close=number):
+                raised, twice, opened, _ = interrupted(action, number)
+                self.assertIsInstance(raised, Interrupt)
+                self.assertEqual(twice, [])
+                self.assertEqual(opened, set())
+
+    def test_an_interrupt_after_any_close_in_the_walk_survives_and_no_descriptor_is_closed_twice(self):
+        directory = self.root / 'one/two/three'
+        directory.mkdir(parents=True)
+        def walk():
+            with _parent(directory / 'record.json'):
+                pass
+        raised, twice, opened, closes = interrupted(walk, 0)
+        self.assertIsNone(raised)
+        self.assertEqual((twice, opened), ([], set()))
+        self.assertGreater(closes, 3)
+        self.assert_every_close_survives(walk, closes)
+
+    def test_an_interrupt_after_the_close_of_a_refused_directory_survives(self):
+        directory = self.root / 'devcontainer-setup' / 'projects' / ('0' * 24)
+        directory.mkdir(parents=True)
+        for private in (directory.parent.parent, directory.parent):
+            private.chmod(0o700)
+        directory.chmod(0o755)  # Not private: the walk refuses it and closes its descriptor.
+        def walk():
+            with _parent(directory / 'record.json', private=True):
+                pass
+        raised, twice, opened, closes = interrupted(walk, 0)
+        self.assertIsInstance(raised, PermissionError)
+        self.assertIn(str(directory), str(raised))
+        self.assertEqual((twice, opened), ([], set()))
+        self.assert_every_close_survives(walk, closes)
 
 
 class DefaultStateHomeTests(unittest.TestCase):

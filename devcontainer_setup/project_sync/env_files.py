@@ -358,8 +358,10 @@ def _read_no_symlink(root: Path, relative: str):
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
                 return None
             nextfd = os.open(part, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=dirfd)
-            os.close(dirfd)
-            dirfd = nextfd
+            # Hand over before closing: an interrupt raised as os.close returns must leave
+            # `finally` the open descriptor, not the old number to close a second time.
+            previous, dirfd = dirfd, nextfd
+            os.close(previous)
         name = parts[-1]
         try:
             info = os.lstat(name, dir_fd=dirfd)

@@ -4,6 +4,8 @@ import importlib
 import json
 import os
 from pathlib import Path
+import signal
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -402,6 +404,28 @@ class NativeCheckpointTests(NativeFixture):
         self.codex(); self.claude()
         with patch('devcontainer_setup.project_sync.agents.CodexClient', side_effect=AssertionError('writer')), patch('devcontainer_setup.project_sync.sessions.assert_quiescent', side_effect=AssertionError('custody')):
             self.assertEqual(len(self.capture()['entries']), 2)
+
+    def test_the_stage_deadline_landing_on_the_walk_handover_ends_the_capture_as_a_timeout(self):
+        from devcontainer_setup.project_sync import sessions, sync_cycle
+        path = self.codex()
+        real_close, real_safe, armed, fired = os.close, sessions._safe, [], []
+        def arming_safe(candidate):
+            if Path(candidate) == path:
+                armed.append(True)  # The capture is now inside its per-session handler.
+            return real_safe(candidate)
+        def alarm_after_close(fd):
+            directory = stat.S_ISDIR(os.fstat(fd).st_mode)
+            real_close(fd)
+            if armed and directory and not fired:
+                fired.append(True)
+                signal.raise_signal(signal.SIGALRM)  # The handler runs as this call returns.
+        cycle = sync_cycle.begin(self.project, str(self.root))
+        with patch.object(sessions, '_safe', arming_safe), patch.object(os, 'close', alarm_after_close):
+            with self.assertRaisesRegex(TimeoutError, 'timed out'):
+                with sync_cycle.stage(cycle, 'desktop_to_codespace:capture', None):
+                    self.api.capture_conversations(self.project, self.store, state=self.root / 'state', env=self.env)
+        self.assertEqual(fired, [True])
+        self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0., 0.))
 
 
 if __name__ == '__main__':
