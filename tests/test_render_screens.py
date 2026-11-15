@@ -61,12 +61,8 @@ class RowActionTests(unittest.TestCase):
     #   slots first (priority and reserved items, which outrank a refused conversation).
     # - "commits behind" without Update the checkout and "Generator" without its review: both rank after the Forget
     #   items, so a full menu cuts them; their rows state a fact and do not name the action.
-    EXCEPTIONS = {
-        'Another repository: three to pair, a cleanup and a stopped replace':
-            'Finish the replace and the cleanup come first and three Pair items follow, so the cut drops Create a '
-            'Codespace while the row says "pair or create one"; Pair answers it, and Create returns once either '
-            'finishes.',
-    }
+    # The elsewhere row is worded from the final menu (FR26), so a cut Create or Pair is never named.
+    EXCEPTIONS = {}
 
     def test_a_row_that_asks_for_an_action_has_it_on_the_menu(self):
         import re

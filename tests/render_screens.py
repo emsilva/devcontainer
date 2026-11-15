@@ -231,6 +231,11 @@ def _action_rows(case):
         ('Another repository: sync stopped, Recovery not answering', quiet, replace(remote, spaces=ok(()))),
         ('Another repository: another Codespace listed', local,
          replace(remote, spaces=ok((Space(OLD, 'Shutdown', None),)))),
+        # FR26 (Codex P2-2): the cleanup takes a priority slot and the retired delete a reserved one; Create is cut.
+        ('Another repository: three to pair, a cleanup and a replaced Codespace listed',
+         replace(local, cleanup=('scaling-fortnight-abcdefghijklmnop',), retired=(OLD,)),
+         replace(remote, spaces=ok(tuple(Space(name, 'Shutdown', None) for name in (
+             OLD, 'fluffy-guide-0123456789abcdefgh', 'probable-space-zebra-q7r8s9t0u1v2'))))),
         ('Another repository: three to pair, a cleanup and a stopped replace',
          replace(local, cleanup=('scaling-fortnight-abcdefghijklmnop',),
                  replacing={'old': CS, 'new': OLD, 'phase': 'ready'}),

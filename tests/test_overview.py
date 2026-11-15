@@ -402,6 +402,31 @@ class OverviewTests(unittest.TestCase):
                                     and (not line.endswith('…') or line == 'Codespace  checking GitHub…')
                                     for line in frame.lines))
 
+    def test_the_elsewhere_row_names_what_the_final_menu_offers(self):
+        # FR26 (Codex P2-2): the clause follows the menu after the cut, not the candidates before it.
+        names = (OLD, 'fluffy-guide-0123456789abcdefgh', 'probable-space-zebra-q7r8s9t0u1v2')
+        three = replace(self.remote, spaces=self.ok(tuple(Space(name, 'Shutdown', None) for name in names)))
+        cleanup = ('scaling-fortnight-abcdefghijklmnop',)
+        cases = [(self.local, replace(self.remote, spaces=self.ok(())), 'create one for this project'),
+                 (self.local, three, 'pair or create one for this project'),
+                 # The cleanup takes a priority slot and the retired delete a reserved one: Create is cut.
+                 (replace(self.local, cleanup=cleanup, retired=(OLD,)), three, 'pair one for this project'),
+                 (replace(self.local, cleanup=cleanup, replacing={'old': CS, 'new': OLD, 'phase': 'ready'}), three,
+                  'pair one for this project')]
+        for local, remote, clause in cases:
+            with self.subTest(clause=clause, cleanup=bool(local.cleanup), retired=local.retired):
+                frame = self.frame(local, remote)
+                row, = self.rows(frame, 'Codespace')
+                self.assertEqual(row, 'Codespace  now under another repository; ' + clause)
+                self.assertLessEqual(self.overview.cells(row), 78)
+                keys = self.keys(frame)
+                self.assertEqual(any(key.startswith('pair:') for key in keys), 'pair' in clause)
+                self.assertEqual('create' in keys, 'create' in clause)
+        # The menu itself is unchanged by the wording: its order and argv are the cut's.
+        crowded = self.frame(replace(self.local, cleanup=cleanup, retired=(OLD,)), three)
+        self.assertEqual(self.keys(crowded), [f'cleanup:{cleanup[0]}', *(f'pair:{name}' for name in names),
+                                              f'delete:{OLD}', 'details'])
+
     def test_recovery_row_says_what_to_plan_around(self):
         armed = replace(self.local, armed=True, keeper='running')
         shutdown = self.remote_state('Shutdown')

@@ -307,9 +307,6 @@ def view(local: Local, remote: Remote | None, *,
         others = sorted((space for space in (spaces or ()) if space.name != name),
                         key=lambda space: (space.last_used_at is not None,
                                            space.last_used_at if space.last_used_at is not None else 0), reverse=True)
-        if situation == 'elsewhere':
-            row(5, 5, 'Codespace', 'now under another repository; '
-                + ('pair or create one for this project' if others else 'create one for this project'))
         for space in others[:3]:
             action('pair:' + space.name, 'Pair ' + space.name, 'work:cs', '--', '--rebind', space.name)
         action('create', 'Create a Codespace', 'setup')
@@ -472,6 +469,12 @@ def view(local: Local, remote: Remote | None, *,
         actions.insert(at, Action('logs', 'Show recovery and sync logs', task_command(local, 'work:logs')))
     actions += reserved
     actions.append(Action('details', 'Show details', task_command(local, 'work:status')))
+    if situation == 'elsewhere':
+        # Worded from the final menu: the cut (priority and reserved items first) can drop Create or the Pair items.
+        offered = [verb for verb, found in (('pair', any(action.key.startswith('pair:') for action in actions)),
+                                            ('create', any(action.key == 'create' for action in actions))) if found]
+        row(5, 5, 'Codespace', 'now under another repository'
+            + ('; ' + ' or '.join(offered) + ' one for this project' if offered else ''))
 
     kept = sorted(sorted(rows, key=lambda found: (found[1], found[0]))[:_ROWS])
     lines = (_title(local.root.name, name, local.origin_unread), *(text for _, _, text in kept))
