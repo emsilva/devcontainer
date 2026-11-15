@@ -448,3 +448,27 @@ Codespace listed and three other Codespaces to pair, the cut drops `Create a Cod
 on it, `pair one for this project` with only `Pair …`, `create one for this project` with only Create, and no clause
 with neither. FR20's sweep test gains that crowded frame (and the render gains it), so a row that names an action
 the cut removed fails.
+
+### Fix round 3d (2026-11-15)
+
+Source: Fable's owner's read of 3b and 3c (`8026fd6..0754193`; no P1 or P2, five P3s N1-N5). 3b and 3c ship
+without waiting for this. Round 2: N4 (a retired Codespace still listed is offered as `Pair …` beside its own
+`Check and delete`), the rest of N5 (the probe's raw `incomplete list` and `answer too large` rows, the wizard's
+`… behind origin/main` line, Show details' `run task work:cs` for a silent Recovery where the menu cannot connect),
+and the empty-origin `Origin must not contain whitespace or control characters` problem for a project with no
+origin.
+
+**FR27. The Checkout row says when Git has no fetch time (Fable N1).** Without a reflog entry for
+`origin/<default>`, the row reads `N commits behind GitHub's main (as last fetched)`; with one, `(as fetched DATE)`
+as today.
+
+**FR28. The unread screen shows only the problem it has (Fable N2).** When `origin_unread`, `standing.read` does not
+derive the project identity from an origin it never read, so `Origin must not contain whitespace or control
+characters` is not added; the Problem row reads `Git remote cannot be read` alone. The render's "pairing not read"
+frame takes its problems from `standing.read`'s path rather than a hand-built list.
+
+**FR29. The Generator row says "latest", not "newer" (Fable N3).** It compares for difference, not order:
+`Generator  the latest version is bbbbbbb; this project uses aaaaaaa`.
+
+**FR30. Two words (Fable N5, owner's read).** `Checkout   diverged from GitHub's main; review before merging`
+replaces `… from origin/main; …`, matching the behind row. `; Connect asks again` replaces `; Connect asks it again`.
