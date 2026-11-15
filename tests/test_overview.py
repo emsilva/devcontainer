@@ -675,7 +675,7 @@ class OverviewTests(unittest.TestCase):
         self.assertEqual(row(None, 'detached'), ['Checkout   on a detached HEAD; Codespaces start from main'])
         self.assertEqual(row('main', 'current'), [])
 
-    def test_sign_in_is_offered_whenever_connected(self):
+    def test_sign_in_is_offered_where_the_menu_can_connect(self):
         # FR3: directly above Replace while connected; right after the first action while a tool is signed out.
         signin = ('Sign in to the tools', ('task', 'work:signin:all'))
         for signed_out, keys in (((), ['connect', 'arm', 'stop', 'signin', 'replace', 'details']),
