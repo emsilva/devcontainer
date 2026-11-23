@@ -12,7 +12,8 @@ committing. It can then push the branch and open a GitHub Codespace.
 | **Source code, branches, commits** | Normal Git checkout on Mac and Codespace | **Manual Git** (`commit` / `push` / `pull`) — sync never touches source code |
 | **Working notes & scratch files** (`.scratch/`, `.scratch/memory/`) | Main checkout `.scratch/` | **Automatic two-way safe sync** (conflicts preserved & shown in `task work`) |
 | **Completed Codex & Claude chats** | Each host's native agent store | **Verified native publication** (`codex resume` / `claude --resume`) |
-| **Grok, OpenCode & `agy` chats** | Host-local only | Stay on each host; share context via `.scratch/memory/` |
+| **Antigravity (`agy`) chats** | Host-local SQLite + automatic read-only Markdown exports under `.scratch/history/agy/{codespace,mac}/` | Exported automatically into `.scratch/` (synced two-way); `AGENTS.md` directs `agy` to read the other host's `INDEX.md` + `.scratch/memory/` |
+| **Grok & OpenCode chats** | Host-local only | Stay on each host; share context via `.scratch/memory/` |
 | **Secrets, tokens & global configs** | Host-local / Codespaces Secrets | Never committed or synced |
 
 ## Mac prerequisites & bootstrap

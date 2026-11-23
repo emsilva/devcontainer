@@ -123,11 +123,21 @@ Deletions propagate. Simultaneous conflicting edits remain for explicit resoluti
 
 Shared project memory is Markdown under `.scratch/memory/`. Setup adds guidance
 to AGENTS.md and CLAUDE.md, so ordinary native agent launches can read and maintain
-those notes. Project Codex policy disables its shared global memory feature for
-this workflow. Claude's project-local settings route auto-memory to
-`.scratch/memory/claude/`, preserving unrelated local settings and any explicit
-auto-memory enable/disable choice. A conflicting custom memory directory is
-reported and preserved. No global profile or memory settings are changed.
+those notes across Codex, Claude, and Antigravity (`agy`). Project Codex policy
+disables its shared global memory feature for this workflow. Claude's project-local
+settings route auto-memory to `.scratch/memory/claude/`, preserving unrelated local
+settings and any explicit auto-memory enable/disable choice. A conflicting custom
+memory directory is reported and preserved. No global profile or memory settings
+are changed.
+
+During each sync cycle, project-scoped top-level Antigravity (`agy`) conversations
+are also exported read-only (never mutating `agy`'s SQLite store) to host-scoped
+Markdown files under `.scratch/history/agy/codespace/` (written by the Codespace)
+and `.scratch/history/agy/mac/` (written by the Mac), each with an `INDEX.md`.
+Because each host writes only to its own subdirectory, two-way `.scratch/` sync
+carries recent history cleanly in both directions without conflicts, and the managed
+`AGENTS.md` guidance tells `agy` to check the other host's `INDEX.md` alongside
+`.scratch/memory/` when continuing work across hosts.
 
 The same guidance treats a Codespace as disposable: anything worth keeping goes
 in `.scratch/` as it is made, with working files in `.scratch/tmp/`. Agents in a

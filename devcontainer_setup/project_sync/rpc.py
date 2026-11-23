@@ -126,7 +126,7 @@ class LocalEndpoint:
         if operation == 'acknowledge':
             return self.store.acknowledge(snapshot_id, source=values['source'])
         from .conversations import publish_conversations
-        from .replication import _memory
+        from .replication import _export_agy_history, _memory
         from .scratch import _scratch
         from .state import _parent
         directory = self.project.root / '.scratch'
@@ -138,6 +138,7 @@ class LocalEndpoint:
                 pass
         _scratch(self.project.root)
         issues = _memory(self.project)
+        _export_agy_history(self.project, host='codespace', state=self.store.state)
         published = publish_conversations(self.project, self.store, snapshot_id, state=self.store.state)
         published['issues'].extend(issues)
         return published

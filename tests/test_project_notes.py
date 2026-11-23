@@ -4,7 +4,7 @@ import tempfile
 import tomllib
 import unittest
 
-from devcontainer_setup.project_sync.notes import _NOTES, _block, _owned, integrate_notes
+from devcontainer_setup.project_sync.notes import _GUIDANCE, _NOTES, _block, _owned, integrate_notes
 
 
 class NotesTests(unittest.TestCase):
@@ -260,11 +260,13 @@ class NotesTests(unittest.TestCase):
         self.put('CLAUDE.md', old)
         self.put('.devcontainer/devcontainer.json', b'{"forwardPorts": [8787, 2222, 3570, 3570]}')
         files = self.generate()
-        body = _OLD_NOTES + b'\n' + _WITH_PORTS
+        body = _GUIDANCE + b'\n' + _WITH_PORTS
         self.assertEqual(files['AGENTS.md'], b'User prefix\n' + _block('project-notes', body) + b'\nUser suffix\n')
         self.assertEqual(files['CLAUDE.md'], _block('project-notes', body))
         self.assertTrue(_owned(files['AGENTS.md'], 'project-notes'))
         self.assertTrue(_owned(files['CLAUDE.md'], 'project-notes'))
+        self.assertIn(b'.scratch/history/agy/codespace/INDEX.md', files['AGENTS.md'])
+        self.assertIn(b'.scratch/history/agy/mac/INDEX.md', files['AGENTS.md'])
         self.assertNotIn(_OLD_NOTES + b'<!--', files['AGENTS.md'])
 
 

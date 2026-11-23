@@ -19,11 +19,21 @@ _GUIDANCE = b'''## Project memory
 
 Read `.scratch/memory/` at the start of a project conversation when it exists.
 Maintain useful project facts, decisions, and handoff notes there as Markdown;
-create the directory when needed. These notes are shared by Codex and Claude.
-Keep notes scoped to this project. Do not copy global memory, credentials,
-tokens, native agent databases, or unrelated project information into scratch.
-The scratch contents are ignored by Git and may synchronize between paired
-checkouts. Preserve existing notes and resolve conflicting facts explicitly.
+create the directory when needed. These notes are shared by Codex, Claude, and
+Antigravity (`agy`). Keep notes scoped to this project. Do not copy global
+memory, credentials, tokens, native agent databases, or unrelated project
+information into scratch. The scratch contents are ignored by Git and may
+synchronize between paired checkouts. Preserve existing notes and resolve
+conflicting facts explicitly.
+
+Recent project Antigravity (`agy`) conversations are also exported automatically
+as read-only Markdown under `.scratch/history/agy/codespace/INDEX.md` (from
+Codespaces) and `.scratch/history/agy/mac/INDEX.md` (from Mac). When picking up
+project work on a different host (for example locally on Mac after working in a
+Codespace, or in a Codespace after working locally), check the other host's
+`INDEX.md` alongside `.scratch/memory/` when it exists. Treat
+`.scratch/history/agy/` as read-only and write lasting handoff notes to
+`.scratch/memory/`.
 
 ## Working files
 

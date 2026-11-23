@@ -207,6 +207,16 @@ def _memory(project, *, env=None):
     return []
 
 
+def _export_agy_history(project, *, host, state=None, env=None, historical_roots=()):
+    """Best-effort read-only export of project agy conversations into .scratch/history/agy/<host>/."""
+    from .agy_export import export_project_history
+    try:
+        export_project_history(project, host=host, state=state, env=env, historical_roots=historical_roots)
+    except (OSError, ValueError):
+        # Never block or degrade Codex/Claude sync if agy is absent, busy, or has no scratch dir.
+        pass
+
+
 class ConnectionVerificationError(ValueError):
     """Root or authenticated transport verification failed before exchange.
 
@@ -303,6 +313,7 @@ def sync_project_data(connection, project, state, remote_root, *, env=None, hist
     try:
         with sync_cycle.stage(cycle, 'memory', progress):
             cycle['issues'].extend(_memory(project, env=env))
+            _export_agy_history(project, host='mac', state=state, env=env)
     except OSError:
         cycle['issues'].append(dict(component='memory', reason='Memory preparation incomplete'))
     for name in sync_cycle.DIRECTIONS:
