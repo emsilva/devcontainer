@@ -30,7 +30,7 @@ def example_scan(**updates):
                            (('codex/sessions/' + NAME, DIGEST),), True,
                            target_scan.cutoffs_digest({('codex', NAME): target_scan.Cutoff(10, DIGEST, True)}),
                            (('codex', NAME),), (), (),
-                           (('claude', 0), ('codex', 0), ('grok', 0), ('herdr', 1), ('opencode', 0)), True, ())
+                           (('agy', 0), ('claude', 0), ('codex', 0), ('grok', 0), ('herdr', 1), ('opencode', 0)), True, ())
     return replace(scan, **updates)
 
 
@@ -439,7 +439,7 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(self.v.as_json(self.result(evidence=evidence))['categories'][3]['items'], [])
 
     def test_agents_items_list_only_counted_sessions(self):
-        scan = replace(self.evidence.scan, agents=(('claude', 2), ('codex', 1), ('grok', 1), ('herdr', 1), ('opencode', 1)),
+        scan = replace(self.evidence.scan, agents=(('agy', 0), ('claude', 2), ('codex', 1), ('grok', 1), ('herdr', 1), ('opencode', 1)),
                        services=(('codex app-server', 100001, 1), ('opencode serve', 100002, 2)))
         evidence = replace(self.evidence, scan=scan)
         row = self.judge('Agents', evidence)
@@ -448,6 +448,12 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(row.items, expected)
         self.assertEqual(row.text, 'Not safe: claude (2), codex (1), grok (1) and 1 more running: end them, then check again')
         self.assertEqual(self.v.as_json(self.result(evidence=evidence))['categories'][3]['items'], list(expected))
+
+    def test_running_agy_blocks_checked_delete(self):
+        scan = replace(self.evidence.scan, agents=(('agy', 1), ('claude', 0), ('codex', 0), ('grok', 0), ('herdr', 1), ('opencode', 0)))
+        row = self.judge('Agents', replace(self.evidence, scan=scan))
+        self.assertEqual((row.verdict, row.items), ('unsafe', ('agy (1)',)))
+        self.assertEqual(row.text, 'Not safe: agy (1) running: end them, then check again')
 
     def test_verdict_lines_match_the_copy(self):
         result = replace(self.result(), kept=(('codex', 'session'), ('claude', 'other')))
@@ -459,7 +465,7 @@ class VerdictTests(unittest.TestCase):
             '  Agents   none running',
             'Kept on this Mac only: codex session, claude other',
             'Not checked: files Git ignores, home-folder data outside sync,',
-            'Grok and OpenCode conversations.',
+            'Grok, OpenCode and Antigravity conversations.',
             'Type delete to delete it.'])
         sealed = replace(result, target=replace(self.target, kind='sealed', seal=self.seal()),
                          categories=self.v.judge(replace(self.target, kind='sealed', seal=self.seal()),

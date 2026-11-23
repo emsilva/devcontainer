@@ -38,6 +38,7 @@ case "$url" in
  https://x.ai/cli/install.sh) name=grok;;
  https://claude.ai/install.sh) name=claude;;
  https://opencode.ai/install|https://opencode.ai/v2/install) name=opencode;;
+ https://antigravity.google/cli/install.sh) name=agy;;
  *) exit 90;;
 esac
 cp "$TEST_FIXTURES/$name.sh" "$out"
@@ -90,6 +91,62 @@ mkdir -p "$HOME/.grok/downloads" "$HOME/.grok/bin"
 printf '#!/bin/sh\\n[ "${FAIL_CHECK:-}" != grok ] || exit 44\\necho "${TEST_GROK_VERSION:-grok 1.0.70 (test) [stable]}"\\n' > "$HOME/.grok/downloads/grok-linux-x86_64"
 chmod +x "$HOME/.grok/downloads/grok-linux-x86_64"
 ln -sfn ../downloads/grok-linux-x86_64 "$HOME/.grok/bin/grok"
+''')
+        self.write(self.root / 'agy.sh', '''#!/bin/bash
+set -eu
+target_dir="$HOME/.local/bin"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -d|--dir) target_dir="$2"; shift 2;;
+    *) echo "Unknown parameter: $1" >&2; exit 1;;
+  esac
+done
+printf 'install agy dir=%s home=%s\\n' "$target_dir" "$HOME" >> "$TEST_CALLS"
+[ "${FAIL_INSTALL:-}" != agy ] || exit 33
+binary="$target_dir/agy"
+if [ -f "$binary" ]; then
+  echo "Notice: 'agy' is already installed at $binary."
+  exit 0
+fi
+mkdir -p "$target_dir"
+cat > "$binary" <<'EOF'
+#!/bin/sh
+set -eu
+if [ "${1:-}" = install ]; then
+  printf 'agy-cmd home=%s %s\\n' "$HOME" "$*" >> "$TEST_CALLS"
+  skip_path=0
+  skip_aliases=0
+  for arg in "$@"; do
+    case "$arg" in
+      --skip-path) skip_path=1 ;;
+      --skip-aliases) skip_aliases=1 ;;
+    esac
+  done
+  if [ "$skip_path" -eq 0 ]; then
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+      [ -f "$rc" ] && echo 'export PATH="$HOME/.local/bin:$PATH" # agy path' >> "$rc"
+    done
+  fi
+  if [ "$skip_aliases" -eq 0 ]; then
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+      if [ -f "$rc" ]; then
+        grep -v -E '^[[:space:]]*alias (agy|antigravity)=' "$rc" > "$rc.tmp" || true
+        mv "$rc.tmp" "$rc"
+      fi
+    done
+  fi
+  exit 0
+fi
+if [ "${1:-}" = --version ]; then
+  [ "${FAIL_CHECK:-}" != agy ] || exit 44
+  [ "${AGY_CLI_DISABLE_AUTO_UPDATE:-}" = true ] || exit 45
+  echo "${TEST_AGY_VERSION:-1.5.14}"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$binary"
+"$binary" install --dir "$target_dir" || true
 ''')
 
     def write(self, path, content):
@@ -167,6 +224,90 @@ ln -sfn ../downloads/grok-linux-x86_64 "$HOME/.grok/bin/grok"
 
     def test_grok_version_failure_propagates(self):
         self.assertNotEqual(self.run_helper(FAIL_CHECK='grok').returncode, 0)
+
+    def test_agy_install_idempotence_update_and_check(self):
+        self.assert_ok(self.run_helper())
+        calls = self.log.read_text()
+        self.assertIn('https://antigravity.google/cli/install.sh', calls)
+        self.assertIn('install agy ', calls)
+        launcher = self.home / '.local/bin/agy'
+        self.assertTrue(launcher.is_file())
+        self.assertFalse(launcher.is_symlink())
+        self.assert_ok(self.run_helper())
+        check = self.run_helper('--check')
+        self.assert_ok(check)
+        self.assertIn('1.5.14', check.stdout)
+        self.assertEqual(calls, self.log.read_text())
+        self.assert_ok(self.run_helper('--update'))
+        updated_calls = self.log.read_text()
+        self.assertEqual(updated_calls.count('install agy '), 2)
+        self.assertIn('--skip-path', updated_calls)
+        self.assertIn('--skip-aliases', updated_calls)
+
+    def test_agy_preserves_profiles_and_passes_skip_flags(self):
+        profiles = {
+            '.bashrc': (
+                '# personal .bashrc\n'
+                "alias agy='echo custom-agy'\n"
+                "alias antigravity='echo custom-antigravity'\n"
+                'export PATH="/custom/bin:$PATH"\n'
+            ),
+            '.zshrc': (
+                '# personal .zshrc\n'
+                "alias agy='echo zsh-agy'\n"
+                "alias antigravity='echo zsh-antigravity'\n"
+                'export PATH="/custom/zsh:$PATH"\n'
+            ),
+            '.profile': (
+                '# personal .profile\n'
+                'export PATH="/custom/profile:$PATH"\n'
+            ),
+        }
+        for name, content in profiles.items():
+            (self.home / name).write_text(content)
+        self.assert_ok(self.run_helper(SHELL='/bin/bash'))
+        self.assert_ok(self.run_helper('--update', SHELL='/bin/zsh'))
+        for name, content in profiles.items():
+            self.assertEqual((self.home / name).read_bytes(), content.encode())
+        agy_cmds = [line for line in self.log.read_text().splitlines() if line.startswith('agy-cmd ')]
+        real_home_cmds = [line for line in agy_cmds if line.startswith(f'agy-cmd home={self.home} ')]
+        self.assertEqual(len(real_home_cmds), 2)
+        for line in real_home_cmds:
+            self.assertIn('--skip-path', line)
+            self.assertIn('--skip-aliases', line)
+
+    def test_agy_rejects_symlink_and_external_target(self):
+        self.assert_ok(self.run_helper())
+        launcher = self.home / '.local/bin/agy'
+        internal = self.home / '.local/bin/agy-internal'
+        self.write(internal, '#!/bin/sh\necho 1.5.14\n')
+        external = self.bin / 'external-agy'
+        self.write(external, '#!/bin/sh\necho 1.5.14\n')
+        for target in (internal, external):
+            with self.subTest(target=target):
+                launcher.unlink(missing_ok=True)
+                launcher.symlink_to(target)
+                self.assertNotEqual(self.run_helper('--check').returncode, 0)
+
+    def test_agy_requires_numeric_version(self):
+        self.assertNotEqual(self.run_helper(TEST_AGY_VERSION='dev').returncode, 0)
+
+    def test_agy_failures_propagate(self):
+        result = self.run_helper(FAIL_DOWNLOAD='https://antigravity.google/cli/install.sh')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Could not download the agy installer', result.stderr)
+        self.assertNotIn('install agy ', self.log.read_text())
+        self.assertEqual(self.run_helper('--update', FAIL_INSTALL='agy').returncode, 33)
+        self.assertNotEqual(self.run_helper('--update', FAIL_CHECK='agy').returncode, 0)
+        self.write(self.root / 'agy.sh', 'echo executed >> "$TEST_CALLS"\nif then\n')
+        bad_syntax = self.run_helper('--update')
+        self.assertNotEqual(bad_syntax.returncode, 0)
+        self.assertNotIn('executed', self.log.read_text())
+        self.write(self.root / 'agy.sh', '#!/bin/bash\nexit 0\n')
+        missing_staged = self.run_helper('--update')
+        self.assertNotEqual(missing_staged.returncode, 0)
+        self.assertIn('did not produce staged ', missing_staged.stderr)
+        self.assertNotIn('~/.local/bin/agy', missing_staged.stderr)
 
     def test_opencode_v2_installer_is_pinned(self):
         self.assert_ok(self.run_helper())

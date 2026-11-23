@@ -395,7 +395,7 @@ class _Coordinator:
         tools = record.get('tools')
         if (record.get('codespace') == self.journal['new'] and type(record.get('updated_at')) in (int, float)
                 and record['updated_at'] > began and isinstance(tools, dict)):
-            retry = [key for key in ('plaud', 'codex', 'claude', 'opencode', 'grok') if key in tools and
+            retry = [key for key in ('plaud', 'codex', 'claude', 'opencode', 'grok', 'agy') if key in tools and
                      (not isinstance(tools[key], dict) or tools[key].get('state') not in
                       ('signed-in', 'other-method', 'absent'))]
         else:

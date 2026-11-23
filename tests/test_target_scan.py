@@ -432,8 +432,16 @@ class TargetScanTests(unittest.TestCase):
         self.process(100003, b'herdr\0server\0')
         result = self.scan()
         self.assertTrue(result.agents_complete)
-        self.assertEqual(dict(result.agents), dict(claude=1, codex=1, grok=0, opencode=0, herdr=1))
+        self.assertEqual(dict(result.agents), dict(agy=0, claude=1, codex=1, grok=0, opencode=0, herdr=1))
         self.assertNotIn(b'/usr/lib/bin/claude', self.connection.raw)
+
+    def test_agy_and_antigravity_processes_count_under_agy(self):
+        self.process(100001, b'/home/vscode/.local/bin/agy\0')
+        self.process(100002, b'/opt/bin/antigravity\0--worker\0')
+        self.process(100003, b'/home/vscode/.local/bin/agy\0antigravity\0')
+        result = self.scan()
+        self.assertTrue(result.agents_complete)
+        self.assertEqual(dict(result.agents), dict(agy=3, claude=0, codex=0, grok=0, opencode=0, herdr=0))
 
     def service(self, pid, argv, start=123):
         path = self.process(pid, argv)
@@ -452,7 +460,7 @@ class TargetScanTests(unittest.TestCase):
             self.service(100001 + offset, argv, start=200 + offset)
         result = self.scan()
         self.assertTrue(result.agents_complete)
-        self.assertEqual(dict(result.agents), dict(claude=0, codex=2, grok=0, opencode=3, herdr=0))
+        self.assertEqual(dict(result.agents), dict(agy=0, claude=0, codex=2, grok=0, opencode=3, herdr=0))
         expected = (('codex app-server', 100001, 200), ('codex app-server', 100002, 201),
                     ('opencode serve', 100003, 202), ('opencode serve', 100004, 203))
         self.assertEqual(result.services, expected)

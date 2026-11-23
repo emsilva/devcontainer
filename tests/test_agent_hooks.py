@@ -26,12 +26,14 @@ codex: outdated (v8 < v10) (/Users/mannu/.codex/herdr-agent-state.sh)
 copilot: not installed (/Users/mannu/.copilot/hooks/herdr-agent-state.sh)
 opencode: current (v13) (/Users/mannu/.config/opencode/plugins/herdr-agent-state.js)
 kilo: not installed (/Users/mannu/.config/kilo/plugin/herdr-agent-state.js)
+antigravity-cli: not installed (/Users/mannu/.gemini/config/hooks/herdr-agent-state.sh)
 grok: not installed (/Users/mannu/.grok/hooks/herdr-agent-state.sh)
 letta (experimental): not installed (/Users/mannu/.letta/hooks/herdr-agent-session.sh)
 """
 
 # A Codespace after the hand fix.
 CURRENT_STATUS = """\
+antigravity-cli: current (v1) (/home/vscode/.gemini/config/hooks/herdr-agent-state.sh)
 claude: current (v11) (/home/vscode/.claude/hooks/herdr-agent-state.sh)
 codex: current (v10) (/home/vscode/.codex/herdr-agent-state.sh)
 opencode: current (v13) (/home/vscode/.config/opencode/plugins/herdr-agent-state.js)
@@ -67,16 +69,19 @@ class Connection:
 
 
 class ParseTests(unittest.TestCase):
-    def test_parse_includes_grok_hook_state(self):
+    def test_parse_includes_grok_and_antigravity_cli_hook_state(self):
         self.assertEqual(agent_hooks.parse(MAC_STATUS).get('grok'), 'not installed')
+        self.assertEqual(agent_hooks.parse(MAC_STATUS).get('antigravity-cli'), 'not installed')
 
     def test_parse_maps_the_owner_mac_fixture(self):
         self.assertEqual(agent_hooks.parse(MAC_STATUS), {
-            'claude': 'outdated', 'codex': 'outdated', 'grok': 'not installed', 'opencode': 'current'})
+            'antigravity-cli': 'not installed', 'claude': 'outdated', 'codex': 'outdated',
+            'grok': 'not installed', 'opencode': 'current'})
 
     def test_parse_maps_the_codespace_fixture(self):
         self.assertEqual(agent_hooks.parse(CURRENT_STATUS), {
-            'claude': 'current', 'codex': 'current', 'grok': 'current', 'opencode': 'current'})
+            'antigravity-cli': 'current', 'claude': 'current', 'codex': 'current',
+            'grok': 'current', 'opencode': 'current'})
 
     def test_parse_missing_codex_line_is_unknown(self):
         text = MAC_STATUS.replace('codex: outdated (v8 < v10) (/Users/mannu/.codex/herdr-agent-state.sh)\n', '')
@@ -93,10 +98,12 @@ class ParseTests(unittest.TestCase):
             '  opencode: current (v13) (/tmp/indented)\n'
         )
         self.assertEqual(agent_hooks.parse(text), {
-            'claude': 'unknown', 'codex': 'unknown', 'grok': 'unknown', 'opencode': 'unknown'})
+            'antigravity-cli': 'unknown', 'claude': 'unknown', 'codex': 'unknown',
+            'grok': 'unknown', 'opencode': 'unknown'})
         # A recognized word is required; a lookalike is not current.
         self.assertEqual(agent_hooks.parse('claude: currently fine\ncodex: not installed (/tmp)\n'), {
-            'claude': 'unknown', 'codex': 'not installed', 'grok': 'unknown', 'opencode': 'unknown'})
+            'antigravity-cli': 'unknown', 'claude': 'unknown', 'codex': 'not installed',
+            'grok': 'unknown', 'opencode': 'unknown'})
 
 
 class EnsureTests(unittest.TestCase):
@@ -112,36 +119,38 @@ class EnsureTests(unittest.TestCase):
             receipt = agent_hooks.ensure(connection, 'space', self.state, '/workspaces/ordinary', now=lambda: WHEN)
         return receipt, out.getvalue()
 
-    def test_ensure_installs_and_verifies_grok_with_baseline_agents(self):
+    def test_ensure_installs_and_verifies_grok_and_antigravity_cli_with_baseline_agents(self):
         current = CURRENT_STATUS + 'grok: current (v1) (/tmp/grok)\n'
         connection = Connection([remote_body(MAC_STATUS),
-                                 remote_body(current, {'claude': 0, 'codex': 0, 'grok': 0})])
+                                 remote_body(current, {'antigravity-cli': 0, 'claude': 0, 'codex': 0, 'grok': 0})])
         receipt, printed = self.run_ensure(connection)
         self.assertEqual(json.loads(connection.calls[1]['payload'])['install'],
-                         ['claude', 'codex', 'grok'])
+                         ['antigravity-cli', 'claude', 'codex', 'grok'])
         self.assertEqual(receipt['hooks']['grok'], 'current')
-        self.assertIn('for claude, codex, grok;', printed)
+        self.assertEqual(receipt['hooks']['antigravity-cli'], 'current')
+        self.assertIn('for antigravity-cli, claude, codex, grok;', printed)
 
     def test_ensure_installs_outdated_agents_from_the_mac_fixture(self):
         connection = Connection([
             remote_body(MAC_STATUS),
-            remote_body(CURRENT_STATUS, {'claude': 0, 'codex': 0, 'grok': 0}),
+            remote_body(CURRENT_STATUS, {'antigravity-cli': 0, 'claude': 0, 'codex': 0, 'grok': 0}),
         ])
         receipt, printed = self.run_ensure(connection)
         self.assertEqual(json.loads(connection.calls[0]['payload']),
                          {'install': [], 'skill': True, 'root': '/workspaces/ordinary'})
         self.assertEqual(json.loads(connection.calls[1]['payload']),
-                         {'install': ['claude', 'codex', 'grok'], 'skill': False})
+                         {'install': ['antigravity-cli', 'claude', 'codex', 'grok'], 'skill': False})
         self.assertEqual(connection.calls[0]['code'], agent_hooks.REMOTE)
         self.assertGreaterEqual(connection.calls[0]['timeout'], 30 + 30)
         self.assertGreaterEqual(connection.calls[1]['timeout'], 30 + 60 * 2)
         self.assertEqual(receipt['codespace'], 'space')
         self.assertEqual(receipt['checked_at'], WHEN)
         self.assertEqual(receipt['hooks'], {
-            'claude': 'current', 'codex': 'current', 'grok': 'current', 'opencode': 'current'})
-        self.assertEqual(receipt['installed'], ['claude', 'codex', 'grok'])
+            'antigravity-cli': 'current', 'claude': 'current', 'codex': 'current',
+            'grok': 'current', 'opencode': 'current'})
+        self.assertEqual(receipt['installed'], ['antigravity-cli', 'claude', 'codex', 'grok'])
         self.assertNotIn('error', receipt)
-        self.assertEqual(printed, 'Installed Herdr resume hooks on space for claude, codex, grok; '
+        self.assertEqual(printed, 'Installed Herdr resume hooks on space for antigravity-cli, claude, codex, grok; '
                          'its agents can now come back after a restart.\n')
         saved = read_json(self.state / agent_hooks.RECEIPT)
         self.assertEqual(saved, receipt)
@@ -158,9 +167,10 @@ class EnsureTests(unittest.TestCase):
         self.assertEqual(receipt['skill'], 'current')
         self.assertEqual(receipt['installed'], [])
         self.assertEqual(receipt['hooks'], {
-            'claude': 'current', 'codex': 'current', 'grok': 'current', 'opencode': 'current'})
+            'antigravity-cli': 'current', 'claude': 'current', 'codex': 'current',
+            'grok': 'current', 'opencode': 'current'})
         self.assertNotIn('error', receipt)
-        self.assertEqual(printed, 'Herdr resume hooks are current on space (claude, codex, grok, opencode).\n')
+        self.assertEqual(printed, 'Herdr resume hooks are current on space (antigravity-cli, claude, codex, grok, opencode).\n')
         self.assertNotIn('Herdr skill', printed)
 
     def test_ensure_prints_a_line_when_the_skill_is_installed(self):
@@ -170,7 +180,7 @@ class EnsureTests(unittest.TestCase):
         self.assertEqual(len(connection.calls), 1)
         self.assertEqual(receipt['skill'], 'installed')
         self.assertNotIn('error', receipt)
-        self.assertEqual(printed, 'Herdr resume hooks are current on space (claude, codex, grok, opencode).\n'
+        self.assertEqual(printed, 'Herdr resume hooks are current on space (antigravity-cli, claude, codex, grok, opencode).\n'
                          'Installed the Herdr skill on space (the copy bundled with its Herdr).\n')
 
     def test_ensure_prints_a_line_when_the_skill_fails(self):
@@ -178,7 +188,7 @@ class EnsureTests(unittest.TestCase):
         receipt, printed = self.run_ensure(connection)
         self.assertEqual(receipt['skill'], 'failed')
         self.assertNotIn('error', receipt)
-        self.assertEqual(printed, 'Herdr resume hooks are current on space (claude, codex, grok, opencode).\n'
+        self.assertEqual(printed, 'Herdr resume hooks are current on space (antigravity-cli, claude, codex, grok, opencode).\n'
                          'Could not install the Herdr skill on space; agents there cannot load it. '
                          'Run task work:cs again.\n')
 
@@ -187,18 +197,18 @@ class EnsureTests(unittest.TestCase):
         receipt, printed = self.run_ensure(connection)
         self.assertEqual(receipt['skill'], 'managed elsewhere')
         self.assertEqual(printed.splitlines(),
-                         ['Herdr resume hooks are current on space (claude, codex, grok, opencode).'])
+                         ['Herdr resume hooks are current on space (antigravity-cli, claude, codex, grok, opencode).'])
 
     def test_ensure_installs_unknown_and_not_installed_in_agent_order(self):
         # Text order is not agent order; a missing line is unknown, which is not current.
         before = 'opencode: not installed (/tmp/o)\nclaude: outdated (v1 < v2) (/tmp/c)\n'
         connection = Connection([remote_body(before), remote_body(CURRENT_STATUS, {
-            'claude': 0, 'codex': 0, 'grok': 0, 'opencode': 0})])
+            'antigravity-cli': 0, 'claude': 0, 'codex': 0, 'grok': 0, 'opencode': 0})])
         receipt, printed = self.run_ensure(connection)
         self.assertEqual(json.loads(connection.calls[1]['payload']),
-                         {'install': ['claude', 'codex', 'grok', 'opencode'], 'skill': False})
-        self.assertEqual(receipt['installed'], ['claude', 'codex', 'grok', 'opencode'])
-        self.assertIn('for claude, codex, grok, opencode;', printed)
+                         {'install': ['antigravity-cli', 'claude', 'codex', 'grok', 'opencode'], 'skill': False})
+        self.assertEqual(receipt['installed'], ['antigravity-cli', 'claude', 'codex', 'grok', 'opencode'])
+        self.assertIn('for antigravity-cli, claude, codex, grok, opencode;', printed)
 
     def test_ensure_records_a_python_value_error(self):
         connection = Connection([ValueError(
@@ -230,19 +240,20 @@ class EnsureTests(unittest.TestCase):
                          'after a restart. Run task work:cs again.\n')
 
     def test_ensure_reports_an_agent_still_outdated_after_install(self):
-        after = ('claude: outdated (v10 < v11) (/tmp/claude)\n'
+        after = ('antigravity-cli: current (v1) (/tmp/agy)\n'
+                 'claude: outdated (v10 < v11) (/tmp/claude)\n'
                  'codex: current (v10) (/tmp/codex)\n'
                  'opencode: current (v13) (/tmp/opencode)\n'
                  'grok: current (v1) (/tmp/grok)\n')
         connection = Connection([
             remote_body(MAC_STATUS),
-            remote_body(after, {'claude': 1, 'codex': 0, 'grok': 0}),
+            remote_body(after, {'antigravity-cli': 0, 'claude': 1, 'codex': 0, 'grok': 0}),
         ])
         receipt, printed = self.run_ensure(connection)
         self.assertNotIn('error', receipt)
         self.assertEqual(receipt['hooks']['claude'], 'outdated')
         self.assertEqual(receipt['hooks']['codex'], 'current')
-        self.assertEqual(receipt['installed'], ['claude', 'codex', 'grok'])
+        self.assertEqual(receipt['installed'], ['antigravity-cli', 'claude', 'codex', 'grok'])
         self.assertEqual(printed, 'Herdr resume hooks are not current on space (claude outdated); '
                          'its agents may not come back after a restart. Run task work:cs again.\n')
 
@@ -264,7 +275,7 @@ class EnsureTests(unittest.TestCase):
         self.assertEqual(len(moved.calls), 1)
         self.assertEqual(receipt['feedback'], 'moved')
         self.assertEqual(out.getvalue(),
-                         'Herdr resume hooks are current on space (claude, codex, grok, opencode).\n'
+                         'Herdr resume hooks are current on space (antigravity-cli, claude, codex, grok, opencode).\n'
                          'Moved handoff feedback on space into .scratch/handoff-feedback so it syncs.\n')
         self.assertEqual(read_json(self.state / agent_hooks.RECEIPT)['feedback'], 'moved')
 
@@ -274,7 +285,7 @@ class EnsureTests(unittest.TestCase):
             receipt = agent_hooks.ensure(elsewhere, 'space', self.state, root, now=lambda: WHEN)
         self.assertEqual(receipt['feedback'], 'managed elsewhere')
         self.assertEqual(out.getvalue(),
-                         'Herdr resume hooks are current on space (claude, codex, grok, opencode).\n'
+                         'Herdr resume hooks are current on space (antigravity-cli, claude, codex, grok, opencode).\n'
                          'Handoff feedback on space is managed elsewhere; left it unchanged.\n')
 
         for state in ('current', 'linked', 'no scratch', 'failed'):
@@ -285,12 +296,12 @@ class EnsureTests(unittest.TestCase):
                     receipt = agent_hooks.ensure(connection, 'space', self.state, root, now=lambda: WHEN)
                 self.assertEqual(receipt['feedback'], state)
                 self.assertEqual(out.getvalue().splitlines(),
-                                 ['Herdr resume hooks are current on space (claude, codex, grok, opencode).'])
+                                 ['Herdr resume hooks are current on space (antigravity-cli, claude, codex, grok, opencode).'])
 
     def test_ensure_sends_the_checkout_on_the_hooks_call_only(self):
         connection = Connection([
             remote_body(MAC_STATUS, feedback='linked'),
-            remote_body(CURRENT_STATUS, {'claude': 0, 'codex': 0, 'grok': 0}),
+            remote_body(CURRENT_STATUS, {'antigravity-cli': 0, 'claude': 0, 'codex': 0, 'grok': 0}),
         ])
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -411,6 +422,14 @@ if sys.argv[1:3] == ["integration", "status"]:
         self.assertEqual(json.loads(result.stdout)['installed'], {'grok': 0})
         self.assertEqual(self.argv_log(), [
             ['integration', 'install', 'grok'], ['integration', 'status']])
+
+    def test_remote_code_installs_and_checks_antigravity_cli(self):
+        self.install_herdr(self.bindir)
+        result = self.invoke('{"install": ["antigravity-cli"], "skill": false}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['installed'], {'antigravity-cli': 0})
+        self.assertEqual(self.argv_log(), [
+            ['integration', 'install', 'antigravity-cli'], ['integration', 'status']])
 
     def test_remote_code_installs_only_the_requested_agents(self):
         self.install_herdr(self.bindir)
@@ -813,7 +832,8 @@ class StatusTests(unittest.TestCase):
         value = {
             'codespace': 'space',
             'checked_at': WHEN,
-            'hooks': {'claude': 'current', 'codex': 'current', 'grok': 'current', 'opencode': 'current'},
+            'hooks': {'antigravity-cli': 'current', 'claude': 'current', 'codex': 'current',
+                      'grok': 'current', 'opencode': 'current'},
             'installed': [],
             'skill': 'current',
             'feedback': 'current',
@@ -821,19 +841,21 @@ class StatusTests(unittest.TestCase):
         value.update(updates)
         return value
 
-    def test_status_line_names_grok_when_all_hooks_are_current(self):
+    def test_status_line_names_grok_and_antigravity_cli_when_all_hooks_are_current(self):
         receipt = self.receipt()
         receipt['hooks']['grok'] = 'current'
-        self.assertIn('claude, codex, grok, opencode current',
+        receipt['hooks']['antigravity-cli'] = 'current'
+        self.assertIn('antigravity-cli, claude, codex, grok, opencode current',
                       agent_hooks.status_line(receipt, 'space'))
 
     def test_status_line_current(self):
         line = agent_hooks.status_line(self.receipt(), 'space')
-        self.assertEqual(line, 'Herdr hooks: claude, codex, grok, opencode current on space (checked '
+        self.assertEqual(line, 'Herdr hooks: antigravity-cli, claude, codex, grok, opencode current on space (checked '
                          + format_time(WHEN) + '); skill current; feedback current')
 
     def test_status_line_lists_only_agents_that_are_not_current(self):
-        hooks = {'claude': 'outdated', 'codex': 'current', 'grok': 'current', 'opencode': 'not installed'}
+        hooks = {'antigravity-cli': 'current', 'claude': 'outdated', 'codex': 'current',
+                 'grok': 'current', 'opencode': 'not installed'}
         line = agent_hooks.status_line(self.receipt(hooks=hooks), 'space')
         self.assertEqual(line, 'Herdr hooks: claude outdated, opencode not installed on space; '
                          'task work:cs installs them; skill current; feedback current')
@@ -857,7 +879,7 @@ class StatusTests(unittest.TestCase):
     def test_status_text_shows_the_hooks_line_and_tolerates_a_missing_key(self):
         # Rows wrap at 78 cells; compare the words.
         shown = ' '.join(workspace.status_text(status_value(herdr_hooks=self.receipt())).split())
-        self.assertIn('Herdr hooks: claude, codex, grok, opencode current on space (checked '
+        self.assertIn('Herdr hooks: antigravity-cli, claude, codex, grok, opencode current on space (checked '
                       + format_time(WHEN) + ')', shown)
         self.assertIn('Env files: not checked on space; task work:cs copies them', shown)
         self.assertLess(shown.index('Herdr hooks:'), shown.index('Env files:'))
@@ -870,7 +892,7 @@ class StatusTests(unittest.TestCase):
         self.assertNotIn('Env files:', workspace.status_text(bare))
 
     def test_status_line_appends_each_skill_state(self):
-        checked = 'Herdr hooks: claude, codex, grok, opencode current on space (checked ' + format_time(WHEN) + ')'
+        checked = 'Herdr hooks: antigravity-cli, claude, codex, grok, opencode current on space (checked ' + format_time(WHEN) + ')'
         self.assertEqual(agent_hooks.status_line(self.receipt(skill='current'), 'space'),
                          checked + '; skill current; feedback current')
         self.assertEqual(agent_hooks.status_line(self.receipt(skill='installed'), 'space'),
@@ -882,7 +904,8 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(agent_hooks.status_line(self.receipt(skill='unknown'), 'space'),
                          checked + '; skill unknown (task work:cs installs it); feedback current')
         # A line that already names the task does not grow a second hint.
-        pending = self.receipt(hooks={'claude': 'outdated', 'codex': 'current', 'grok': 'current', 'opencode': 'current'},
+        pending = self.receipt(hooks={'antigravity-cli': 'current', 'claude': 'outdated', 'codex': 'current',
+                                      'grok': 'current', 'opencode': 'current'},
                                skill='failed')
         self.assertEqual(agent_hooks.status_line(pending, 'space'),
                          'Herdr hooks: claude outdated on space; task work:cs installs them; '
@@ -892,11 +915,11 @@ class StatusTests(unittest.TestCase):
         old = self.receipt()
         del old['skill']
         line = agent_hooks.status_line(old, 'space')
-        self.assertEqual(line, 'Herdr hooks: claude, codex, grok, opencode current on space (checked '
+        self.assertEqual(line, 'Herdr hooks: antigravity-cli, claude, codex, grok, opencode current on space (checked '
                          + format_time(WHEN) + '); skill unknown (task work:cs installs it); feedback current')
 
     def test_status_line_appends_each_feedback_state(self):
-        checked = ('Herdr hooks: claude, codex, grok, opencode current on space (checked '
+        checked = ('Herdr hooks: antigravity-cli, claude, codex, grok, opencode current on space (checked '
                    + format_time(WHEN) + '); skill current')
         for state in ('current', 'linked', 'moved', 'managed elsewhere', 'no scratch'):
             with self.subTest(state=state):
@@ -906,7 +929,8 @@ class StatusTests(unittest.TestCase):
             with self.subTest(state=state):
                 line = agent_hooks.status_line(self.receipt(feedback=state), 'space')
                 self.assertEqual(line, checked + '; feedback ' + state + ' (task work:cs links it)')
-        pending = self.receipt(hooks={'claude': 'outdated', 'codex': 'current', 'grok': 'current', 'opencode': 'current'},
+        pending = self.receipt(hooks={'antigravity-cli': 'current', 'claude': 'outdated', 'codex': 'current',
+                                      'grok': 'current', 'opencode': 'current'},
                                skill='failed', feedback='failed')
         self.assertEqual(agent_hooks.status_line(pending, 'space'),
                          'Herdr hooks: claude outdated on space; task work:cs installs them; '
@@ -916,7 +940,7 @@ class StatusTests(unittest.TestCase):
         old = self.receipt()
         del old['feedback']
         line = agent_hooks.status_line(old, 'space')
-        self.assertEqual(line, 'Herdr hooks: claude, codex, grok, opencode current on space (checked '
+        self.assertEqual(line, 'Herdr hooks: antigravity-cli, claude, codex, grok, opencode current on space (checked '
                          + format_time(WHEN) + '); skill current; feedback unknown (task work:cs links it)')
 
     def test_read_returns_none_when_the_receipt_is_missing_or_unreadable(self):

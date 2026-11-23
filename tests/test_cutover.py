@@ -350,6 +350,15 @@ class CutoverTests(unittest.TestCase):
         for line in gate:
             self.assertLessEqual(cells(line), 78, line)
 
+    def test_running_agy_blocks_cutover(self):
+        self.bind('old-space')
+        self.scanner.side_effect = [replace(self.scan, agents=(('agy', 1),))]
+        self.ask.side_effect = ['stop']
+        code, out = self.run_cutover()
+        self.assertEqual(code, 1)
+        self.assertIn('On old-space: agy (1) running.', out)
+        self.sealer.assert_not_called()
+
     def test_an_unknown_word_at_the_gate_is_answered(self):
         agents = replace(self.scan, agents=(('codex', 1),))
         services = replace(self.scan, services=(('opencode serve', 100001, 1),))

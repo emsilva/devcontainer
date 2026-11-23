@@ -63,7 +63,7 @@ class ReplacingTests(unittest.TestCase):
     def test_round_trip_and_malformed(self):
         self.assertIsNone(self.r.read(self.state))
         value = journal(request=dict(at=999.0, before=['old-space'], retries=[1000.0]),
-                        signins=dict(retry=['codex'], at=1001.0), check={'ok': True})
+                        signins=dict(retry=['codex', 'agy'], at=1001.0), check={'ok': True})
         self.r.write(self.state, value)
         self.assertEqual(self.r.read(self.state), value)
         self.assertEqual(stat.S_IMODE((self.state / 'replace.json').stat().st_mode), 0o600)

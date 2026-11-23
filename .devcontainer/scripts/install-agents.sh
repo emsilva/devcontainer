@@ -54,6 +54,8 @@ try:
     if name == 'opencode':
         assert launcher.is_symlink()
         assert target.samefile(home / '.opencode/bin/opencode')
+    if name == 'agy':
+        assert launcher.is_file() and not launcher.is_symlink()
     if name == 'codex':
         package = (home / '.codex/packages/standalone/current').resolve(strict=True)
         package.relative_to(home / '.codex/packages/standalone')
@@ -79,8 +81,18 @@ PY
 check_agent() {
   local name="$1" launcher="$HOME/.local/bin/$1" version
   check_layout "$name" || return 1
-  version=$("$launcher" --version) || return 1
+  if [ "$name" = agy ]; then
+    version=$(AGY_CLI_DISABLE_AUTO_UPDATE=true "$launcher" --version) || return 1
+  else
+    version=$("$launcher" --version) || return 1
+  fi
   printf '%s\n' "$version"
+  if [ "$name" = agy ]; then
+    case "$version" in
+      [0-9]*.[0-9]*) ;;
+      *) echo 'Managed Antigravity CLI must report a numeric version.' >&2; return 1 ;;
+    esac
+  fi
   if [ "$name" = opencode ]; then
     version=$(printf '%s\n' "$version" | awk 'END {print $NF}')
     case "${version#v}" in
@@ -101,14 +113,14 @@ check_agent() {
 }
 
 if [ "$mode" = --check ]; then
-  for agent in codex claude opencode grok; do check_agent "$agent"; done
+  for agent in codex claude opencode grok agy; do check_agent "$agent"; done
   exit 0
 fi
 
 umask 077
 temporary=$(mktemp -d)
 trap 'rm -rf "$temporary"' EXIT
-for agent in codex claude opencode grok; do
+for agent in codex claude opencode grok agy; do
   if [ "$mode" != --update ] && check_agent "$agent" >/dev/null 2>&1; then
     printf 'Managed %s is complete; keeping installed release.\n' "$agent"
     continue
@@ -120,6 +132,7 @@ for agent in codex claude opencode grok; do
     claude) urls=https://claude.ai/install.sh; shell='bash' ;;
     grok) urls=https://x.ai/cli/install.sh; shell='bash' ;;
     opencode) urls=https://opencode.ai/v2/install; shell='bash' ;;
+    agy) urls=https://antigravity.google/cli/install.sh; shell='bash' ;;
   esac
   installer="$temporary/$agent.sh"
   for url in $urls; do
@@ -148,6 +161,21 @@ for agent in codex claude opencode grok; do
     opencode)
       bash "$installer" --no-modify-path --version "$OPENCODE_VERSION"
       ln -sfn "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode"
+      ;;
+    agy)
+      # Run install.sh against a fresh -d staging directory and throwaway HOME so:
+      # 1) --update still refreshes an existing ~/.local/bin/agy (install.sh exits early if target exists);
+      # 2) agy install (which install.sh calls without --skip-path) cannot edit personal shell profiles.
+      agy_home="$temporary/agy-home"
+      agy_bin="$temporary/agy-bin"
+      rm -rf "$agy_home" "$agy_bin"
+      mkdir -p "$agy_home" "$agy_bin" "$HOME/.local/bin"
+      HOME="$agy_home" AGY_CLI_DISABLE_AUTO_UPDATE=true bash "$installer" -d "$agy_bin"
+      [ -x "$agy_bin/agy" ] || { echo "Managed Antigravity CLI installer did not produce staged $agy_bin/agy." >&2; exit 1; }
+      cp "$agy_bin/agy" "$HOME/.local/bin/agy.new"
+      chmod +x "$HOME/.local/bin/agy.new"
+      mv -f "$HOME/.local/bin/agy.new" "$HOME/.local/bin/agy"
+      AGY_CLI_DISABLE_AUTO_UPDATE=true "$HOME/.local/bin/agy" install --skip-path --skip-aliases --dir "$HOME/.local/bin" >/dev/null || true
       ;;
   esac
   check_agent "$agent"

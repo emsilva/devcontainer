@@ -225,7 +225,7 @@ def run(project, state, *, operation, old, new, receipt, recovery, ask=input, tt
                     print(f'Started again on {old}: {_listed_services(restarted)}. '
                           'Something restarts it; close that, then press Enter.')
                 counts = dict(scan.agents)
-                agents = [f'{agent} ({counts[agent]})' for agent in ('claude', 'codex', 'grok', 'opencode')
+                agents = [f'{agent} ({counts[agent]})' for agent in ('agy', 'claude', 'codex', 'grok', 'opencode')
                           if counts.get(agent, 0) > 0]
                 if agents or scan.services:
                     if agents:

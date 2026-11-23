@@ -948,9 +948,9 @@ class ReplacementTests(unittest.TestCase):
         self.signin_code = 1
         self.signin_record = dict(codespace='new-space', updated_at=3000,
             tools={key: {'state': state} for key, state in
-                   (('codex', 'failed'), ('claude', 'other-method'), ('grok', 'absent'))})
+                   (('codex', 'failed'), ('claude', 'other-method'), ('grok', 'absent'), ('agy', 'signed-out'))})
         self.assertEqual(self.run_replace(), 0)
-        self.assertEqual(self.archives()[0]['signins']['retry'], ['codex'])
+        self.assertEqual(self.archives()[0]['signins']['retry'], ['codex', 'agy'])
         self.assertNotIn('Not signed in yet on new-space:', self.output.getvalue())
         self.assertNotIn('Sign-in on new-space did not finish;', self.output.getvalue())
         self.assertTrue(any('delete' in argv for argv, _, _ in self.steps))

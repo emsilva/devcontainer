@@ -81,7 +81,7 @@ def cutoffs_digest(cutoffs: Mapping[tuple[str, str], Cutoff]) -> str:
     return hashlib.sha256(json.dumps(record, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
-_AGENTS = ('claude', 'codex', 'grok', 'opencode', 'herdr')
+_AGENTS = ('agy', 'claude', 'codex', 'grok', 'opencode', 'herdr')
 _SERVICES = ('codex app-server', 'opencode serve')
 _PROBLEMS = ('could not connect to the Codespace', 'could not read the Codespace inventory',
              'could not read every repository under /workspaces', 'could not read .scratch',
@@ -791,7 +791,7 @@ def session_inventory():
 
 
 def process_inventory():
-    names = ('claude', 'codex', 'grok', 'opencode', 'herdr')
+    names = ('agy', 'claude', 'codex', 'grok', 'opencode', 'herdr')
     counts = {name: 0 for name in names}
     root = Path(request['proc'])
     excluded = {os.getpid()}
@@ -837,7 +837,10 @@ def process_inventory():
                         continue
                     found = {value.rsplit(b'/', 1)[-1] for value in command.split(b'\0')}
                     for name in names:
-                        counts[name] += name.encode() in found
+                        if name == 'agy':
+                            counts[name] += bool(found & {b'agy', b'antigravity'})
+                        else:
+                            counts[name] += name.encode() in found
                 except (FileNotFoundError, ProcessLookupError):
                     continue
                 except (OSError, ValueError, IndexError, Incomplete):
@@ -856,7 +859,7 @@ for inventory, part in ((git_inventory, 'git'), (scratch_inventory, 'scratch'),
         problem(part)
 # Preserve the fixed shape even if the global time allowance expired first.
 if not result['agents']:
-    result['agents'] = sorted((name, 0) for name in ('claude', 'codex', 'grok', 'opencode', 'herdr'))
+    result['agents'] = sorted((name, 0) for name in ('agy', 'claude', 'codex', 'grok', 'opencode', 'herdr'))
 output = json.dumps(result, sort_keys=True, separators=(',', ':')).encode()
 if len(output) > limits['output']:
     # The host rejects this fixed malformed response as incomplete in all parts.

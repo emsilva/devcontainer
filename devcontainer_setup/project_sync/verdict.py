@@ -15,7 +15,7 @@ from .transport import _name
 
 SAFE, UNSAFE, UNKNOWN = 'safe', 'unsafe', 'unknown'
 CATEGORIES = ('Git', 'Scratch', 'History', 'Agents')
-NOT_CHECKED = ('files Git ignores', 'home-folder data outside sync', 'Grok and OpenCode conversations')
+NOT_CHECKED = ('files Git ignores', 'home-folder data outside sync', 'Grok, OpenCode and Antigravity conversations')
 _SYNC_STOPPED = 'sync is not running; run task work:cs, then check again'
 _NO_CYCLE = 'sync has not finished a cycle since the check began; check again in a minute'
 
@@ -370,7 +370,7 @@ def _agents(target, scan):
     if not scan.agents_complete:
         return _category('Agents', UNKNOWN, 'could not read processes on ' + target.name)
     counts = dict(scan.agents)
-    running = tuple(f'{agent} ({counts.get(agent, 0)})' for agent in ('claude', 'codex', 'grok', 'opencode')
+    running = tuple(f'{agent} ({counts.get(agent, 0)})' for agent in ('agy', 'claude', 'codex', 'grok', 'opencode')
                     if counts.get(agent, 0) > 0)
     if running:
         return _category('Agents', UNSAFE, _listed(running) + ' running: end them, then check again', running)

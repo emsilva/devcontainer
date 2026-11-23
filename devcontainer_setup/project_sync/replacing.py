@@ -115,7 +115,7 @@ def _validate(value):
                 raise ValueError
             _epoch(signins['at'])
             for tool in signins['retry']:
-                if tool not in ('plaud', 'codex', 'claude', 'opencode', 'grok', 'unknown'):
+                if tool not in ('plaud', 'codex', 'claude', 'opencode', 'grok', 'agy', 'unknown'):
                     raise ValueError
         if value['moving'] is not None:
             _epoch(value['moving'])
