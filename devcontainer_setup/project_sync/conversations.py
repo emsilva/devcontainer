@@ -12,6 +12,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import subprocess
 import uuid
 
 from . import agents, sessions
@@ -58,8 +59,45 @@ def _rows(data):
     return result
 
 
+def _worktree_roots(project) -> list[str]:
+    """Return linked Git worktrees of this project (excluding legacy .devcontainer-work)."""
+    try:
+        result = subprocess.run(
+            ['git', '-C', str(project.root), 'worktree', 'list', '--porcelain'],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode:
+        return []
+    roots = []
+    for line in result.stdout.splitlines():
+        if not line.startswith('worktree '):
+            continue
+        candidate = line[len('worktree '):].strip()
+        if not candidate:
+            continue
+        path = Path(candidate)
+        if not path.is_absolute() or '..' in path.parts or '.devcontainer-work' in path.parts:
+            continue
+        roots.append(str(path))
+    return roots
+
+
+def _matching_root(cwd, roots):
+    if not isinstance(cwd, str):
+        return None
+    path = Path(cwd)
+    if not path.is_absolute() or '..' in path.parts:
+        return None
+    matched = [root for root in roots if cwd == root or path.is_relative_to(root)]
+    return max(matched, key=len) if matched else None
+
+
 def _scopes(project, state, historical_roots=()):
     scopes = {str(project.root)}
+    for wt in _worktree_roots(project):
+        scopes.add(wt)
     registry = {}
     if state is not None:
         try:
@@ -279,7 +317,7 @@ def _codex_entry(project, store, sid, index, *, scopes, receipts, destination_ro
         sessions.session_uuid(meta.get('id'))
         sessions._version('codex', meta.get('cli_version'))
         approved = sorted(set(scopes) | set(_receipt_scopes(project, receipts, destination_roots, path, data, store)))
-        sessions._scoped_roots(meta.get('cwd'), approved)
+        sessions._scoped_roots(meta.get('cwd'), approved, child=True)
         parent = sessions._parent(meta)
         inherited = None
         if parent:
@@ -345,6 +383,29 @@ def _claude_entry(project, store, sid, path, *, scopes, receipts, destination_ro
     origin = max((root for root in approved if last == root or Path(last).is_relative_to(root)), key=len)
     digest = hashlib.sha256(kept).hexdigest()
     return {sid: kept}, dict(schema=SCHEMA, agent='claude', session_id=sid, project_id=project.project_id, identity=project.identity, source_root=origin, scope_roots=approved, cutoff=dict(turn_id=cutoff, bytes=len(kept)), files=[dict(session_id=sid, path=path.name, size=len(kept), sha256=digest, blob=digest, scope_roots=approved, origin_root=origin)], title=sessions._catalog_metadata(kept, 'claude', path)['title'], updated_at=path.stat().st_mtime)
+
+
+def _claude_first_cwd(path):
+    """The first cwd recorded by a Claude transcript, read from a bounded prefix."""
+    with _parent(sessions._safe(path)) as (parent, name):
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        with os.fdopen(fd, 'rb') as source:
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError('Native metadata requires a regular file without hard links')
+            budget = 16 * 1024 * 1024
+            for _ in range(64):
+                line = source.readline(budget + 1)
+                budget -= len(line)
+                if budget < 0 or not line.endswith(b'\n'):
+                    return None
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    return None
+                if isinstance(row, dict) and isinstance(row.get('cwd'), str):
+                    return row['cwd']
+    return None
 
 
 def _claude_entrypoint(path):
@@ -511,10 +572,29 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
     # List every file this capture visits before reading the receipts, the one
     # read of the capture. A publication records a file in its receipt before the
     # file gets its name, so each listed import is found with its receipt.
+    # Include subdirectory namespaces beneath each scope root; sibling collisions
+    # (e.g. /repo-other vs /repo) are filtered by checking their first cwd.
+    projects_dir = home / 'projects'
     claude_stores = []
+    seen_dirs = set()
     for root in scopes:
-        directory = home / 'projects' / sessions.claude_namespace(root)
-        claude_stores.append(None if directory.is_symlink() else list(directory.glob('*.jsonl')))
+        exact_ns = sessions.claude_namespace(root)
+        directory = projects_dir / exact_ns
+        seen_dirs.add(exact_ns)
+        claude_stores.append((False, None if directory.is_symlink() else list(directory.glob('*.jsonl'))))
+        if projects_dir.is_dir() and not projects_dir.is_symlink():
+            prefix = exact_ns + '-'
+            try:
+                children = sorted(projects_dir.iterdir(), key=lambda p: p.name)
+            except OSError:
+                children = []
+            for sub in children:
+                if sub.name in seen_dirs or not sub.name.startswith(prefix):
+                    continue
+                if sub.is_symlink() or not sub.is_dir():
+                    continue
+                seen_dirs.add(sub.name)
+                claude_stores.append((True, list(sub.glob('*.jsonl'))))
     receipts = _import_receipts(project, state)
     imported = _created_imports(receipts)
     for sid, path in index.items():
@@ -541,7 +621,7 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
             if meta.get('source') == 'exec':
                 continue  # Headless runs are not conversations; the picker hides them (#49).
             approved = sorted(set(scopes) | set(_receipt_scopes(project, receipts, destination_roots, path, first, store)))
-            if meta.get('cwd') not in approved:
+            if _matching_root(meta.get('cwd'), approved) is None:
                 continue
             if row.get('type') == 'session_meta' and metadata_only and sessions._parent(meta) is None:
                 continue  # An unopened turn is not a conversation or an origin yet.
@@ -555,7 +635,7 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
         keep(retained, entry)
         del retained  # Hold one session's retained bytes at a time.
     aliases = _import_aliases(receipts)
-    for paths in claude_stores:
+    for is_subdir, paths in claude_stores:
         if paths is None:
             issue('claude', None, ValueError('Symlink native project store'))
             continue
@@ -565,6 +645,8 @@ def capture_conversations(project, store, *, state=None, env=None, historical_ro
                 continue  # Not a transcript (herd.jsonl and the like), or a finished worker's.
             try:
                 sessions.session_uuid(sid)
+                if is_subdir and _matching_root(_claude_first_cwd(path), scopes) is None:
+                    continue  # Sibling directory prefix collision (e.g. /repo-other).
                 if (_claude_entrypoint(path) or '').startswith('sdk-'):
                     continue  # Agent SDK and claude -p runs are not conversations.
                 if ('claude', str(path)) not in imported:
@@ -590,7 +672,7 @@ def _preflight(project, store, entry):
         raise ValueError('Unsupported checkpoint agent')
     sid = sessions.session_uuid(entry.get('session_id'))
     scopes = entry.get('scope_roots')
-    sessions._scoped_roots(entry.get('source_root'), scopes)
+    sessions._scoped_roots(entry.get('source_root'), scopes, child=True)
     if not isinstance(entry.get('files'), list) or not entry['files']:
         raise ValueError('Empty native dependency closure')
     by_id, metadata = {}, {}
@@ -615,7 +697,7 @@ def _preflight(project, store, entry):
         if len(data) > sessions.MAX_BYTES:
             raise ValueError('Native checkpoint exceeds size limit')
         approved = item.get('scope_roots')
-        sessions._scoped_roots(item.get('origin_root'), approved)
+        sessions._scoped_roots(item.get('origin_root'), approved, child=True)
         if any(root not in scopes for root in approved):
             raise ValueError('Dependency scopes exceed conversation checkpoint scopes')
         rows = sessions._records(data, agent)
@@ -1132,7 +1214,7 @@ def _check_published(receipt, home, agent, project, *, receipt_path):
             _owned_content(parent, name, item, growing=True)
 
 
-def publish_conversations(project, store, snapshot_id, *, state=None, env=None):
+def publish_conversations(project, store, snapshot_id, *, state=None, env=None, exclude=frozenset()):
     """Publish checked history to ordinary native resume lists, without turns."""
     from .state import state_dir
     state = Path(state) if state is not None else state_dir(project, env)
@@ -1144,8 +1226,15 @@ def publish_conversations(project, store, snapshot_id, *, state=None, env=None):
     conversations = manifest.get('conversations')
     if not isinstance(conversations, dict) or not isinstance(conversations.get('entries'), list):
         raise ValueError('Invalid conversation publication manifest')
-    result = dict(imported=[], unchanged=[], issues=list(conversations.get('issues', [])))
+    excluded = frozenset(exclude)
+    result = dict(imported=[], unchanged=[],
+                  issues=[item for item in conversations.get('issues', [])
+                          if (item.get('agent'), item.get('session_id')) not in excluded])
     for entry in conversations['entries']:
+        if (entry.get('agent'), entry.get('session_id')) in excluded:
+            result['unchanged'].append(dict(agent=entry.get('agent'), source_session_id=entry.get('session_id'),
+                                            session_id=entry.get('session_id'), forgotten=True))
+            continue
         try:
             agent, sid, by_id, order = _preflight(project, store, entry)
             if entry.get('relayed') is True and _started_here(project, state, agent, sid, env):

@@ -101,14 +101,34 @@ def install_mutagen(state: Path, *, asset=None, allow_download=True) -> Path:
         return binary
 
 
+def _short_mutagen_dir(state: Path, limit: int) -> Path:
+    base = Path('/tmp') / ('dc-m' + str(os.getuid()))
+    try:
+        if base.is_symlink():
+            raise ValueError('Short Mutagen socket parent is a symlink.')
+        base.mkdir(mode=0o700, exist_ok=True)
+        info = base.stat(follow_symlinks=False)
+        if not os.path.isdir(base) or info.st_uid != os.getuid():
+            raise ValueError('Short Mutagen socket parent is not owned by this user.')
+        os.chmod(base, 0o700)
+    except OSError as exc:
+        raise ValueError('Mutagen socket path is too long and private fallback could not be created.') from exc
+    digest = hashlib.sha256(os.fsencode(str(Path(state).resolve(strict=False)))).hexdigest()[:12]
+    directory = base / digest
+    if len(os.fsencode(str(directory / 'daemon/daemon.sock'))) > limit:
+        raise ValueError('Mutagen socket path is too long; select a shorter absolute XDG_STATE_HOME before configuring.')
+    return directory
+
+
 def mutagen_env(state: Path):
     from .transport import clean_env
     env = clean_env()
-    # Compact versioned basename leaves room for Darwin's 104-byte sun_path.
+    # Compact versioned basename leaves room for Darwin's 104-byte sun_path;
+    # fall back to a user-private short /tmp dir when $HOME or XDG_STATE_HOME is long.
     directory = Path(state) / 'm181'
     limit = 103 if platform.system() == 'Darwin' else 107
     if len(os.fsencode(str(directory / 'daemon/daemon.sock'))) > limit:
-        raise ValueError('Mutagen socket path is too long; select a shorter absolute XDG_STATE_HOME before configuring.')
+        directory = _short_mutagen_dir(state, limit)
     env.update(MUTAGEN_DATA_DIRECTORY=str(directory),
                MUTAGEN_SSH_PATH=str(Path(state) / 'transport-bin'),
                MUTAGEN_SSH_CONNECT_TIMEOUT='15')

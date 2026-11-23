@@ -212,9 +212,9 @@ def _version(agent, version):
     match = re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', version) if isinstance(version, str) else None
     if match:
         major, minor, patch = map(int, match.groups())
-        if agent == 'codex' and major == 0 and (minor, patch) >= (163, 0):
+        if agent == 'codex' and (major, minor, patch) >= (0, 163, 0):
             return
-        if agent == 'claude' and major == 2 and (minor, patch) >= (1, 0):
+        if agent == 'claude' and (major, minor, patch) >= (2, 1, 0):
             return
     raise ValueError(f'Unsupported {agent} native version: {version!r}')
 

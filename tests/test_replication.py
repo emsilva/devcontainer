@@ -617,7 +617,7 @@ class ReplicationTests(unittest.TestCase):
 
     def test_capture_issues_are_not_double_counted_as_publication_failures(self):
         sid, source = self.conversation(self.connection.env)
-        source.write_bytes(source.read_bytes().replace(b'2.1.302', b'9.9.999'))
+        source.write_bytes(source.read_bytes().replace(b'2.1.302', b'2.0.9'))
         result = replication.sync_project_data(self.connection, self.project, self.store.state,
                                               str(self.root), env=self.local_env)
         inbound = result['directions']['codespace_to_desktop']

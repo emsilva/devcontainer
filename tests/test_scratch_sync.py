@@ -949,10 +949,12 @@ class ScratchTests(unittest.TestCase):
             except ProcessLookupError:
                 pass
 
-    def test_mutagen_socket_limit_fails_clearly_and_version_state_is_isolated(self):
+    def test_mutagen_socket_limit_falls_back_to_short_private_dir_and_version_state_is_isolated(self):
         from devcontainer_setup.project_sync.tools import mutagen_env
-        with self.assertRaisesRegex(ValueError, 'socket path'):
-            mutagen_env(Path('/private/' + 'x' * 120))
+        long_env = mutagen_env(Path('/private/' + 'x' * 120))
+        sock_path = Path(long_env['MUTAGEN_DATA_DIRECTORY']) / 'daemon/daemon.sock'
+        self.assertLessEqual(len(os.fsencode(str(sock_path))), 103)
+        self.assertTrue(long_env['MUTAGEN_DATA_DIRECTORY'].startswith(f'/tmp/dc-m{os.getuid()}/'))
         env = mutagen_env(Path('/private/tmp/fixture-state'))
         self.assertEqual(env['MUTAGEN_DATA_DIRECTORY'], '/private/tmp/fixture-state/m181')
 

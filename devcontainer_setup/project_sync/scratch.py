@@ -60,9 +60,35 @@ def _validate_tree(path):
         pass
 
 
+MAX_BACKUPS = 10
+
+
 def _archive_path(state, label):
     path = Path(state) / 'backups' / (str(time.time_ns()) + '-' + secrets.token_hex(8) + '-' + label + '.tar.gz')
     return path
+
+
+def _prune_backups(state: Path, *, keep: int = MAX_BACKUPS, preserve: Path | None = None) -> int:
+    directory = Path(state) / 'backups'
+    if not directory.is_dir():
+        return 0
+    archives = sorted(
+        (p for p in directory.glob('*.tar.gz') if p.is_file() and not p.is_symlink()),
+        key=lambda p: (p.stat().st_mtime_ns, p.name),
+        reverse=True,
+    )
+    removed = 0
+    for old in archives[keep:]:
+        if preserve is not None and old == preserve:
+            continue
+        for candidate in (old, old.with_suffix(old.suffix + '.sha256')):
+            try:
+                candidate.chmod(0o600)
+                candidate.unlink()
+            except OSError:
+                pass
+        removed += 1
+    return removed
 
 
 def backup(root: Path, state: Path) -> Path:
@@ -76,6 +102,7 @@ def backup(root: Path, state: Path) -> Path:
     atomic_write(path, buffer.getvalue(), mode=0o400)
     atomic_write(path.with_suffix(path.suffix + '.sha256'),
                  (hashlib.sha256(buffer.getvalue()).hexdigest() + '\n').encode(), mode=0o400)
+    _prune_backups(Path(state), preserve=path)
     return path
 
 
@@ -781,10 +808,13 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                                     progress(result)
                                 except ConnectionVerificationError:
                                     raise
-                                except (OSError, ValueError, KeyError, TypeError):
+                                except (OSError, ValueError, KeyError, TypeError) as exc:
+                                    from .sessions import display_text
+                                    detail = display_text(str(exc), 200) if isinstance(exc, ValueError) else type(exc).__name__
+                                    logger.warning('Conversation cycle error (%s): %s', type(exc).__name__, detail)
                                     result = runtime['conversations'] or sync_cycle.begin(project, config['remote_root'])
                                     result.update(outcome='failed', completed_at=time.time(),
-                                                  issues=[dict(reason='Conversation cycle incomplete; previous receipts preserved')])
+                                                  issues=[dict(reason='Conversation cycle incomplete (' + detail + '); previous receipts preserved')])
                                     progress(result)
                             synchronize()
                             while not exiting.wait(5):
@@ -797,18 +827,30 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                                     raise ValueError('Remote repository identity changed; synchronization paused.')
                                 summary = _mutagen(binary, state, 'sync', 'list', session)
                                 info = _session_info(binary, state, receipt)
-                                if info is not None and _reconciliation(info)['phase'] == 'synchronized':
+                                reconciled = _reconciliation(info) if info is not None else {'phase': 'connecting', 'conflicts': []}
+                                if reconciled['phase'] == 'synchronized':
                                     runtime['last_synchronized_at'] = time.time()
+                                runtime['conflicts'] = reconciled['conflicts']
                                 update('syncing', detail=summary)
                                 synchronize()
                         finally:
                             watcher.stop()
                 except Exception as error:
                     if receipt:
+                        paused = False
                         try:
                             _pause_saved_session(binary, state, receipt)
+                            paused = True
                         except Exception:
-                            update('cleanup_required', error='Owned session could not be paused; refusing reconnect.')
+                            # Retry once after restarting a wedged Mutagen daemon before giving up.
+                            try:
+                                _mutagen(binary, state, 'daemon', 'stop')
+                                _pause_saved_session(binary, state, receipt)
+                                paused = True
+                            except Exception:
+                                pass
+                        if not paused:
+                            update('cleanup_required', error='Owned session could not be paused; run task work:stop then task work:cs to recover.')
                             logger.info('Owned session could not be paused; stopping supervisor.')
                             break
                     # Only controlled ValueError messages are exposed. Never log

@@ -81,9 +81,23 @@ import subprocess
 import json
 
 roots = []
-for path in list(pathlib.Path('/workspaces').iterdir())[:100]:
-    if path.name == '.devcontainer-work' or not path.is_dir():
-        continue
+seen = set()
+candidates = []
+base = pathlib.Path('/workspaces')
+if base.is_dir():
+    for first in sorted(base.iterdir())[:100]:
+        if first.name == '.devcontainer-work' or first.is_symlink() or not first.is_dir():
+            continue
+        candidates.append(first)
+        if not (first / '.git').exists():
+            try:
+                for second in sorted(first.iterdir())[:50]:
+                    if second.name == '.devcontainer-work' or second.is_symlink() or not second.is_dir():
+                        continue
+                    candidates.append(second)
+            except OSError:
+                pass
+for path in candidates[:200]:
     result = subprocess.run(
         ['git', '-C', str(path), 'rev-parse', '--show-toplevel'],
         capture_output=True, text=True,
@@ -91,6 +105,9 @@ for path in list(pathlib.Path('/workspaces').iterdir())[:100]:
     if result.returncode:
         continue
     root = result.stdout.strip()
+    if root in seen:
+        continue
+    seen.add(root)
     remote = subprocess.run(
         ['git', '-C', root, 'remote', 'get-url', 'origin'],
         capture_output=True, text=True,

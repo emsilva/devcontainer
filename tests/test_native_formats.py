@@ -248,13 +248,13 @@ class NativeFormatTests(unittest.TestCase):
 
     def test_version_boundary_and_global_memory_are_explicit(self):
         accepted = {
-            'codex': ('0.163.0', '0.164.0', '0.164.0-alpha.1', '0.165.0', '0.166.0', '0.170.3'),
-            'claude': ('2.1.0', '2.1.316', '2.2.0'),
+            'codex': ('0.163.0', '0.164.0', '0.164.0-alpha.1', '0.165.0', '0.166.0', '0.170.3', '1.0.0', '9.0.0'),
+            'claude': ('2.1.0', '2.1.316', '2.2.0', '3.0.0'),
         }
         refused = {
             'codex': ('0.162.9', '0.99.999', '0.164.0-alpha.2', '0.165.0-alpha.1', '0.166.0-beta',
-                      '0.166.0+build.1', '1.0.0', '9.0.0', '0.166', 'x', None),
-            'claude': ('2.0.9', '3.0.0', '2.2.0-beta', '2.2.0+build.1', 'x'),
+                      '0.166.0+build.1', '0.166', 'x', None),
+            'claude': ('2.0.9', '2.2.0-beta', '2.2.0+build.1', 'x'),
         }
         for agent, versions in accepted.items():
             for version in versions:

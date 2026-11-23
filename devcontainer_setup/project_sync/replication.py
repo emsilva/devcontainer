@@ -332,8 +332,15 @@ def sync_project_data(connection, project, state, remote_root, *, env=None, hist
                 row['counts'].update(received=count, received_bytes=sum(len(store.read(d)) for d in set(references(manifest))))
             row['stage'] = 'publication'
             with sync_cycle.stage(cycle, name + ':publication', progress):
-                publication = (endpoint.call('publish', snapshot_id=snapshot) if outbound else
-                               publish_conversations(project, store, snapshot, state=state, env=env))
+                if outbound:
+                    publication = endpoint.call('publish', snapshot_id=snapshot)
+                else:
+                    try:
+                        excluded = forget.forgotten(state)
+                    except forget.Unreadable:
+                        excluded = frozenset()
+                    publication = publish_conversations(project, store, snapshot, state=state, env=env,
+                                                        exclude=excluded)
                 sync_cycle.publication_result(row, manifest, publication)
         except (OSError, ValueError, KeyError, TypeError) as error:
             # Keep any completed receipt and continue the opposite direction.

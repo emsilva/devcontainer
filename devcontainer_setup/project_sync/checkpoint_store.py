@@ -340,20 +340,59 @@ class Store:
                 data = self._read(self._path('manifests', digest), digest)
                 live.update(_references(json.loads(data)))
             # Published conversations keep proving their source against these blobs.
-            for receipt in (self.state / 'conversation-imports').glob('*/receipt.json'):
-                live.update(_strings(read_json(receipt)))
+            # Retain the newest completed receipt per (agent, source_session_id, destination_root),
+            # any incomplete or unkeyed receipt, and recent receipts within keep_days; older
+            # superseded completed receipts can be pruned so unreferenced blobs are freed.
+            import_receipts = []
+            for receipt_path in (self.state / 'conversation-imports').glob('*/receipt.json'):
+                try:
+                    info = receipt_path.stat(follow_symlinks=False)
+                    payload = read_json(receipt_path)
+                except OSError:
+                    continue
+                import_receipts.append((receipt_path, info, payload))
+            newest_by_key = {}
+            for receipt_path, info, payload in import_receipts:
+                if (payload.get('status') == 'complete'
+                        and isinstance(payload.get('agent'), str)
+                        and isinstance(payload.get('source_session_id'), str)
+                        and isinstance(payload.get('destination_root'), str)):
+                    key = (payload['agent'], payload['source_session_id'], payload['destination_root'])
+                    best = newest_by_key.get(key)
+                    rank = (info.st_mtime_ns, receipt_path.parent.name)
+                    if best is None or rank > best[0]:
+                        newest_by_key[key] = (rank, receipt_path)
+            kept_receipts, superseded_receipts = [], []
+            for receipt_path, info, payload in import_receipts:
+                key = (payload.get('agent'), payload.get('source_session_id'), payload.get('destination_root'))
+                if (payload.get('status') == 'complete' and key in newest_by_key
+                        and newest_by_key[key][1] != receipt_path
+                        and info.st_mtime < now - keep_days * 86400):
+                    superseded_receipts.append(receipt_path)
+                else:
+                    kept_receipts.append(payload)
+            for payload in kept_receipts:
+                live.update(_strings(payload))
             for _, record in self._relay_records():
                 live.update(_strings(record))
             doomed = [('manifests', digest, info) for digest, info in manifests.items() if digest not in kept]
             doomed += [('objects', digest, info) for digest, info in self._entries('objects').items()
                        if digest not in live and info.st_mtime < now - grace_seconds]
             if apply:
+                for receipt_path in superseded_receipts:
+                    try:
+                        with _parent(receipt_path, private=True) as (parent, name):
+                            os.unlink(name, dir_fd=parent)
+                        receipt_path.parent.rmdir()
+                    except OSError:
+                        pass
                 for family, digest, _ in doomed:
                     with _parent(self._path(family, digest), private=True) as (parent, name):
                         os.unlink(name, dir_fd=parent)
         return {'manifests': sum(family == 'manifests' for family, _, _ in doomed),
                 'objects': sum(family == 'objects' for family, _, _ in doomed),
                 'bytes': sum(info.st_size for family, _, info in doomed if family == 'objects'),
+                'superseded_imports': len(superseded_receipts),
                 'applied': apply}
 
     def _entries(self, family: str) -> dict:
