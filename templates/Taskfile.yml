@@ -10,13 +10,17 @@ tasks:
     desc: Validate the selected devcontainer configuration
     cmds:
       - bash .devcontainer/scripts/setup-wizard.sh --check
+  doctor:
+    desc: Check local prerequisites for setup and Codespaces continuity
+    cmds:
+      - bash .devcontainer/scripts/setup-wizard.sh --doctor
   upgrade:self:
     desc: Review a deliberate devcontainer generator upgrade
     interactive: true
     cmds:
       - bash .devcontainer/scripts/setup-wizard.sh --upgrade {{.CLI_ARGS}}
   upgrade:agents:
-    desc: Update native Codex, Claude Code, OpenCode and Grok and the pinned ccswap and Plaud tools
+    desc: Update native Codex, Claude Code, OpenCode, Grok and Antigravity CLI and the pinned ccswap and Plaud tools
     cmds:
       - bash .devcontainer/scripts/install-agents.sh --update
       - bash .devcontainer/scripts/install-tools.sh --update

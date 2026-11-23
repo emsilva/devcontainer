@@ -34,6 +34,14 @@ class RenderTests(unittest.TestCase):
         self.assertIn('grok', commands)
         self.assertIn('grok', fresh)
 
+    def test_agy_is_checked_in_baseline_and_fresh_shell_commands(self):
+        files = self.render()
+        check = files['.devcontainer/scripts/validate-selected.sh'].decode()
+        commands = check.split('for tool in ', 1)[1].split(';', 1)[0].split()
+        fresh = check.split('for tool in ', 2)[2].split(';', 1)[0].split()
+        self.assertIn('agy', commands)
+        self.assertIn('agy', fresh)
+
     def test_scan_decisions_are_sorted_separate_and_preserved(self):
         decisions = [{'kind': 'tool', 'value': 'aws', 'answer': False},
                      {'kind': 'port', 'value': 8080, 'answer': True}]
@@ -175,8 +183,8 @@ class RenderTests(unittest.TestCase):
         call = 'system-path.sh "$PATH" "$(command -v python3)" "$HOME/.local/bin/open-on-mac"'
         self.assertEqual(post.count(call), 2, 'The setup and recovery commands both need the helper')
         canonical = (ROOT / '.devcontainer/scripts/post-create.sh').read_text()
-        self.assertIn('system-path.sh "$PATH" "$(command -v python3)"; then', canonical)
-        self.assertNotIn('open-on-mac', canonical)
+        self.assertIn('system-path.sh "$PATH" "$(command -v python3)" "${USER_HOME}/.local/bin/open-on-mac"; then', canonical)
+        self.assertIn('open-on-mac', canonical)
         self.install(files)
         self.assertEqual(validate(self.project), [])
         (self.project / name).unlink()
@@ -398,11 +406,15 @@ class RenderTests(unittest.TestCase):
                 self.assertIn('9.15.4', result.stderr)
                 self.assertIn('12.11.2', result.stderr)
 
-    def test_unsupported_manager_version_overrides_stop_with_actionable_conflict(self):
+    def test_unsupported_manager_version_overrides_warn_and_fallback(self):
         for manager in ('yarn', 'npm', 'bun'):
-            with self.subTest(manager=manager), self.assertRaisesRegex(ValueError, 'version.*(support|locked)|locked.*version'):
-                self.render(package_managers={'node': manager},
-                            package_manager_versions={'node': '9.15.4'})
+            with self.subTest(manager=manager):
+                files = self.render(package_managers={'node': manager},
+                                    package_manager_versions={'node': '9.15.4'})
+                marker = self.config(files)['customizations']['devcontainerSetup']
+                self.assertEqual(marker['selections']['package_manager_versions'], {})
+                self.assertIn(manager, marker['pinningLimitations'])
+                self.assertIn('9.15.4', marker['pinningLimitations'][manager])
 
     def test_minimal_is_selective_and_does_not_write(self):
         files = self.render()

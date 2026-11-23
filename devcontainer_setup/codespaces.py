@@ -342,6 +342,40 @@ class Codespaces:
         except OSError as error:
             raise ValueError(f'Cannot store launch receipt at {path}: {error}') from error
 
+    def _reconcile_lost_create(self, repo: str, branch: str, machine: str | None,
+                               before: float) -> str | None:
+        """Adopt a single newly created Codespace if create returned no name or dropped mid-flight."""
+        from datetime import datetime
+        try:
+            after = self.existing(repo, branch)
+        except (ValueError, TypeError):
+            return None
+        matches = []
+        for space in after:
+            name = space.get('name')
+            if not name:
+                continue
+            if machine is not None and (space.get('machine') or {}).get('name') != machine:
+                continue
+            created_at = space.get('created_at')
+            if isinstance(created_at, str) and created_at:
+                try:
+                    stamp = datetime.fromisoformat(created_at.replace('Z', '+00:00')).timestamp()
+                except ValueError:
+                    continue
+                if stamp < before - 60:
+                    continue
+            matches.append(name)
+        if len(matches) == 1:
+            print(f'Adopted newly created codespace {matches[0]} after lost create reply.', flush=True)
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError(
+                'Creation reply was lost and multiple new codespaces appeared ('
+                + ', '.join(sorted(matches))
+                + '). Resume one explicitly with --resume <name>.')
+        return None
+
     def launch(self, repo: str, branch: str, sha: str, machine: str | None, idle_timeout: str | None,
                open_after_create: str, dotfiles_repo: str | None, receipt: Path,
                *, resume: str | None = None, location: str | None = None,
@@ -393,10 +427,21 @@ class Codespaces:
                 before = time.time()
                 if before_create is not None:
                     before_create()
-                reply = self.command(*args).splitlines()
-                created = reply[-1] if reply else ''
+                try:
+                    reply = self.command(*args).splitlines()
+                    created = reply[-1] if reply else ''
+                except ValueError as create_error:
+                    reconciled = self._reconcile_lost_create(repo, branch, machine, before)
+                    if reconciled is not None:
+                        created = reconciled
+                    else:
+                        raise create_error
                 if not re.fullmatch(r'[A-Za-z0-9-]+', created):
-                    raise ValueError('Creation did not return a codespace name. Check gh codespace list before retrying.')
+                    reconciled = self._reconcile_lost_create(repo, branch, machine, before)
+                    if reconciled is not None:
+                        created = reconciled
+                    else:
+                        raise ValueError('Creation did not return a codespace name. Check gh codespace list before retrying.')
                 name = created
                 settings = {'machine': machine, 'idle_timeout_minutes': self._minutes(idle_timeout),
                             'location': location, 'retention_period_minutes': self._minutes(retention)}
@@ -429,7 +474,11 @@ class Codespaces:
                     raise ValueError(move_first(name, branch, actual_branch))
                 dirty = self._read_ssh(name, f'cd {shlex.quote(folder)} && git status --porcelain --untracked-files=all')
                 if dirty:
-                    raise ValueError(f'The existing codespace has user changes. Preserve them before reuse:\n{dirty}')
+                    raise ValueError(
+                        f'The existing codespace has user changes. Preserve them before reuse:\n{dirty}\n'
+                        f'Inspect or clean it with: gh codespace ssh -c {name}\n'
+                        f'Or replace/delete it with: task devcontainer:setup -- --replace '
+                        f'(or task work:cs:delete -- --codespace {name})')
             # The branch may have moved past the merge (another PR merged since); it must contain it.
             contains_command = (f'cd {shlex.quote(folder)} && if git merge-base --is-ancestor {shlex.quote(sha)} HEAD; '
                                 'then echo yes; else echo no; fi')

@@ -113,7 +113,7 @@ def _safe_path(project, relative):
     return target
 
 
-def _selections(values):
+def _selections(values, *, ignored_out=None):
     selected = {'runtimes': dict(values.get('runtimes', {})),
                 'tools': sorted(set(values.get('tools', []))),
                 'agents': True,
@@ -142,13 +142,15 @@ def _selections(values):
                      'ruby': {'bundler'}, 'go': {'go'}, 'rust': {'cargo'}}
         if manager not in supported[family]:
             raise ValueError(f'Unsupported package manager: {family}/{manager}')
-    for family, version in selected['package_manager_versions'].items():
+    for family, version in list(selected['package_manager_versions'].items()):
         manager = selected['package_managers'].get(family)
         if not manager or not isinstance(version, str) or not re.fullmatch(r'\d+\.\d+\.\d+', version):
             raise ValueError(f'Choose an exact supported package-manager version (x.y.z): {family}={version}')
         if manager != 'pnpm':
-            raise ValueError(f'{manager} version override {version} is not supported by the locked installation; '
-                             'review the project declaration or add a separately verified installer before setup')
+            # Warn and fall back to the locked feature's bundled version instead of aborting setup.
+            if ignored_out is not None:
+                ignored_out[manager] = version
+            selected['package_manager_versions'].pop(family, None)
     return selected
 
 
@@ -304,7 +306,8 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
     project, source = Path(project), Path(source)
     if not re.fullmatch(r'[0-9a-f]{40}', source_ref):
         raise ValueError('source revision must be an immutable full 40-hex Git commit')
-    selected = _selections(selections)
+    ignored_versions = {}
+    selected = _selections(selections, ignored_out=ignored_versions)
     target = _safe_path(project, CONFIG)
     current = _read(target) if target.exists() else {}
     marker = current.get('customizations', {}).get(NAMESPACE)
@@ -391,7 +394,7 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
         effective_tools.add('db-clients')
     for tool in sorted(effective_tools):
         commands.extend(tool_commands[tool])
-    commands.extend(['claude', 'codex', 'opencode', 'grok', 'ccswap'])
+    commands.extend(['claude', 'codex', 'opencode', 'grok', 'agy', 'ccswap'])
     commands.extend(selected['package_managers'].values())
     if selected['dotfiles']:
         commands.extend(['chezmoi', 'load-dotfiles'])
@@ -468,7 +471,7 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
     if ('image' in config) == ('build' in config):
         raise ValueError('Choose exactly one devcontainer image or build configuration')
     # Adoption may retain a project's older Node version after the desired defaults merge.
-    fresh_commands = ['codex', 'claude', 'opencode', 'grok', 'ccswap', 'node']
+    fresh_commands = ['codex', 'claude', 'opencode', 'grok', 'agy', 'ccswap', 'node']
     if plaud_supported(str(config['features'][FEATURE + 'node:1']['version'])):
         commands.append('plaud')
         fresh_commands.append('plaud')
@@ -531,6 +534,9 @@ def render(project: Path, source: Path, selections: dict, source_ref: str) -> di
         limitations['yarn'] = 'The locked Node Feature exposes no Yarn version option'
     if FEATURE + 'docker-in-docker:2' in config['features']:
         limitations['compose'] = 'The locked Docker Feature only supports none/v1/v2; its apt Compose package has no exact version option'
+    for manager, version in sorted(ignored_versions.items()):
+        limitations[manager] = (f'{manager} version {version} was declared by the project; '
+                                f'the locked installation uses its bundled {manager} version instead')
     config.setdefault('customizations', {})[NAMESPACE] = {
         'version': 1, 'sourceRef': source_ref, 'selections': selected,
         'scanDecisions': _scan_decisions(selections.get('scanDecisions',

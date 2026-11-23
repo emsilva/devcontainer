@@ -412,11 +412,75 @@ def _check_revision(metadata: dict, ref: str, upgrade: bool, default: str | None
         raise ValueError('This project uses a different generator revision. Run its installed task, or use --upgrade to review updating it.')
 
 
+def preflight(*, env=None) -> list[dict]:
+    """Check local prerequisites upfront with exact remediation commands."""
+    from .project_sync.transport import SUPPORTED_GH, _gh_version_tuple, clean_env
+    source_env = os.environ if env is None else env
+    checks = []
+    py_ok = sys.version_info >= (3, 11)
+    checks.append({'name': 'python3', 'required': True, 'ok': py_ok,
+                   'detail': f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}',
+                   'fix': 'Install Python 3.11+ (brew install python@3.13)'})
+    checks.append({'name': 'git', 'required': True, 'ok': shutil.which('git') is not None,
+                   'detail': shutil.which('git') or 'missing',
+                   'fix': 'Install Git (xcode-select --install or brew install git)'})
+    checks.append({'name': 'task', 'required': True, 'ok': shutil.which('task') is not None,
+                   'detail': shutil.which('task') or 'missing',
+                   'fix': 'brew install go-task'})
+    gh_path = shutil.which('gh')
+    gh_ok, gh_detail, gh_fix = False, 'missing', 'brew install gh && gh auth login && gh auth refresh -s codespace'
+    if gh_path:
+        try:
+            ver = subprocess.run(['gh', '--version'], env=clean_env(source_env), capture_output=True, text=True, timeout=10)
+            parsed = _gh_version_tuple(ver.stdout)
+            minimum = tuple(int(p) for p in SUPPORTED_GH.split('.'))
+            if parsed is None or parsed < minimum:
+                found = '.'.join(map(str, parsed)) if parsed else 'unknown'
+                gh_detail, gh_fix = f'version {found} (< {SUPPORTED_GH})', 'brew upgrade gh'
+            else:
+                auth = subprocess.run(['gh', 'auth', 'status', '--hostname', 'github.com'],
+                                      env=clean_env(source_env), capture_output=True, text=True, timeout=10)
+                combined = auth.stdout + '\n' + auth.stderr
+                if auth.returncode != 0:
+                    gh_detail, gh_fix = f'version {".".join(map(str, parsed))}, not signed in', 'gh auth login --hostname github.com && gh auth refresh -s codespace'
+                elif 'codespace' not in combined:
+                    gh_detail, gh_fix = f'version {".".join(map(str, parsed))}, missing codespace scope', 'gh auth refresh -s codespace'
+                else:
+                    gh_ok, gh_detail, gh_fix = True, f'version {".".join(map(str, parsed))}, authenticated', ''
+        except (OSError, subprocess.TimeoutExpired):
+            gh_detail, gh_fix = 'check timed out or failed', 'gh auth status --hostname github.com'
+    checks.append({'name': 'gh', 'required': False, 'ok': gh_ok, 'detail': gh_detail, 'fix': gh_fix})
+    herdr_path = shutil.which('herdr')
+    checks.append({'name': 'herdr', 'required': False, 'ok': herdr_path is not None,
+                   'detail': herdr_path or 'missing (needed for Codespace continuity)',
+                   'fix': 'curl -fsSL https://herdr.dev/install.sh | sh'})
+    home = Path(source_env.get('HOME') or Path.home())
+    ssh_key = home / '.ssh/codespaces.auto'
+    checks.append({'name': 'codespaces-ssh-key', 'required': False, 'ok': ssh_key.is_file(),
+                   'detail': str(ssh_key) if ssh_key.is_file() else 'missing (~/.ssh/codespaces.auto)',
+                   'fix': 'Run `gh codespace ssh` once against any Codespace to generate ~/.ssh/codespaces.auto'})
+    return checks
+
+
+def print_doctor(checks: list[dict], stream=None) -> int:
+    out = sys.stdout if stream is None else stream
+    failed = False
+    for item in checks:
+        status = 'OK' if item['ok'] else ('MISSING' if item['required'] else 'WARN')
+        line = f'[{status:7}] {item["name"]}: {item["detail"]}'
+        if not item['ok'] and item.get('fix'):
+            line += f'  ->  {item["fix"]}'
+        print(line, file=out, flush=True)
+        if not item['ok'] and item['required']:
+            failed = True
+    return 1 if failed else 0
+
+
 @contextmanager
-def setup_checkout(project: Path):
+def setup_checkout(project: Path, *, local_only: bool = False):
     """Yield (checkout, default) to render and commit in: with a GitHub origin, a temporary
     worktree on a new setup branch cut from origin/<default>; else the owner's checkout and None."""
-    if not _github_repository(project):
+    if local_only or not _github_repository(project):
         yield project, None
         return
     from .project_sync.state import discover_project, ensure_setup_worktree_root
@@ -588,16 +652,19 @@ def _answer_findings(ui, found, chosen, decisions):
     return chosen
 
 
-def _dotfiles_answer(ui, preferences):
+def _dotfiles_answer(ui, preferences) -> bool:
     while True:
         try:
-            repo = dotfiles_repository(ui.input('Which dotfiles repository?', preferences['dotfiles_repo']))
+            raw = ui.input('Which dotfiles repository?', preferences['dotfiles_repo'])
+            if not (raw or '').strip():
+                return False
+            repo = dotfiles_repository(raw)
             if repo != preferences['dotfiles_repo']:
                 print('Checking dotfiles repository access...', flush=True)
                 if not repository_access(repo) and not ui.confirm('Could not verify access. Use this repository anyway?', False):
                     continue
             preferences['dotfiles_repo'] = repo
-            return
+            return True
         except ValueError as error:
             print(error, file=sys.stderr)
 
@@ -615,12 +682,17 @@ def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
     for warning in found['warnings']:
         print(f'  Note: {warning}')
     runtime_names = ui.multi('Which other runtimes? (Python, Node and uv are included)',
-                             ['node', 'ruby', 'go', 'rust'], [name for name in chosen['runtimes'] if name != 'python'])
+                             ['ruby', 'go', 'rust'],
+                             [name for name in chosen['runtimes'] if name not in ('python', 'node')])
     runtimes = {'python': chosen['runtimes'].get('python', '3.13')}
-    for name in ['python', *runtime_names]:
+    # Node is always included in baseline features; keep its detected/saved version when present.
+    node_entry = found['runtimes'].get('node', {})
+    if 'node' in chosen['runtimes'] or node_entry.get('selected') or node_entry.get('conflicts'):
+        runtimes['node'] = chosen['runtimes'].get('node', node_entry.get('version') or RUNTIME_DEFAULTS['node'])
+    for name in dict.fromkeys(['python', *(['node'] if 'node' in runtimes else []), *runtime_names]):
         entry = found['runtimes'][name]
         value = chosen['runtimes'].get(name, entry['version'] or RUNTIME_DEFAULTS[name])
-        if name in runtime_names and name not in chosen['runtimes'] or entry['conflicts']:
+        if (name in runtime_names and name not in chosen['runtimes']) or entry['conflicts']:
             question = f'Which {name} version?'
             if entry['conflicts']:
                 print('\n'.join(entry['conflicts']), flush=True)
@@ -656,7 +728,8 @@ def _select(ui: Gum, found: dict, chosen: dict, preferences: dict) -> dict:
             chosen['package_manager_versions'].pop(family, None)
     chosen['dotfiles'] = ui.confirm('Apply dotfiles inside the container?', chosen['dotfiles'])
     if chosen['dotfiles']:
-        _dotfiles_answer(ui, preferences)
+        if not _dotfiles_answer(ui, preferences):
+            chosen['dotfiles'] = False
     chosen['agents'] = True
     preferences['apply_dotfiles'], preferences['agentic_tools'] = chosen['dotfiles'], chosen['agents']
     if ui.confirm('Change advanced environment options?', False):
@@ -1168,12 +1241,13 @@ def _resume_setup_pr(ui, api: Codespaces, project: Path, repo: str, default: str
 
 
 def interactive(project: Path, found: dict | None, metadata: dict | None, ref: str, resume: str | None,
-                upgrade: bool = False) -> int:
+                upgrade: bool = False, *, local_only: bool = False) -> int:
     ui, api = _Trail(Gum()), Codespaces()
     preferences = load_preferences()
-    github = _github_repository(project)
+    github = None if local_only else _github_repository(project)
     if not github:
-        print(f'Note: {NO_GITHUB_ORIGIN} Commit-only setup works without it.', file=sys.stderr, flush=True)
+        if not local_only:
+            print(f'Note: {NO_GITHUB_ORIGIN} Commit-only setup works without it.', file=sys.stderr, flush=True)
     else:
         base = default_branch(project)
         try:
@@ -1185,7 +1259,8 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
         if pending:
             return _resume_setup_pr(ui, api, project, github, base, pending, resume, preferences)
     pull = None
-    with setup_checkout(project) as (source, default):
+    checkout_ctx = setup_checkout(project) if not local_only else contextmanager(lambda: (yield (project, None)))()
+    with checkout_ctx as (source, default):
         if default:
             # What reaches the default branch is computed from it, never from this checkout.
             found, metadata = scan(source), _metadata(source)
@@ -1201,7 +1276,8 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
             chosen = _normalize_saved(found, chosen)
             chosen = _answer_findings(ui, found, chosen, decisions)
             if chosen['dotfiles'] and not preferences['dotfiles_repo']:
-                _dotfiles_answer(ui, preferences)
+                if not _dotfiles_answer(ui, preferences):
+                    chosen['dotfiles'] = False
         while True:
             if editing:
                 local_preferences = dict(preferences) if rerun else preferences
@@ -1262,7 +1338,7 @@ def interactive(project: Path, found: dict | None, metadata: dict | None, ref: s
             # The PR body: the review without the local path, the dotfiles repository or the launch choices.
             body = [f'Branch: {plan.branch}{origin}', f'Runtimes: {chosen["runtimes"]} (Python, Node and uv baseline)',
                     f'Tools: {", ".join(chosen["tools"]) or "baseline only"}',
-                    'Agents: Codex, Claude Code, OpenCode, Grok (baseline)',
+                    'Agents: Codex, Claude Code, OpenCode, Grok, Antigravity (baseline)',
                     f'Files: {", ".join(plan.changed) or "already configured"}',
                     *[f'Dependency: {detail}' for detail in marker.get('dependencies', {}).values()],
                     *[f'Version note: {detail}' for detail in marker.get('pinningLimitations', {}).values()]]
@@ -1345,12 +1421,17 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument('--scan', action='store_true', help='Print repository recommendations as JSON; no changes')
     mode.add_argument('--dry-run', action='store_true', help='Print the recommended configuration diff; no changes')
     mode.add_argument('--check', action='store_true', help='Validate the installed project configuration')
+    mode.add_argument('--doctor', action='store_true', help='Check local prerequisites and print exact fix commands')
     mode.add_argument('--replace', action='store_true', help='Replace the paired Codespace; rerun to continue')
+    parser.add_argument('--local-only', action='store_true', help='Configure locally on this branch without GitHub or a Codespace')
+    parser.add_argument('--offline', action='store_true', help='Use cached release and local checkout without fetching GitHub')
     parser.add_argument('--upgrade', action='store_true', help='Review an explicit generator-version upgrade')
     parser.add_argument('--upgrade-loaded', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--resume', metavar='CODESPACE', help='Reuse the named codespace after confirmation')
     args = parser.parse_args(argv)
     try:
+        if args.doctor:
+            return print_doctor(preflight())
         project = Path(git(args.project, 'rev-parse', '--show-toplevel')).resolve()
         if args.replace:
             if not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -1366,12 +1447,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.scan:
             print(json.dumps(scan(project), indent=2))
             return 0
+        local_only = bool(args.local_only or args.offline)
         # With a GitHub origin what reaches main is computed from main: only its worktree is read.
-        github = _github_repository(project)
+        github = None if local_only else _github_repository(project)
         found, metadata = (None, None) if github else (scan(project), _metadata(project))
         ref, upgrade = source_ref(), args.upgrade or args.upgrade_loaded
         if args.dry_run:
-            with setup_checkout(project) as (source, default):
+            checkout_ctx = setup_checkout(project) if not local_only else contextmanager(lambda: (yield (project, None)))()
+            with checkout_ctx as (source, default):
                 if default:
                     found, metadata = scan(source), _metadata(source)
                 chosen = defaults(found, load_preferences(), metadata)
@@ -1400,7 +1483,11 @@ def main(argv: list[str] | None = None) -> int:
                 return result
         if not github:
             _check_revision(metadata, ref, upgrade)
-        return interactive(project, found, metadata, ref, args.resume, upgrade=upgrade)
+        missing_required = [item for item in preflight() if not item['ok'] and item['required']]
+        if missing_required:
+            details = '; '.join(f'{item["name"]} ({item["fix"]})' for item in missing_required)
+            raise ValueError(f'Missing required local tools before setup: {details}. Run `task setup:doctor` for details.')
+        return interactive(project, found, metadata, ref, args.resume, upgrade=upgrade, local_only=local_only)
     except Cancelled:
         print('Setup cancelled. No push or codespace creation performed.', file=sys.stderr)
         return 130

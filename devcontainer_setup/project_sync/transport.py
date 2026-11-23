@@ -230,6 +230,13 @@ def _ssh_problem(stderr):
     return ('SSH connection failed; inspect Codespace connectivity and the dedicated SSH configuration.', False)
 
 
+def _gh_version_tuple(stdout: str) -> tuple[int, int, int] | None:
+    match = re.search(r'\bgh version (\d+)\.(\d+)\.(\d+)\b', stdout or '')
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
 def _check_gh(env):
     try:
         version = subprocess.run(['gh', '--version'], env=clean_env(env), capture_output=True, text=True, timeout=10)
@@ -237,8 +244,12 @@ def _check_gh(env):
         raise ValueError('GitHub CLI check timed out; verify gh is responsive and retry.') from None
     except OSError as error:
         raise ValueError('GitHub CLI is required for project connections.') from error
-    if not version.stdout.startswith('gh version ' + SUPPORTED_GH + ' '):
-        raise ValueError('Scratch transport requires tested GitHub CLI ' + SUPPORTED_GH + '; run the offline compatibility gate before upgrading.')
+    minimum = tuple(int(part) for part in SUPPORTED_GH.split('.'))
+    parsed = _gh_version_tuple(version.stdout)
+    if parsed is None or parsed < minimum:
+        found = '.'.join(map(str, parsed)) if parsed else (version.stdout.strip().splitlines()[:1] or ['unknown'])[0]
+        raise ValueError(
+            f'GitHub CLI {SUPPORTED_GH} or newer is required (found {found}); upgrade with: brew upgrade gh')
 
 
 def herdr_stdio(codespace: str, state: str | Path) -> int:
