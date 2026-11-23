@@ -384,17 +384,69 @@ def _conversation_receipt(project, state):
 
 def _ready(project, state, timeout=120):
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    delay = 0.25
+    while (now := time.monotonic()) < deadline:
         runtime = scratch.status(state)
         if not runtime.get('running'):
             raise ValueError('Scratch/conversation worker stopped; inspect task scratch:logs')
         if _current_worker(runtime) and runtime.get('connection_prepared'):
             binding = scratch._config(project.root, state)
-            if (runtime.get('prepared_binding') == binding
-                    and scratch.inspect_sync(project.root, state).get('phase') == 'synchronized'):
-                return runtime
-        time.sleep(.25)
+            if runtime.get('prepared_binding') == binding:
+                sync = scratch.inspect_sync(project.root, state)
+                phase = sync.get('phase')
+                if phase == 'synchronized':
+                    return runtime
+                if phase == 'conflicts':
+                    paths = sync.get('conflicts') or []
+                    shown = ', '.join(paths[:3]) + (f' (+{len(paths) - 3} more)' if len(paths) > 3 else '')
+                    print('Warning: .scratch/ has sync conflicts'
+                          + (f' ({shown})' if shown else '')
+                          + '; opening Herdr so you can inspect and resolve them.', flush=True)
+                    return runtime
+        time.sleep(min(delay, max(0.0, deadline - now)))
+        delay = min(delay * 2, 2.0)
     raise ValueError('Waiting for current scratch connection timed out; inspect task work:status and scratch:logs')
+
+
+_LEASE_PROBE = """import json, os, pathlib, socket, sys, time
+pid = sys.argv[1]
+host = sys.argv[2]
+now = time.time()
+path = pathlib.Path.home() / '.local/state/devcontainer-setup' / ('pairing-lease-' + pid + '.json')
+prev = None
+try:
+    if path.is_file() and not path.is_symlink():
+        prev = json.loads(path.read_text(encoding='utf-8'))
+except (OSError, ValueError):
+    prev = None
+try:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp = path.with_suffix('.tmp.' + str(os.getpid()))
+    tmp.write_text(json.dumps({'host': host, 'updated_at': now}), encoding='utf-8')
+    os.replace(tmp, path)
+except OSError:
+    pass
+print(json.dumps(prev or {}))
+"""
+
+
+def _check_multi_mac_lease(connection, project):
+    """Warn (never block) if another Mac paired with this Codespace recently."""
+    import socket
+    host = socket.gethostname() or 'this-mac'
+    try:
+        raw = connection.python(_LEASE_PROBE, argv=[project.project_id, host], timeout=15)
+        prev = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+    except Exception:
+        return
+    if not isinstance(prev, dict):
+        return
+    other = prev.get('host')
+    updated = prev.get('updated_at')
+    if (isinstance(other, str) and other and other != host
+            and isinstance(updated, (int, float)) and 0 <= time.time() - updated <= 900):
+        print(f'Warning: another Mac ({other}) paired with this Codespace recently; '
+              'avoid simultaneous .scratch/ sync from two Macs.', flush=True)
 
 
 # Only Herdr setup installs a matching Herdr on a Codespace, so which one is there is read, not inferred.
@@ -475,6 +527,7 @@ def remote(project, state, armed=None, rebind=None, before_herdr=None, move=None
         binding = read_json(binding_path) if binding_path.exists() else None
         with CodespaceConnection(name, state=state) as connection:
             _verify_roots(connection, primary, [remote_root])
+            _check_multi_mac_lease(connection, primary)
             remote_herdr = _remote_herdr(connection)
             old_roots = [value.get(k) for k in ('remote_root', 'remote_active_root')]
             old_roots += value.get('verified_remote_historical_roots', [])
@@ -704,8 +757,16 @@ def _recovery_rows(value, *, hints: bool = True) -> list[tuple[str, str]]:
         rows.append(('Codespace', 'not read yet' + (hint('; run task work:cs:armed') if not running
                                                     else _token_hint(runtime))))
     elif not reading.get('ok'):
-        rows.append(('Codespace', 'unreadable at ' + format_time(reading['at'])
-                     + '; check gh auth status --hostname github.com and the network'))
+        http = reading.get('http')
+        if http == 401:
+            rows.append(('Codespace', 'GitHub sign-in expired (HTTP 401) at ' + format_time(reading['at'])
+                         + '; run gh auth login --hostname github.com'))
+        elif http == 403:
+            rows.append(('Codespace', 'GitHub token lacks Codespaces permission (HTTP 403) at '
+                         + format_time(reading['at']) + '; run gh auth refresh -s codespace'))
+        else:
+            rows.append(('Codespace', 'unreadable at ' + format_time(reading['at'])
+                         + '; check gh auth status --hostname github.com and the network'))
     elif reading.get('state') == 'Available':
         if anchor:
             at = anchor['at']
@@ -763,16 +824,30 @@ def _status_rows(value) -> list[tuple[str, str]]:
     if worker.get('running') and worker.get('phase') == 'waiting' and isinstance(error, str) and error:
         from .sessions import display_text
         worker_text += ', waiting: ' + display_text(error, 200)
-    # The stage and the retained receipts stay in --json.
+    scratch_phase = scratch_status.get('phase', 'unknown')
     rows = [('', RECOVERY_OFF)] if off else []
     rows += [('', 'Sync: ' + worker_text),
-             ('', 'Scratch: ' + scratch_status.get('phase', 'unknown')),
-             ('', 'History: ' + history['outcome'])]
+             ('', 'Scratch: ' + scratch_phase)]
+    conflicts = scratch_status.get('conflicts') or []
+    if scratch_phase == 'conflicts' and isinstance(conflicts, list) and conflicts:
+        shown = ', '.join(str(p) for p in conflicts[:5])
+        more = f' (+{len(conflicts) - 5} more)' if len(conflicts) > 5 else ''
+        rows.append(('', f'Conflicts: {shown}{more}; resolve in .scratch/'))
+    rows.append(('', 'History: ' + history['outcome']))
     for name, label in zip(sync_cycle.DIRECTIONS, ('Mac → Codespace', 'Codespace → Mac')):
         counts = history['directions'][name]['counts']
         rows.append(('', label + ': ' + str(counts['received']) + ' received, ' + str(counts['available'])
                      + ' available, ' + str(counts['pending']) + ' pending, ' + str(counts['unsupported'])
                      + ' unsupported'))
+    if history['issues']:
+        from .sessions import display_text
+        for item in history['issues'][:3]:
+            if isinstance(item, dict):
+                who = ' '.join(part for part in (item.get('agent'), (item.get('session_id') or '')[:8]) if part)
+                reason = display_text(str(item.get('reason') or ''), 140)
+                prefix = f'Issue ({who}): ' if who else 'Issue: '
+                if reason:
+                    rows.append(('', prefix + reason))
     if history['issues'] or worker.get('error') or scratch_status.get('issue'):
         rows.append(('', 'Details: task work:status -- --json; logs: task scratch:logs'))
     # A property of this Codespace, not of arming, so it is not a recovery row.

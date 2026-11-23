@@ -437,15 +437,16 @@ class LeadTests(unittest.TestCase):
     def test_resume_text_is_verbatim(self):
         stopped = 1_792_632_500.0  # 2026-10-22 01:28:20Z
         text = restore.resume_text('r-012820Z', stopped, stopped + 180)
-        # R34: spec 6.6 exactly, with a period after "work".
+        # R34: spec 6.6 sentence verbatim with a period after "work"; note both --resume and --conversation (agy).
         self.assertEqual(text, 'Codespace restarted, we are back. You need to bring the services that you require '
                                "up and continue with the work. (Automatic restart r-012820Z: GitHub's 12-hour stop at "
-                               '01:28Z, back at 01:31Z. Restored agents came back with --resume and without their '
-                               "launch flags, so check each worker's model, effort and sandbox before dispatching "
-                               'to it.)')
+                               '01:28Z, back at 01:31Z. Restored agents came back with --resume / --conversation and '
+                               "without their launch flags, so check each worker's model, effort and sandbox before "
+                               'dispatching to it.)')
         planned = restore.resume_text('o-012820Z', stopped, stopped + 180)
         self.assertTrue(planned.startswith(restore.SENTENCE + '. (Planned restart o-012820Z: stopped at 01:28Z, '
                                                               'back at 01:31Z. Restored agents'))
+        self.assertIn('--resume / --conversation', planned)
         self.assertNotIn('12-hour', planned)
 
 

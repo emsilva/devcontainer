@@ -35,14 +35,16 @@ TOOLS = (
     Tool('opencode', 'OpenCode', 'opencode', ('opencode', 'auth', 'list', '--format', 'json'),
          ('opencode', 'auth', 'login', 'openai', '--method', 'chatgpt-token-sharing'), 600),
     Tool('grok', 'Grok', 'grok', ('grok', 'models'), ('grok', 'login', '--device-auth'), 600),
+    Tool('agy', 'Antigravity', 'agy', ('agy', 'models'), ('agy', 'acp', '--login'), 600),
 )
 SIGNED_IN, SIGNED_OUT, OTHER_METHOD, UNKNOWN, ABSENT = (
     'signed-in', 'signed-out', 'other-method', 'unknown', 'absent')
 
 
-def _classify(key: str, code: int, out: str, err: str) -> tuple[str, str | None]:
+def _classify(key: str, code: int, out: str, err: str, *, home: str | None = None) -> tuple[str, str | None]:
     # Self-contained: only this function's source is shipped to the Codespace.
     import json
+    import os
     if key == 'plaud':
         return ({0: 'signed-in', 2: 'signed-out'}.get(code, 'unknown'), None)
     if key == 'codex':
@@ -68,18 +70,34 @@ def _classify(key: str, code: int, out: str, err: str) -> tuple[str, str | None]
                     return ('signed-in', email)
                 return ('other-method', None)
         if key == 'opencode' and code == 0 and isinstance(value, list):
-            found = any(isinstance(item, dict) and item.get('id') == 'openai' for item in value)
+            provider = os.environ.get('DEVCONTAINER_OPENCODE_PROVIDER', 'openai').strip() or 'openai'
+            found = any(isinstance(item, dict) and item.get('id') == provider for item in value)
             return ('signed-in' if found else 'signed-out', None)
     if key == 'grok':
         if 'You are logged in with grok.com.' in out:
             return ('signed-in', None)
         if 'You are not authenticated.' in out:
             return ('signed-out', None)
+    if key == 'agy':
+        combined = out + '\n' + err
+        if 'Please sign in to view available models.' in combined:
+            return ('signed-out', None)
+        if code == 0 and out.strip():
+            settings_path = os.path.join(home or os.path.expanduser('~'),
+                                         '.gemini', 'antigravity-cli', 'settings.json')
+            try:
+                with open(settings_path, encoding='utf-8') as stream:
+                    settings = json.load(stream)
+                if isinstance(settings, dict) and settings.get('modelProvider') == 'gemini':
+                    return ('other-method', None)
+            except (OSError, ValueError, TypeError):
+                pass
+            return ('signed-in', None)
     return ('unknown', None)
 
 
 REMOTE_PROBE = inspect.getsource(_classify) + '''
-import json, shutil, subprocess, sys
+import json, os, shutil, subprocess, sys
 results = {}
 for key, argv in json.loads(sys.argv[1]).items():
     state, identity = 'unknown', None
@@ -87,7 +105,8 @@ for key, argv in json.loads(sys.argv[1]).items():
         state = 'absent'
     else:
         try:
-            answer = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+            env = dict(os.environ, AGY_CLI_DISABLE_AUTO_UPDATE='true') if key == 'agy' else None
+            answer = subprocess.run(argv, capture_output=True, text=True, timeout=30, env=env)
             state, identity = _classify(key, answer.returncode, answer.stdout, answer.stderr)
         except (subprocess.TimeoutExpired, OSError, UnicodeError):
             pass
@@ -193,6 +212,19 @@ def _end_login(child, number=signal.SIGTERM):
         child.wait()
 
 
+def _login_argv(tool: Tool) -> tuple[str, ...]:
+    import os
+    if tool.key == 'opencode':
+        provider = os.environ.get('DEVCONTAINER_OPENCODE_PROVIDER', '').strip()
+        method = os.environ.get('DEVCONTAINER_OPENCODE_METHOD', '').strip()
+        if provider or method:
+            argv = ['opencode', 'auth', 'login', provider or 'openai']
+            if method:
+                argv += ['--method', method]
+            return tuple(argv)
+    return tool.login
+
+
 def login(state: Path, tool: Tool) -> int:
     child = None
     try:
@@ -200,7 +232,8 @@ def login(state: Path, tool: Tool) -> int:
         with _defer_signals():
             # ssh -t sends Ctrl-C to the Codespace, not to this process. A tool killed by it
             # makes ssh exit 255, the code for a dropped link; the trap turns it into 130.
-            command = 'trap "exit 130" INT; ' + shlex.join(tool.login)
+            prefix = 'AGY_CLI_DISABLE_AUTO_UPDATE=true ' if tool.key == 'agy' else ''
+            command = 'trap "exit 130" INT; ' + prefix + shlex.join(_login_argv(tool))
             child = subprocess.Popen(_ssh(state, command, terminal=True), start_new_session=False)
         code = child.wait(timeout=tool.deadline)
         return code if code >= 0 else 128 - code
@@ -338,9 +371,13 @@ def run(project, state: Path, codespace: str, *, ask=input, interactive=None) ->
                     if refusal:
                         print(refusal)
                         break
-                    text = f'Signing in to {tool.label}. Approve the page that opens on this Mac.'
-                    if tool.key == 'grok':
-                        text += ' Enter the code shown here.'
+                    if tool.key == 'agy':
+                        text = (f'Signing in to {tool.label}. Open the URL shown here on your Mac, '
+                                'then paste the code or callback URL.')
+                    else:
+                        text = f'Signing in to {tool.label}. Approve the page that opens on this Mac.'
+                        if tool.key == 'grok':
+                            text += ' Enter the code shown here.'
                     print(text, flush=True)
                     code = login(state, tool)
                     if code in (128 + signal.SIGINT, 128 + signal.SIGTERM, 128 + signal.SIGHUP):

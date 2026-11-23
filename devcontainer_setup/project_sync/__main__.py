@@ -173,6 +173,14 @@ def _armed(project, state, args):
     if keeper.wait_ready(state, started['nonce']).get('phase') == 'starting':
         print('Recovery has not reported within 60 seconds; see task work:logs.')
     print('\n'.join(workspace.recovery_lines(workspace.recovery(state))))
+    try:
+        from . import restore
+        machine = read_json(state / 'herdr-machine.json').get('machine_id')
+        if machine and restore.lead(restore.Herdr(machine).agents()) is None:
+            print('Tip: name your main project orchestrator pane lead-<project> in Herdr so recovery '
+                  'can resume it after a 12-hour stop.')
+    except (OSError, ValueError):
+        pass
 
 
 def _resume_recovery(project, state) -> None:

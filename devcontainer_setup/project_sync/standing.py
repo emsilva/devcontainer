@@ -36,6 +36,7 @@ class Refusal:
     agent: str
     session_id: str
     reason: str
+    direction: str = 'desktop_to_codespace'
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,10 @@ class Local:
     history_pending_since: float | None = None
     logs: bool = False
     problems: tuple[str, ...] = ()
+    last_restart_issue: str | None = None
+    scratch_conflicts: tuple[str, ...] = ()
+    mac_link_live: bool | None = None
+    mac_stop_live: bool | None = None
 
 
 _TASKFILES = ('Taskfile.yml', 'Taskfile.yaml', 'taskfile.yml', 'taskfile.yaml',
@@ -321,23 +326,29 @@ def _cycle(runtime, project, binding, completed=True):
 
 def _refusals(runtime, project, binding, reader):
     cycle = _cycle(runtime, project, binding)
-    row = _object(_object(cycle.get('directions')).get('desktop_to_codespace'))
-    if not sync_cycle.receipt_matches(row.get('receipt'), row.get('snapshot_id')):
-        return ()
-    issues = row.get('publication_issues', [])
-    if not isinstance(issues, list):
-        reader.problem('scratch-runtime.json publication issues cannot be read')
-        return ()
+    directions = _object(cycle.get('directions'))
     result = []
-    for issue in issues:
-        item = _object(issue)
-        agent, session, reason = (item.get(key) for key in ('agent', 'session_id', 'reason'))
-        if (not isinstance(agent, str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,31}', agent)
-                or not isinstance(session, str) or not re.fullmatch(r'[A-Za-z0-9._-]{1,128}', session)
-                or not isinstance(reason, str)):
-            reader.problem('scratch-runtime.json publication issue has invalid ids or reason')
+    seen = set()
+    for direction in ('desktop_to_codespace', 'codespace_to_desktop'):
+        row = _object(directions.get(direction))
+        if not sync_cycle.receipt_matches(row.get('receipt'), row.get('snapshot_id')):
             continue
-        result.append(Refusal(agent, session, reason))
+        issues = row.get('publication_issues', [])
+        if not isinstance(issues, list):
+            reader.problem('scratch-runtime.json publication issues cannot be read')
+            continue
+        for issue in issues:
+            item = _object(issue)
+            agent, session, reason = (item.get(key) for key in ('agent', 'session_id', 'reason'))
+            if (not isinstance(agent, str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,31}', agent)
+                    or not isinstance(session, str) or not re.fullmatch(r'[A-Za-z0-9._-]{1,128}', session)
+                    or not isinstance(reason, str)):
+                reader.problem('scratch-runtime.json publication issue has invalid ids or reason')
+                continue
+            if (agent, session) in seen:
+                continue
+            seen.add((agent, session))
+            result.append(Refusal(agent, session, reason, direction))
     return tuple(result)
 
 
@@ -473,6 +484,15 @@ def _state_facts(state, project, reader, timeout):
             anchor = _number(_object(runtime.get('anchor')).get('at'))
             if reading.get('ok') is True and reading.get('state') == 'Available' and anchor is not None:
                 values['next_stop_at'] = anchor + lifecycle.LIFETIME
+        last_restart = _object(runtime.get('last_restart'))
+        outcome = _text(last_restart.get('outcome'))
+        if outcome and any(marker in outcome for marker in (
+                'no single lead', 'Herdr not reachable', 'busy', 'waiting for an answer',
+                'resume not delivered', 'restore failed', 'start failed', 'started elsewhere',
+                'not restarted')):
+            # Show concise failure tail after '; ' if present (e.g. 'no single lead', 'Herdr not reachable').
+            short = outcome.split('; ', 1)[-1]
+            values['last_restart_issue'] = short[:80]
     if values.get('armed') is True:
         try:
             rows = lifecycle.Ledger(state / keeper.LEDGER).rows()
@@ -484,6 +504,8 @@ def _state_facts(state, project, reader, timeout):
         values['worker'] = 'unknown'
     elif pairing and binding and worker.get('binding') == binding:
         values['worker'] = _process(worker, state, reader, timeout, flag='--supervise', module='.scratch')
+        if values['worker'] == 'running' and isinstance(worker.get('conflicts'), list):
+            values['scratch_conflicts'] = tuple(str(item) for item in worker['conflicts'][:20] if isinstance(item, str) and item)
         cycle = _cycle(worker, project, binding)
         values['cycle_at'] = _number(cycle.get('completed_at'))
         values['refusals'] = _refusals(worker, project, binding, reader)
@@ -504,6 +526,18 @@ def read(root: Path, *, env: Mapping[str, str] = os.environ, timeout: float = 1.
     """Read independent facts best-effort; failures never create or repair anything."""
     reader = _Reader()
     values = dict(root=Path(root), in_codespace=env.get('CODESPACES') == 'true')
+    if values['in_codespace']:
+        home = Path(env.get('HOME') or Path.home())
+        links_dir = home / '.local/state/devcontainer-links'
+        now = time.time()
+        def _fresh(filename):
+            try:
+                p = links_dir / filename
+                return not p.is_symlink() and p.is_file() and 0 <= now - p.stat().st_mtime <= 30
+            except OSError:
+                return False
+        values['mac_link_live'] = _fresh('mac-listening')
+        values['mac_stop_live'] = _fresh('stop-listening-v1')
     try:
         root = Path(root).resolve()
         values['root'] = root

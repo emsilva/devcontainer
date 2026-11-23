@@ -145,11 +145,17 @@ ensure_login_shell
 # Configure system timezone if requested
 configure_timezone
 
+# Install open-on-mac helper so Codespace CLI OAuth flows open on the paired Mac
+if [ -f templates/tools/open-on-mac ]; then
+  install -m 0755 templates/tools/open-on-mac "${USER_HOME}/.local/bin/open-on-mac" 2>/dev/null || true
+  ln -sfn "${USER_HOME}/.local/bin/open-on-mac" "${USER_HOME}/.local/bin/xdg-open" 2>/dev/null || true
+fi
+
 # Install complete user-owned native coding tools.
-if ! sudo -n bash templates/scripts/system-path.sh "$PATH" "$(command -v python3)"; then
+if ! sudo -n bash templates/scripts/system-path.sh "$PATH" "$(command -v python3)" "${USER_HOME}/.local/bin/open-on-mac"; then
   # The recovery command expands PATH when copied into the user's shell.
   # shellcheck disable=SC2016
-  echo 'Could not configure system PATH; run: sudo bash templates/scripts/system-path.sh "$PATH" "$(command -v python3)"' >&2
+  echo 'Could not configure system PATH; run: sudo bash templates/scripts/system-path.sh "$PATH" "$(command -v python3)" "$HOME/.local/bin/open-on-mac"' >&2
   exit 1
 fi
 export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"

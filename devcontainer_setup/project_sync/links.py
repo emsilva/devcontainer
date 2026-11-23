@@ -341,7 +341,7 @@ def handle(request: Request, connection, forwards: Forwards, *, project: str, no
                 if remedy:
                     detail += '. ' + remedy
                 notifier(project, request.program, request.host, detail)
-                if request.tty and request.program not in SELF_SHOWING:
+                if request.tty:
                     try:
                         connection.python(_REMOTE_TTY, json.dumps(dict(tty=request.tty,
                             text=f'{request.program}: {request.host}: {detail}')).encode(), timeout=10)

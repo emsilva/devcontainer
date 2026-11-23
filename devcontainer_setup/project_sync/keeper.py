@@ -363,8 +363,14 @@ class Keeper:
         watch = self.runtime['down']
         if not reading.ok:
             watch['count'] = 0
+            if reading.http == 401:
+                err = 'GitHub sign-in expired (HTTP 401); run gh auth login --hostname github.com'
+            elif reading.http == 403:
+                err = 'GitHub token lacks Codespaces permission (HTTP 403); run gh auth refresh -s codespace'
+            else:
+                err = 'Codespace state unreadable; check gh auth status and the network'
             self.runtime.update(phase='deleted' if self._deleted_read_at is not None else 'waiting',
-                                error='Codespace state unreadable; check gh auth status and the network')
+                                error=err)
             return None
         if reading.state != self.previous[0]:
             _LOG.info('Codespace %s at %s', reading.state, _utc(reading.at))
@@ -711,9 +717,12 @@ class Keeper:
                 and all(isinstance(at, (int, float)) and not isinstance(at, bool) for at in (stopped_at, back_at))):
             return
         key = 'restore-' + rid
-        if ((self.runtime.get('last_restart') or {}).get('rid') == rid or key in self.runtime['notified']
-                or self.now() - back_at > PENDING_FRESH):
-            self._clear_pending(rid)  # consumed or expired
+        if ((self.runtime.get('last_restart') or {}).get('rid') == rid or key in self.runtime['notified']):
+            self._clear_pending(rid)  # already consumed
+            return
+        if self.now() - back_at > PENDING_FRESH:
+            self._clear_pending(rid)
+            _LOG.info('Planned restart %s expired before restore (>%ds); skipping auto-resume', rid, PENDING_FRESH)
             return
         last = {'rid': rid, 'at': self.now(), 'stopped_at': stopped_at, 'back_at': back_at, 'outcome': 'restoring'}
         self.runtime['last_restart'] = last
@@ -769,7 +778,8 @@ class Keeper:
                                                          'task work:hold -- off ends the hold, and task work:status '
                                                          'shows the restart.')
             self._tick('resuming')
-            told, name = restore.resume(herdr, rid, restore.resume_text(rid, stopped_at, back_at), now=self.now,
+            resume_prompt = restore.resume_text(rid, stopped_at, back_at, root=getattr(self, 'root', None))
+            told, name = restore.resume(herdr, rid, resume_prompt, now=self.now,
                                         sleep=self._pause, tick=self._tick)
             last['resume'] = told
             who = f'its lead {name}' if name else 'its lead'
@@ -782,8 +792,21 @@ class Keeper:
                         f', and {who} was told to resume but is now waiting on a question or approval in its pane; '
                         'answer it there.')
             elif told == 'no-lead':
-                outcome('no single lead', ', but no single lead-* agent was found on its Herdr machine; tell its '
-                                          'lead to resume.')
+                observed = []
+                try:
+                    for item in herdr.agents()[:10]:
+                        label = str(item.get('name') or 'unnamed')
+                        status = str(item.get('agent_status') or 'unknown')
+                        observed.append(f'{label}({status})')
+                except Exception:
+                    pass
+                if observed:
+                    last['observed_agents'] = observed
+                    _LOG.info('Restore %s observed Herdr agents: %s', rid, ', '.join(observed))
+                seen_note = f' (seen: {", ".join(observed[:4])})' if observed else ''
+                outcome('no single lead' + seen_note,
+                        ', but no single lead-* agent was found on its Herdr machine' + seen_note
+                        + '; tell its lead to resume.')
             elif told == 'busy':
                 outcome(f'{name or "lead"} busy', f', but {who} stayed busy for 10 minutes; tell it to resume.')
             else:

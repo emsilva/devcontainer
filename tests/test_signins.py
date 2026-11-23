@@ -31,6 +31,7 @@ class ProbeTests(unittest.TestCase):
             ('opencode', 'OpenCode', ('opencode', 'auth', 'list', '--format', 'json'),
              ('opencode', 'auth', 'login', 'openai', '--method', 'chatgpt-token-sharing'), 600),
             ('grok', 'Grok', ('grok', 'models'), ('grok', 'login', '--device-auth'), 600),
+            ('agy', 'Antigravity', ('agy', 'models'), ('agy', 'acp', '--login'), 600),
         ]
         self.assertEqual([(t.key, t.label, t.status, t.login, t.deadline) for t in self.signins.TOOLS], expected)
         self.assertEqual([t.binary for t in self.signins.TOOLS], [row[0] for row in expected])
@@ -56,10 +57,40 @@ class ProbeTests(unittest.TestCase):
             ('grok', 0, 'You are logged in with grok.com.\n', '', 'signed-in', None),
             ('grok', 0, 'You are not authenticated.\n', '', 'signed-out', None),
             ('grok', 0, 'something else', '', 'unknown', None),
+            ('agy', 1, '', '\rError: Please sign in to view available models. Launch the CLI without arguments to sign in.\n', 'signed-out', None),
+            ('agy', 0, 'gemini-4-neon-high        Gemini 4 Neon (High)\n', '', 'signed-in', None),
+            ('agy', 1, '', 'modelProvider is set to "gemini" in settings.json, but the GEMINI_API_KEY environment variable is not set.\n', 'unknown', None),
+            ('agy', 0, '', '', 'unknown', None),
         ]
         for key, code, out, err, state, identity in rows:
             with self.subTest(key=key, code=code, out=out):
-                self.assertEqual(self.signins._classify(key, code, out, err), (state, identity))
+                if key == 'agy':
+                    self.assertEqual(self.signins._classify(key, code, out, err, home=str(self.state)), (state, identity))
+                else:
+                    self.assertEqual(self.signins._classify(key, code, out, err), (state, identity))
+
+    def test_agy_settings_gemini_provider_is_other_method_and_probe_disables_auto_update(self):
+        settings = self.state / '.gemini/antigravity-cli/settings.json'
+        settings.parent.mkdir(parents=True)
+        settings.write_text('{"modelProvider": "gemini"}\n')
+        self.assertEqual(
+            self.signins._classify('agy', 0, 'gemini-4-neon-high\n', '', home=str(self.state)),
+            ('other-method', None),
+        )
+        self.fake('agy', 'import os\nassert os.environ.get("AGY_CLI_DISABLE_AUTO_UPDATE") == "true"\nprint("gemini-4-neon-high")\n')
+        result = subprocess.run(
+            [sys.executable, '-I', '-B', '-c', self.signins.REMOTE_PROBE, json.dumps({'agy': ['agy', 'models']})],
+            env=dict(os.environ, HOME=str(self.state), PATH=str(self.state)),
+            capture_output=True, text=True, timeout=10, check=True,
+        )
+        self.assertEqual(json.loads(result.stdout), {'agy': {'state': 'other-method', 'identity': None}})
+        settings.unlink()
+        result_signed_in = subprocess.run(
+            [sys.executable, '-I', '-B', '-c', self.signins.REMOTE_PROBE, json.dumps({'agy': ['agy', 'models']})],
+            env=dict(os.environ, HOME=str(self.state), PATH=str(self.state)),
+            capture_output=True, text=True, timeout=10, check=True,
+        )
+        self.assertEqual(json.loads(result_signed_in.stdout), {'agy': {'state': 'signed-in', 'identity': None}})
 
     def test_codex_api_key_is_other_method(self):
         self.assertEqual(self.signins._classify('codex', 0, '', 'API key configured - sk-fake\n'),
@@ -216,11 +247,11 @@ class SequenceTests(unittest.TestCase):
                 self.assertEqual(ask.call_count, 3)
                 self.assertEqual(probe.call_count, 5)
                 self.assertEqual([call.args[1] for call in login.call_args_list],
-                                 [self.signins.TOOLS[0]] * 3 + [self.signins.TOOLS[-1]])
+                                 [self.signins.TOOLS[0]] * 3 + [self.signins.TOOLS[-2]])
                 retry = "Press Enter to open Plaud's page again, or type next to go on."
                 self.assertEqual(out.count(retry), 2)
                 self.assertLess(out.index('Plaud: not signed in'), out.index(retry))
-                self.assertIn('Signed in: Plaud, Codex, Claude, OpenCode, Grok.', out)
+                self.assertIn('Signed in: Plaud, Codex, Claude, OpenCode, Grok, Antigravity.', out)
 
     def test_retry_next_moves_to_following_tool(self):
         initial = self.states(plaud='signed-out', grok='signed-out')
@@ -282,7 +313,7 @@ class SequenceTests(unittest.TestCase):
         self.assertEqual(code, 130)
         login.assert_not_called()
         self.assertIn('Sign-in cancelled.\n', out)
-        self.assertIn('Signed in: Codex, Claude, OpenCode, Grok.', out)
+        self.assertIn('Signed in: Codex, Claude, OpenCode, Grok, Antigravity.', out)
         self.assertEqual(json.loads((self.state / 'signins.json').read_text())['tools']['plaud']['state'], 'signed-out')
 
     def test_ctrl_c_at_retry_prompt_keeps_record(self):
@@ -391,7 +422,7 @@ class SequenceTests(unittest.TestCase):
         self.assertIn('Signing in to Plaud. Approve the page that opens on this Mac.', out)
         self.assertIn('Plaud: signed in', out)
         self.assertIn('Claude: already signed in as a@b.c', out)
-        self.assertIn('Signed in: Plaud, Codex, Claude, OpenCode, Grok.', out)
+        self.assertIn('Signed in: Plaud, Codex, Claude, OpenCode, Grok, Antigravity.', out)
 
     def test_skips_signed_in_other_method_and_unknown(self):
         code, out, login, _ = self.sequence(self.states(codex='other-method', opencode='unknown', grok='absent'))
@@ -442,11 +473,12 @@ class SequenceTests(unittest.TestCase):
                                                 follow=[{'codex': {'state': after, 'identity': None}}], login=0)
                 self.assertIn(line + '\n', out)
                 self.assertEqual(code, 0)
-        self.assertIn('Signed in: Plaud, Claude, OpenCode, Grok.', out)
+        self.assertIn('Signed in: Plaud, Claude, OpenCode, Grok, Antigravity.', out)
 
     def test_missing_and_the_summary_count_unknown_as_not_signed_in(self):
         tools = {'plaud': {'state': 'signed-out', 'checked_at': 1.0}, 'codex': {'state': 'signed-in'},
-                 'claude': {'state': 'unknown'}, 'opencode': {'state': 'other-method'}, 'grok': {'state': 'absent'}}
+                 'claude': {'state': 'unknown'}, 'opencode': {'state': 'other-method'},
+                 'grok': {'state': 'absent'}, 'agy': {'state': 'signed-in'}}
         missing = self.signins.missing(tools, unlisted=True)
         self.assertEqual(missing, ('Plaud', 'Claude'))
         out = io.StringIO()
@@ -462,11 +494,11 @@ class SequenceTests(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.signins._summary({})
-        self.assertIn('Not signed in: Plaud, Codex, Claude, OpenCode, Grok. Retry with task work:signin:all.\n',
+        self.assertIn('Not signed in: Plaud, Codex, Claude, OpenCode, Grok, Antigravity. Retry with task work:signin:all.\n',
                       out.getvalue())
         self.assertEqual(self.signins.missing({}, unlisted=False), ())
         self.assertEqual(self.signins.missing({}, unlisted=True),
-                         ('Plaud', 'Codex', 'Claude', 'OpenCode', 'Grok'))
+                         ('Plaud', 'Codex', 'Claude', 'OpenCode', 'Grok', 'Antigravity'))
 
     def test_expired_page_failure_names_new_page_on_retry(self):
         for tool in self.signins.TOOLS:
@@ -512,10 +544,25 @@ class SequenceTests(unittest.TestCase):
     def test_login_argv(self):
         with patch.object(self.signins.subprocess, 'Popen') as spawn:
             spawn.return_value.wait.return_value = 0
-            self.assertEqual(self.signins.login(self.state, self.signins.TOOLS[-1]), 0)
+            self.assertEqual(self.signins.login(self.state, self.signins.TOOLS[-2]), 0)
         spawn.assert_called_once_with(['ssh', '-F', str(self.state / 'ssh-config'), '-t', 'project-sync',
                                        'bash', '-lc', shlex.quote('trap "exit 130" INT; grok login --device-auth')],
                                       start_new_session=False)
+
+    def test_agy_login_argv_and_copy_paste_hint(self):
+        with patch.object(self.signins.subprocess, 'Popen') as spawn:
+            spawn.return_value.wait.return_value = 0
+            self.assertEqual(self.signins.login(self.state, self.signins.TOOLS[-1]), 0)
+        spawn.assert_called_once_with([
+            'ssh', '-F', str(self.state / 'ssh-config'), '-t', 'project-sync',
+            'bash', '-lc',
+            shlex.quote('trap "exit 130" INT; AGY_CLI_DISABLE_AUTO_UPDATE=true agy acp --login'),
+        ], start_new_session=False)
+        code, out, login, _ = self.sequence(self.states(agy='signed-out'), follow=[{'agy': self.states()['agy']}])
+        self.assertEqual(code, 0)
+        self.assertEqual(login.call_args.args[1].key, 'agy')
+        self.assertIn('Signing in to Antigravity. Open the URL shown here on your Mac, then paste the code or callback URL.', out)
+        self.assertNotIn('Approve the page that opens on this Mac', out)
 
     def test_ctrl_c_on_the_codespace_reads_as_a_cancel(self):
         # Through ssh -t the Mac never sees Ctrl-C: the Codespace terminal sends SIGINT to the

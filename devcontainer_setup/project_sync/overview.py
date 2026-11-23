@@ -218,6 +218,8 @@ def _recovery(local: Local, situation: str, pair: _Pair, now: float, connects: b
         if kind == 'LIFETIME':
             return 6, 'armed; not restarted yet; Show details has the reason'
         return 6, 'armed; checking why it stopped'
+    if local.last_restart_issue:
+        return 6, 'armed; last restart: ' + local.last_restart_issue
     if local.next_stop_at is None:
         return 12, 'armed; next 12-hour stop not known yet'
     if local.next_stop_at > now:
@@ -239,7 +241,16 @@ def view(local: Local, remote: Remote | None, *,
         candidates.append(Action(key, label, task_command(local, alias, *args)))
 
     if local.in_codespace:
-        return View((fit("This is the Codespace; task work shows the project's state on your Mac."),),
+        lines = [fit("This is the Codespace; task work shows the project's state on your Mac.")]
+        if local.mac_link_live is not None:
+            if local.mac_link_live and local.mac_stop_live:
+                mac_text = 'connected (links & remote stop ready)'
+            elif local.mac_link_live:
+                mac_text = 'connected (links ready; update Mac worker for remote stop)'
+            else:
+                mac_text = 'disconnected; run task work:cs on your Mac'
+            lines.append(_row('Mac', mac_text))
+        return View(tuple(lines),
                     (Action('stop', 'Stop the Codespace', task_command(local, 'work:cs:stop')),))
 
     pair = _pair(local, remote, now)
@@ -370,6 +381,11 @@ def view(local: Local, remote: Remote | None, *,
             row(6, recovery[0], 'Recovery', recovery[1])
     if name and local.worker == 'stopped':
         row(7, 7, 'Sync', 'stopped; connect to start it' if connects else 'stopped')
+    elif local.scratch_conflicts:
+        count = len(local.scratch_conflicts)
+        first = _clean(local.scratch_conflicts[0])
+        suffix = f' (+{count - 1} more)' if count > 1 else ''
+        row(7, 6, 'Scratch', f'{count} conflict' + ('s: ' if count != 1 else ': ') + first + suffix)
     elif local.cycle_at is not None:
         row(7, 14, 'Sync', 'last completed ' + _when(local.cycle_at, now))
 
@@ -498,6 +514,31 @@ def _unique_labels(actions: list[Action]) -> tuple[Action, ...]:
     return tuple(result)
 
 
+def more_actions(local: Local, primary: tuple[Action, ...], *, now: float | None = None) -> tuple[Action, ...]:
+    """Secondary lifecycle and diagnostic commands surfaced under 'More actions…'."""
+    if local.in_codespace or not local.pairing:
+        return ()
+    now = time.time() if now is None else now
+    existing = {action.key for action in primary}
+    extras: list[Action] = []
+    def add(key, label, alias, *args):
+        if key not in existing:
+            extras.append(Action(key, label, task_command(local, alias, *args)))
+    if local.logs:
+        add('logs', 'Show recovery and sync logs', 'work:logs')
+    if local.worker == 'running':
+        add('disconnect', 'Disconnect from Herdr', 'work:disconnect')
+        add('stop-worker', 'Stop sync worker', 'work:stop')
+    add('restart', 'Restart Codespace now', 'work:cs:restart')
+    if local.armed is True:
+        if local.hold_until is not None and local.hold_until > now:
+            add('hold-off', 'End restart hold', 'work:hold', '--', 'off')
+        else:
+            add('hold', 'Hold restarts until 09:00', 'work:hold', '--', '09:00')
+        add('disarm', 'Disarm automatic recovery', 'work:disarm')
+    return _unique_labels(extras)
+
+
 def run(root: Path, *, env: Mapping[str, str] = os.environ, stdin=sys.stdin, stdout=sys.stdout,
         deadline: float = 2.0, gum=DEFAULT, call=subprocess.call) -> int:
     """Print without changing state; only an explicit menu choice runs a command."""
@@ -539,14 +580,30 @@ def run(root: Path, *, env: Mapping[str, str] = os.environ, stdin=sys.stdin, std
             print('Gum is not installed, so there is no menu; run one of the commands above.',
                   file=stdout, flush=True)
             return 0
-        try:
-            choice = terminal.Gum(gum).choose('What next?', [action.item for action in frame.actions] + ['Exit'])
-        except (terminal.Cancelled, KeyboardInterrupt):
-            choice = 'Exit'
-        if choice == 'Exit':
-            print('Nothing ran.', file=stdout, flush=True)
-            return 0
-        action = next(action for action in frame.actions if action.item == choice)
+        extras = more_actions(local, frame.actions)
+        while True:
+            items = [action.item for action in frame.actions]
+            if extras:
+                items.append('More actions…')
+            items.append('Exit')
+            try:
+                choice = terminal.Gum(gum).choose('What next?', items)
+            except (terminal.Cancelled, KeyboardInterrupt):
+                choice = 'Exit'
+            if choice == 'Exit':
+                print('Nothing ran.', file=stdout, flush=True)
+                return 0
+            if choice == 'More actions…':
+                try:
+                    sub = terminal.Gum(gum).choose('More actions', [action.item for action in extras] + ['Back'])
+                except (terminal.Cancelled, KeyboardInterrupt):
+                    sub = 'Back'
+                if sub == 'Back':
+                    continue
+                action = next(action for action in extras if action.item == sub)
+                break
+            action = next(action for action in frame.actions if action.item == choice)
+            break
         print('Running: ' + action.command, file=stdout, flush=True)
         return call(list(action.argv), cwd=root)
     finally:

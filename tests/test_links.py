@@ -288,20 +288,17 @@ class LinksTests(unittest.TestCase):
             self.assertEqual(forwards.active(), set())
             self.assertEqual(json.loads((self.state / 'links-forwards.json').read_text())['forwards'], {})
 
-    def test_busy_message_goes_to_tty_only_for_non_self_showing(self):
+    def test_busy_message_goes_to_tty_for_all_programs(self):
         for program in ('plaud', 'other', 'codex', 'claude', 'opencode', 'gh', 'az'):
             with self.subTest(program=program), self.forwards() as (forwards, _, _), \
                     mock.patch.object(self.links, 'check_port', return_value=(False, 'server (pid 4242)')):
                 self.connection.reset_mock()
                 request = self.links.parse_request(packet(program=program, tty='/dev/pts/7'))
                 self.assertEqual(self.handle(request, forwards), 'busy')
-                if program in ('plaud', 'other'):
-                    payload = json.loads(self.connection.python.call_args.args[1])
-                    self.assertEqual(payload['tty'], '/dev/pts/7')
-                    self.assertIn('server (pid 4242)', payload['text'])
-                    self.assertNotIn(request.url, payload['text'])
-                else:
-                    self.connection.python.assert_not_called()
+                payload = json.loads(self.connection.python.call_args.args[1])
+                self.assertEqual(payload['tty'], '/dev/pts/7')
+                self.assertIn('server (pid 4242)', payload['text'])
+                self.assertNotIn(request.url, payload['text'])
 
     def test_logs_and_notices_never_contain_url(self):
         with self.forwards() as (forwards, _, _), self.assertLogs(self.links._LOG, level='INFO') as logs:

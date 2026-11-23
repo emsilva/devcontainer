@@ -11,6 +11,10 @@ tasks:
     interactive: true
     cmds:
       - bash scripts/project-sync.sh work --codespace {{.CLI_ARGS}}
+  work:signin:
+    desc: Finish waiting Codespace browser sign-ins on this Mac
+    cmds:
+      - bash scripts/project-sync.sh work --signin {{.CLI_ARGS}}
   work:signin:all:
     desc: Sign in to every tool on the paired Codespace
     interactive: true
@@ -68,6 +72,10 @@ tasks:
     interactive: true
     cmds:
       - bash scripts/setup.sh {{.CLI_ARGS}}
+  setup:doctor:
+    desc: Check local prerequisites for setup and Codespaces continuity
+    cmds:
+      - bash scripts/setup.sh --doctor {{.CLI_ARGS}}
   up:
     desc: Start the development container
     cmds: [{task: 'devcontainer:up'}]

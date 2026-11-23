@@ -312,7 +312,7 @@ def _copy_memory(path, data):
             fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
         except FileExistsError:
             if _memory_bytes(path) != data:
-                raise ValueError('Claude memory destination conflict; settings and existing notes preserved') from None
+                raise ValueError(f'Claude memory destination conflict ({path.name}); settings and existing notes preserved') from None
             return
         # Once visible, a note can receive owner edits. Even cancellation must
         # retain that path; a partial copy is an explicit conflict on retry.
@@ -347,7 +347,7 @@ def _seed_memory(project, source, destination, previous, env):
         for name, data in files.items():
             current = _memory_bytes(destination / name)
             if current is not None and current != data:
-                raise ValueError('Claude memory destination conflict; settings and existing notes preserved')
+                raise ValueError(f'Claude memory destination conflict ({name}); settings and existing notes preserved')
         # The startup index becomes visible only after its referenced notes.
         for name in sorted(files, key=lambda value: (value == 'MEMORY.md', value)):
             _copy_memory(destination / name, files[name])

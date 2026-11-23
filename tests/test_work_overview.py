@@ -310,7 +310,7 @@ class WorkOverviewTests(unittest.TestCase):
                 self.assertEqual(options[-1], 'Exit')
                 # Items are labels only; the command prints once one is chosen.
                 self.assertEqual(options, ['Connect', 'Connect and arm recovery', 'Stop the Codespace',
-                                           'Replace this Codespace', 'Show details', 'Exit'])
+                                           'Replace this Codespace', 'Show details', 'More actions…', 'Exit'])
                 return 'Connect and arm recovery'
 
         def call(argv, *, cwd):

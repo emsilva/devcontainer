@@ -288,15 +288,35 @@ def _hhmmz(when):
     return time.strftime('%H:%MZ', time.gmtime(when))
 
 
-def resume_text(rid: str, stopped_at: float, back_at: float) -> str:
+def resume_text(rid: str, stopped_at: float, back_at: float, *, root: Path | None = None) -> str:
     """The owner's sentence verbatim, then one line of facts (spec 6.6); an o- rid is the owner's restart."""
     if rid.startswith('o-'):
         what = f'Planned restart {rid}: stopped at {_hhmmz(stopped_at)}'
     else:
         what = f"Automatic restart {rid}: GitHub's 12-hour stop at {_hhmmz(stopped_at)}"
-    return (f'{SENTENCE}. ({what}, back at {_hhmmz(back_at)}. Restored agents came back with --resume and '
-            "without their launch flags, so check each worker's model, effort and sandbox before dispatching "
-            'to it.)')
+    extra = ''
+    if root is not None:
+        hint_path = Path(root) / '.scratch' / 'restart-resume.json'
+        try:
+            if hint_path.is_file() and not hint_path.is_symlink():
+                hint = json.loads(hint_path.read_text(encoding='utf-8'))
+                if isinstance(hint, dict):
+                    parts = []
+                    conv = hint.get('root_conversation_id')
+                    if isinstance(conv, str) and re.fullmatch(r'[A-Za-z0-9._-]{1,128}', conv):
+                        parts.append(f'top-level conversation {conv}')
+                    services = hint.get('services')
+                    if isinstance(services, list):
+                        clean = [str(s) for s in services[:12] if isinstance(s, (str, int)) and '\n' not in str(s) and '\0' not in str(s)]
+                        if clean:
+                            parts.append('check services ' + ', '.join(clean))
+                    if parts:
+                        extra = ' Recovery hints from .scratch/restart-resume.json: ' + '; '.join(parts) + '.'
+        except (OSError, ValueError, TypeError):
+            pass
+    return (f'{SENTENCE}. ({what}, back at {_hhmmz(back_at)}. Restored agents came back with --resume / '
+            "--conversation and without their launch flags, so check each worker's model, effort and sandbox "
+            f'before dispatching to it.{extra})')
 
 
 def _status(herdr, name):
@@ -306,19 +326,23 @@ def _status(herdr, name):
     return None
 
 
-def _settled(herdr, name, now, sleep):
+def _settled(herdr, name, now, sleep) -> str:
     # Ready with an interactive UI on two reads SETTLE s apart, within IDLE_WAIT.
+    # Return 'blocked' immediately if the restored agent is already waiting on a dialog/trust prompt.
     deadline, ready = now() + IDLE_WAIT, False
     while True:
         agent = next((agent for agent in herdr.agents() if agent.get('name') == name), {})
-        if agent.get('agent_status') in READY and agent.get('interactive_ready') is not False:
+        status = agent.get('agent_status')
+        if status == 'blocked':
+            return 'blocked'
+        if status in READY and agent.get('interactive_ready') is not False:
             if ready:
-                return True
+                return 'ready'
             ready = True
         else:
             ready = False
         if now() >= deadline:
-            return False
+            return 'busy'
         sleep(SETTLE)
 
 
@@ -334,7 +358,10 @@ def resume(herdr: Herdr, rid: str, text: str, *, now=time.time, sleep=time.sleep
     if found is None:
         return 'no-lead', None
     name = found['name']
-    if not _settled(herdr, name, now, sleep):
+    settled = _settled(herdr, name, now, sleep)
+    if settled == 'blocked':
+        return 'blocked', name
+    if settled != 'ready':
         return 'busy', name
     if herdr.prompt(name, text) == 'started':
         return ('blocked' if _status(herdr, name) == 'blocked' else 'delivered'), name
