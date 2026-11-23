@@ -1,8 +1,36 @@
 # Devcontainer setup
 
-Configure a Git project with the runtimes and tools it needs. The terminal wizard
-scans the repo, recommends a setup, and lets you review the diff before committing.
-It can then push the branch and open a GitHub Codespace.
+Configure a Git project with the runtimes and tools it needs, then work smoothly
+across your Mac and GitHub Codespaces with native AI coding agents. The terminal
+wizard scans the repo, recommends a setup, and lets you review the diff before
+committing. It can then push the branch and open a GitHub Codespace.
+
+## 5-minute mental model
+
+| What | Where it lives | How it moves |
+|---|---|---|
+| **Source code, branches, commits** | Normal Git checkout on Mac and Codespace | **Manual Git** (`commit` / `push` / `pull`) — sync never touches source code |
+| **Working notes & scratch files** (`.scratch/`, `.scratch/memory/`) | Main checkout `.scratch/` | **Automatic two-way safe sync** (conflicts preserved & shown in `task work`) |
+| **Completed Codex & Claude chats** | Each host's native agent store | **Verified native publication** (`codex resume` / `claude --resume`) |
+| **Grok, OpenCode & `agy` chats** | Host-local only | Stay on each host; share context via `.scratch/memory/` |
+| **Secrets, tokens & global configs** | Host-local / Codespaces Secrets | Never committed or synced |
+
+## Mac prerequisites & bootstrap
+
+Install these on your Mac before setting up a Codespace-paired project:
+
+```sh
+brew install python@3.13 git go-task gh
+gh auth login --hostname github.com
+gh auth refresh -s codespace
+curl -fsSL https://herdr.dev/install.sh | sh
+```
+
+- **GitHub CLI (`gh`)**: version `2.102.0` or newer is required for project connections.
+- **Codespaces SSH key (`~/.ssh/codespaces.auto`)**: run `gh codespace ssh` once against any Codespace so GitHub CLI generates the key pair before your first `task work:cs`.
+- **Preflight check**: run `task setup:doctor` (in this repo) or `task devcontainer:doctor` (in a generated project) to verify every local prerequisite and get exact fix commands.
+
+The wizard downloads Gum and pinned Mutagen automatically when needed.
 
 ## Install in a project
 
@@ -12,16 +40,12 @@ Run this from your project's Git repository:
 curl -fsSL https://raw.githubusercontent.com/emsilva/devcontainer/main/install.sh | sh -s --
 ```
 
-You need Python 3.11+, Git, curl, and Bash. For Codespaces, also install the
-GitHub CLI and sign in with `gh auth login`. The wizard downloads Gum when needed.
-Install [Task](https://taskfile.dev) to use the `task` commands below.
-
 The wizard asks you to:
 
-1. Choose runtimes and tools from recommendations based on manifests, source files,
-   workflows, and ignore rules. Ignore rules are supporting hints.
-2. Apply dotfiles, enabled by default. Enter a repo such as `emsilva/dotfiles`;
-   the wizard remembers it for your next project.
+1. Choose additional runtimes (Ruby, Go, Rust) and tools from recommendations based on
+   manifests, source files, workflows, and ignore rules. Ignore rules are supporting hints.
+2. Apply dotfiles, enabled by default. Enter a repo such as `emsilva/dotfiles` (remembered
+   for your next project), or leave blank and press Enter to skip dotfiles.
 3. Keep scratch files and project notes synced with your Mac, enabled by default.
    This also synchronizes supported completed Codex and Claude conversations.
 4. Choose commit-only setup or a Codespace. For a new Codespace, select its machine
@@ -37,10 +61,13 @@ the fix: merge the project into `main`, then run the setup from a checkout on
 `main`; or, from this Mac's `main`, push it to GitHub first. It exits without
 asking, writing or pushing anything. A checkout that is only behind GitHub's
 default branch always passes, and one without a GitHub `origin` is not checked.
+To configure a **local-only** devcontainer on a feature branch without GitHub or a
+Codespace, pass `--local-only` (or `--offline` to use a cached release without
+fetching GitHub).
 
-Every environment includes Python, uv, Codex, Claude Code, OpenCode, and Grok. The four
-coding tools use their official native installers as `vscode`; Node is selected
-when the project needs it. Dotfiles apply inside the container.
+Every environment includes Python, Node, uv, Codex, Claude Code, OpenCode, Grok, and
+Antigravity CLI (`agy`). The five coding tools use their official native installers as
+`vscode`. Dotfiles apply inside the container.
 
 Your project receives the selected `.devcontainer` configuration, Feature lockfile,
 small helpers, and a Taskfile include. A project without a Taskfile gets a new
@@ -53,40 +80,52 @@ Personal preferences live in
 
 ## Use an installed project
 
+### Daily workflow
+
 | Command | Action |
 |---|---|
-| `task work` | Show where this project stands and pick the next step from a menu; the chosen command prints before it runs, and without a terminal it prints the commands |
-| `codex` / `claude` / `opencode` / `grok` | Start a native agent in the current checkout |
+| `task work` | Interactive dashboard & menu (primary actions plus `More actions…` for logs, stop, hold, restart, disarm, disconnect); prints `Next:` commands without a terminal, and shows Mac worker reachability inside a Codespace |
+| `codex` / `claude` / `opencode` / `grok` / `agy` | Start a native agent in the current checkout |
 | `codex resume` / `claude --resume` | Choose a native conversation |
 | `task work:cs` | Connect Codespace Herdr and sync scratch and project conversations |
 | `task work:signin:all` | Start or retry sign-ins to every tool on the paired Codespace |
 | `task work:signin` | Finish waiting Codespace browser sign-ins on this Mac |
-| `task work:disconnect` | Disconnect this project's Codespace from the local Herdr UI |
-| `task work:status` / `task work:stop` | Read offline sync summary / stop this project’s worker and its keeper |
-| `task work:status -- --json` | Inspect cycle, receipt and publication detail |
-| `task work:forget -- --agent claude --session ID` | Stop sending a refused conversation on its own; keep every stored copy |
-| `task work:cs:armed` | Connect as `work:cs`, then arm restart after GitHub's 12-hour stop |
+| `task work:status` | Read offline sync, conflict, issue, and recovery summary (`-- --json` for full detail) |
+| `task work:logs` | Show recent keeper and worker logs, merged by time |
+
+### Codespace lifecycle & recovery
+
+| Command | Action |
+|---|---|
+| `task work:cs:armed` | Connect as `work:cs`, then arm automatic restart after GitHub's 12-hour stop |
 | `task work:hold -- 09:30` / `-- off` | Hold restarts and resume prompts until a local time / end the hold |
 | `task work:disarm` | Stop this project's keeper and its keep-alive; sync continues |
+| `task work:disconnect` | Disconnect this project's Codespace from the local Herdr UI |
+| `task work:stop` | Stop this project's sync worker and its keeper |
 | `task work:cs:stop` | Stop the Codespace and keep it stopped, from your Mac or through its connected Mac worker |
 | `task work:cs:restart` | Restart the Codespace now; an armed project's lead is told to resume |
-| `task work:logs` | Show recent keeper and worker logs, merged by time |
-| `task devcontainer:setup` | Review or change the setup |
+| `task work:cs:delete -- --codespace NAME` | Audit Git, Scratch, History, and Agents, then delete after typed `delete` |
+| `task work:forget -- --agent claude --session ID` | Stop retrying a refused conversation (in either direction); keep every stored copy |
+
+### Setup & local Docker
+
+| Command | Action |
+|---|---|
+| `task devcontainer:doctor` | Check local Mac prerequisites and print exact fix commands |
+| `task devcontainer:setup` | Review or change the setup (`-- --local-only` for local branch setup) |
 | `task devcontainer:setup -- --scan` | Show runtime and tool recommendations |
 | `task devcontainer:setup -- --dry-run` | Preview the recommended file changes |
-| `task devcontainer:check` | Validate the generated configuration |
+| `task devcontainer:check` | Validate the generated configuration (falls back to cached release offline) |
 | `task devcontainer:upgrade:self` | Review an upgrade to the latest wizard |
-| `task devcontainer:build` | Build locally with Docker and the Dev Containers CLI |
-| `task devcontainer:up` | Start the local devcontainer |
-| `task devcontainer:status` | Show its container and ports |
-| `task devcontainer:down` | Stop the local devcontainer |
+| `task devcontainer:build` / `up` / `status` / `down` | Build, start, inspect, or stop the local devcontainer with Docker |
 
-Scan, dry-run, and check leave project files and preferences untouched. Installed
-runners need network access to validate their pinned source cache. Setup preserves
+Scan, dry-run, doctor, and check leave project files and preferences untouched.
+Read-only commands (`--check`, `--scan`, `--dry-run`, `--doctor`) and `--offline`
+fall back to the cached generator release if GitHub is unreachable. Setup preserves
 existing project tasks, ports, and editor settings. Edits to managed helpers stop
 an overwrite and need manual migration.
 
-Inside the container, update all four coding tools without rebuilding:
+Inside the container, update all five coding tools without rebuilding:
 
 ```sh
 task devcontainer:upgrade:agents
@@ -114,8 +153,10 @@ commands in your local checkout. Use `codex resume` or `claude --resume` to choo
 a conversation through the native picker.
 
 After connecting, run `task work:signin:all` to sign in to Plaud, Codex, Claude,
-OpenCode and Grok. Approve each page on this Mac; Claude uses the account you
-choose in the browser. Existing sign-ins are kept, and a retry starts only the
+OpenCode, Grok and Antigravity. Approve each page on this Mac; Claude uses the
+account you choose in the browser, while Antigravity (`agy acp --login`) prints
+a Google OAuth URL in the terminal to open on this Mac and paste back the code
+or callback URL. Existing sign-ins are kept, and a retry starts only the
 tools confirmed signed out. To connect and sign in before Herdr opens, run
 `task work:cs -- --then-signin-all`. Use `task work:signin` to finish waiting
 sign-ins when the worker is disconnected. See [sign-ins](docs/project-continuity.md#sign-ins).

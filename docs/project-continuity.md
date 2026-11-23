@@ -37,30 +37,46 @@ create checkouts. Uncommitted code stays on the host where it was edited.
 | `task work:logs` | Show the last keeper and worker log lines, merged by time |
 
 `task work` names the paired Codespace once, then shows labelled rows such as
-`Codespace`, `Recovery`, `Sync` and `Sign-ins`, at most six lines of 78 columns.
-Its menu shows labels only, for example `Connect` (`Open in Herdr` while the sync
-already runs and recovery is running or not armed), `Sign in to the tools` while
-the Codespace is up, the sync runs and the menu can connect to it, and `Replace
-this Codespace`. The chosen command prints as `Running: …` before it runs; without a
-terminal, each one prints as a `Next:` line.
+`Codespace`, `Recovery` (including any failed `last_restart` outcome), `Scratch`
+(naming conflicting `.scratch/` paths when present), `Sync`, `History` and
+`Sign-ins`, at most six lines of 78 columns. Its primary menu shows labels only,
+for example `Connect` (`Open in Herdr` while the sync already runs and recovery is
+running or not armed), `Sign in to the tools`, `Replace this Codespace`, and
+`Show details`, plus a `More actions…` submenu for logs, stop, disconnect,
+restart, hold, and disarm. Inside a Codespace, `task work` also reports whether
+your Mac worker's link and remote-stop helpers are connected. The chosen command
+prints as `Running: …` before it runs; without a terminal, each one prints as a
+`Next:` line.
 
 Run the connection tasks on your Mac. Inside Herdr, connection returns to your
 shell; select the Codespace group to work remotely. From another terminal, it
 opens local Herdr with that group available. Repeated entry reuses the existing
 project workspace. The controller verifies checkout identity and does not alter
-its branch or index. Local Python, tested GitHub CLI, selected credentials, SSH
+its branch or index. Local Python, GitHub CLI (`>= 2.102.0`), selected credentials, SSH
 key and Herdr prerequisites are checked before starting a stopped Codespace.
-Herdr opens once the current verified scratch pairing is synchronized and SSH
+Herdr opens once the current verified scratch pairing is synchronized (or immediately
+with a conflict warning banner if `.scratch/` has conflicts to resolve) and SSH
 is prepared. Before Herdr opens, `work:cs` checks Herdr's resume hooks for
-Claude, Codex and OpenCode on the Codespace, and installs any that are missing
-or outdated, so that a restart can resume the agents. The same step also
+Antigravity (`antigravity-cli`), Claude, Codex, Grok and OpenCode on the
+Codespace, and installs any that are missing or outdated, so that a restart can
+resume the agents. The same step also
 installs the Herdr skill that matches the Codespace's Herdr. The same step also
 links `~/.claude/handoff-feedback` on the Codespace to the checkout's
 `.scratch/handoff-feedback`, so that feedback syncs to the Mac. `work:status`
 shows the last check. The same step copies the checkout's gitignored `.env`
 files the Codespace lacks and never overwrites an existing file. `work:status`
 shows that check. Conversation exchange runs in the worker; pending or refused
-history is reported without blocking the connection.
+history (in either direction) is reported without blocking the connection, and
+can be muted with `task work:forget`.
+
+For hierarchical orchestrators (such as `agy` `/teamwork`), you may optionally
+record `{"root_conversation_id": "<uuid>", "services": [":19632", ":19680"]}` in
+`.scratch/restart-resume.json` so post-restart resume prompts include your
+top-level entry-root conversation ID and service checks.
+
+To customize OpenCode's sign-in provider or method for `task work:signin:all`,
+set `DEVCONTAINER_OPENCODE_PROVIDER` (default `openai`) and optionally
+`DEVCONTAINER_OPENCODE_METHOD` (default `chatgpt-token-sharing`) in your Mac shell.
 
 Disconnect leaves remote sessions, local Herdr and synchronization running. It
 needs no SSH or GitHub connection and is idempotent. Use `work:stop` separately to
@@ -74,11 +90,16 @@ To do both before Herdr opens, run `task work:cs -- --then-signin-all`. The
 sequence waits for the link helper on both machines before starting each login.
 If it cannot reach the Mac, reconnect with `task work:cs` and retry.
 
-Plaud, Codex, Claude, OpenCode and Grok run in that order in your terminal on the
-Codespace, opening their approval pages on this Mac. Choose one Claude account
-in the browser; its email appears in the result. For Grok, enter the code shown
-in the terminal. Credentials stay on the Codespace. The Mac saves only states,
-check times and Claude's email in its private project state.
+Plaud, Codex, Claude, OpenCode, Grok and Antigravity run in that order in your
+terminal on the Codespace. Plaud, Codex, Claude and OpenCode open their
+approval pages on this Mac; choose one Claude account in the browser, and its
+email appears in the result. For Grok, enter the code shown in the terminal.
+For Antigravity (`agy acp --login`), open the Google OAuth URL printed in the
+terminal on this Mac and paste back the authorization code or callback URL
+(Antigravity prints its URL directly rather than invoking `$BROWSER` /
+`open-on-mac`, and uses file-backed token storage in headless containers).
+Credentials stay on the Codespace. The Mac saves only states, check times and
+Claude's email in its private project state.
 
 Existing sign-ins, including other authentication methods, are kept. A tool
 whose status cannot be checked is skipped; only a confirmed signed-out tool
@@ -143,9 +164,10 @@ as new conversations. Locally continued or active sessions are preserved.
 
 Only project-scoped conversations are eligible. Histories with unrelated-project
 or global-memory context can be refused. Unsupported child-agent/sidecar history
-or other unvalidated native formats are reported. Start agent conversations
-from the checkout root so its scope can be established. An unfinished turn may
-not be available until its next supported completion.
+or other unvalidated native formats are reported. Agent conversations started from
+the checkout root, subdirectories beneath it, or linked Git worktrees of the same
+repository are matched cleanly. An unfinished turn may not be available until its
+next supported completion.
 
 Passing the version check admits a release for validation only. The record,
 scope, ancestry and completed-turn checks decide which histories can sync;
@@ -242,13 +264,18 @@ Git covers every repository and linked worktree under `/workspaces`: changes,
 untracked files, stashes and commits that have not reached GitHub. Scratch and
 Codex/Claude conversations must have reached this Mac; an unfinished turn blocks
 deletion. A retired Codespace is compared with the final sync recorded when it
-was replaced. Running Claude, Codex, Grok or OpenCode agents also block deletion.
+was replaced. Running Antigravity (`agy` / `antigravity`), Claude, Codex, Grok
+or OpenCode agents also block deletion.
 Conversations kept on this Mac that the replacement refused are named in the
 verdict and do not block it.
 
 The verdict lists what is not checked: files Git ignores, home-folder data
-outside sync, and Grok and OpenCode conversations. Nothing exports those files.
-For agents or a headless terminal, run
+outside sync, and Grok, OpenCode and Antigravity conversations. Nothing exports
+those files. Antigravity conversation sync is unsupported because `agy` stores
+sessions in global SQLite+WAL databases (`conversation_summaries.db` and
+`dbtrajectory` `.db`/`.db-wal`/protobuf stores) and workspace-URI-bound
+`brain/<uuid>/` trees under `~/.gemini/antigravity-cli/`, rather than
+immutable per-session JSONL files. For agents or a headless terminal, run
 `task work:cs:delete -- --codespace NAME --check --json`; it only checks and
 makes no changes. Without `--codespace NAME`, it checks the current pairing.
 
@@ -350,6 +377,39 @@ is set on the Mac. Run task work:cs after a Mac restart; for an armed project it
 Arming refuses while another gh process, such as a project's own `cs:ports` forward or a mirror script, holds this Codespace's link; stop it first.
 The managed notes tell agents in the Codespace which ports reach the owner, and
 the Mac URL for each.
+
+### Antigravity (`agy`) restart and `/teamwork` recovery
+
+Antigravity CLI (`agy`) has stricter session-recovery constraints than Claude
+and Codex across Codespace or `agy` server restarts:
+
+- **Resume flags and dropped launch options:** `agy` resumes sessions with
+  `--conversation <id>` rather than `--resume` (`agy acp` has no
+  `--conversation` flag, and `agy --conversation <id>` silently falls back when
+  a conversation ID is not found). When Herdr restores an `agy` session after a
+  restart, it relaunches with `--conversation` and drops original launch flags
+  (such as mode, model, effort, or permission/sandbox options).
+- **`/teamwork` conversation tree requirement:** `agy` `/teamwork` runs form a
+  parent-child hierarchy (top-level entry-root Sentinel -> internal
+  `teamwork_orchestrator` -> sub-orchestrators). Opening an internal subagent or
+  sub-orchestrator UUID directly comes up blank because `LoadTrajectory` requires
+  its parent conversation; only the top-level entry-root conversation can revive
+  the hierarchy.
+- **Unloaded trees, dead services, and Herdr hook scope:** A Codespace or `agy`
+  server restart unloads parent conversations from memory and stops background
+  dev servers and services. Herdr's `antigravity-cli` (`v4`) hook
+  (`herdr-agent-state.sh`) is session-only and reports a single
+  `conversationId` per Herdr pane without `root_conversation_id` or
+  `is_subagent` filtering (and `SessionStart` hooks skip non-new starts). During
+  automatic restore, `restore.py` only prompts a single live `lead-*` Herdr
+  pane; it cannot inspect or re-attach unloaded `agy` parent trees or restart
+  background services automatically.
+- **Operational guidance:** Keep the top-level entry-root / Sentinel session
+  (not an internal sub-orchestrator) in the single named `lead-*` Herdr pane,
+  and record its entry-root conversation ID in synced project state (for
+  example under `.scratch/`) before long runs. After a restart, manually revive
+  an unloaded hierarchy with `agy --conversation <entry-root-id>`, verify
+  desired launch settings, and check or restart any required background services.
 
 Connections wait up to 45 seconds for a successful SSH handshake and separately
 up to 45 seconds for the saved Herdr machine's remote API after startup. Only

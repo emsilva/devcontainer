@@ -13,7 +13,7 @@ use a selected subset. See the [README](../README.md) for installation and proje
 - **CLIs & tooling via features:** AWS / Azure / Google Cloud CLIs, kubectl + Helm,
   GitHub CLI, Docker-in-Docker (compose v2), `go-task`, `fzf`, starship, SSHD,
   `uv`, common-utils (zsh).
-- **Native user coding tools (post-create):** Claude Code, OpenAI Codex, OpenCode.
+- **Native user coding tools (post-create):** Claude Code, OpenAI Codex, OpenCode, Grok, Antigravity CLI (`agy`).
 - **Shell tools via `apt-packages`:** bat, ripgrep, fd, tldr, tree, jq, yq, httpie, zoxide,
   git, git-lfs, git-delta, DB clients (postgres/mysql/sqlite/redis), htop, ncdu, shellcheck, …
 - **Extra tooling (pinned, via on-create):** ast-grep (npm), herdr, claude-swap (`cswap`,
@@ -28,13 +28,13 @@ use a selected subset. See the [README](../README.md) for installation and proje
 Feature artifacts are pinned by SHA256 in `devcontainer-lock.json`. Generated
 configurations also pin supported installer options. A Feature lock pins its
 installer, not everything it downloads: some bundled tools and operating-system
-packages can still change. Codex, Claude Code, and OpenCode use official native
-user installers during post-create, with complete packages owned by `vscode`.
-Their ordinary vendor release channels deliberately move; OpenCode uses its
-default installer channel without forcing a major upgrade. Agents cannot be
-deselected; legacy false preferences are accepted and ignored. They do not
-require the Node runtime. Normal setup keeps valid user installations;
-`task devcontainer:upgrade:agents` explicitly updates all three.
+packages can still change. Codex, Claude Code, OpenCode, Grok, and Antigravity CLI
+(`agy`) use official native user installers during post-create, with complete
+packages owned by `vscode`. Their ordinary vendor release channels deliberately
+move; OpenCode uses its pinned v2 release channel. Agents cannot be deselected;
+legacy false preferences are accepted and ignored. They do not require the Node
+runtime. Normal setup keeps valid user installations;
+`task devcontainer:upgrade:agents` explicitly updates all five.
 `bash .devcontainer/scripts/install-agents.sh --check` verifies native packages
 and launchers without downloading or sending model requests. User launcher
 paths precede system paths through VS Code's `remoteEnv` and explicit lifecycle
@@ -80,20 +80,35 @@ they are injected automatically. For **local** runs, copy
 Codespaces injects these secrets directly. `${localEnv:}` resolves empty there
 and can blank their values.
 
-## Lifecycle
+## Lifecycle: Canonical Catalog vs. Generated Projects
+
+### Canonical catalog (this repository's `.devcontainer/`)
 
 - **`onCreateCommand` → `scripts/on-create.sh`** (prebuild-cacheable, secret-free):
-  corepack, crane, vivid, Rails, chezmoi, neovim, ast-grep, herdr, claude-swap (+ its
-  login-activated cswap-switch service), a minimal default `~/.zshrc` (replacing the base
+  corepack, crane, vivid, Rails, chezmoi, neovim, ast-grep, herdr, claude-swap (`cswap` + its
+  login-activated `cswap-switch` service), a minimal default `~/.zshrc` (replacing the base
   image's oh-my-zsh one), and (opt-in) man-page restore.
-- **`postCreateCommand` → `scripts/post-create.sh`** (per-user, has secrets): native coding tools, cache/volume
-  permissions, default shell, timezone, git config, gh auth, and chezmoi dotfiles.
+- **`postCreateCommand` → `scripts/post-create.sh`** (per-user, has secrets): native coding tools
+  (Codex, Claude Code, OpenCode, Grok, Antigravity CLI), `open-on-mac`, cache/volume permissions,
+  default `zsh` shell, timezone, git config, `gh` auth via `PERSONAL_PAT`, SSH authorized keys,
+  and chezmoi dotfiles.
 - **`postStartCommand` → `scripts/post-start.sh`** (each start): history volume, a
   once-weekly tldr refresh.
 
 Heavy installs live in `onCreate` so Codespaces **prebuilds** snapshot them; per-user work
 stays in `postCreate`. Restoring man pages (`apt` + `unminimize`, slow) is **opt-in** via
 `DEVCONTAINER_RESTORE_MANPAGES=1`.
+
+### Generated projects (rendered via `task setup` / `install.sh`)
+
+- **`postCreateCommand` → `.devcontainer/scripts/post-create-selected.sh`**: loads local
+  `.devcontainer/devcontainer.env` when present, sets `zsh` login shell, applies `DEVCONTAINER_TZ`
+  when set, authenticates `gh` with `PERSONAL_PAT` when provided, configures system `PATH` and
+  `BROWSER` (`system-path.sh`), installs the five native agents (`install-agents.sh`), installs
+  `open-on-mac` / `ccswap` / `plaud` (`install-tools.sh`), preinstalls `herdr` if absent, runs
+  `validate-selected.sh`, and applies chezmoi dotfiles when enabled.
+- Generated projects intentionally omit the heavy canonical-only `on-create.sh` / `post-start.sh`
+  extras (neovim, Rails, crane, vivid, ast-grep, `cswap-switch`) unless added via polyglot/dotfiles.
 
 ## Git identity
 
@@ -143,8 +158,16 @@ If you only ever use `gh codespace ssh`, the `sshd` feature is optional and can 
 
 ## Troubleshooting
 
-| Issue | Fix |
+| Issue | Cause & Fix |
 |---|---|
+| Missing `task`, `gh`, `herdr`, or `~/.ssh/codespaces.auto` | Run `task setup:doctor` (or `task devcontainer:doctor`). For `~/.ssh/codespaces.auto`, run `gh codespace ssh` once against any Codespace to bootstrap the key. |
+| `GitHub CLI 2.102.0 or newer is required` | Upgrade `gh` on your Mac with `brew upgrade gh`. |
+| `HTTP 401` / `HTTP 403` in `task work:status` or keeper logs | Token expired or missing Codespaces scope. Run `gh auth login --hostname github.com` and `gh auth refresh -s codespace`, and unset ambient `GH_TOKEN` / `GITHUB_TOKEN` if overriding your keyring login. |
+| `.scratch/` sync conflicts | `task work:cs` still opens Herdr with a warning banner; `task work` and `task work:status` list the exact conflicting paths under `.scratch/`. Resolve the files and Mutagen resumes automatically. |
+| Post-restart `no single lead` or `waiting for an answer` | Ensure exactly one primary orchestrator pane is named `lead-<project>` in Herdr. If a restored agent sits on a workspace trust/approval dialog, answer it in its pane. For `agy` `/teamwork`, record the top-level entry-root conversation ID and service ports in `.scratch/restart-resume.json`. |
+| `task devcontainer:check` while offline | Read-only commands (`--check`, `--scan`, `--dry-run`, `--doctor`) and `--offline` automatically fall back to your cached release under `${XDG_CACHE_HOME:-$HOME/.cache}/devcontainer-setup/releases/`. |
+| Setup refused on a feature branch | Codespaces boot from GitHub's default branch. Merge first for a Codespace, or pass `--local-only` to configure a local devcontainer on the current branch. |
+| `Mutagen socket path is too long` on macOS | Automatically falls back to a private `0700` directory under `/tmp/dc-m<uid>/`. |
 | Docker-in-Docker `iptables: Table does not exist` | Some hosts lack legacy `ip_tables`; `modprobe iptable_nat` or switch to the nft backend. Codespaces is fine. |
 | Dotfiles not applied | Set `DOTFILES_REPO` (secret/env) or run `load-dotfiles <repo>`. |
 | Python deps missing | `uv sync`, or `pip install -r requirements.txt`. |
