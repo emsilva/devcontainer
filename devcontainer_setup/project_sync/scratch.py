@@ -61,6 +61,22 @@ def _validate_tree(path):
 
 
 MAX_BACKUPS = 10
+SNAPSHOT_TIMEOUT = 7200
+
+
+class _HashingWriter:
+    """Wrap a binary stream so tarfile writes and SHA-256 hashing happen in one streaming pass."""
+
+    def __init__(self, stream):
+        self._stream = stream
+        self.digest = hashlib.sha256()
+
+    def write(self, data):
+        self.digest.update(data)
+        return self._stream.write(data)
+
+    def flush(self):
+        return self._stream.flush()
 
 
 def _archive_path(state, label):
@@ -93,26 +109,54 @@ def _prune_backups(state: Path, *, keep: int = MAX_BACKUPS, preserve: Path | Non
 
 def backup(root: Path, state: Path) -> Path:
     """Retain payloads and markers, excluding transient caches from private backups."""
+    import stat
+    import uuid
+    from .state import _parent
+
     _private_location(root, state)
     source = _scratch(discover_project(Path(root)).root)
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode='w:gz', dereference=False) as archive:
-        scratch_tree.add_backup(archive, source)
     path = _archive_path(state, 'local')
-    atomic_write(path, buffer.getvalue(), mode=0o400)
+    with _parent(path, create=True, private=True) as (parent, name):
+        try:
+            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError('Refusing nonregular or linked state destination')
+        temporary = f'.{name}.{uuid.uuid4().hex}.tmp'
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=parent)
+        try:
+            with os.fdopen(fd, 'wb') as output:
+                fd = -1
+                os.fchmod(output.fileno(), 0o400)
+                writer = _HashingWriter(output)
+                with tarfile.open(fileobj=writer, mode='w|gz', compresslevel=1, dereference=False) as archive:
+                    scratch_tree.add_backup(archive, source)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
+            os.fsync(parent)
+        finally:
+            if fd != -1:
+                os.close(fd)
+            try:
+                os.unlink(temporary, dir_fd=parent)
+            except FileNotFoundError:
+                pass
     atomic_write(path.with_suffix(path.suffix + '.sha256'),
-                 (hashlib.sha256(buffer.getvalue()).hexdigest() + '\n').encode(), mode=0o400)
+                 (writer.digest.hexdigest() + '\n').encode(), mode=0o400)
     _prune_backups(Path(state), preserve=path)
     return path
 
 
-def _remote(connection, remote_root, *, snapshot=False, allow_missing_scratch=False, prepare_identity=None):
+def _remote_code(remote_root, *, snapshot=False, allow_missing_scratch=False, prepare_identity=None):
     # Execute the canonical identity implementation on native remote Python.
     # Do not duplicate identity normalization or rely on directory basenames.
     # Identity probes must also accept older checkouts before scratch is seeded.
     source = Path(project_state.__file__).read_bytes()
     tree_source = Path(scratch_tree.__file__).read_bytes()
-    code = '''import base64,io,json,os,pathlib,sys,tarfile,types
+    return '''import base64,json,os,pathlib,sys,tarfile,types
 m=types.ModuleType("_project_sync_state");sys.modules[m.__name__]=m
 exec(compile(base64.b64decode(__SOURCE__),"project-state.py","exec"),m.__dict__)
 tree=types.ModuleType("_scratch_tree");sys.modules[tree.__name__]=tree
@@ -131,12 +175,37 @@ if not s.is_dir() and (__SNAPSHOT__ or not __ALLOW_MISSING__):raise ValueError("
 if s.is_dir():
  for _ in tree.entries(s):pass
 if __SNAPSHOT__:
- b=io.BytesIO()
- with tarfile.open(fileobj=b,mode="w:gz",dereference=False) as t:tree.add_backup(t,s)
- sys.stdout.buffer.write(b.getvalue())
+ with tarfile.open(fileobj=sys.stdout.buffer,mode="w|gz",compresslevel=1,dereference=False) as t:tree.add_backup(t,s)
+ sys.stdout.buffer.flush()
 else:print(json.dumps({"identity":p.identity,"root":str(p.root)}))
 '''.replace('__SOURCE__', repr(base64.b64encode(source).decode())).replace('__TREE_SOURCE__', repr(base64.b64encode(tree_source).decode())).replace('__ROOT__', repr(remote_root)).replace('__SNAPSHOT__', repr(snapshot)).replace('__ALLOW_MISSING__', repr(allow_missing_scratch)).replace('__PREPARE_IDENTITY__', repr(prepare_identity))
-    return connection.python(code, timeout=90)
+
+
+def _remote(connection, remote_root, *, snapshot=False, allow_missing_scratch=False, prepare_identity=None):
+    code = _remote_code(remote_root, snapshot=snapshot, allow_missing_scratch=allow_missing_scratch,
+                        prepare_identity=prepare_identity)
+    return connection.python(code, timeout=SNAPSHOT_TIMEOUT if snapshot else 90)
+
+
+def _remote_backup(connection, remote_root, state: Path) -> Path:
+    """Stream remote .scratch backup straight to disk when supported, with bounded memory."""
+    remote_backup = _archive_path(state, 'remote')
+    try:
+        if hasattr(connection, 'python_to_file'):
+            code = _remote_code(remote_root, snapshot=True)
+            digest = connection.python_to_file(code, remote_backup, mode=0o400, timeout=SNAPSHOT_TIMEOUT)
+        else:
+            remote_snapshot = _remote(connection, remote_root, snapshot=True)
+            atomic_write(remote_backup, remote_snapshot, mode=0o400)
+            digest = hashlib.sha256(remote_snapshot).hexdigest()
+    except ValueError as error:
+        if 'timed out' in str(error):
+            raise ValueError('Remote .scratch backup timed out; check for large files under remote .scratch/tmp/ or inspect Codespace connectivity.') from None
+        raise
+    atomic_write(remote_backup.with_suffix(remote_backup.suffix + '.sha256'),
+                 (digest + '\n').encode(), mode=0o400)
+    _prune_backups(Path(state), preserve=remote_backup)
+    return remote_backup
 
 
 def _config(root, state):
@@ -760,10 +829,10 @@ def supervise(root: Path, state: Path, nonce=None) -> None:
                             if info is not None and _reconciliation(info)['phase'] == 'synchronized':
                                 runtime['last_synchronized_at'] = time.time()
                             if info is None:
+                                update('backing_up', session=session)
+                                logger.info('Backing up local and remote .scratch before creating Mutagen session.')
                                 backup(root, state)
-                                remote_snapshot = _remote(connection, config['remote_root'], snapshot=True)
-                                remote_backup = _archive_path(state, 'remote')
-                                atomic_write(remote_backup, remote_snapshot, mode=0o400)
+                                _remote_backup(connection, config['remote_root'], state)
                                 args = ['sync', 'create', str(root / '.scratch'),
                                         'project-sync:' + config['remote_root'] + '/.scratch',
                                         '--name=' + session, '--mode=two-way-safe', '--hash=sha256',

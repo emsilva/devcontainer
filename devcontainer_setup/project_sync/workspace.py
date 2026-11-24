@@ -385,8 +385,10 @@ def _conversation_receipt(project, state):
 def _ready(project, state, timeout=120):
     deadline = time.monotonic() + timeout
     delay = 0.25
+    last_phase = None
     while (now := time.monotonic()) < deadline:
         runtime = scratch.status(state)
+        last_phase = runtime.get('phase')
         if not runtime.get('running'):
             raise ValueError('Scratch/conversation worker stopped; inspect task scratch:logs')
         if _current_worker(runtime) and runtime.get('connection_prepared'):
@@ -405,6 +407,8 @@ def _ready(project, state, timeout=120):
                     return runtime
         time.sleep(min(delay, max(0.0, deadline - now)))
         delay = min(delay * 2, 2.0)
+    if last_phase == 'backing_up':
+        raise ValueError('Still backing up a large .scratch/ before first sync; let the background worker finish (check task work:status and scratch:logs) or move large files out of .scratch/tmp/')
     raise ValueError('Waiting for current scratch connection timed out; inspect task work:status and scratch:logs')
 
 

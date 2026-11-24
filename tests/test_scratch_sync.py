@@ -180,6 +180,45 @@ class ScratchTests(unittest.TestCase):
             self.assertEqual(archive.extractfile('.scratch/README.md').read(), b'tracked marker')
             self.assertFalse(any('node_modules' in name or '.venv' in name for name in archive.getnames()))
 
+    def test_remote_snapshot_uses_streaming_gzip_long_timeout_and_streams_to_disk(self):
+        self._cache_link_fixture(self.scratch)
+        seen = []
+
+        class StreamingLocalPython:
+            def python(self, code, payload=b'', timeout=60):
+                seen.append(('python', timeout, code))
+                return subprocess.run([os.sys.executable, '-I', '-B', '-c', code], input=payload,
+                                      capture_output=True, check=True, timeout=timeout).stdout
+
+            def python_to_file(self, code, destination, *, mode=0o400, timeout=7200):
+                seen.append(('python_to_file', timeout, code))
+                raw = subprocess.run([os.sys.executable, '-I', '-B', '-c', code],
+                                     capture_output=True, check=True, timeout=timeout).stdout
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(raw)
+                destination.chmod(mode)
+                return hashlib.sha256(raw).hexdigest()
+
+        conn = StreamingLocalPython()
+        self.module._remote(conn, str(self.root), snapshot=False)
+        self.assertEqual(seen[-1][1], 90)
+        archive_path = self.module._remote_backup(conn, str(self.root), self.state)
+        self.assertEqual(seen[-1][0], 'python_to_file')
+        self.assertEqual(seen[-1][1], self.module.SNAPSHOT_TIMEOUT)
+        self.assertIn('mode="w|gz",compresslevel=1', seen[-1][2])
+        self.assertNotIn('BytesIO', seen[-1][2])
+        sha_path = archive_path.with_suffix(archive_path.suffix + '.sha256')
+        self.assertEqual(sha_path.read_text().strip(), hashlib.sha256(archive_path.read_bytes()).hexdigest())
+        with tarfile.open(archive_path) as archive:
+            self.assertEqual(archive.extractfile('.scratch/memory/keep.md').read(), b'retained note')
+
+        # Timeout produces an actionable .scratch/tmp/ message.
+        class SlowConn:
+            def python_to_file(self, code, destination, *, mode=0o400, timeout=7200):
+                raise ValueError('Remote Python/SSH timed out; inspect Codespace connectivity and status before retrying.')
+        with self.assertRaisesRegex(ValueError, r'Remote \.scratch backup timed out.*\.scratch/tmp/'):
+            self.module._remote_backup(SlowConn(), str(self.root), self.state)
+
     def test_excluded_directory_links_are_not_followed_but_included_links_are_refused(self):
         (self.scratch / '.cache').symlink_to(self.root / 'missing-cache', target_is_directory=True)
         self.assertEqual(self.module._scratch(self.root), self.scratch)

@@ -471,6 +471,82 @@ class CodespaceConnection:
             raise ValueError(f'Remote Python command failed (exit {result.returncode}); inspect the remote checkout and Python environment.')
         return result.stdout
 
+    def python_to_file(self, code: str, destination: Path, *, mode: int = 0o400, timeout: int = 7200) -> str:
+        """Stream remote Python stdout directly to disk with bounded memory; return its sha256 hex digest."""
+        import hashlib
+        import select
+        import stat
+        import uuid
+        from .state import _parent
+
+        if self._closed:
+            raise ValueError('The Codespace connection is closed')
+        path = self._probe_config
+        self.ssh_config(path)
+        if not self._ready:
+            self._wait_for_ssh(path)
+        destination = Path(destination)
+        digest = hashlib.sha256()
+        with _parent(destination, create=True, private=True) as (parent, name):
+            try:
+                info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise ValueError('Refusing nonregular or linked backup destination')
+            temporary = f'.{name}.{uuid.uuid4().hex}.tmp'
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=parent)
+            proc = None
+            try:
+                proc = subprocess.Popen(
+                    ['ssh', '-F', str(path), '-T', 'project-sync', 'python3 -I -B -c ' + shlex.quote(code)],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env=clean_env(self.env))
+                deadline = time.monotonic() + timeout
+                with os.fdopen(fd, 'wb') as output:
+                    fd = -1
+                    os.fchmod(output.fileno(), mode)
+                    assert proc.stdout is not None
+                    out_fd = proc.stdout.fileno()
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            _terminate(proc)
+                            raise ValueError('Remote Python/SSH timed out; inspect Codespace connectivity and status before retrying.')
+                        ready, _, _ = select.select([out_fd], [], [], min(5.0, remaining))
+                        if not ready:
+                            continue
+                        chunk = os.read(out_fd, 256 * 1024)
+                        if not chunk:
+                            break
+                        output.write(chunk)
+                        digest.update(chunk)
+                    output.flush()
+                    os.fsync(output.fileno())
+                remaining = max(1.0, deadline - time.monotonic())
+                try:
+                    _, stderr = proc.communicate(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    _terminate(proc)
+                    raise ValueError('Remote Python/SSH timed out; inspect Codespace connectivity and status before retrying.') from None
+                if proc.returncode:
+                    if proc.returncode == 255:
+                        raise ValueError(_ssh_problem(stderr)[0])
+                    raise ValueError(f'Remote Python command failed (exit {proc.returncode}); inspect the remote checkout and Python environment.')
+                os.replace(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
+                os.fsync(parent)
+                return digest.hexdigest()
+            finally:
+                if fd != -1:
+                    os.close(fd)
+                if proc is not None and proc.poll() is None:
+                    _terminate(proc)
+                try:
+                    os.unlink(temporary, dir_fd=parent)
+                except FileNotFoundError:
+                    pass
+
     def __exit__(self, *exc):
         self._closed = True
         self._ready = False
