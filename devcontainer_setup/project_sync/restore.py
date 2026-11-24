@@ -24,6 +24,7 @@ IDLE_WAIT = 10 * 60
 REACH_WAIT = 10 * 60
 POLL = 10
 _AGENT = re.compile(r'[a-z][a-z0-9_-]{0,31}')
+_PANE = re.compile(r'w[0-9]{1,8}:p[0-9]{1,8}')
 
 
 def _served(command, state):
@@ -150,7 +151,7 @@ def end_stale_proxies(codespace: str, state: Path, before: float, *, run=subproc
 
 
 def _named(name):
-    return isinstance(name, str) and bool(_AGENT.fullmatch(name))
+    return isinstance(name, str) and bool(_AGENT.fullmatch(name) or _PANE.fullmatch(name))
 
 
 class Herdr:
@@ -278,17 +279,70 @@ def wait_reachable(herdr: Herdr, *, now=time.time, sleep=time.sleep, tick=None) 
         sleep(min(POLL, max(0, deadline - now())))
 
 
+def leads(agents: list[dict]) -> list[dict]:
+    """All live agents named lead-*, sorted by name. Unnamed agents never count."""
+    seen: dict[str, dict] = {}
+    for agent in agents:
+        name = agent.get('name')
+        if isinstance(name, str) and name.startswith('lead-') and _AGENT.fullmatch(name) and name not in seen:
+            seen[name] = agent
+    return [seen[name] for name in sorted(seen)]
+
+
 def lead(agents: list[dict]) -> dict | None:
-    """The one live agent named lead-*; None for none or several (D4). Unnamed agents never count."""
-    found = [agent for agent in agents if isinstance(agent.get('name'), str) and agent['name'].startswith('lead-')]
+    """The one live agent named lead-*; None for none or several. Unnamed agents never count."""
+    found = leads(agents)
     return found[0] if len(found) == 1 else None
+
+
+def targets(agents: list[dict]) -> list[str]:
+    """Target IDs to resume after a restart.
+
+    If one or more lead-* agents exist, resume only those leads (they manage their
+    own workers). Otherwise fall back to existing live non-worker agent panes
+    (by valid agent name or Herdr pane_id such as w1:p1).
+    """
+    lead_agents = leads(agents)
+    if lead_agents:
+        return [agent['name'] for agent in lead_agents]
+    fallback: list[str] = []
+    seen: set[str] = set()
+    for agent in agents:
+        name = agent.get('name')
+        if isinstance(name, str) and name.startswith('worker-'):
+            continue
+        ident = None
+        if isinstance(name, str) and _AGENT.fullmatch(name):
+            ident = name
+        else:
+            pane_id = agent.get('pane_id')
+            if isinstance(pane_id, str) and _PANE.fullmatch(pane_id):
+                ident = pane_id
+        if ident and ident not in seen:
+            seen.add(ident)
+            fallback.append(ident)
+    return sorted(fallback)
 
 
 def _hhmmz(when):
     return time.strftime('%H:%MZ', time.gmtime(when))
 
 
-def resume_text(rid: str, stopped_at: float, back_at: float, *, root: Path | None = None) -> str:
+def _hint_parts(hint: dict) -> list[str]:
+    parts = []
+    conv = hint.get('root_conversation_id')
+    if isinstance(conv, str) and re.fullmatch(r'[A-Za-z0-9._-]{1,128}', conv):
+        parts.append(f'top-level conversation {conv}')
+    services = hint.get('services')
+    if isinstance(services, list):
+        clean = [str(s) for s in services[:12] if isinstance(s, (str, int)) and '\n' not in str(s) and '\0' not in str(s)]
+        if clean:
+            parts.append('check services ' + ', '.join(clean))
+    return parts
+
+
+def resume_text(rid: str, stopped_at: float, back_at: float, *, root: Path | None = None,
+                lead_name: str | None = None) -> str:
     """The owner's sentence verbatim, then one line of facts (spec 6.6); an o- rid is the owner's restart."""
     if rid.startswith('o-'):
         what = f'Planned restart {rid}: stopped at {_hhmmz(stopped_at)}'
@@ -301,15 +355,13 @@ def resume_text(rid: str, stopped_at: float, back_at: float, *, root: Path | Non
             if hint_path.is_file() and not hint_path.is_symlink():
                 hint = json.loads(hint_path.read_text(encoding='utf-8'))
                 if isinstance(hint, dict):
-                    parts = []
-                    conv = hint.get('root_conversation_id')
-                    if isinstance(conv, str) and re.fullmatch(r'[A-Za-z0-9._-]{1,128}', conv):
-                        parts.append(f'top-level conversation {conv}')
-                    services = hint.get('services')
-                    if isinstance(services, list):
-                        clean = [str(s) for s in services[:12] if isinstance(s, (str, int)) and '\n' not in str(s) and '\0' not in str(s)]
-                        if clean:
-                            parts.append('check services ' + ', '.join(clean))
+                    selected = hint
+                    per_lead = hint.get('leads')
+                    if lead_name and isinstance(per_lead, dict) and isinstance(per_lead.get(lead_name), dict):
+                        merged = dict(hint)
+                        merged.update(per_lead[lead_name])
+                        selected = merged
+                    parts = _hint_parts(selected)
                     if parts:
                         extra = ' Recovery hints from .scratch/restart-resume.json: ' + '; '.join(parts) + '.'
         except (OSError, ValueError, TypeError):
@@ -319,64 +371,103 @@ def resume_text(rid: str, stopped_at: float, back_at: float, *, root: Path | Non
             f'before dispatching to it.{extra})')
 
 
-def _status(herdr, name):
+def _status(herdr, target):
     for agent in herdr.agents():
-        if agent.get('name') == name:
+        if agent.get('name') == target or agent.get('pane_id') == target:
             return agent.get('agent_status')
     return None
 
 
-def _settled(herdr, name, now, sleep) -> str:
-    # Ready with an interactive UI on two reads SETTLE s apart, within IDLE_WAIT.
-    # Return 'blocked' immediately if the restored agent is already waiting on a dialog/trust prompt.
-    deadline, ready = now() + IDLE_WAIT, False
-    while True:
-        agent = next((agent for agent in herdr.agents() if agent.get('name') == name), {})
-        status = agent.get('agent_status')
-        if status == 'blocked':
-            return 'blocked'
-        if status in READY and agent.get('interactive_ready') is not False:
-            if ready:
-                return 'ready'
-            ready = True
-        else:
-            ready = False
-        if now() >= deadline:
-            return 'busy'
-        sleep(SETTLE)
-
-
-def resume(herdr: Herdr, rid: str, text: str, *, now=time.time, sleep=time.sleep,
-           tick=None) -> tuple[str, str | None]:
-    """Spec 6.6: ('delivered' | 'entered' | 'resent' | 'blocked' | 'no-lead' | 'busy' | 'undelivered',
-    the lead's name or None).
-
-    Never logs the screen. `tick`, when given, runs after each Herdr call, as the keeper's heartbeat.
-    """
-    herdr = _ticked(herdr, tick)
-    found = lead(herdr.agents())
-    if found is None:
-        return 'no-lead', None
-    name = found['name']
-    settled = _settled(herdr, name, now, sleep)
-    if settled == 'blocked':
-        return 'blocked', name
-    if settled != 'ready':
-        return 'busy', name
+def _deliver_one(herdr, name: str, rid: str, text: str) -> str:
     if herdr.prompt(name, text) == 'started':
-        return ('blocked' if _status(herdr, name) == 'blocked' else 'delivered'), name
+        return 'blocked' if _status(herdr, name) == 'blocked' else 'delivered'
     status = _status(herdr, name)
     if status == 'working':
-        return 'delivered', name
+        return 'delivered'
     if status == 'blocked':
-        return 'blocked', name
+        return 'blocked'
     if status not in READY:
-        return 'undelivered', name
+        return 'undelivered'
     # The screen chooses a remedy only: the rid can still be in the unsent input box.
     if rid in herdr.read(name):
         if herdr.enter(name) and herdr.wait_active(name):
-            return ('blocked' if _status(herdr, name) == 'blocked' else 'entered'), name
-        return 'undelivered', name
+            return 'blocked' if _status(herdr, name) == 'blocked' else 'entered'
+        return 'undelivered'
     if herdr.prompt(name, text) == 'started':
-        return ('blocked' if _status(herdr, name) == 'blocked' else 'resent'), name
-    return 'undelivered', name
+        return 'blocked' if _status(herdr, name) == 'blocked' else 'resent'
+    return 'undelivered'
+
+
+def resume_all(herdr: Herdr, rid: str, text_for, *, now=time.time, sleep=time.sleep,
+               tick=None) -> list[tuple[str, str]]:
+    """Wait for every target agent pane to settle and deliver its resume prompt.
+
+    Targets all live lead-* agents when any exist, or falls back to existing live
+    non-worker agent panes (named or by pane_id). `text_for` may be a string or a
+    callable `(target_id) -> str`. Returns `(outcome, target_id)` pairs in sorted
+    order (empty if no target exists). All targets share one IDLE_WAIT window so
+    one busy pane never blocks ready sibling panes.
+    """
+    herdr = _ticked(herdr, tick)
+    selected = targets(herdr.agents())
+    if not selected:
+        return []
+    prompt_for = text_for if callable(text_for) else (lambda _name: text_for)
+    deadline = now() + IDLE_WAIT
+    ready_once = {name: False for name in selected}
+    outcomes: dict[str, str] = {}
+    while len(outcomes) < len(selected):
+        snapshot: dict[str, dict] = {}
+        for agent in herdr.agents():
+            for key in ('name', 'pane_id'):
+                val = agent.get(key)
+                if isinstance(val, str) and val not in snapshot:
+                    snapshot[val] = agent
+        for name in selected:
+            if name in outcomes:
+                continue
+            agent = snapshot.get(name, {})
+            status = agent.get('agent_status')
+            if status == 'blocked':
+                outcomes[name] = 'blocked'
+            elif status in READY and agent.get('interactive_ready') is not False:
+                if ready_once[name]:
+                    outcomes[name] = _deliver_one(herdr, name, rid, prompt_for(name))
+                else:
+                    ready_once[name] = True
+            else:
+                ready_once[name] = False
+        if len(outcomes) >= len(selected):
+            break
+        if now() >= deadline:
+            for name in selected:
+                outcomes.setdefault(name, 'busy')
+            break
+        sleep(SETTLE)
+    return [(outcomes[name], name) for name in selected]
+
+
+_SUCCESS = ('delivered', 'entered', 'resent')
+
+
+def resume(herdr: Herdr, rid: str, text, *, now=time.time, sleep=time.sleep,
+           tick=None) -> tuple[str, str | None]:
+    """Spec 6.6 (extended for parallel leads): resume all live lead-* agents.
+
+    Returns (outcome, label). For 0 leads: ('no-lead', None). For 1 lead:
+    (outcome, lead_name). For multiple leads: ('delivered'|'entered'|'resent'|
+    'blocked'|'busy'|'undelivered'|'partial', ', '.join(names) or summary).
+    """
+    results = resume_all(herdr, rid, text, now=now, sleep=sleep, tick=tick)
+    if not results:
+        return 'no-lead', None
+    if len(results) == 1:
+        return results[0]
+    names = ', '.join(name for _, name in results)
+    kinds = [outcome for outcome, _ in results]
+    if all(kind in _SUCCESS for kind in kinds):
+        return (kinds[0] if len(set(kinds)) == 1 else 'delivered'), names
+    if len(set(kinds)) == 1:
+        return kinds[0], names
+    detail = '; '.join(f'{name}: {outcome}' for outcome, name in results)
+    return 'partial', detail

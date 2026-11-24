@@ -169,7 +169,7 @@ for agent in codex claude opencode grok agy; do
       agy_home="$temporary/agy-home"
       agy_bin="$temporary/agy-bin"
       rm -rf "$agy_home" "$agy_bin"
-      mkdir -p "$agy_home" "$agy_bin" "$HOME/.local/bin"
+      mkdir -p "$agy_home" "$agy_bin" "$HOME/.local/bin" "$HOME/.gemini/config"
       HOME="$agy_home" AGY_CLI_DISABLE_AUTO_UPDATE=true bash "$installer" -d "$agy_bin"
       [ -x "$agy_bin/agy" ] || { echo "Managed Antigravity CLI installer did not produce staged $agy_bin/agy." >&2; exit 1; }
       cp "$agy_bin/agy" "$HOME/.local/bin/agy.new"

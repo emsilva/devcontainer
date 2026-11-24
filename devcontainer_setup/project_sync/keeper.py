@@ -232,11 +232,12 @@ class Keeper:
     """
 
     def __init__(self, state, *, api, notifier, keepalive=None, herdr=None, now=time.time, sleep=time.sleep,
-                 clock=time.monotonic, end_proxies=restore.end_stale_proxies, caffeinate=None):
+                 clock=time.monotonic, end_proxies=restore.end_stale_proxies, caffeinate=None, root=None):
         self.state, self.api, self.notifier = Path(state), api, notifier
         self.keepalive, self.herdr, self.now, self.sleep, self.clock = keepalive, herdr, now, sleep, clock
         self.end_proxies = end_proxies
         self.caffeinate, self._deleted_read_at = caffeinate, None
+        self.root = Path(root) if root is not None else None
         self.ledger = lifecycle.Ledger(self.state / LEDGER, now=now)
         self.project = api.name
         self.previous = None, None  # (state, time) of the last successful reading
@@ -778,19 +779,35 @@ class Keeper:
                                                          'task work:hold -- off ends the hold, and task work:status '
                                                          'shows the restart.')
             self._tick('resuming')
-            resume_prompt = restore.resume_text(rid, stopped_at, back_at, root=getattr(self, 'root', None))
-            told, name = restore.resume(herdr, rid, resume_prompt, now=self.now,
+            project_root = self.root
+            if project_root is None:
+                try:
+                    raw_root = read_json(self.state / CONFIG).get('root')
+                    if isinstance(raw_root, str) and raw_root:
+                        project_root = Path(raw_root)
+                except (OSError, ValueError):
+                    pass
+            prompt_for = lambda lead_name: restore.resume_text(
+                rid, stopped_at, back_at, root=project_root, lead_name=lead_name)
+            told, name = restore.resume(herdr, rid, prompt_for, now=self.now,
                                         sleep=self._pause, tick=self._tick)
             last['resume'] = told
-            who = f'its lead {name}' if name else 'its lead'
+            plural = isinstance(name, str) and ', ' in name
+            who = (f'its leads {name}' if plural else f'its lead {name}') if name else 'its lead'
             _LOG.info('Resume %s: %s (%s)', rid, told, name or 'no lead')
             if told in ('delivered', 'entered', 'resent'):
+                verb = 'were' if plural else 'was'
                 outcome(f'Herdr in {int(herdr_at - back_at)} s; {name or "lead"} told',
-                        f' and {who} was told to resume; task work:status shows the restart.')
+                        f' and {who} {verb} told to resume; task work:status shows the restart.')
             elif told == 'blocked':
+                verb = 'were' if plural else 'was'
+                state_verb = 'are' if plural else 'is'
                 outcome(f'{name or "lead"} waiting for an answer',
-                        f', and {who} was told to resume but is now waiting on a question or approval in its pane; '
+                        f', and {who} {verb} told to resume but {state_verb} now waiting on a question or approval in its pane; '
                         'answer it there.')
+            elif told == 'partial':
+                outcome(f'partial resume ({name})',
+                        f', and resume had mixed results ({name}); check any lead that did not start in Herdr.')
             elif told == 'no-lead':
                 observed = []
                 try:
@@ -804,8 +821,8 @@ class Keeper:
                     last['observed_agents'] = observed
                     _LOG.info('Restore %s observed Herdr agents: %s', rid, ', '.join(observed))
                 seen_note = f' (seen: {", ".join(observed[:4])})' if observed else ''
-                outcome('no single lead' + seen_note,
-                        ', but no single lead-* agent was found on its Herdr machine' + seen_note
+                outcome('no lead' + seen_note,
+                        ', but no lead-* agent was found on its Herdr machine' + seen_note
                         + '; tell its lead to resume.')
             elif told == 'busy':
                 outcome(f'{name or "lead"} busy', f', but {who} stayed busy for 10 minutes; tell it to resume.')
@@ -900,7 +917,7 @@ def supervise(root: Path, state: Path, nonce: str) -> None:
             api = lifecycle.LifecycleAPI(value.get('codespace'), value.get('gh_user'))
             _end_left_behind(state)  # before this keeper starts its own
             caffeinate = _Caffeinate(lambda pid: current.runtime.update(caffeinate=pid) if current is not None else None)
-            current = Keeper(state, api=api, notifier=notify.notify, caffeinate=caffeinate,
+            current = Keeper(state, api=api, notifier=notify.notify, caffeinate=caffeinate, root=root,
                              keepalive=KeepAlive(api.name, state, value.get('gh_user'), value.get('ports') or []))
             caffeinate.hold()
             current.runtime.update(pid=os.getpid(), nonce=nonce, process_identity=process_identity(os.getpid()),

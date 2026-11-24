@@ -721,13 +721,10 @@ class KeeperStepTests(unittest.TestCase):
             ('Herdr not reachable', {'herdr': FakeHerdr(reachable=False)}, 'Herdr machine is not reachable',
              'open the Herdr TUI'),
             ('no receipt', {}, 'Herdr machine is not reachable', 'open the Herdr TUI'),
-            ('no lead', {'herdr': FakeHerdr(agents=[{'name': 'lead-a', 'agent_status': 'idle'},
-                                                     {'name': 'lead-b', 'agent_status': 'idle'}])},
-             'no single lead', 'tell its lead to resume'),
             ('busy', {'herdr': FakeHerdr(agents=[{'name': 'lead-proj', 'agent_status': 'working'}])},
              'lead-proj stayed busy', 'tell it to resume'),
             ('undelivered', {'herdr': FakeHerdr(works=False)}, 'did not reach its lead lead-proj', 'task work:logs'),
-            ('lead gone', {'herdr': FakeHerdr(agents=[])}, 'no single lead', 'tell its lead to resume'),
+            ('lead gone', {'herdr': FakeHerdr(agents=[])}, 'no lead-* agent was found', 'tell its lead to resume'),
         )
         for name, extra, what, run in cases:
             with self.subTest(name=name):
@@ -741,6 +738,34 @@ class KeeperStepTests(unittest.TestCase):
                 self.assertIn(run, self.notes[0])
                 self.assertLessEqual(self.api.posts, 1)
                 self.assertEqual(self.runtime()['phase'], 'watching')
+
+    def test_parallel_leads_are_all_resumed_with_project_root_hints(self):
+        project_root = Path(self.temp.name).resolve() / 'proj'
+        scratch = project_root / '.scratch'
+        scratch.mkdir(parents=True, exist_ok=True)
+        (scratch / 'restart-resume.json').write_text(json.dumps({
+            'services': [':19632'],
+            'leads': {'lead-2': {'root_conversation_id': 'sentinel-2', 'services': [':19680']}},
+        }))
+        herdr = FakeHerdr(agents=[
+            {'name': 'lead-1', 'agent_status': 'idle'},
+            {'name': 'lead-2', 'agent_status': 'idle'},
+            {'name': 'lead-3', 'agent_status': 'idle'},
+        ])
+        stops, readings = self.lifetime([down(T0 + LIFE), up(T0 + LIFE + 60, last_used_at=T0 + LIFE)])
+        k = self.keeper(readings, herdr=herdr)
+        k.root = project_root
+        self.run_steps(k, [T0] + stops)
+        last = self.runtime()['last_restart']
+        self.assertEqual(last['resume'], 'delivered')
+        self.assertIn('lead-1, lead-2, lead-3 told', last['outcome'])
+        self.assertEqual([name for name, _ in herdr.prompts], ['lead-1', 'lead-2', 'lead-3'])
+        by_name = dict(herdr.prompts)
+        self.assertIn(':19632', by_name['lead-1'])
+        self.assertIn('sentinel-2', by_name['lead-2'])
+        self.assertIn(':19680', by_name['lead-2'])
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn('its leads lead-1, lead-2, lead-3 were told to resume', self.notes[0])
 
     def test_the_heartbeat_keeps_up_with_a_slow_herdr(self):
         # The reviewer's heartbeat_slow_herdr: every Herdr call takes its whole 60 s timeout on the

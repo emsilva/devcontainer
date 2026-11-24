@@ -808,6 +808,139 @@ if sys.argv[1:3] == ["integration", "status"]:
         self.assertEqual(list(outside.iterdir()), [])
         self.assertFalse(self.feedback_link().exists())
 
+    def test_remote_code_creates_gemini_config_and_pins_sentinel_root_session_for_subagents(self):
+        import socket
+        import sqlite3
+        import threading
+        import time
+
+        # Fake herdr that fails if ~/.gemini/config is missing (matching real Herdr behavior).
+        herdr_script = self.bindir / 'herdr'
+        herdr_script.write_text('''#!/bin/sh
+if [ "$1" = "integration" ] && [ "$2" = "install" ] && [ "$3" = "antigravity-cli" ]; then
+  if [ ! -d "$HOME/.gemini/config" ]; then
+    echo "antigravity cli config directory not found at $HOME/.gemini/config" >&2
+    exit 1
+  fi
+  mkdir -p "$HOME/.gemini/config/hooks"
+  printf '#!/bin/sh\\nprintf "{}\\\\n"\\n' > "$HOME/.gemini/config/hooks/herdr-agent-state.sh"
+  chmod +x "$HOME/.gemini/config/hooks/herdr-agent-state.sh"
+  printf '{"herdr":{"PreInvocation":[{"type":"command","command":"true"}]},"user-hook":{"Stop":[]}}\\n' > "$HOME/.gemini/config/hooks.json"
+  exit 0
+fi
+if [ "$1" = "integration" ] && [ "$2" = "status" ]; then
+  printf 'antigravity-cli: current (v4) (%s/.gemini/config/hooks/herdr-agent-state.sh)\\n' "$HOME"
+  exit 0
+fi
+exit 0
+''')
+        herdr_script.chmod(0o755)
+        self.assertFalse((self.home / '.gemini/config').exists())
+
+        result = self.invoke(json.dumps({'install': ['antigravity-cli'], 'skill': False}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = json.loads(result.stdout)
+        self.assertEqual(body['installed']['antigravity-cli'], 0)
+        self.assertTrue((self.home / '.gemini/config').is_dir())
+        hook_script = self.home / '.gemini/config/hooks/devcontainer-agy-root-session.sh'
+        self.assertTrue(hook_script.is_file())
+        hooks_cfg = json.loads((self.home / '.gemini/config/hooks.json').read_text())
+        self.assertIn('herdr', hooks_cfg)
+        self.assertIn('user-hook', hooks_cfg)
+        self.assertIn('devcontainer-agy-root-session', hooks_cfg)
+        self.assertEqual(
+            set(hooks_cfg['devcontainer-agy-root-session']),
+            {'SessionStart', 'PreInvocation', 'PostInvocation', 'Stop'},
+        )
+
+        # Build a real conversation_summaries.db with 3 parallel Sentinel trees.
+        app_dir = self.home / '.gemini/antigravity-cli'
+        app_dir.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(app_dir / 'conversation_summaries.db')
+        con.execute('''CREATE TABLE conversation_summaries (
+            conversation_id TEXT PRIMARY KEY,
+            parent_conversation_id TEXT,
+            nesting_depth INTEGER
+        )''')
+        con.executemany(
+            'INSERT INTO conversation_summaries VALUES (?, ?, ?)',
+            [
+                ('sentinel-1', '', 0),
+                ('orch-1', 'sentinel-1', 1),
+                ('worker-1', 'orch-1', 2),
+                ('sentinel-2', '', 0),
+                ('orch-2', 'sentinel-2', 1),
+                ('sentinel-3', '', 0),
+                ('orch-3', 'sentinel-3', 1),
+            ],
+        )
+        con.commit()
+        con.close()
+
+        # Listen on a fake Herdr Unix socket and record pane.report_agent_session messages.
+        # Keep the socket path short for macOS AF_UNIX 104-byte limit.
+        sock_dir = Path(tempfile.mkdtemp(dir='/tmp'))
+        self.addCleanup(lambda: shutil.rmtree(sock_dir, ignore_errors=True))
+        sock_path = sock_dir / 'h.sock'
+        received = []
+        stop = threading.Event()
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(sock_path))
+        server.listen(16)
+        server.settimeout(0.1)
+
+        def serve():
+            while not stop.is_set():
+                try:
+                    conn, _ = server.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                with conn:
+                    data = conn.recv(4096)
+                    if data:
+                        received.append(json.loads(data.decode()))
+                    conn.sendall(b'{"ok":true}\n')
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        try:
+            for pane, sub_cid, event in (
+                ('w1:p1', 'worker-1', 'pre-invocation'),
+                ('w1:p2', 'orch-2', 'post-invocation'),
+                ('w1:p3', 'orch-3', 'stop'),
+            ):
+                env = dict(
+                    os.environ,
+                    HOME=str(self.home),
+                    HERDR_ENV='1',
+                    HERDR_SOCKET_PATH=str(sock_path),
+                    HERDR_PANE_ID=pane,
+                )
+                run = subprocess.run(
+                    ['bash', str(hook_script), event],
+                    input=json.dumps({'conversationId': sub_cid}),
+                    text=True, capture_output=True, env=env, timeout=10,
+                )
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertEqual(run.stdout.strip(), '{}')
+            # Wait for the delayed pre-invocation child for w1:p1.
+            deadline = time.monotonic() + 3.0
+            while len(received) < 3 and time.monotonic() < deadline:
+                time.sleep(0.05)
+        finally:
+            stop.set()
+            server.close()
+            thread.join(timeout=2)
+
+        by_pane = {row['params']['pane_id']: row['params']['agent_session_id'] for row in received}
+        self.assertEqual(by_pane, {
+            'w1:p1': 'sentinel-1',
+            'w1:p2': 'sentinel-2',
+            'w1:p3': 'sentinel-3',
+        })
+
 
 def status_value(**extra):
     counts = {'received': 0, 'available': 0, 'pending': 0, 'unsupported': 0}

@@ -428,11 +428,13 @@ class HerdrTests(unittest.TestCase):
 class LeadTests(unittest.TestCase):
     def test_lead_requires_exactly_one(self):
         lead = {'name': 'lead-consult-sm-mainstage', 'agent_status': 'idle'}
+        other = {'name': 'lead-other', 'agent_status': 'idle'}
         # Measured: the real lead beside an unnamed agent.
         self.assertEqual(restore.lead([{'pane_id': 'p1'}, {'name': None}, lead, {'name': 'worker-xhigh-1a2b'}]), lead)
         self.assertIsNone(restore.lead([]))
         self.assertIsNone(restore.lead([{'name': 'worker'}, {'pane_id': 'p1'}]))
-        self.assertIsNone(restore.lead([lead, {'name': 'lead-other'}]))
+        self.assertIsNone(restore.lead([lead, other]))
+        self.assertEqual(restore.leads([other, {'pane_id': 'p1'}, lead, {'name': 'worker'}]), [lead, other])
 
     def test_resume_text_is_verbatim(self):
         stopped = 1_792_632_500.0  # 2026-10-22 01:28:20Z
@@ -616,11 +618,121 @@ class ResumeTests(unittest.TestCase):
                 else:
                     self.assertEqual(len(herdr.prompts), 2)
 
-    def test_resume_without_exactly_one_lead_sends_nothing(self):
+    def test_resume_with_zero_leads_sends_nothing(self):
         clock = Clock()
-        two = FakeHerdr(clock, agents=[{'name': 'lead-other', 'agent_status': 'idle'}])
-        self.assertEqual(self.resume(two, clock), ('no-lead', None))
-        self.assertEqual(two.prompts, [])
+        class EmptyHerdr(FakeHerdr):
+            def agents(self):
+                return [{'name': 'worker-1', 'agent_status': 'idle'}]
+        empty = EmptyHerdr(clock)
+        self.assertEqual(self.resume(empty, clock), ('no-lead', None))
+        self.assertEqual(empty.prompts, [])
+
+    def test_resume_pokes_all_parallel_leads_and_handles_partial_outcomes(self):
+        clock = Clock()
+
+        class MultiLeadHerdr:
+            def __init__(self, states):
+                self.states = {k: list(v) for k, v in states.items()}
+                self.reads = {k: 0 for k in states}
+                self.active = {}
+                self.prompts = []
+
+            def agents(self):
+                rows = []
+                for name, seq in self.states.items():
+                    if name in self.active:
+                        status = self.active[name]
+                    else:
+                        status = seq[min(self.reads[name], len(seq) - 1)]
+                        self.reads[name] += 1
+                    rows.append({'name': name, 'agent_status': status})
+                rows.append({'name': 'worker-bg', 'agent_status': 'idle'})
+                return rows
+
+            def prompt(self, name, text):
+                self.prompts.append((name, text, clock.t))
+                self.active[name] = 'working'
+                return 'started'
+
+            def read(self, name, lines=80):
+                return ''
+
+            def enter(self, name):
+                return True
+
+            def wait_active(self, name):
+                return True
+
+        three = MultiLeadHerdr({
+            'lead-c': ['idle'],
+            'lead-a': ['working', 'working', 'idle', 'idle'],
+            'lead-b': ['idle'],
+        })
+        outcome, label = restore.resume(three, 'r-012820Z', lambda n: f'resume {n}',
+                                        now=clock.now, sleep=clock.sleep)
+        self.assertEqual((outcome, label), ('delivered', 'lead-a, lead-b, lead-c'))
+        self.assertEqual([p[0] for p in three.prompts], ['lead-b', 'lead-c', 'lead-a'])
+        self.assertEqual({p[0]: p[1] for p in three.prompts}, {
+            'lead-a': 'resume lead-a', 'lead-b': 'resume lead-b', 'lead-c': 'resume lead-c'})
+
+        # Fallback when no lead-* exists: poke existing live non-worker panes (named or pane_id).
+        clock = Clock()
+
+        class FallbackHerdr:
+            def __init__(self):
+                self.active = {}
+                self.prompts = []
+
+            def agents(self):
+                return [
+                    {'pane_id': 'w1:p1', 'name': None, 'agent_status': self.active.get('w1:p1', 'idle')},
+                    {'pane_id': 'w1:p2', 'name': 'sentinel-2', 'agent_status': self.active.get('sentinel-2', 'idle')},
+                    {'pane_id': 'w1:p3', 'name': 'worker-1', 'agent_status': 'idle'},
+                ]
+
+            def prompt(self, target, text):
+                self.prompts.append((target, text))
+                self.active[target] = 'working'
+                return 'started'
+
+        fallback = FallbackHerdr()
+        outcome, label = restore.resume(fallback, 'r-012820Z', 'text', now=clock.now, sleep=clock.sleep)
+        self.assertEqual((outcome, label), ('delivered', 'sentinel-2, w1:p1'))
+        self.assertEqual([p[0] for p in fallback.prompts], ['sentinel-2', 'w1:p1'])
+
+        # Mixed outcomes: two delivered, one blocked.
+        clock = Clock()
+        mixed = MultiLeadHerdr({
+            'lead-1': ['idle'],
+            'lead-2': ['blocked'],
+            'lead-3': ['idle'],
+        })
+        outcome, detail = restore.resume(mixed, 'r-012820Z', 'text', now=clock.now, sleep=clock.sleep)
+        self.assertEqual(outcome, 'partial')
+        self.assertIn('lead-1: delivered', detail)
+        self.assertIn('lead-2: blocked', detail)
+        self.assertIn('lead-3: delivered', detail)
+        self.assertEqual(sorted(p[0] for p in mixed.prompts), ['lead-1', 'lead-3'])
+
+    def test_resume_text_supports_per_lead_hints(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '.scratch').mkdir()
+            (root / '.scratch/restart-resume.json').write_text(json.dumps({
+                'services': [':19632'],
+                'leads': {
+                    'lead-api': {'root_conversation_id': 'sentinel-api-1', 'services': [':19680']},
+                    'lead-ui': {'services': [':19673']},
+                },
+            }))
+            stopped = 1_792_632_500.0
+            api = restore.resume_text('r-012820Z', stopped, stopped + 60, root=root, lead_name='lead-api')
+            ui = restore.resume_text('r-012820Z', stopped, stopped + 60, root=root, lead_name='lead-ui')
+            other = restore.resume_text('r-012820Z', stopped, stopped + 60, root=root, lead_name='lead-other')
+            self.assertIn('top-level conversation sentinel-api-1', api)
+            self.assertIn('check services :19680', api)
+            self.assertIn('check services :19673', ui)
+            self.assertIn('check services :19632', other)
 
 
 if __name__ == '__main__':

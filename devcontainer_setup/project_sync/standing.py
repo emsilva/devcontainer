@@ -487,9 +487,9 @@ def _state_facts(state, project, reader, timeout):
         last_restart = _object(runtime.get('last_restart'))
         outcome = _text(last_restart.get('outcome'))
         if outcome and any(marker in outcome for marker in (
-                'no single lead', 'Herdr not reachable', 'busy', 'waiting for an answer',
-                'resume not delivered', 'restore failed', 'start failed', 'started elsewhere',
-                'not restarted')):
+                'no single lead', 'no lead', 'partial resume', 'Herdr not reachable', 'busy',
+                'waiting for an answer', 'resume not delivered', 'restore failed', 'start failed',
+                'started elsewhere', 'not restarted')):
             # Show concise failure tail after '; ' if present (e.g. 'no single lead', 'Herdr not reachable').
             short = outcome.split('; ', 1)[-1]
             values['last_restart_issue'] = short[:80]

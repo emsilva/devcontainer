@@ -58,8 +58,11 @@ Herdr opens once the current verified scratch pairing is synchronized (or immedi
 with a conflict warning banner if `.scratch/` has conflicts to resolve) and SSH
 is prepared. Before Herdr opens, `work:cs` checks Herdr's resume hooks for
 Antigravity (`antigravity-cli`), Claude, Codex, Grok and OpenCode on the
-Codespace, and installs any that are missing or outdated, so that a restart can
-resume the agents. The same step also
+Codespace, creates `~/.gemini/config` when needed, installs any missing or
+outdated hooks, and installs a companion Antigravity root-session pin hook
+(`~/.gemini/config/hooks/devcontainer-agy-root-session.sh`) so subagents
+(such as `/teamwork` orchestrators and workers) never overwrite their pane's
+top-level Sentinel conversation ID in Herdr. The same step also
 installs the Herdr skill that matches the Codespace's Herdr. The same step also
 links `~/.claude/handoff-feedback` on the Codespace to the checkout's
 `.scratch/handoff-feedback`, so that feedback syncs to the Mac. `work:status`
@@ -69,10 +72,16 @@ shows that check. Conversation exchange runs in the worker; pending or refused
 history (in either direction) is reported without blocking the connection, and
 can be muted with `task work:forget`.
 
-For hierarchical orchestrators (such as `agy` `/teamwork`), you may optionally
-record `{"root_conversation_id": "<uuid>", "services": [":19632", ":19680"]}` in
-`.scratch/restart-resume.json` so post-restart resume prompts include your
-top-level entry-root conversation ID and service checks.
+For multi-lead or hierarchical orchestrators (such as parallel `agy` `/teamwork`
+panes), name each top-level lead pane `lead-<name>` in Herdr (for example
+`lead-1`, `lead-2`, `lead-3` or `lead-api`, `lead-ui`, `lead-data`): after a
+restart, recovery settles and resumes every `lead-*` pane independently (leaving
+worker panes to their leads). If no `lead-*` pane exists, recovery falls back to
+resuming all existing live non-worker agent panes (named or by Herdr pane ID).
+You may optionally record global or per-lead hints in
+`.scratch/restart-resume.json` (`{"services": [":19632"], "leads": {"lead-1":
+{"services": [":19680"]}}}`) so post-restart resume prompts include service
+checks or explicit conversation IDs.
 
 To customize OpenCode's sign-in provider or method for `task work:signin:all`,
 set `DEVCONTAINER_OPENCODE_PROVIDER` (default `openai`) and optionally

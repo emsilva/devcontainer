@@ -30,7 +30,7 @@ _FEEDBACK_STATES = ('current', 'linked', 'moved', 'managed elsewhere', 'no scrat
 # Herdr is found the same way as workspace._HERDR_PROBE. Skill install uses
 # timeout=30, matching SKILL_TIMEOUT.
 REMOTE = """\
-import errno, json, os, shutil, stat, subprocess, sys
+import errno, json, os, shlex, shutil, stat, subprocess, sys
 ALLOWED = ("antigravity-cli", "claude", "codex", "grok", "opencode")
 FEEDBACK_DIR = "handoff-feedback"
 
@@ -335,6 +335,236 @@ def ensure_feedback(root):
         return state
     return "failed"
 
+def ensure_agy_config_dir():
+    config_dir = os.path.join(os.path.expanduser("~"), ".gemini", "config")
+    gemini_dir = os.path.dirname(config_dir)
+    if os.path.islink(gemini_dir) or os.path.islink(config_dir):
+        return False
+    try:
+        os.makedirs(config_dir, exist_ok=True)
+    except OSError:
+        return False
+    return kind(config_dir) == "dir"
+
+AGY_ROOT_HOOK_KEY = "devcontainer-agy-root-session"
+AGY_ROOT_HOOK_SCRIPT = '''#!/bin/sh
+# managed by devcontainer-setup; keeps Herdr pinned to the top-level Antigravity
+# conversation so internal subagents (/teamwork, workers) never overwrite the
+# pane's resume session ID.
+set -eu
+
+emit_and_exit() {
+  echo '{}'
+  exit 0
+}
+
+event="${1:-}"
+[ "${HERDR_ENV:-}" = "1" ] || emit_and_exit
+[ -n "${HERDR_SOCKET_PATH:-}" ] || emit_and_exit
+[ -n "${HERDR_PANE_ID:-}" ] || emit_and_exit
+command -v python3 >/dev/null 2>&1 || emit_and_exit
+
+payload=$(cat)
+[ -n "$payload" ] || emit_and_exit
+
+python3 - "$event" "$payload" <<'DEVCONTAINER_AGY_ROOT_PY' 2>/dev/null || true
+import json
+import os
+from pathlib import Path
+import socket
+import sqlite3
+import subprocess
+import sys
+import time
+from urllib.parse import quote
+
+event = sys.argv[1] if len(sys.argv) > 1 else ""
+raw_payload = sys.argv[2] if len(sys.argv) > 2 else ""
+try:
+    payload = json.loads(raw_payload)
+except Exception:
+    raise SystemExit(0)
+if not isinstance(payload, dict):
+    raise SystemExit(0)
+
+cid = payload.get("conversationId")
+if not isinstance(cid, str) or not cid:
+    raise SystemExit(0)
+
+pane_id = os.environ.get("HERDR_PANE_ID", "")
+sock_path = os.environ.get("HERDR_SOCKET_PATH", "")
+if not pane_id or not sock_path:
+    raise SystemExit(0)
+
+override = os.environ.get("ANTIGRAVITY_CLI_HOME") or os.environ.get("AGY_HOME")
+app_dir = Path(override) if override else (Path.home() / ".gemini/antigravity-cli")
+db_path = app_dir / "conversation_summaries.db"
+
+def lookup_root(conversation_id):
+    if not db_path.is_file() or db_path.is_symlink():
+        return None, None
+    encoded = quote(str(db_path), safe="/")
+    con = None
+    for query in ("mode=ro", "mode=ro&immutable=1"):
+        try:
+            con = sqlite3.connect(f"file:{encoded}?{query}", uri=True, timeout=0.3)
+            break
+        except sqlite3.Error:
+            con = None
+    if con is None:
+        return None, None
+    try:
+        current = conversation_id
+        seen = set()
+        found_any = False
+        is_subagent = False
+        for _ in range(16):
+            if current in seen:
+                break
+            seen.add(current)
+            row = con.execute(
+                "SELECT COALESCE(parent_conversation_id, ''), COALESCE(nesting_depth, 0) "
+                "FROM conversation_summaries WHERE conversation_id = ?",
+                (current,),
+            ).fetchone()
+            if row is None:
+                break
+            found_any = True
+            parent, depth = row[0], row[1]
+            if parent:
+                is_subagent = True
+                current = parent
+                continue
+            if depth and depth > 0:
+                is_subagent = True
+                return None, True
+            return current, is_subagent
+        return (current if found_any and not is_subagent else None), (is_subagent if found_any else None)
+    except sqlite3.Error:
+        return None, None
+    finally:
+        con.close()
+
+def send_session(root_id):
+    seq = time.time_ns()
+    params = {
+        "pane_id": pane_id,
+        "source": "herdr:antigravity_cli",
+        "agent": "agy",
+        "seq": seq,
+        "agent_session_id": root_id,
+    }
+    transcript = app_dir / "brain" / root_id / ".system_generated/logs/transcript.jsonl"
+    if transcript.is_file() and not transcript.is_symlink():
+        params["agent_session_path"] = str(transcript)
+    request = json.dumps({
+        "id": f"herdr:antigravity_cli:{seq}",
+        "method": "pane.report_agent_session",
+        "params": params,
+    })
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(0.5)
+            client.connect(sock_path)
+            client.sendall((request + chr(10)).encode())
+            client.recv(4096)
+    except Exception:
+        pass
+
+if event == "pre-invocation-delayed":
+    time.sleep(0.25)
+    root_id, is_subagent = lookup_root(cid)
+    if root_id and (is_subagent or root_id != cid):
+        send_session(root_id)
+    raise SystemExit(0)
+
+root_id, is_subagent = lookup_root(cid)
+if event == "pre-invocation":
+    # Herdr also hooks PreInvocation; re-run this script shortly after in a detached
+    # child so root_id always wins if a subagent (or a brand-new subagent not yet
+    # flushed to SQLite) just overwrote Herdr's pane session ID.
+    if is_subagent is True or root_id is None:
+        script_file = os.path.join(os.path.expanduser("~"), ".gemini", "config", "hooks", "devcontainer-agy-root-session.sh")
+        try:
+            proc = subprocess.Popen(
+                ["bash", script_file, "pre-invocation-delayed"],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True, close_fds=True,
+            )
+            if proc.stdin is not None:
+                proc.stdin.write(raw_payload.encode("utf-8"))
+                proc.stdin.close()
+        except Exception:
+            if root_id and root_id != cid:
+                send_session(root_id)
+elif root_id:
+    send_session(root_id)
+DEVCONTAINER_AGY_ROOT_PY
+
+emit_and_exit
+'''
+
+def ensure_agy_root_hook(force=False):
+    config_dir = os.path.join(os.path.expanduser("~"), ".gemini", "config")
+    hooks_dir = os.path.join(config_dir, "hooks")
+    herdr_hook = os.path.join(hooks_dir, "herdr-agent-state.sh")
+    hooks_json = os.path.join(config_dir, "hooks.json")
+    if not force and kind(herdr_hook) != "file":
+        return
+    if not ensure_agy_config_dir():
+        return
+    if os.path.islink(hooks_dir) or os.path.islink(hooks_json):
+        return
+    try:
+        os.makedirs(hooks_dir, exist_ok=True)
+        script_path = os.path.join(hooks_dir, AGY_ROOT_HOOK_KEY + ".sh")
+        if os.path.islink(script_path):
+            return
+        data = AGY_ROOT_HOOK_SCRIPT.encode("utf-8")
+        write_script = True
+        if kind(script_path) == "file":
+            with open(script_path, "rb") as existing:
+                if existing.read() == data and (os.stat(script_path).st_mode & 0o111):
+                    write_script = False
+        if write_script:
+            tmp = os.path.join(hooks_dir, "." + AGY_ROOT_HOOK_KEY + "-" + os.urandom(6).hex() + ".tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o755)
+            try:
+                os.write(fd, data)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, script_path)
+        current = {}
+        if kind(hooks_json) == "file":
+            with open(hooks_json, "rb") as fh:
+                loaded = json.loads(fh.read().decode("utf-8"))
+            if not isinstance(loaded, dict):
+                return
+            current = loaded
+        elif kind(hooks_json) != "missing":
+            return
+        quoted = shlex.quote(script_path)
+        desired = {
+            "SessionStart": [{"type": "command", "command": f"bash {quoted} session-start", "timeout": 10}],
+            "PreInvocation": [{"type": "command", "command": f"bash {quoted} pre-invocation", "timeout": 10}],
+            "PostInvocation": [{"type": "command", "command": f"bash {quoted} post-invocation", "timeout": 10}],
+            "Stop": [{"type": "command", "command": f"bash {quoted} stop", "timeout": 10}],
+        }
+        if current.get(AGY_ROOT_HOOK_KEY) != desired:
+            current[AGY_ROOT_HOOK_KEY] = desired
+            encoded = (json.dumps(current, indent=2, sort_keys=True) + "\\n").encode("utf-8")
+            tmp = os.path.join(config_dir, ".hooks-" + os.urandom(6).hex() + ".tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            try:
+                os.write(fd, encoded)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, hooks_json)
+    except Exception:
+        pass
+
 def main():
     try:
         body = json.load(sys.stdin)
@@ -362,10 +592,13 @@ def main():
         answer["skill"] = ensure_skill(herdr)
     installed = {}
     for name in names:
+        if name == "antigravity-cli":
+            ensure_agy_config_dir()
         result = subprocess.run(
             [herdr, "integration", "install", name],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         installed[name] = result.returncode
+    ensure_agy_root_hook(force="antigravity-cli" in names)
     status = subprocess.run(
         [herdr, "integration", "status"],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
